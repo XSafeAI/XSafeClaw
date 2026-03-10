@@ -157,7 +157,7 @@ class GatewayClient:
                 "id":          client_id,
                 "displayName": "SafeClaw",
                 "version":     "1.0.0",
-                "platform":    __import__("platform").system().lower(),
+                "platform":    (__import__("os").environ.get("SAFECLAW_CLIENT_PLATFORM") or __import__("platform").system().lower()),
                 "mode":        client_mode,
                 "instanceId":  str(uuid.uuid4()),
             },
