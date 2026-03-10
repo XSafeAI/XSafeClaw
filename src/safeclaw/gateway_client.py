@@ -122,12 +122,14 @@ class GatewayClient:
         self._reader_task = asyncio.create_task(self._read_loop())
 
         # _read_loop will fire _send_connect when the challenge arrives.
-        # If no challenge within 2 s, send connect without nonce.
+        # Newer gateways require device.nonce; do NOT send device auth without nonce.
         try:
-            await asyncio.wait_for(self._connected.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
-            await self._send_connect(nonce=None)
-            await asyncio.wait_for(self._connected.wait(), timeout=5.0)
+            await asyncio.wait_for(self._connected.wait(), timeout=8.0)
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                "Gateway hello challenge timeout (missing nonce). "
+                "Please ensure OpenClaw gateway is running and retry."
+            ) from e
 
     async def disconnect(self) -> None:
         if self._reader_task:
