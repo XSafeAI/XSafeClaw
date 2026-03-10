@@ -329,22 +329,27 @@ class SendMessageResponse(BaseModel):
     stop_reason: str | None = None
 
 
-def _build_gateway_message_payload(message: str, images: list[str]) -> str | list[dict]:
-    """Build chat.send payload supporting optional multimodal image parts."""
-    clean_message = (message or "").strip()
-    clean_images = [u for u in (images or []) if isinstance(u, str) and u.startswith("data:image/")]
-
-    if not clean_images:
-        return clean_message
-
-    parts: list[dict] = []
-    if clean_message:
-        parts.append({"type": "text", "text": clean_message})
-
-    for data_url in clean_images[:3]:  # keep payload bounded
-        parts.append({"type": "input_image", "image_url": data_url})
-
-    return parts
+def _build_gateway_attachments(images: list[str]) -> list[dict]:
+    """Build chat.send attachments from pasted image data URLs."""
+    out: list[dict] = []
+    for idx, data_url in enumerate((images or [])[:3]):
+        if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+            continue
+        try:
+            header, b64 = data_url.split(",", 1)
+            mime = header.split(";")[0].replace("data:", "") or "image/png"
+            ext = mime.split("/")[-1] if "/" in mime else "png"
+            out.append(
+                {
+                    "name": f"pasted-{idx + 1}.{ext}",
+                    "mimeType": mime,
+                    "content": b64,
+                    "encoding": "base64",
+                }
+            )
+        except Exception:
+            continue
+    return out
 
 
 # --------------- Endpoints ---------------
@@ -373,7 +378,8 @@ async def send_message(request: SendMessageRequest):
     try:
         result = await client.send_chat(
             session_key=request.session_key,
-            message=_build_gateway_message_payload(request.message, request.images),
+            message=(request.message or "").strip(),
+            attachments=_build_gateway_attachments(request.images),
             timeout_ms=120_000,
         )
         return SendMessageResponse(
@@ -413,7 +419,8 @@ async def send_message_stream(request: SendMessageRequest):
         try:
             async for chunk in client.stream_chat(
                 session_key=request.session_key,
-                message=_build_gateway_message_payload(request.message, request.images),
+                message=(request.message or "").strip(),
+                attachments=_build_gateway_attachments(request.images),
             ):
                 if chunk["type"] == "final":
                     final_text = chunk.get("text", "")

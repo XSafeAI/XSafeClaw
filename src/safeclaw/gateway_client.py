@@ -259,6 +259,7 @@ class GatewayClient:
         self,
         session_key: str,
         message: Any,
+        attachments: list[dict] | None = None,
         thinking: str | None = None,
         timeout_ms: int | None = None,
     ):
@@ -347,6 +348,8 @@ class GatewayClient:
                 "message":        message,
                 "idempotencyKey": run_id,
             }
+            if attachments:
+                params["attachments"] = attachments
             if thinking:
                 params["thinking"] = thinking
             if timeout_ms:
@@ -405,6 +408,7 @@ class GatewayClient:
         self,
         session_key: str,
         message: Any,
+        attachments: list[dict] | None = None,
         thinking: str | None = None,
         timeout_ms: int | None = None,
     ) -> dict:
@@ -453,6 +457,8 @@ class GatewayClient:
                 "message":        message,
                 "idempotencyKey": run_id,
             }
+            if attachments:
+                params["attachments"] = attachments
             if thinking:
                 params["thinking"] = thinking
             if timeout_ms:
