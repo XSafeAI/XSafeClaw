@@ -1,6 +1,6 @@
 [project]
 name = "safeclaw"
-version = "1.0.0"
+version = "0.1.0"
 description = "SafeClaw - Keeping Your Claw Safe. Real-time monitoring and security for OpenClaw AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,9 +41,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/safeclaw"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/safeclaw/static" = "safeclaw/static"
 
 [tool.ruff]
 line-length = 100

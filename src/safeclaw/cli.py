@@ -52,7 +52,7 @@ def start(
 @app.command()
 def version() -> None:
     """Show SafeClaw version."""
-    console.print("[bold]SafeClaw[/bold] v1.0.0")
+    console.print("[bold]SafeClaw[/bold] v0.1.0")
 
 
 if __name__ == "__main__":
