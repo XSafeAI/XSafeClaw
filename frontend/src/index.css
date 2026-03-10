@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+/*
+ * Use @theme inline so Tailwind utility classes (bg-surface-0, text-text-primary …)
+ * reference CSS custom properties at runtime — enabling dark/light switching
+ * by just swapping [data-theme] on <html> without a rebuild.
+ */
+@theme inline {
+  --color-surface-0:      var(--surface-0);
+  --color-surface-1:      var(--surface-1);
+  --color-surface-2:      var(--surface-2);
+  --color-surface-3:      var(--surface-3);
+  --color-border:         var(--border);
+  --color-border-active:  var(--border-active);
+  --color-accent:         var(--accent);
+  --color-accent-dim:     var(--accent-dim);
+  --color-accent-glow:    var(--accent-glow);
+  --color-success:        #34d399;
+  --color-warning:        #fbbf24;
+  --color-danger:         #f87171;
+  --color-info:           #60a5fa;
+  --color-text-primary:   var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted:     var(--text-muted);
+}
+
+/* ── Dark theme (default) ──────────────────────────────────── */
+:root {
+  --surface-0:      #0c0a1a;
+  --surface-1:      #13112a;
+  --surface-2:      #1a1735;
+  --surface-3:      #211e40;
+  --border:         #2a2650;
+  --border-active:  #4a3f8f;
+  --accent:         #7c5cfc;
+  --accent-dim:     #5b3fd9;
+  --accent-glow:    rgba(124, 92, 252, 0.15);
+  --text-primary:   #e8e5f0;
+  --text-secondary: #9890b8;
+  --text-muted:     #5e5680;
+}
+
+/* ── Light theme ───────────────────────────────────────────── */
+[data-theme="light"] {
+  --surface-0:      #f5f4fb;
+  --surface-1:      #eceaf7;
+  --surface-2:      #e1def2;
+  --surface-3:      #d5d1eb;
+  --border:         #c4bfe0;
+  --border-active:  #7c5cfc;
+  --accent:         #7c5cfc;
+  --accent-dim:     #5b3fd9;
+  --accent-glow:    rgba(124, 92, 252, 0.12);
+  --text-primary:   #17112e;
+  --text-secondary: #3d3268;
+  --text-muted:     #7b74a0;
+}
+
+/* ── Base ──────────────────────────────────────────────────── */
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--surface-0);
+  color: var(--text-primary);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
+
+/* ── Shimmer animation ─────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

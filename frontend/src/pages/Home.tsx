@@ -1,0 +1,84 @@
+import { useNavigate } from 'react-router-dom';
+import { Users, Globe } from 'lucide-react';
+
+interface ActionCard {
+  icon: React.ElementType;
+  title: string;
+  description: string;
+  onClick: () => void;
+  accent?: boolean;
+}
+
+function Card({ icon: Icon, title, description, onClick, accent }: ActionCard) {
+  return (
+    <button
+      onClick={onClick}
+      className={`group flex flex-col items-center gap-5 p-8 rounded-2xl border transition-all duration-200 text-center
+        hover:scale-[1.02] hover:shadow-xl
+        ${accent
+          ? 'bg-accent/10 border-accent/30 hover:bg-accent/15 hover:border-accent/50 shadow-lg shadow-accent/10'
+          : 'bg-surface-1 border-border hover:bg-surface-2 hover:border-accent/30'
+        }`}
+    >
+      <div className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all
+        ${accent
+          ? 'bg-accent/20 group-hover:bg-accent/30'
+          : 'bg-surface-2 group-hover:bg-accent/10'
+        }`}>
+        <Icon className={`w-7 h-7 ${accent ? 'text-accent' : 'text-text-secondary group-hover:text-accent'} transition-colors`} />
+      </div>
+
+      <p className={`text-[17px] font-bold tracking-tight ${accent ? 'text-accent' : 'text-text-primary'}`}>
+        {title}
+      </p>
+
+      <p className="text-[13px] text-text-secondary leading-relaxed max-w-[200px]">
+        {description}
+      </p>
+    </button>
+  );
+}
+
+export default function Home() {
+  const navigate = useNavigate();
+  const goToWorld = () => {
+    window.location.href = '/world.html';
+  };
+
+  return (
+    <div className="min-h-screen bg-surface-0 flex flex-col items-center justify-center px-8 py-16">
+
+      {/* ── Logo + title ── */}
+      <div className="flex flex-col items-center gap-4 mb-16">
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-accent to-purple-500
+          flex items-center justify-center text-white font-bold text-2xl shadow-xl shadow-accent/25">
+          S
+        </div>
+        <div className="text-center space-y-2">
+          <h1 className="text-[32px] font-bold text-text-primary tracking-tight">
+            SafeClaw
+          </h1>
+          <p className="text-[15px] text-text-muted">Keeping Your Claw Safe.</p>
+        </div>
+      </div>
+
+      {/* ── Two cards in one row ── */}
+      <div className="grid grid-cols-2 gap-6 w-full max-w-2xl">
+        <Card
+          icon={Globe}
+          title="Agent Town"
+          description="Manage and observe all your AI agents in one place."
+          onClick={goToWorld}
+          accent
+        />
+        <Card
+          icon={Users}
+          title="Agent Dashboard"
+          description="A dashboard to monitor and manage your AI agents."
+          onClick={() => navigate('/monitor?tab=agent')}
+        />
+      </div>
+
+    </div>
+  );
+}
