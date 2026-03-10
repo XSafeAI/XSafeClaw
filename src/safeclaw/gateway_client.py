@@ -258,7 +258,7 @@ class GatewayClient:
     async def stream_chat(
         self,
         session_key: str,
-        message: str,
+        message: Any,
         thinking: str | None = None,
         timeout_ms: int | None = None,
     ):
@@ -404,7 +404,7 @@ class GatewayClient:
     async def send_chat(
         self,
         session_key: str,
-        message: str,
+        message: Any,
         thinking: str | None = None,
         timeout_ms: int | None = None,
     ) -> dict:

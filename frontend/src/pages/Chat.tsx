@@ -14,6 +14,7 @@ interface ChatMessage {
   content: string;
   timestamp: Date;
   pending?: boolean;
+  images?: string[];
   // tool call fields
   tool_id?: string;
   tool_name?: string;
@@ -216,9 +217,20 @@ function Bubble({ msg }: { msg: ChatMessage }) {
               <span className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce [animation-delay:300ms]" />
             </div>
           ) : (
-            <p className="text-[13px] text-text-primary whitespace-pre-wrap leading-relaxed break-words">
-              {msg.content}
-            </p>
+            <div className="space-y-2">
+              {msg.content && (
+                <p className="text-[13px] text-text-primary whitespace-pre-wrap leading-relaxed break-words">
+                  {msg.content}
+                </p>
+              )}
+              {msg.images && msg.images.length > 0 && (
+                <div className="grid grid-cols-3 gap-2">
+                  {msg.images.map((img, idx) => (
+                    <img key={idx} src={img} alt={`pasted-${idx}`} className="w-24 h-24 object-cover rounded-lg border border-border" />
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -239,6 +251,7 @@ export default function Chat() {
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null); // key being loaded
   const [selectedModel, setSelectedModel] = useState<string>(QUICK_MODELS[0]);
   const [isComposing, setIsComposing] = useState(false);
+  const [pastedImages, setPastedImages] = useState<string[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -374,21 +387,24 @@ export default function Chat() {
   };
 
   /* --- Send (streaming via SSE) --- */
-  const sendText = async (rawText: string, userVisibleText?: string) => {
+  const sendText = async (rawText: string, userVisibleText?: string, images?: string[]) => {
     const text = rawText.trim();
-    if (!text || !activeKey || inFlightRef.current) return;
+    const imagePayload = (images ?? []).filter(Boolean);
+    if ((!text && imagePayload.length === 0) || !activeKey || inFlightRef.current) return;
 
     const key = activeKey;
     inFlightRef.current = true;
 
     setInput('');
+    setPastedImages([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setSending(true);
 
     const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      content: (userVisibleText ?? rawText).trim(),
+      content: (userVisibleText ?? rawText).trim() || (imagePayload.length ? `[Pasted ${imagePayload.length} image${imagePayload.length > 1 ? 's' : ''}]` : ''),
+      images: imagePayload.length ? imagePayload : undefined,
       timestamp: new Date(),
     };
     const pendingId = uuidv4();
@@ -400,7 +416,7 @@ export default function Chat() {
       const response = await fetch('/api/chat/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_key: key, message: text }),
+        body: JSON.stringify({ session_key: key, message: text, images: imagePayload }),
       });
 
       if (!response.ok || !response.body) {
@@ -524,13 +540,13 @@ export default function Chat() {
 
   const handleSend = async () => {
     const original = input.trim();
-    if (!original) return;
+    if (!original && pastedImages.length === 0) return;
     const modelCommand = parsePromptModelSwitch(original);
     if (modelCommand) {
-      await sendText(modelCommand, original);
+      await sendText(modelCommand, original, pastedImages);
       return;
     }
-    await sendText(original);
+    await sendText(original, undefined, pastedImages);
   };
 
   const handleQuickModelSwitch = async (modelRef: string) => {
@@ -543,6 +559,32 @@ export default function Chat() {
     const ta = e.target;
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imageItems = items.filter(i => i.type.startsWith('image/'));
+    if (imageItems.length === 0) return;
+
+    e.preventDefault();
+    const toDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const urls: string[] = [];
+    for (const item of imageItems.slice(0, 3)) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      const dataUrl = await toDataUrl(file);
+      if (dataUrl.startsWith('data:image/')) urls.push(dataUrl);
+    }
+
+    if (urls.length > 0) {
+      setPastedImages(prev => [...prev, ...urls].slice(0, 3));
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -725,6 +767,7 @@ export default function Chat() {
                     onKeyDown={handleKeyDown}
                     onCompositionStart={() => setIsComposing(true)}
                     onCompositionEnd={() => setIsComposing(false)}
+                    onPaste={handlePaste}
                     placeholder={sending ? 'Waiting for response…' : 'Message (↵ to send, Shift+↵ for line breaks)'}
                     rows={1}
                     disabled={sending}
@@ -734,12 +777,29 @@ export default function Chat() {
                   />
                   <button
                     onClick={handleSend}
-                    disabled={!input.trim() || sending}
+                    disabled={(!input.trim() && pastedImages.length === 0) || sending}
                     className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg bg-accent text-white hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm shadow-accent/20"
                   >
                     {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
                   </button>
                 </div>
+                {pastedImages.length > 0 && (
+                  <div className="mt-2 flex items-center gap-2 flex-wrap">
+                    {pastedImages.map((img, idx) => (
+                      <div key={idx} className="relative">
+                        <img src={img} alt={`paste-preview-${idx}`} className="w-14 h-14 rounded-md object-cover border border-border" />
+                        <button
+                          onClick={() => setPastedImages(prev => prev.filter((_, i) => i !== idx))}
+                          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-black/70 text-white text-[10px]"
+                          title="Remove image"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    <span className="text-[11px] text-text-muted">Pasted image{pastedImages.length > 1 ? 's' : ''} will be sent with the message.</span>
+                  </div>
+                )}
                 {sending && (
                   <p className="text-[11px] text-text-muted mt-2 flex items-center gap-1.5">
                     <Loader2 className="w-3 h-3 animate-spin" />
