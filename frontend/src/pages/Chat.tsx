@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2,
 } from 'lucide-react';
-import { chatAPI } from '../services/api';
+import { chatAPI, systemAPI } from '../services/api';
 
 /* ==================== Types ==================== */
 interface ChatMessage {
@@ -227,6 +228,8 @@ function Bubble({ msg }: { msg: ChatMessage }) {
 
 /* ==================== Main ==================== */
 export default function Chat() {
+  const navigate = useNavigate();
+
   const [sessions, setSessions] = useState<StoredSession[]>(loadStoredSessions);
   const [activeKey, setActiveKey] = useState<string | null>(() => loadStoredSessions()[0]?.key ?? null);
   const [messageMap, setMessageMap] = useState<Record<string, ChatMessage[]>>({});
@@ -235,6 +238,7 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null); // key being loaded
   const [selectedModel, setSelectedModel] = useState<string>(QUICK_MODELS[0]);
+  const [isComposing, setIsComposing] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -323,7 +327,24 @@ export default function Chat() {
       setMessageMap(prev => ({ ...prev, [key]: [] }));
       setActiveKey(key);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to connect to OpenClaw gateway. Is it running?');
+      try {
+        const status = await systemAPI.status();
+        if (!status.data.openclaw_installed) {
+          const goSetup = window.confirm(
+            'OpenClaw is not installed yet. Click OK to open the setup page for guided install.'
+          );
+          if (goSetup) navigate('/setup');
+          return;
+        }
+      } catch {
+        // ignore status check errors and fall back to gateway guidance
+      }
+
+      const detail = err.response?.data?.detail;
+      alert(
+        detail ||
+        'Cannot connect to OpenClaw gateway. Please run `openclaw dashboard` (or `openclaw gateway`) first, then retry.'
+      );
     } finally {
       setConnecting(false);
     }
@@ -525,7 +546,10 @@ export default function Chat() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
+      e.preventDefault();
+      handleSend();
+    }
   };
 
   return (
@@ -699,6 +723,8 @@ export default function Chat() {
                     value={input}
                     onChange={handleInputChange}
                     onKeyDown={handleKeyDown}
+                    onCompositionStart={() => setIsComposing(true)}
+                    onCompositionEnd={() => setIsComposing(false)}
                     placeholder={sending ? 'Waiting for response…' : 'Message (↵ to send, Shift+↵ for line breaks)'}
                     rows={1}
                     disabled={sending}
