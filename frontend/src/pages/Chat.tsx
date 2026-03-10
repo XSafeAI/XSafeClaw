@@ -72,6 +72,36 @@ function extractMessageText(msg: any): string {
   return '';
 }
 
+const QUICK_MODELS = [
+  'openai/gpt-5.2',
+  'openai/gpt-5.2-mini',
+  'anthropic/claude-opus-4-5',
+  'anthropic/claude-sonnet-4-5',
+  'google/gemini-2.5-pro',
+];
+
+function parsePromptModelSwitch(input: string): string | null {
+  const text = input.trim();
+
+  const patterns: RegExp[] = [
+    /^switch\s+model\s+to\s+(.+)$/i,
+    /^use\s+model\s+(.+)$/i,
+    /^切换模型(?:到|为)?\s*(.+)$/,
+    /^改用模型\s*(.+)$/,
+    /^换模型(?:到|为)?\s*(.+)$/,
+  ];
+
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (!m) continue;
+    const ref = (m[1] || '').trim();
+    if (!ref || ref.includes(' ')) return null;
+    return `/model ${ref}`;
+  }
+
+  return null;
+}
+
 /* ==================== Tool Call Bubble ==================== */
 function ToolCallBubble({ msg }: { msg: ChatMessage }) {
   const [expanded, setExpanded] = useState(false);
@@ -204,6 +234,7 @@ export default function Chat() {
   const [connecting, setConnecting] = useState(false);
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null); // key being loaded
+  const [selectedModel, setSelectedModel] = useState<string>(QUICK_MODELS[0]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -322,8 +353,8 @@ export default function Chat() {
   };
 
   /* --- Send (streaming via SSE) --- */
-  const handleSend = async () => {
-    const text = input.trim();
+  const sendText = async (rawText: string, userVisibleText?: string) => {
+    const text = rawText.trim();
     if (!text || !activeKey || inFlightRef.current) return;
 
     const key = activeKey;
@@ -333,7 +364,12 @@ export default function Chat() {
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setSending(true);
 
-    const userMsg: ChatMessage = { id: uuidv4(), role: 'user', content: text, timestamp: new Date() };
+    const userMsg: ChatMessage = {
+      id: uuidv4(),
+      role: 'user',
+      content: (userVisibleText ?? rawText).trim(),
+      timestamp: new Date(),
+    };
     const pendingId = uuidv4();
     const pendingMsg: ChatMessage = { id: pendingId, role: 'assistant', content: '', timestamp: new Date(), pending: true };
 
@@ -353,9 +389,6 @@ export default function Chat() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-
-      // Remove "pending" dots once stream starts
-      let streamStarted = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -377,7 +410,6 @@ export default function Chat() {
             };
 
             if (chunk.type === 'delta' && chunk.text) {
-              if (!streamStarted) streamStarted = true;
               setMessageMap(prev => ({
                 ...prev,
                 [key]: (prev[key] ?? []).map(m =>
@@ -388,8 +420,6 @@ export default function Chat() {
               }));
 
             } else if (chunk.type === 'tool_start') {
-              // Insert a new tool_call bubble BEFORE the assistant bubble
-              // (tool events arrive after final, so insert before the last assistant msg)
               const toolMsg: ChatMessage = {
                 id: `tool-${chunk.tool_id || uuidv4()}`,
                 role: 'tool_call',
@@ -402,7 +432,6 @@ export default function Chat() {
               };
               setMessageMap(prev => {
                 const msgs = prev[key] ?? [];
-                // Find the assistant bubble (the one that was pendingId, now finalized)
                 const assistantIdx = msgs.findIndex(m => m.id === pendingId);
                 const insertAt = assistantIdx >= 0 ? assistantIdx : msgs.length - 1;
                 const next = [...msgs];
@@ -411,7 +440,6 @@ export default function Chat() {
               });
 
             } else if (chunk.type === 'tool_result') {
-              // Update the corresponding tool_call bubble with result
               setMessageMap(prev => ({
                 ...prev,
                 [key]: (prev[key] ?? []).map(m =>
@@ -449,7 +477,6 @@ export default function Chat() {
         }
       }
 
-      // Safety: if stream ended without finalizing, remove pending state
       setMessageMap(prev => ({
         ...prev,
         [key]: (prev[key] ?? []).map(m =>
@@ -472,6 +499,22 @@ export default function Chat() {
       setSending(false);
       inFlightRef.current = false;
     }
+  };
+
+  const handleSend = async () => {
+    const original = input.trim();
+    if (!original) return;
+    const modelCommand = parsePromptModelSwitch(original);
+    if (modelCommand) {
+      await sendText(modelCommand, original);
+      return;
+    }
+    await sendText(original);
+  };
+
+  const handleQuickModelSwitch = async (modelRef: string) => {
+    if (!activeKey || sending || inFlightRef.current) return;
+    await sendText(`/model ${modelRef}`, `/model ${modelRef}`);
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -595,14 +638,34 @@ export default function Chat() {
                     {activeKey.slice(0, 18)}…
                   </span>
                 </div>
-                <button
-                  onClick={handleRefreshHistory}
-                  disabled={loadingHistory === activeKey}
-                  title="Reload latest history from OpenClaw session file"
-                  className="p-1.5 text-text-muted hover:text-text-primary hover:bg-surface-2 rounded-md transition-all"
-                >
-                  <RotateCcw className={`w-3.5 h-3.5 ${loadingHistory === activeKey ? 'animate-spin' : ''}`} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedModel}
+                    onChange={e => setSelectedModel(e.target.value)}
+                    className="text-[12px] bg-surface-0 border border-border rounded px-2 py-1 text-text-secondary"
+                    title="Choose model"
+                  >
+                    {QUICK_MODELS.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => handleQuickModelSwitch(selectedModel)}
+                    disabled={sending || !activeKey}
+                    className="px-2.5 py-1 text-[12px] rounded border border-border text-text-secondary hover:text-text-primary hover:bg-surface-2 disabled:opacity-50"
+                    title="Switch model with /model"
+                  >
+                    Switch Model
+                  </button>
+                  <button
+                    onClick={handleRefreshHistory}
+                    disabled={loadingHistory === activeKey}
+                    title="Reload latest history from OpenClaw session file"
+                    className="p-1.5 text-text-muted hover:text-text-primary hover:bg-surface-2 rounded-md transition-all"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${loadingHistory === activeKey ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
               </div>
 
               {/* Messages */}
