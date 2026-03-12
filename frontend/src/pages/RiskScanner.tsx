@@ -3,8 +3,10 @@ import {
   Shield, Zap, Loader2, Play, ChevronDown, ChevronRight,
   AlertTriangle, XCircle, Square,
   Crosshair, Send, Clock, Check, Bot, User, MessageSquare,
+  ShieldAlert, ExternalLink,
 } from 'lucide-react';
-import { redteamAPI } from '../services/api';
+import { useNavigate } from 'react-router-dom';
+import { redteamAPI, guardAPI } from '../services/api';
 
 /* ==================== Types ==================== */
 interface InstructionItem { record_id: string; instruction: string; category: string; }
@@ -48,7 +50,7 @@ function CardHeader({ icon: Icon, title, badge, action }: { icon: typeof Shield;
   );
 }
 
-/* ==================== Red Team Panel ==================== */
+/* ==================== Safety Rehearsal Panel ==================== */
 function RedTeamPanel() {
   const [instructions, setInstructions] = useState<InstructionItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,6 +68,35 @@ function RedTeamPanel() {
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef(false);
+  const navigate = useNavigate();
+
+  const [guardPending, setGuardPending] = useState<{
+    id: string; tool_name: string; risk_source: string | null;
+    failure_mode: string | null; real_world_harm: string | null;
+  }[]>([]);
+
+  // Poll guard pending items for the active red-team session
+  useEffect(() => {
+    if (!sessionKey) { setGuardPending([]); return; }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { data } = await guardAPI.pending(false);
+        if (cancelled) return;
+        const forSession = data.filter((p: any) => p.session_key === sessionKey || p.session_key?.endsWith(sessionKey));
+        setGuardPending(forSession.map((p: any) => ({
+          id: p.id,
+          tool_name: p.tool_name,
+          risk_source: p.risk_source ?? null,
+          failure_mode: p.failure_mode ?? null,
+          real_world_harm: p.real_world_harm ?? null,
+        })));
+      } catch { /* ignore */ }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [sessionKey]);
 
   // Load instructions on mount
   useEffect(() => {
@@ -159,7 +190,6 @@ function RedTeamPanel() {
       const turn = result.turns[i];
       setCurrentTurn(i);
 
-      // Add user message (attack input)
       const userMsgId = `user-${i}-${Date.now()}`;
       setChatMessages(prev => [...prev, {
         id: userMsgId,
@@ -170,16 +200,13 @@ function RedTeamPanel() {
         state: 'sending',
       }]);
 
-      // Send to agent
       try {
         const res = await redteamAPI.sendMessage(key, turn.output);
 
-        // Update user message state to done
         setChatMessages(prev => prev.map(m =>
           m.id === userMsgId ? { ...m, state: 'done' } : m
         ));
 
-        // Add assistant reply
         setChatMessages(prev => [...prev, {
           id: `assistant-${i}-${Date.now()}`,
           role: 'assistant',
@@ -429,7 +456,7 @@ function RedTeamPanel() {
                         </div>
                         <div className="bg-surface-0 border border-border rounded-lg p-2.5">
                           <p className="text-[10px] font-semibold text-red-400 mb-1">ATTACK INPUT</p>
-                          <p className="text-[11px] text-text-primary font-mono whitespace-pre-wrap leading-relaxed">{turn.output}</p>
+                          <p className="text-[11px] text-text-primary font-mono whitespace-pre-wrap break-all leading-relaxed">{turn.output}</p>
                         </div>
                       </div>
                     )}
@@ -449,7 +476,7 @@ function RedTeamPanel() {
               <div className="w-16 h-16 rounded-2xl bg-surface-2 flex items-center justify-center mb-5">
                 <Crosshair className="w-8 h-8 text-text-muted" />
               </div>
-              <p className="text-sm font-medium text-text-secondary mb-2">Automated Red Team</p>
+              <p className="text-sm font-medium text-text-secondary mb-2">Automated Safety Rehearsal</p>
               <p className="text-[12px] text-text-muted max-w-sm">
                 Select an attack instruction and generate multi-turn decomposed commands. Then execute them against the agent in a live session.
               </p>
@@ -489,6 +516,36 @@ function RedTeamPanel() {
                 )
               }
             />
+
+            {/* Guard interception banner */}
+            {guardPending.length > 0 && (
+              <div className="flex-shrink-0 mx-4 mt-3">
+                {guardPending.map(gp => (
+                  <div key={gp.id} className="flex items-start gap-3 px-4 py-3 bg-red-500/8 border border-red-500/25 rounded-xl mb-2 animate-pulse">
+                    <ShieldAlert className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[13px] font-semibold text-red-400">
+                        Tool <code className="bg-red-500/15 px-1.5 py-0.5 rounded text-[12px]">{gp.tool_name}</code> blocked by Guard
+                      </p>
+                      <p className="text-[11px] text-text-muted mt-0.5">Agent paused — needs human approval.</p>
+                      {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
+                        <div className="mt-1.5 text-[11px] text-text-secondary space-y-0.5">
+                          {gp.risk_source && <p><span className="text-amber-400 font-medium">Risk Source:</span> {gp.risk_source}</p>}
+                          {gp.failure_mode && <p><span className="text-orange-400 font-medium">Failure Mode:</span> {gp.failure_mode}</p>}
+                          {gp.real_world_harm && <p><span className="text-red-400 font-medium">Real World Harm:</span> {gp.real_world_harm}</p>}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => navigate('/monitor')}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 text-[12px] font-semibold rounded-lg transition-colors flex-shrink-0"
+                    >
+                      Review <ExternalLink className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Chat messages area */}
             <div className="flex-1 overflow-y-auto min-h-0 p-5 space-y-4">
@@ -547,7 +604,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   if (role === 'user') {
     return (
       <div className="flex justify-end gap-2">
-        <div className="max-w-[85%]">
+        <div className="max-w-[85%] overflow-hidden">
           {turnIndex !== undefined && (
             <div className="flex items-center justify-end gap-1.5 mb-1">
               <span className="text-[10px] font-bold text-red-400">TURN {turnIndex + 1}</span>
@@ -557,7 +614,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
             </div>
           )}
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl rounded-br-sm px-4 py-3">
-            <p className="text-[12px] text-text-primary font-mono whitespace-pre-wrap leading-relaxed">{content}</p>
+            <p className="text-[12px] text-text-primary font-mono whitespace-pre-wrap break-all leading-relaxed">{content}</p>
           </div>
         </div>
         <div className="w-7 h-7 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0 mt-auto">
@@ -573,7 +630,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
       <div className="w-7 h-7 rounded-full bg-accent/20 flex items-center justify-center flex-shrink-0 mt-auto">
         <Bot className="w-3.5 h-3.5 text-accent" />
       </div>
-      <div className="max-w-[85%]">
+      <div className="max-w-[85%] overflow-hidden">
         <div className="flex items-center gap-1.5 mb-1">
           <span className="text-[10px] font-bold text-accent">AGENT</span>
           {state === 'final' && <Check className="w-3 h-3 text-emerald-400" />}
@@ -581,7 +638,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           {state === 'timeout' && <Clock className="w-3 h-3 text-orange-400" />}
         </div>
         <div className="bg-accent/5 border border-accent/10 rounded-xl rounded-bl-sm px-4 py-3">
-          <p className="text-[12px] text-text-primary whitespace-pre-wrap leading-relaxed">{content}</p>
+          <p className="text-[12px] text-text-primary whitespace-pre-wrap break-all leading-relaxed">{content}</p>
         </div>
       </div>
     </div>
@@ -608,17 +665,42 @@ function RiskAssessmentPanel() {
 /* ==================== Main Page ==================== */
 export default function RiskScanner() {
   const [activeTab, setActiveTab] = useState<TabId>('redteam');
+  const [guardOn, setGuardOn] = useState(true);
+
+  useEffect(() => {
+    guardAPI.getEnabled().then(r => setGuardOn(r.data.enabled)).catch(() => {});
+  }, []);
+
+  const toggleGuard = async () => {
+    const next = !guardOn;
+    setGuardOn(next);
+    try { await guardAPI.setEnabled(next); } catch { setGuardOn(!next); }
+  };
 
   return (
     <div className="min-h-screen">
       {/* ===== Header ===== */}
       <div className="border-b border-border">
         <div className="px-8 py-6">
-          <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold text-text-primary">Red Teaming</h1>
-            <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
-              Ready
-            </span>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <h1 className="text-xl font-bold text-text-primary">Safety Rehearsal</h1>
+              <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
+                Ready
+              </span>
+            </div>
+            <button onClick={toggleGuard}
+              className="flex items-center gap-2.5 group"
+              title={guardOn ? 'Guard is ON — tool calls will be checked' : 'Guard is OFF — tool calls pass through'}
+            >
+              <span className={`text-[12px] font-semibold transition-colors ${guardOn ? 'text-emerald-400' : 'text-text-muted'}`}>
+                <Shield className="w-4 h-4 inline -mt-0.5 mr-1" />
+                Guard
+              </span>
+              <div className={`relative w-9 h-5 rounded-full transition-colors ${guardOn ? 'bg-emerald-500' : 'bg-surface-2'}`}>
+                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${guardOn ? 'translate-x-[18px]' : 'translate-x-[2px]'}`} />
+              </div>
+            </button>
           </div>
           <p className="text-[13px] text-text-muted mt-2">
             Find weaknesses in your AI agents before they cause problems.

@@ -9,6 +9,7 @@ import Assets from './pages/Assets';
 import RiskScanner from './pages/RiskScanner';
 import Chat from './pages/Chat';
 import Setup from './pages/Setup';
+import Configure from './pages/Configure';
 import { systemAPI } from './services/api';
 
 const queryClient = new QueryClient({
@@ -21,12 +22,9 @@ const queryClient = new QueryClient({
   },
 });
 
-/* ── System check wrapper ── */
-type CheckState = 'pending' | 'setup' | 'ok';
+type CheckState = 'pending' | 'setup' | 'configure' | 'ok';
 
-/** Pages that should NOT be redirected to /setup when openclaw is missing */
-const SETUP_EXEMPT = ['/setup'];
-/** Pages that should NOT be redirected to /home on fresh load */
+const EXEMPT_PATHS = ['/setup', '/configure'];
 const HOME_ENTRY_PATHS = ['/', '/home'];
 
 function AppRoutes() {
@@ -38,46 +36,45 @@ function AppRoutes() {
     (async () => {
       try {
         const res = await systemAPI.status();
-        if (res.data.openclaw_installed) {
-          setCheckState('ok');
-          // If user is on the root path, send them to the home landing page
-          if (HOME_ENTRY_PATHS.includes(location.pathname)) {
-            navigate('/home', { replace: true });
+        const d = res.data as any;
+        const currentPath = window.location.pathname;
+
+        if (!d.openclaw_installed) {
+          setCheckState('setup');
+          if (!EXEMPT_PATHS.includes(currentPath)) {
+            navigate('/setup', { replace: true });
+          }
+        } else if (!d.config_exists) {
+          setCheckState('configure');
+          if (!EXEMPT_PATHS.includes(currentPath)) {
+            navigate('/configure', { replace: true });
           }
         } else {
-          setCheckState('setup');
-          if (!SETUP_EXEMPT.includes(location.pathname)) {
-            navigate('/setup', { replace: true });
+          setCheckState('ok');
+          if (HOME_ENTRY_PATHS.includes(currentPath)) {
+            navigate('/home', { replace: true });
           }
         }
       } catch {
-        // Backend not yet available – let the app load normally
         setCheckState('ok');
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Guard: bounce back to /setup if openclaw disappears
+  // Guard: redirect if state doesn't match page
   useEffect(() => {
-    if (checkState === 'setup' && !SETUP_EXEMPT.includes(location.pathname)) {
-      navigate('/setup', { replace: true });
-    }
+    if (EXEMPT_PATHS.includes(location.pathname)) return;
+    if (checkState === 'setup') navigate('/setup', { replace: true });
+    else if (checkState === 'configure') navigate('/configure', { replace: true });
   }, [checkState, location.pathname, navigate]);
-
-  const handleSetupComplete = () => {
-    setCheckState('ok');
-    navigate('/home', { replace: true });
-  };
 
   if (checkState === 'pending') {
     return (
       <div className="min-h-screen bg-surface-0 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent to-purple-500 flex items-center justify-center text-white font-bold text-lg animate-pulse">
-            S
-          </div>
-          <p className="text-text-muted text-sm">Starting SafeClaw…</p>
+          <img src="/logo.png" alt="SafeClaw" className="w-14 h-14 rounded-xl animate-pulse" />
+          <p className="text-text-muted text-sm">Starting SafeClaw...</p>
         </div>
       </div>
     );
@@ -85,20 +82,16 @@ function AppRoutes() {
 
   return (
     <Routes>
-      {/* Setup page – full-screen, no sidebar */}
-      <Route path="/setup" element={<Setup onComplete={handleSetupComplete} />} />
-
-      {/* Home landing page – full-screen, no sidebar */}
+      <Route path="/setup" element={<Setup />} />
+      <Route path="/configure" element={<Configure />} />
       <Route path="/home" element={<Home />} />
       <Route path="/world" element={<World />} />
-
-      {/* Main app with sidebar */}
       <Route element={<Layout />}>
-        <Route path="/"            element={<Monitor />} />
-        <Route path="/monitor"     element={<Monitor />} />
-        <Route path="/assets"      element={<Assets />} />
+        <Route path="/" element={<Monitor />} />
+        <Route path="/monitor" element={<Monitor />} />
+        <Route path="/assets" element={<Assets />} />
         <Route path="/risk-scanner" element={<RiskScanner />} />
-        <Route path="/chat"        element={<Chat />} />
+        <Route path="/chat" element={<Chat />} />
       </Route>
     </Routes>
   );

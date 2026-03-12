@@ -5,8 +5,11 @@ import {
   User, Bot, Terminal,
   RefreshCw, Zap, Users, ListChecks, ShieldCheck,
   Plus, Minus, Maximize2, X, Filter,
+  Check, Pencil, Loader2, AlertTriangle,
+  CheckCircle2, XCircle, Timer,
+  ChevronDown, ChevronRight,
 } from 'lucide-react';
-import { sessionsAPI, eventsAPI, statsAPI } from '../services/api';
+import { sessionsAPI, eventsAPI, statsAPI, guardAPI } from '../services/api';
 import api from '../services/api';
 import ActivityTab from './ActivityTab';
 
@@ -231,6 +234,260 @@ const monitorTabs = [
 ] as const;
 type MonitorTabId = (typeof monitorTabs)[number]['id'];
 
+/* ============ Pending Approvals Panel ============ */
+interface PendingItem {
+  id: string;
+  session_key: string;
+  tool_name: string;
+  params: Record<string, any>;
+  guard_verdict: string;
+  guard_raw: string;
+  session_context: string;
+  risk_source: string | null;
+  failure_mode: string | null;
+  real_world_harm: string | null;
+  created_at: number;
+  resolved: boolean;
+  resolution: string;
+  resolved_at: number;
+  modified_params: Record<string, any> | null;
+}
+
+function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void }) {
+  const [items, setItems] = useState<PendingItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showResolved, setShowResolved] = useState(false);
+  const [resolving, setResolving] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editParams, setEditParams] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const fetchItems = useCallback(async () => {
+    try {
+      const { data } = await guardAPI.pending();
+      setItems(data.map((d: any) => ({ ...d, session_context: d.session_context ?? '', real_world_harm: d.real_world_harm ?? null })));
+    } catch { /* ignore */ } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchItems();
+    const timer = setInterval(fetchItems, 3000);
+    return () => clearInterval(timer);
+  }, [fetchItems]);
+
+  const pending = items.filter(i => !i.resolved);
+  const resolved = items.filter(i => i.resolved);
+
+  useEffect(() => { onCountChange?.(pending.length); }, [pending.length, onCountChange]);
+
+  const handleResolve = async (id: string, resolution: string, modifiedParams?: Record<string, any>) => {
+    setResolving(id);
+    try {
+      await guardAPI.resolve(id, resolution, modifiedParams);
+      await fetchItems();
+    } catch (e: any) {
+      console.error('resolve failed', e);
+    } finally {
+      setResolving(null);
+      setEditingId(null);
+    }
+  };
+
+  const handleModify = (id: string) => {
+    if (editingId === id) {
+      try {
+        const parsed = JSON.parse(editParams);
+        handleResolve(id, 'modified', parsed);
+      } catch { alert('Invalid JSON'); }
+    } else {
+      const item = items.find(i => i.id === id);
+      setEditingId(id);
+      setEditParams(JSON.stringify(item?.params ?? {}, null, 2));
+    }
+  };
+
+  const timeAgo = (ts: number) => {
+    const sec = Math.floor(Date.now() / 1000 - ts);
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    return `${Math.floor(sec / 3600)}h ago`;
+  };
+
+  const resolutionIcon = (r: string) => {
+    if (r === 'approved') return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />;
+    if (r === 'rejected') return <XCircle className="w-3.5 h-3.5 text-red-400" />;
+    if (r === 'modified') return <Pencil className="w-3.5 h-3.5 text-amber-400" />;
+    if (r === 'timeout') return <Timer className="w-3.5 h-3.5 text-text-muted" />;
+    return null;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <RefreshCw className="w-5 h-5 text-accent animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header bar */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-semibold text-text-primary">Tool Call Approvals</h2>
+          {pending.length > 0 && (
+            <span className="px-2.5 py-1 rounded-full bg-red-500/15 text-red-400 text-xs font-semibold animate-pulse">
+              {pending.length} pending
+            </span>
+          )}
+        </div>
+        <button
+          onClick={fetchItems}
+          className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {/* Empty state */}
+      {pending.length === 0 && (
+        <div className="flex flex-col items-center justify-center py-20 bg-surface-1 border border-border rounded-xl">
+          <div className="w-14 h-14 rounded-2xl bg-surface-2 flex items-center justify-center mb-4">
+            <ShieldCheck className="w-7 h-7 text-text-muted" />
+          </div>
+          <p className="text-sm font-medium text-text-secondary mb-1">No Pending Approvals</p>
+          <p className="text-[12px] text-text-muted max-w-xs">Tool calls flagged as unsafe will appear here for review.</p>
+        </div>
+      )}
+
+      {/* Pending items */}
+      {pending.map(item => (
+        <div key={item.id} className="bg-surface-1 border-l-4 border-l-red-500 border border-border rounded-xl overflow-hidden">
+          <div className="px-5 py-4 flex items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1.5">
+                <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <span className="font-mono text-sm font-semibold text-text-primary">{item.tool_name}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-semibold uppercase">
+                  {item.guard_verdict}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-text-muted">
+                <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{timeAgo(item.created_at)}</span>
+                <span>Session: <code className="text-accent">{item.session_key.slice(0, 12)}…</code></span>
+              </div>
+              {(item.risk_source || item.failure_mode || item.real_world_harm) && (
+                <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                  {item.risk_source && <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-medium">{item.risk_source}</span>}
+                  {item.failure_mode && <span className="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 font-medium">{item.failure_mode}</span>}
+                  {item.real_world_harm && <span className="px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 font-medium">{item.real_world_harm}</span>}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={() => handleResolve(item.id, 'approved')}
+                disabled={resolving === item.id}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
+              >
+                {resolving === item.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                Approve
+              </button>
+              <button
+                onClick={() => handleModify(item.id)}
+                disabled={resolving === item.id}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50"
+              >
+                <Pencil className="w-3.5 h-3.5" />
+                {editingId === item.id ? 'Save' : 'Modify'}
+              </button>
+              <button
+                onClick={() => handleResolve(item.id, 'rejected')}
+                disabled={resolving === item.id}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50"
+              >
+                <X className="w-3.5 h-3.5" />
+                Reject
+              </button>
+            </div>
+          </div>
+
+          {/* Session Context */}
+          {item.session_context && (
+            <div className="px-5 pt-2 pb-1">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Session Trajectory</p>
+              <pre className="bg-surface-0 border border-border rounded-lg p-3 text-[11px] font-mono text-text-secondary whitespace-pre-wrap break-words overflow-y-auto max-h-64 leading-relaxed">
+                {item.session_context}
+              </pre>
+            </div>
+          )}
+
+          <div className="px-5 pb-4">
+            <button
+              onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
+              className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary mb-2 transition-colors"
+            >
+              {expandedId === item.id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+              Parameters
+            </button>
+            {expandedId === item.id && (
+              <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
+                {JSON.stringify(item.params, null, 2)}
+              </pre>
+            )}
+            {editingId === item.id && (
+              <div className="mt-3">
+                <label className="text-xs text-text-muted font-semibold mb-1 block">Edit parameters (JSON):</label>
+                <textarea
+                  value={editParams}
+                  onChange={e => setEditParams(e.target.value)}
+                  rows={6}
+                  className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent resize-y"
+                />
+                <button
+                  onClick={() => setEditingId(null)}
+                  className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors"
+                >
+                  Cancel editing
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {/* Resolved history */}
+      {resolved.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowResolved(!showResolved)}
+            className="flex items-center gap-2 text-sm text-text-muted hover:text-text-primary transition-colors mb-3"
+          >
+            {showResolved ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            Resolved ({resolved.length})
+          </button>
+          {showResolved && (
+            <div className="space-y-2">
+              {resolved.map(item => (
+                <div key={item.id} className="bg-surface-1 border border-border rounded-lg px-4 py-3 flex items-center justify-between opacity-70">
+                  <div className="flex items-center gap-3">
+                    {resolutionIcon(item.resolution)}
+                    <span className="font-mono text-xs text-text-primary">{item.tool_name}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-text-muted capitalize">{item.resolution}</span>
+                  </div>
+                  <span className="text-xs text-text-muted">{timeAgo(item.resolved_at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============ Main Page ============ */
 export default function Monitor() {
   const [searchParams] = useSearchParams();
@@ -246,6 +503,7 @@ export default function Monitor() {
   const [loading, setLoading] = useState(true);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('active');
+  const [pendingCount, setPendingCount] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   /* ---------- Data fetching ---------- */
@@ -282,6 +540,18 @@ export default function Monitor() {
   }, []);
 
   useEffect(() => { fetchData(); const t = setInterval(fetchData, 5_000); return () => clearInterval(t); }, [fetchData]);
+
+  useEffect(() => {
+    const fetchPendingCount = async () => {
+      try {
+        const { data } = await guardAPI.pending();
+        setPendingCount(Array.isArray(data) ? data.filter((i: any) => !i.resolved).length : 0);
+      } catch { /* ignore */ }
+    };
+    fetchPendingCount();
+    const t = setInterval(fetchPendingCount, 5_000);
+    return () => clearInterval(t);
+  }, []);
 
   /* Load event messages on select */
   useEffect(() => {
@@ -400,7 +670,7 @@ export default function Monitor() {
   }
 
   const LABEL_W = 152;
-  const tabCounts: Record<MonitorTabId, number> = { world: 0, agent: stats.sessions, activity: stats.events, approval: 0 };
+  const tabCounts: Record<MonitorTabId, number> = { world: 0, agent: stats.sessions, activity: stats.events, approval: pendingCount };
 
   return (
     <div className="min-h-screen">
@@ -431,7 +701,10 @@ export default function Monitor() {
                 <Icon className="w-3.5 h-3.5" />
                 {tab.name}
                 <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-md min-w-[22px] text-center
-                  ${active ? 'bg-accent/20 text-accent' : 'bg-surface-2 text-text-muted'}`}>
+                  ${tab.id === 'approval' && tabCounts[tab.id] > 0
+                    ? 'bg-red-500/20 text-red-400 animate-pulse'
+                    : active ? 'bg-accent/20 text-accent' : 'bg-surface-2 text-text-muted'
+                  }`}>
                   {tabCounts[tab.id]}
                 </span>
               </button>
@@ -631,13 +904,7 @@ export default function Monitor() {
 
         {/* ========== Tab: Approval ========== */}
         {activeTab === 'approval' && (
-          <div className="flex flex-col items-center justify-center py-32 text-center">
-            <div className="w-14 h-14 rounded-2xl bg-surface-2 flex items-center justify-center mb-4">
-              <ShieldCheck className="w-7 h-7 text-text-muted" />
-            </div>
-            <p className="text-sm font-medium text-text-secondary mb-1">Pending Approvals</p>
-            <p className="text-[12px] text-text-muted max-w-xs">Agent actions requiring human approval.</p>
-          </div>
+          <ApprovalPanel onCountChange={setPendingCount} />
         )}
       </div>
     </div>

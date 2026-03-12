@@ -1,0 +1,15 @@
+{
+  "id": "safeclaw-guard",
+  "name": "SafeClaw Guard",
+  "description": "Intercepts tool calls and sends them to SafeClaw for safety evaluation before execution.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "safeclawUrl": {
+        "type": "string",
+        "default": "http://localhost:6874"
+      }
+    }
+  }
+}

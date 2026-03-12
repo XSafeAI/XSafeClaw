@@ -169,6 +169,15 @@ export const chatAPI = {
 
   closeSession: (sessionKey: string) =>
     api.post('/chat/close-session', null, { params: { session_key: sessionKey } }),
+
+  patchSession: (sessionKey: string, data: { model?: string | null; thinking_level?: string | null }) =>
+    api.post<{ status: string }>('/chat/patch-session', { session_key: sessionKey, ...data }),
+
+  availableModels: () =>
+    api.get<{
+      models: { id: string; name: string; provider: string; reasoning: boolean }[];
+      default_model: string;
+    }>('/chat/available-models'),
 };
 
 // Statistics API
@@ -178,6 +187,37 @@ export const statsAPI = {
   
   toolUsage: () =>
     api.get('/stats/tool-usage'),
+};
+
+// Guard API
+export const guardAPI = {
+  pending: (resolved?: boolean) =>
+    api.get<{
+      id: string;
+      session_key: string;
+      tool_name: string;
+      params: Record<string, any>;
+      guard_verdict: string;
+      guard_raw: string;
+      risk_source: string | null;
+      failure_mode: string | null;
+      created_at: number;
+      resolved: boolean;
+      resolution: string;
+      resolved_at: number;
+      modified_params: Record<string, any> | null;
+    }[]>('/guard/pending', { params: resolved !== undefined ? { resolved } : {} }),
+
+  resolve: (pendingId: string, resolution: string, modifiedParams?: Record<string, any>) =>
+    api.post(`/guard/pending/${pendingId}/resolve`, {
+      resolution,
+      modified_params: modifiedParams ?? null,
+    }),
+
+  status: () => api.get('/guard/status'),
+
+  getEnabled: () => api.get<{ enabled: boolean }>('/guard/enabled'),
+  setEnabled: (enabled: boolean) => api.post<{ enabled: boolean }>('/guard/enabled', { enabled }),
 };
 
 // System API (openclaw install / onboard / status)
@@ -207,6 +247,64 @@ export const systemAPI = {
    */
   onboardInput: (procId: string, text: string) =>
     api.post(`/system/onboard/${procId}/input`, { text }),
+
+  /** Get onboard form defaults and provider/model list (legacy). */
+  onboardDefaults: () =>
+    api.get('/system/onboard-defaults'),
+
+  /** Scan local environment for providers, channels, skills, hooks via openclaw CLI. */
+  onboardScan: () =>
+    api.get('/system/onboard-scan'),
+
+  /** Reset config/creds/sessions based on scope. */
+  configReset: (scope: string, workspace?: string) =>
+    api.post('/system/config-reset', { scope, workspace }),
+
+  /** Submit onboard config form. */
+  onboardConfig: (data: {
+    mode?: string;
+    provider?: string;
+    api_key?: string;
+    model_id?: string;
+    gateway_port?: number;
+    gateway_bind?: string;
+    gateway_auth_mode?: string;
+    gateway_token?: string;
+    channels?: string[];
+    hooks?: string[];
+    workspace?: string;
+    install_daemon?: boolean;
+    tailscale_mode?: string;
+    search_provider?: string;
+    search_api_key?: string;
+    remote_url?: string;
+    remote_token?: string;
+    selected_skills?: string[];
+    feishu_app_id?: string;
+    feishu_app_secret?: string;
+    feishu_connection_mode?: string;
+    feishu_domain?: string;
+    feishu_group_policy?: string;
+    feishu_group_allow_from?: string[];
+    feishu_verification_token?: string;
+    feishu_webhook_path?: string;
+    cf_account_id?: string;
+    cf_gateway_id?: string;
+    litellm_base_url?: string;
+    vllm_base_url?: string;
+    vllm_model_id?: string;
+    custom_base_url?: string;
+    custom_model_id?: string;
+    custom_provider_id?: string;
+    custom_compatibility?: string;
+  }) => api.post('/system/onboard-config', data),
+
+  /** Test Feishu credentials. */
+  feishuTest: (appId: string, appSecret: string, domain: string) =>
+    api.post<{ ok: boolean; bot_name?: string; bot_open_id?: string; error?: string }>(
+      '/system/feishu-test',
+      { app_id: appId, app_secret: appSecret, domain },
+    ),
 };
 
 export default api;

@@ -201,3 +201,100 @@ async def clear_results_cache():
     """Clear all cached guard results."""
     guard_service.clear_results()
     return {"message": "Guard results cache cleared"}
+
+
+# ---------------------------------------------------------------------------
+# Tool-call Guard — real-time check (called by OpenClaw plugin)
+# ---------------------------------------------------------------------------
+
+class ToolCheckRequest(BaseModel):
+    tool_name: str
+    params: dict = {}
+    session_key: str = ""
+
+
+class ToolCheckResponse(BaseModel):
+    action: str               # "allow" | "block" | "modify"
+    reason: str | None = None
+    params: dict | None = None
+
+
+@router.post("/tool-check", response_model=ToolCheckResponse)
+async def tool_check(body: ToolCheckRequest):
+    """Real-time tool-call guard.  Long-polls if the call needs approval."""
+    result = await guard_service.check_tool_call(
+        tool_name=body.tool_name,
+        params=body.params,
+        session_key=body.session_key,
+    )
+    return ToolCheckResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Pending Approvals — list / resolve / cleanup
+# ---------------------------------------------------------------------------
+
+class PendingApprovalResponse(BaseModel):
+    id: str
+    session_key: str
+    tool_name: str
+    params: dict
+    guard_verdict: str
+    guard_raw: str = ""
+    session_context: str = ""
+    risk_source: str | None = None
+    failure_mode: str | None = None
+    real_world_harm: str | None = None
+    created_at: float = 0.0
+    resolved: bool = False
+    resolution: str = ""
+    resolved_at: float = 0.0
+    modified_params: dict | None = None
+
+
+@router.get("/pending", response_model=list[PendingApprovalResponse])
+async def list_pending(resolved: bool | None = Query(None)):
+    """List pending approval items."""
+    items = guard_service.get_all_pending()
+    if resolved is not None:
+        items = [i for i in items if i.resolved == resolved]
+    return [PendingApprovalResponse(**i.to_dict()) for i in items]
+
+
+class ResolveRequest(BaseModel):
+    resolution: str             # "approved" | "rejected" | "modified"
+    modified_params: dict | None = None
+
+
+@router.post("/pending/{pending_id}/resolve", response_model=PendingApprovalResponse)
+async def resolve_pending(pending_id: str, body: ResolveRequest):
+    """Resolve a pending approval — approve, reject, or modify params."""
+    p = guard_service.resolve_pending(
+        pending_id=pending_id,
+        resolution=body.resolution,
+        modified_params=body.modified_params,
+    )
+    if not p:
+        raise HTTPException(404, f"Pending item {pending_id} not found or already resolved")
+    return PendingApprovalResponse(**p.to_dict())
+
+
+@router.post("/pending/cleanup")
+async def cleanup_pending():
+    """Remove old resolved pending items."""
+    removed = guard_service.cleanup_resolved()
+    return {"removed": removed}
+
+
+@router.get("/enabled")
+async def guard_enabled_status():
+    """Return whether the guard is currently enabled."""
+    return {"enabled": guard_service.is_guard_enabled()}
+
+
+@router.post("/enabled")
+async def set_guard_enabled(body: dict):
+    """Toggle guard on/off. Body: { "enabled": true/false }"""
+    enabled = body.get("enabled", True)
+    guard_service.set_guard_enabled(bool(enabled))
+    return {"enabled": guard_service.is_guard_enabled()}

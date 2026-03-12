@@ -5,8 +5,9 @@ import * as PIXI from 'pixi.js';
  * and extracts the collision grid + workstation objects.
  */
 export default class TiledRenderer {
-  constructor(mapData) {
+  constructor(mapData, options = {}) {
     this.data   = mapData;
+    this.options = options;
     this.tileW  = mapData.tilewidth;
     this.tileH  = mapData.tileheight;
     this.mapW   = mapData.width;
@@ -18,6 +19,135 @@ export default class TiledRenderer {
     this.container.sortableChildren = true;
   }
 
+  _normalizeLayerName(name) {
+    return String(name || '').trim().toLowerCase();
+  }
+
+  _isCollisionLayerName(name) {
+    const layerName = this._normalizeLayerName(name);
+    return layerName === 'collision' || layerName.startsWith('collision-');
+  }
+
+  _getRequestedVisualLayerName() {
+    return this._normalizeLayerName(this.options.visualLayerName);
+  }
+
+  _getRequestedCollisionLayerName() {
+    return this._normalizeLayerName(this.options.collisionLayerName);
+  }
+
+  _getRequestedTilesetName() {
+    return this._normalizeLayerName(this.options.tilesetName);
+  }
+
+  _getRequestedImageAsset() {
+    return String(this.options.imageAsset || '').trim();
+  }
+
+  _shouldRenderWholeImage() {
+    return this.options.renderMode === 'whole-image';
+  }
+
+  _getRelevantContentLayers() {
+    const requestedVisualLayerName = this._getRequestedVisualLayerName();
+    const requestedCollisionLayerName = this._getRequestedCollisionLayerName();
+
+    return this.data.layers.filter((layer) => {
+      if (layer.type !== 'tilelayer') return false;
+      const layerName = this._normalizeLayerName(layer.name);
+      if (requestedVisualLayerName && layerName === requestedVisualLayerName) return true;
+      if (requestedCollisionLayerName && layerName === requestedCollisionLayerName) return true;
+      return false;
+    });
+  }
+
+  _getLayerBounds(layer) {
+    let top = Infinity;
+    let bottom = -1;
+    let left = Infinity;
+    let right = -1;
+
+    for (let y = 0; y < layer.height; y++) {
+      for (let x = 0; x < layer.width; x++) {
+        const gid = layer.data[y * layer.width + x];
+        if (!gid) continue;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+        if (x < left) left = x;
+        if (x > right) right = x;
+      }
+    }
+
+    if (bottom < top || right < left) return null;
+    return { top, bottom, left, right };
+  }
+
+  getContentBounds() {
+    if (this._contentBounds) return this._contentBounds;
+
+    const layers = this._getRelevantContentLayers();
+    let merged = null;
+
+    for (const layer of layers) {
+      const bounds = this._getLayerBounds(layer);
+      if (!bounds) continue;
+      if (!merged) {
+        merged = { ...bounds };
+      } else {
+        merged.top = Math.min(merged.top, bounds.top);
+        merged.bottom = Math.max(merged.bottom, bounds.bottom);
+        merged.left = Math.min(merged.left, bounds.left);
+        merged.right = Math.max(merged.right, bounds.right);
+      }
+    }
+
+    if (!merged) {
+      merged = {
+        top: 0,
+        bottom: this.mapH - 1,
+        left: 0,
+        right: this.mapW - 1,
+      };
+    }
+
+    this._contentBounds = {
+      ...merged,
+      pixelX: merged.left * this.tileW,
+      pixelY: merged.top * this.tileH,
+      pixelW: (merged.right - merged.left + 1) * this.tileW,
+      pixelH: (merged.bottom - merged.top + 1) * this.tileH,
+    };
+    return this._contentBounds;
+  }
+
+  _findWholeImageTileset() {
+    const requestedTilesetName = this._getRequestedTilesetName();
+    const requestedImageAsset = this._getRequestedImageAsset();
+
+    return this.tilesets.find((tileset) => {
+      const matchesName = requestedTilesetName
+        ? this._normalizeLayerName(tileset.name) === requestedTilesetName
+        : false;
+      const matchesImage = requestedImageAsset
+        ? requestedImageAsset.endsWith(`/${tileset.image}`) || requestedImageAsset === tileset.image
+        : false;
+      return matchesName || matchesImage;
+    }) || null;
+  }
+
+  _renderWholeImageLayer() {
+    const tileset = this._findWholeImageTileset();
+    if (!tileset?.texture) return null;
+
+    const sprite = new PIXI.Sprite(tileset.texture);
+    sprite.x = 0;
+    sprite.y = 0;
+    sprite.zIndex = 0;
+    sprite.eventMode = 'none';
+    this.container.addChild(sprite);
+    return this.container;
+  }
+
   /**
    * Load all tileset images referenced by the map.
    * Handles both embedded tilesets and external .tsj references.
@@ -25,7 +155,7 @@ export default class TiledRenderer {
   async loadTilesets(basePath, mapUrl) {
     const mapDir = mapUrl
       ? mapUrl.substring(0, mapUrl.lastIndexOf('/') + 1)
-      : (basePath + '/');
+      : (basePath ? `${basePath}/` : '/');
 
     for (const tsEntry of this.data.tilesets) {
       let tsData = tsEntry;
@@ -45,7 +175,8 @@ export default class TiledRenderer {
         }
       }
 
-      const imgBase = tsData._imgBase || (basePath + '/');
+      // Embedded tileset images should resolve relative to the TMJ file itself.
+      const imgBase = tsData._imgBase || mapDir;
       const imgPath = imgBase + tsData.image;
 
       try {
@@ -81,6 +212,7 @@ export default class TiledRenderer {
           row: Math.floor(lid / ts.cols),
           flipH: !!(gid & FLIP_H),
           flipV: !!(gid & FLIP_V),
+          flipD: !!(gid & FLIP_D),
         };
       }
     }
@@ -89,10 +221,25 @@ export default class TiledRenderer {
 
   /** Render all visible tile layers and return the root container. */
   render() {
+    if (this._shouldRenderWholeImage()) {
+      const wholeImage = this._renderWholeImageLayer();
+      if (wholeImage) return wholeImage;
+      console.warn('TiledRenderer: whole-image render requested but no matching tileset found, falling back to tile rendering.');
+    }
+
     let zIdx = 0;
+    const requestedVisualLayerName = this._getRequestedVisualLayerName();
+    const hasRequestedVisualLayer = requestedVisualLayerName
+      ? this.data.layers.some((layer) => (
+          layer.type === 'tilelayer' &&
+          this._normalizeLayerName(layer.name) === requestedVisualLayerName
+        ))
+      : false;
+
     for (const layer of this.data.layers) {
       if (layer.type !== 'tilelayer' || layer.visible === false) continue;
-      if (layer.name.toLowerCase() === 'collision') continue;
+      if (this._isCollisionLayerName(layer.name)) continue;
+      if (hasRequestedVisualLayer && this._normalizeLayerName(layer.name) !== requestedVisualLayerName) continue;
 
       const lc = new PIXI.Container();
       lc.zIndex = zIdx++;
@@ -108,12 +255,34 @@ export default class TiledRenderer {
             r.col * r.ts.tilewidth, r.row * r.ts.tileheight,
             r.ts.tilewidth, r.ts.tileheight
           );
-          const tex    = new PIXI.Texture(r.ts.texture.baseTexture, rect);
+          const tex = new PIXI.Texture(r.ts.texture.baseTexture, rect);
           const sprite = new PIXI.Sprite(tex);
-          sprite.x = x * this.tileW;
-          sprite.y = y * this.tileH;
-          if (r.flipH) { sprite.scale.x = -1; sprite.x += this.tileW; }
-          if (r.flipV) { sprite.scale.y = -1; sprite.y += this.tileH; }
+
+          if (r.flipD) {
+            // Tiled diagonal flip is effectively a transpose; combine it with
+            // horizontal/vertical flags using rotation around tile center.
+            sprite.anchor.set(0.5);
+            sprite.x = x * this.tileW + this.tileW / 2;
+            sprite.y = y * this.tileH + this.tileH / 2;
+
+            if (r.flipH && r.flipV) {
+              sprite.rotation = Math.PI / 2;
+              sprite.scale.x = -1;
+            } else if (r.flipH) {
+              sprite.rotation = Math.PI / 2;
+            } else if (r.flipV) {
+              sprite.rotation = -Math.PI / 2;
+            } else {
+              sprite.rotation = Math.PI / 2;
+              sprite.scale.y = -1;
+            }
+          } else {
+            sprite.x = x * this.tileW;
+            sprite.y = y * this.tileH;
+            if (r.flipH) { sprite.scale.x = -1; sprite.x += this.tileW; }
+            if (r.flipV) { sprite.scale.y = -1; sprite.y += this.tileH; }
+          }
+
           lc.addChild(sprite);
         }
       }
@@ -123,12 +292,18 @@ export default class TiledRenderer {
   }
 
   /** Extract collision grid: 0 = walkable, 1 = blocked. */
-  getCollisionGrid() {
-    const layer = this.data.layers.find(l =>
-      l.type === 'tilelayer' && l.name.toLowerCase() === 'collision'
+  getCollisionGrid(layerName) {
+    const requestedCollisionLayerName = this._normalizeLayerName(
+      layerName || this.options.collisionLayerName
     );
+    const layer = this.data.layers.find((l) => {
+      if (l.type !== 'tilelayer') return false;
+      const normalizedName = this._normalizeLayerName(l.name);
+      if (requestedCollisionLayerName) return normalizedName === requestedCollisionLayerName;
+      return this._isCollisionLayerName(normalizedName);
+    });
     if (!layer) {
-      console.warn('TiledRenderer: no "collision" layer — all tiles walkable.');
+      console.warn('TiledRenderer: no collision layer found — all tiles walkable.');
       return Array.from({ length: this.mapH }, () => Array(this.mapW).fill(0));
     }
     const grid = [];
@@ -163,8 +338,8 @@ export default class TiledRenderer {
    * Detect building bounds and block outside tiles.
    * Returns { grid, rTop, rBot, cLeft, cRight }.
    */
-  buildBoundedGrid() {
-    const grid = this.getCollisionGrid();
+  buildBoundedGrid(layerName) {
+    const grid = this.getCollisionGrid(layerName);
 
     let rTop = 0, rBot = grid.length - 1;
     while (rTop < grid.length && grid[rTop].every(c => c === 0)) rTop++;

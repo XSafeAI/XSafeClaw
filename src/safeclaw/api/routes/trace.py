@@ -12,6 +12,8 @@ falls within the cutoff window, with the same fallback chain
 from __future__ import annotations
 
 import datetime as dt
+import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -27,6 +29,7 @@ router = APIRouter()
 
 ACTIVE_CUTOFF = dt.timedelta(hours=1)
 TODAY_CUTOFF = dt.timedelta(hours=24)
+_SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +104,37 @@ def _truncate(text: str, length: int = 2000) -> str:
     return text[:length] + "…" if len(text) > length else text
 
 
+def _load_session_store_index() -> dict[str, dict[str, Any]]:
+    """Map session_id -> gateway session metadata from sessions.json."""
+    if not _SESSIONS_JSON.exists():
+        return {}
+
+    try:
+        raw = json.loads(_SESSIONS_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    index: dict[str, dict[str, Any]] = {}
+    for session_key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+
+        session_id = entry.get("sessionId")
+        if not session_id:
+            continue
+
+        delivery = entry.get("deliveryContext") or {}
+        origin = entry.get("origin") or {}
+        index[session_id] = {
+            "session_key": session_key,
+            "model_provider": entry.get("modelProvider"),
+            "model": entry.get("model"),
+            "channel": delivery.get("channel") or entry.get("lastChannel") or origin.get("provider"),
+        }
+
+    return index
+
+
 def _serialize_tool_call(tc: "ToolCall") -> dict[str, Any]:
     """Serialize a ToolCall ORM object to a JSON-friendly dict."""
     return {
@@ -166,6 +200,7 @@ async def get_trace(
 
     # ── Guard: sessions flagged as unsafe ──────────────────────────
     unsafe_ids = guard_service.get_unsafe_session_ids()
+    session_store_index = _load_session_store_index()
 
     # ── 3. Build agents (only visible ones) ────────────────────────
     agents: list[dict[str, Any]] = []
@@ -177,14 +212,17 @@ async def get_trace(
         visible_session_ids.append(sid)
         base_status = _agent_status_from_event(latest_event_ts.get(sid))
         status = "waiting" if sid in unsafe_ids else base_status
+        session_store = session_store_index.get(sid, {})
         agents.append({
             "id": sid,
             "name": f"Agent-{_short_id(sid)}",
             "pid": _short_id(sid),
-            "provider": s.current_model_provider or "unknown",
-            "model": s.current_model_name or "",
+            "provider": session_store.get("model_provider") or s.current_model_provider or "unknown",
+            "model": session_store.get("model") or s.current_model_name or "",
             "status": status,
             "first_seen_at": _iso(s.first_seen_at),
+            "session_key": session_store.get("session_key"),
+            "channel": session_store.get("channel") or s.channel,
         })
 
     if not visible_session_ids:

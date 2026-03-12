@@ -7,7 +7,9 @@ import { fetchData } from '../data/mockData';
  * Uses a DOM ref to hide the loading screen directly (avoids React state batching issues).
  */
 export default function GameCanvas({
-  onNpcHover, onNpcLeave, onNpcClick, onPendingClick, guardEnabled = false,
+  onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, guardEnabled = false,
+  onLayoutChange,
+  mapConfig,
 }) {
   const containerRef = useRef(null);
   const loadingRef   = useRef(null);
@@ -16,15 +18,19 @@ export default function GameCanvas({
   const [loadText, setLoadText]   = useState('Loading assets...');
 
   // Keep callbacks in refs so the engine always has the latest copies
-  const cbRef = useRef({ onNpcHover, onNpcLeave, onNpcClick, onPendingClick });
-  cbRef.current = { onNpcHover, onNpcLeave, onNpcClick, onPendingClick };
+  const cbRef = useRef({
+    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange,
+  });
+  cbRef.current = {
+    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange,
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
     let aborted = false;
     let refreshTimer = null;
     let hideLoadingTimer = null;
-    const engine = new GameEngine();
+    const engine = new GameEngine({ mapConfig });
     engineRef.current = engine;
 
     // Wire callbacks through ref
@@ -32,6 +38,8 @@ export default function GameCanvas({
     engine.onNpcLeave     = (...a) => cbRef.current.onNpcLeave?.(...a);
     engine.onNpcClick     = (...a) => cbRef.current.onNpcClick?.(...a);
     engine.onPendingClick = (...a) => cbRef.current.onPendingClick?.(...a);
+    engine.onCursorStateChange = (...a) => cbRef.current.onCursorStateChange?.(...a);
+    engine.onLayoutChange = (layout) => cbRef.current.onLayoutChange?.(layout);
 
     (async () => {
       try {
@@ -78,8 +86,9 @@ export default function GameCanvas({
       if (hideLoadingTimer) clearTimeout(hideLoadingTimer);
       engine.destroy();
       engineRef.current = null;
+      cbRef.current.onCursorStateChange?.('normal');
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mapConfig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     engineRef.current?.setGuardEnabled?.(guardEnabled);

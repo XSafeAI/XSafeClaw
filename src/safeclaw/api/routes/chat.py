@@ -315,9 +315,23 @@ class StartSessionResponse(BaseModel):
     status: str = "connected"
 
 
+class StartSessionRequest(BaseModel):
+    label: str | None = None
+    model_override: str | None = None
+    provider_override: str | None = None
+
+
+class ImageAttachment(BaseModel):
+    """Base64-encoded image attachment for multimodal chat."""
+    mime_type: str = Field(..., description="MIME type, e.g. image/png, image/jpeg")
+    data: str = Field(..., description="Base64-encoded image data (no data: prefix)")
+    file_name: str = Field(default="image.png", description="Original file name")
+
+
 class SendMessageRequest(BaseModel):
     session_key: str = Field(..., description="Gateway session key")
     message: str = Field(..., description="Message to send to the agent")
+    images: list[ImageAttachment] = Field(default_factory=list, description="Optional image attachments")
 
 
 class SendMessageResponse(BaseModel):
@@ -331,15 +345,32 @@ class SendMessageResponse(BaseModel):
 # --------------- Endpoints ---------------
 
 @router.post("/start-session", response_model=StartSessionResponse)
-async def start_session():
+async def start_session(request: StartSessionRequest | None = None):
     """
     Create a new OpenClaw gateway chat session.
     Returns a session_key for subsequent send-message calls.
     """
+    body = request or StartSessionRequest()
     session_key = f"chat-{uuid.uuid4().hex[:12]}"
     client = await _get_or_create_client(session_key)
-    # Remove the just-stored entry so _get_or_create handles reconnect cleanly
-    # (we just need the key to exist conceptually; each request reconnects if needed)
+
+    if body.model_override or body.provider_override or body.label:
+        try:
+            await client.patch_session(
+                session_key,
+                label=body.label,
+                model_override=body.model_override,
+                provider_override=body.provider_override,
+                verbose_level="on",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to initialize session model override: {exc}",
+            ) from exc
+    else:
+        await client.enable_verbose(session_key)
+
     return StartSessionResponse(session_key=session_key, status="connected")
 
 
@@ -389,12 +420,26 @@ async def send_message_stream(request: SendMessageRequest):
     """
     client = await _get_or_create_client(request.session_key)
 
+    # Convert image attachments to OpenClaw's format
+    attachments = None
+    if request.images:
+        attachments = [
+            {
+                "type": "image",
+                "mimeType": img.mime_type,
+                "fileName": img.file_name,
+                "content": img.data,
+            }
+            for img in request.images
+        ]
+
     async def event_generator():
         final_text = ""
         try:
             async for chunk in client.stream_chat(
                 session_key=request.session_key,
                 message=request.message,
+                attachments=attachments,
             ):
                 if chunk["type"] == "final":
                     final_text = chunk.get("text", "")
@@ -451,3 +496,56 @@ async def close_session(session_key: str = Query(..., description="Session key t
         except Exception:
             pass
     return {"status": "closed", "session_key": session_key}
+
+
+# --------------- Session settings ---------------
+
+class PatchSessionRequest(BaseModel):
+    session_key: str = Field(..., description="Gateway session key")
+    model: str | None = Field(None, description="Model in 'provider/model' format, e.g. 'openai/gpt-4o'. null to reset.")
+    thinking_level: str | None = Field(None, description="off / minimal / low / medium / high / xhigh")
+
+
+@router.post("/patch-session")
+async def patch_session(request: PatchSessionRequest):
+    """Update session settings (model, thinking level) on the fly."""
+    client = await _get_or_create_client(request.session_key)
+    try:
+        result = await client.patch_session(
+            request.session_key,
+            model=request.model,
+            thinking_level=request.thinking_level,
+        )
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/available-models")
+async def available_models():
+    """Return models from configured providers only (no --all flag)."""
+    from .system import _run_openclaw_json
+
+    raw, status_raw = await asyncio.gather(
+        _run_openclaw_json(["models", "list"]),
+        _run_openclaw_json(["models", "status"]),
+    )
+
+    default_model = ""
+    if status_raw and isinstance(status_raw, dict):
+        default_model = status_raw.get("defaultModel", "")
+
+    models = []
+    if raw and isinstance(raw, dict):
+        for m in raw.get("models", []):
+            key = m.get("key", "")
+            if "/" not in key:
+                continue
+            models.append({
+                "id": key,
+                "name": m.get("name", key),
+                "provider": key.split("/")[0],
+                "reasoning": "reasoning" in (m.get("tags") or []),
+            })
+
+    return {"models": models, "default_model": default_model}

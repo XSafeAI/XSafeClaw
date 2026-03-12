@@ -3,7 +3,26 @@ export const FW = 32;
 export const FH = 64;
 
 // ── NPC display ──
-export const NPC_SCALE = 1.0;
+export const NPC_SCALE = 3.9;
+
+// ── Data source mode ──
+export const USE_AGENT_TOWN_MOCK = true;
+
+// ── Background music ──
+export const MUSIC_TRACKS = [
+  {
+    id: 'home',
+    label: 'Home',
+    fileName: 'toby fox - UNDERTALE Soundtrack - 12 Home.mp3',
+    url: '/music/toby fox - UNDERTALE Soundtrack - 12 Home.mp3',
+  },
+  {
+    id: 'undertale',
+    label: 'Undertale',
+    fileName: 'toby fox - UNDERTALE Soundtrack - 71 Undertale.mp3',
+    url: '/music/toby fox - UNDERTALE Soundtrack - 71 Undertale.mp3',
+  },
+];
 
 // ── Asset paths (relative to public/) ──
 export const CHAR_BASE = '/character_assets/';
@@ -11,7 +30,58 @@ export const EXCL_URL  = '/emotes/Exclamation_emote_16x16.png';
 
 // ── Map configuration ──
 export const MAP_MODE       = 'tiled';       // 'static' | 'tiled'
-export const TILED_MAP_URL  = '/First_Map.tmj';
+export const MAP_VARIANTS = [
+  {
+    id: 'map1',
+    label: 'Classic',
+    description: 'Original office mood with the classic palette.',
+    mapUrl: '/Map/Map_V1.tmj',
+    previewImage: '/Map/Map-demo/Map1-demo.png',
+    visualLayer: 'Map1',
+    tilesetName: 'Map1_Final',
+    imageAsset: '/Map/Map1_Final.png',
+    collisionLayer: 'collision-Map1',
+    renderMode: 'whole-image',
+    tileWidth: 32,
+    tileHeight: 32,
+    width: 172,
+    height: 100,
+  },
+  {
+    id: 'map2',
+    label: 'Cyberpunk',
+    description: 'Neon cyberpunk lighting with the same playable layout.',
+    mapUrl: '/Map/Map_V1.tmj',
+    previewImage: '/Map/Map-demo/Map2-demo.png',
+    visualLayer: 'Map2',
+    tilesetName: 'Map2_Final',
+    imageAsset: '/Map/Map2_Final.png',
+    collisionLayer: 'collision-Map2',
+    renderMode: 'whole-image',
+    tileWidth: 32,
+    tileHeight: 32,
+    width: 172,
+    height: 100,
+  },
+  {
+    id: 'map3',
+    label: 'Mechanical',
+    description: 'Heavy mechanical factory skin with industrial accents.',
+    mapUrl: '/Map/Map_V1.tmj',
+    previewImage: '/Map/Map-demo/Map3-demo.png',
+    visualLayer: 'Map3',
+    tilesetName: 'Map3',
+    imageAsset: '/Map/Map3.png',
+    collisionLayer: 'collision-Map3',
+    renderMode: 'whole-image',
+    tileWidth: 32,
+    tileHeight: 32,
+    width: 172,
+    height: 100,
+  },
+];
+export const DEFAULT_MAP_CONFIG = MAP_VARIANTS[0];
+export const TILED_MAP_URL  = DEFAULT_MAP_CONFIG.mapUrl;
 export const TILED_BASE_PATH = '';
 
 // ── Static mode fallback ──
@@ -29,7 +99,7 @@ export const CHAR_NAMES = [
 // ── NPC meeting interaction ──
 export const MEETING_DIST     = 40;   // pixel distance to trigger
 export const MEETING_TIME     = 4;    // seconds NPCs chat
-export const BUBBLE_MAX_CHARS = 48;
+export const BUBBLE_MAX_CHARS = 96;
 
 // ── Walk zones (static mode patrol paths) ──
 export const WALK_ZONES = [
@@ -46,4 +116,4 @@ export const WALK_ZONES = [
 ];
 
 // ── PixiJS background ──
-export const BG_COLOR = 0xF0EDE6;
+export const BG_COLOR = 0xF7F6F2;

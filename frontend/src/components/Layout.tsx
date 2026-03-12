@@ -6,7 +6,7 @@ const navigation = [
   { name: 'Claw Monitor',    href: '/monitor',        icon: Monitor,        desc: 'Real-time Monitoring' },
   { name: 'Safe Chat',       href: '/chat',            icon: MessageSquare,  desc: 'Chat with Agent' },
   { name: 'Asset Shield',    href: '/assets',          icon: Shield,         desc: 'Asset Scanning' },
-  { name: 'Red Teaming',     href: '/risk-scanner',    icon: ScanSearch,     desc: 'Red Team Attacks' },
+  { name: 'Safety Rehearsal', href: '/risk-scanner',    icon: ScanSearch,     desc: 'Safety Rehearsal' },
 ];
 
 function useTheme() {
@@ -33,12 +33,10 @@ export default function Layout() {
       <aside className="w-56 flex-shrink-0 bg-surface-1 border-r border-border flex flex-col">
         {/* Logo */}
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-purple-500 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-accent/20">
-            S
-          </div>
+          <img src="/logo.png" alt="SafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />
           <div className="flex items-center gap-2">
             <span className="text-[15px] font-bold text-text-primary tracking-tight">SafeClaw</span>
-            <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">V1.0</span>
+            <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">V0.1.1</span>
           </div>
         </div>
 

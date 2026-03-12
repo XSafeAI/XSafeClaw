@@ -300,9 +300,7 @@ export default function OnboardDebug() {
 
         {/* Header */}
         <div className="flex flex-col items-center gap-3 mb-10">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-orange-500/25">
-            D
-          </div>
+          <img src="/logo.png" alt="SafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
           <div className="text-center">
             <p className="text-[22px] font-bold text-text-primary tracking-tight">Onboard Debugger</p>
             <p className="text-[13px] text-text-muted mt-0.5">Run and debug <span className="font-mono">openclaw onboard --install-daemon</span></p>

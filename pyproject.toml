@@ -20,6 +20,7 @@ dependencies = [
     "greenlet>=3.3.1",
     "pynvml>=13.0.1",
     "cryptography>=46.0.5",
+    "websockets>=16.0",
 ]
 
 [project.scripts]

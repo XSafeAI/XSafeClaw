@@ -4,7 +4,7 @@ import TiledRenderer from './TiledRenderer';
 import SpriteLoader from './SpriteLoader';
 import {
   FW, FH, NPC_SCALE, CHAR_NAMES, BG_COLOR,
-  MAP_MODE, TILED_MAP_URL, TILED_BASE_PATH,
+  MAP_MODE, TILED_MAP_URL, TILED_BASE_PATH, DEFAULT_MAP_CONFIG,
   SCENE_IMAGE_URL, SCENE_W, SCENE_H,
   WALK_ZONES, MEETING_DIST, MEETING_TIME, BUBBLE_MAX_CHARS,
 } from '../config/constants';
@@ -13,13 +13,18 @@ const GUARD_PORTAL_URL = '/portals/3.png';
 const GUARD_IDLE_URL = '/guard/Idle.png';
 const GUARD_WALK_URL = '/guard/Walk.png';
 const GUARD_ATTACK_URL = '/guard/Attack.png';
+const ISSUE_QUESTION_URL = '/UI/png/status/status_question.png';
+const GUARD_PORTAL_SCALE = 4.2;
+const GUARD_BODY_SCALE = 3.6;
+const GUARD_SHADOW_SCALE = 3.3;
+const ISSUE_MARKER_SCALE = Math.max(2.8, NPC_SCALE * 0.92);
 
 /**
  * The core game engine — manages PixiJS app, map, NPCs, and game loop.
  * Framework-agnostic: React (or any UI) communicates via callbacks.
  */
 export default class GameEngine {
-  constructor() {
+  constructor(options = {}) {
     this.app          = null;
     this.world        = null;
     this.npcLayer     = null;
@@ -45,14 +50,25 @@ export default class GameEngine {
     this._guardIdleFrames = [];
     this._guardWalkFrames = [];
     this._guardAttackFrames = [];
+    this._issueQuestionTexture = null;
     this._guardUnsafeIds = new Set();
     this._guardChecking = false;
+    this.mapConfig = {
+      ...DEFAULT_MAP_CONFIG,
+      ...(options.mapConfig || {}),
+    };
 
     // Callbacks set by React component
     this.onNpcHover   = null;  // (npcData, globalPos) => void
     this.onNpcLeave   = null;  // () => void
     this.onNpcClick   = null;  // (agentData) => void
     this.onPendingClick = null; // () => void
+    this.onCursorStateChange = null; // ('normal' | 'grab-start' | 'grab-full') => void
+    this.onLayoutChange = null; // ({ sceneW, sceneH }) => void
+    this._dragContext = null;
+    this._dragCursorTimer = null;
+    this._windowPointerMove = null;
+    this._windowPointerUp = null;
   }
 
   /** Initialize PixiJS application and attach to DOM element. */
@@ -68,6 +84,7 @@ export default class GameEngine {
     containerEl.appendChild(this.app.view);
     this.app.view.style.width  = '100%';
     this.app.view.style.height = '100%';
+    this.app.view.style.touchAction = 'none';
 
     this.world = new PIXI.Container();
     this.world.sortableChildren = true;
@@ -86,6 +103,12 @@ export default class GameEngine {
     this._containerEl = containerEl;
     this._resizeObs = new ResizeObserver(() => this._resize());
     this._resizeObs.observe(containerEl);
+    this._windowPointerMove = (event) => this._handleWindowPointerMove(event);
+    this._windowPointerUp = (event) => this._handleWindowPointerUp(event);
+    window.addEventListener('pointermove', this._windowPointerMove);
+    window.addEventListener('pointerup', this._windowPointerUp);
+    window.addEventListener('pointercancel', this._windowPointerUp);
+    window.addEventListener('blur', this._windowPointerUp);
 
     return this;
   }
@@ -102,6 +125,7 @@ export default class GameEngine {
     this.world.scale.set(scale);
     this.world.x = Math.round((w - this.sceneW * scale) / 2);
     this.world.y = Math.round((h - this.sceneH * scale) / 2);
+    this.onLayoutChange?.({ sceneW: this.sceneW, sceneH: this.sceneH });
   }
 
   /** Load sprites + map. onProgress(0-1, label). */
@@ -115,36 +139,48 @@ export default class GameEngine {
 
     // 3. Load map
     onProgress?.(0.5, 'Loading map...');
-    if (MAP_MODE === 'tiled' && TILED_MAP_URL) {
+    const mapUrl = this.mapConfig?.mapUrl || TILED_MAP_URL;
+    if (MAP_MODE === 'tiled' && mapUrl) {
       try {
-        const mapRes  = await fetch(TILED_MAP_URL);
+        const mapRes  = await fetch(mapUrl);
         const mapData = await mapRes.json();
 
-        this.tiledRenderer = new TiledRenderer(mapData);
-        await this.tiledRenderer.loadTilesets(TILED_BASE_PATH, TILED_MAP_URL);
+        this.tiledRenderer = new TiledRenderer(mapData, {
+          visualLayerName: this.mapConfig?.visualLayer,
+          collisionLayerName: this.mapConfig?.collisionLayer,
+          tilesetName: this.mapConfig?.tilesetName,
+          imageAsset: this.mapConfig?.imageAsset,
+          renderMode: this.mapConfig?.renderMode,
+        });
+        await this.tiledRenderer.loadTilesets(TILED_BASE_PATH, mapUrl);
 
-        this.sceneW = this.tiledRenderer.pixelW;
-        this.sceneH = this.tiledRenderer.pixelH;
+        const contentBounds = this.tiledRenderer.getContentBounds();
+
+        this.sceneW = contentBounds.pixelW;
+        this.sceneH = contentBounds.pixelH;
+        this._worldOffsetX = -contentBounds.pixelX;
+        this._worldOffsetY = -contentBounds.pixelY;
 
         const mapContainer = this.tiledRenderer.render();
         this.world.addChild(mapContainer);
 
-        // Build bounded collision grid
-        const { grid, rTop, rBot } = this.tiledRenderer.buildBoundedGrid();
+        // Keep pathfinding bounded, but render the full map the artist exported.
+        const { grid } = this.tiledRenderer.buildBoundedGrid(this.mapConfig?.collisionLayer);
         this.pathfinder = new PathFinder(grid, this.tiledRenderer.tileW, this.tiledRenderer.tileH);
 
-        // Crop scene to building bounds
-        const marginTiles = 1;
-        const cropBot = Math.min(this.tiledRenderer.mapH, rBot + 1 + marginTiles) * this.tiledRenderer.tileH;
-        this.sceneW = this.tiledRenderer.pixelW;
-        this.sceneH = cropBot;
-
-        mapContainer.y = 0;
-        this.npcLayer.y = 0;
+        mapContainer.x = this._worldOffsetX;
+        mapContainer.y = this._worldOffsetY;
+        this.npcLayer.x = this._worldOffsetX;
+        this.npcLayer.y = this._worldOffsetY;
+        this.guardLayer.x = this._worldOffsetX;
+        this.guardLayer.y = this._worldOffsetY;
+        this.guardFxLayer.x = this._worldOffsetX;
+        this.guardFxLayer.y = this._worldOffsetY;
 
         console.log(
           `Map loaded: ${this.tiledRenderer.mapW}×${this.tiledRenderer.mapH} tiles, ` +
-          `walkable: ${this.pathfinder._walkable.length}, scene: ${this.sceneW}×${this.sceneH}`
+          `walkable: ${this.pathfinder._walkable.length}, scene: ${this.sceneW}×${this.sceneH}, ` +
+          `layer: ${this.mapConfig?.visualLayer || 'all'}, bounds: ${contentBounds.left},${contentBounds.top} -> ${contentBounds.right},${contentBounds.bottom}`
         );
       } catch (e) {
         console.error('Failed to load Tiled map, falling back to static:', e);
@@ -174,11 +210,12 @@ export default class GameEngine {
 
   async _loadGuardAssets() {
     try {
-      const [portalTex, idleTex, walkTex, attackTex] = await Promise.all([
+      const [portalTex, idleTex, walkTex, attackTex, issueQuestionTex] = await Promise.all([
         PIXI.Assets.load(GUARD_PORTAL_URL),
         PIXI.Assets.load(GUARD_IDLE_URL),
         PIXI.Assets.load(GUARD_WALK_URL),
         PIXI.Assets.load(GUARD_ATTACK_URL),
+        PIXI.Assets.load(ISSUE_QUESTION_URL),
       ]);
 
       const toFrames = (tex) => {
@@ -199,11 +236,14 @@ export default class GameEngine {
       this._guardIdleFrames = toFrames(idleTex);
       this._guardWalkFrames = toFrames(walkTex);
       this._guardAttackFrames = toFrames(attackTex);
+      issueQuestionTex.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
+      this._issueQuestionTexture = issueQuestionTex;
     } catch (_) {
       this._guardPortalFrames = [];
       this._guardIdleFrames = [];
       this._guardWalkFrames = [];
       this._guardAttackFrames = [];
+      this._issueQuestionTexture = null;
     }
   }
 
@@ -214,7 +254,10 @@ export default class GameEngine {
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
 
-    const sceneAgents  = agents.slice(0, WALK_ZONES.length);
+    const maxSceneAgents = this.pathfinder
+      ? Math.min(agents.length, Math.max(CHAR_NAMES.length, 1))
+      : WALK_ZONES.length;
+    const sceneAgents = agents.slice(0, maxSceneAgents);
 
     for (let i = 0; i < sceneAgents.length; i++) {
       const npc = this._createNPC(sceneAgents[i], i);
@@ -232,7 +275,7 @@ export default class GameEngine {
 
   // ─── NPC Creation ─────────────────────────────────────────────
 
-  _createGoldOutlineSprites(sprite, container, offsetPx = 2, addAtIndex = null) {
+  _createGoldOutlineSprites(sprite, container, offsetPx = 4, addAtIndex = null, alpha = 1) {
     const goldFilter = new PIXI.ColorMatrixFilter();
     goldFilter.matrix = [
       0, 0, 0, 0, 232 / 255,
@@ -250,7 +293,7 @@ export default class GameEngine {
       clone.anchor.set(0.5, 1);
       clone.scale.set(sprite.scale.x, sprite.scale.y);
       clone.filters = [goldFilter];
-      clone.alpha = 0.9;
+      clone.alpha = alpha;
       clone.x = ox;
       clone.y = oy;
       if (typeof addAtIndex === 'number') {
@@ -261,6 +304,355 @@ export default class GameEngine {
       out.push(clone);
     }
     return out;
+  }
+
+  _createIssueMarkerSprite() {
+    if (this._issueQuestionTexture) {
+      const marker = new PIXI.Sprite(this._issueQuestionTexture);
+      marker.anchor.set(0.5, 1);
+      marker.scale.set(ISSUE_MARKER_SCALE);
+      marker.x = 0;
+      marker.y = -FH * NPC_SCALE - 2;
+      marker.alpha = 0.98;
+      return marker;
+    }
+
+    const marker = new PIXI.Text('?', {
+      fontFamily: 'Press Start 2P',
+      fontSize: Math.max(18, Math.round(12 * NPC_SCALE)),
+      fill: 0xf4c95d,
+      stroke: 0x5b3706,
+      strokeThickness: 4,
+      align: 'center',
+    });
+    marker.anchor.set(0.5, 1);
+    marker.x = 0;
+    marker.y = -FH * NPC_SCALE - 2;
+    return marker;
+  }
+
+  _clearCursorStateTimer() {
+    if (this._dragCursorTimer) {
+      clearTimeout(this._dragCursorTimer);
+      this._dragCursorTimer = null;
+    }
+  }
+
+  _setCursorState(state = 'normal') {
+    this.onCursorStateChange?.(state);
+  }
+
+  _playCursorSequence(states, intervalMs = 80) {
+    const queue = Array.isArray(states) ? states.filter(Boolean) : [];
+    this._clearCursorStateTimer();
+    if (!queue.length) {
+      this._setCursorState('normal');
+      return;
+    }
+    this._setCursorState(queue[0]);
+    if (queue.length === 1) return;
+
+    let idx = 1;
+    const advance = () => {
+      this._setCursorState(queue[idx]);
+      idx += 1;
+      if (idx < queue.length) {
+        this._dragCursorTimer = setTimeout(advance, intervalMs);
+      } else {
+        this._dragCursorTimer = null;
+      }
+    };
+    this._dragCursorTimer = setTimeout(advance, intervalMs);
+  }
+
+  _clearNpcMeetingState(npc) {
+    if (!npc) return;
+    if (npc.meetingPartner) {
+      const partner = npc.meetingPartner;
+      partner.meetingPartner = null;
+      if (partner.aiState === 'meeting') {
+        partner.aiState = 'idle';
+        partner.idleTimer = 0.6 + Math.random() * 1.2;
+        partner._curDir = 'idle';
+        partner.sprite.textures = partner.frames.idle;
+        partner.sprite.play();
+      }
+      this._removeBubble(partner);
+    }
+    npc.meetingPartner = null;
+    npc.meetingTimer = 0;
+    this._removeBubble(npc);
+  }
+
+  _attachNpcDragHandlers(npc, activate) {
+    if (!npc?.container) return;
+    npc._activate = activate;
+    npc.container.on('pointerdown', (event) => this._beginNpcDrag(npc, activate, event));
+  }
+
+  _beginNpcDrag(npc, activate, event) {
+    if (!npc?.container || !event?.data || this._dragContext) return;
+
+    const originalEvent = event.data.originalEvent;
+    const local = event.data.getLocalPosition(this.npcLayer);
+    this._clearNpcMeetingState(npc);
+    this.onNpcLeave?.();
+    this._playCursorSequence(['grab-start', 'grab-full'], 90);
+
+    npc._dragActive = false;
+    npc.path = null;
+    npc.pathIdx = 0;
+    npc._stuckFrames = 0;
+    npc._curDir = 'idle';
+    if (npc.frames?.idle?.length) {
+      npc.sprite.textures = npc.frames.idle;
+      npc.sprite.play();
+    }
+
+    this._dragContext = {
+      npc,
+      activate,
+      startClientX: originalEvent?.clientX ?? 0,
+      startClientY: originalEvent?.clientY ?? 0,
+      offsetX: local.x - npc.container.x,
+      offsetY: local.y - npc.container.y,
+    };
+
+    originalEvent?.preventDefault?.();
+    event.stopPropagation?.();
+  }
+
+  _handleWindowPointerMove(event) {
+    const ctx = this._dragContext;
+    if (!ctx?.npc || !this.app) return;
+
+    const dx = (event.clientX ?? 0) - ctx.startClientX;
+    const dy = (event.clientY ?? 0) - ctx.startClientY;
+    if (!ctx.npc._dragActive && Math.sqrt(dx * dx + dy * dy) >= 6) {
+      ctx.npc._dragActive = true;
+      ctx.npc.container.alpha = 0.96;
+      ctx.npc.container.zIndex = 9999;
+      this._clearCursorStateTimer();
+      this._setCursorState('grab-full');
+    }
+    if (!ctx.npc._dragActive) return;
+
+    const local = this._getLayerPointFromClient(event.clientX, event.clientY);
+    if (!local) return;
+    const point = this._clampDropPoint(local.x - ctx.offsetX, local.y - ctx.offsetY);
+    ctx.npc.container.x = point.x;
+    ctx.npc.container.y = point.y;
+    ctx.npc._lastX = point.x;
+    ctx.npc._lastY = point.y;
+  }
+
+  _handleWindowPointerUp() {
+    const ctx = this._dragContext;
+    if (!ctx?.npc) return;
+
+    const { npc } = ctx;
+    this._dragContext = null;
+    this._playCursorSequence(['grab-start', 'normal'], 70);
+
+    if (npc._dragActive) {
+      npc._dragActive = false;
+      npc.container.alpha = 1;
+      this._applyNpcDropPosition(npc, npc.container.x, npc.container.y);
+      return;
+    }
+
+    npc.container.alpha = 1;
+    ctx.activate?.();
+  }
+
+  _getLayerPointFromClient(clientX, clientY) {
+    if (!this.app?.view || !this.world || !this.npcLayer) return null;
+    const rect = this.app.view.getBoundingClientRect();
+    const scale = this.world.scale.x || 1;
+    const viewX = clientX - rect.left;
+    const viewY = clientY - rect.top;
+    const worldX = (viewX - this.world.x) / scale;
+    const worldY = (viewY - this.world.y) / scale;
+    return {
+      x: worldX - this.npcLayer.x,
+      y: worldY - this.npcLayer.y,
+    };
+  }
+
+  _clampDropPoint(x, y) {
+    const halfW = (FW * NPC_SCALE) / 2;
+    const minY = Math.max(FH * NPC_SCALE + 8, 24);
+    return {
+      x: Math.max(halfW, Math.min(this.sceneW - halfW, x)),
+      y: Math.max(minY, Math.min(this.sceneH, y)),
+    };
+  }
+
+  _findNearestWalkableTile(tx, ty, maxRadius = 16) {
+    if (!this.pathfinder) return null;
+    if (this.pathfinder.isWalkable(tx, ty)) return { x: tx, y: ty };
+
+    let best = null;
+    let bestDist = Infinity;
+    for (let radius = 1; radius <= maxRadius; radius++) {
+      for (let y = ty - radius; y <= ty + radius; y++) {
+        for (let x = tx - radius; x <= tx + radius; x++) {
+          if (!this.pathfinder.isWalkable(x, y)) continue;
+          const dist = Math.abs(x - tx) + Math.abs(y - ty);
+          if (dist < bestDist) {
+            best = { x, y };
+            bestDist = dist;
+          }
+        }
+      }
+      if (best) return best;
+    }
+    return this.pathfinder.getRandomWalkable();
+  }
+
+  _resolveNpcDropPosition(npc, x, y) {
+    const clamped = this._clampDropPoint(x, y);
+    if (this.pathfinder && npc.mode === 'pathfind') {
+      let tile = this.pathfinder.pixelToTile(clamped.x, clamped.y);
+      if (!this.pathfinder.isWalkable(tile.x, tile.y)) {
+        tile = this._findNearestWalkableTile(tile.x, tile.y);
+      }
+      if (tile) {
+        const point = this.pathfinder.tileToPixel(tile.x, tile.y);
+        return { x: point.x, y: point.y, tile };
+      }
+    }
+    return { x: clamped.x, y: clamped.y, tile: null };
+  }
+
+  _applyNpcDropPosition(npc, x, y) {
+    if (!npc?.container) return;
+    const drop = this._resolveNpcDropPosition(npc, x, y);
+    npc.container.x = drop.x;
+    npc.container.y = drop.y;
+    npc.container.zIndex = Math.round(drop.y);
+    npc._lastX = drop.x;
+    npc._lastY = drop.y;
+    npc.path = null;
+    npc.pathIdx = 0;
+    npc._stuckFrames = 0;
+    npc._failedPaths = 0;
+
+    if (npc.mode === 'pathfind') {
+      npc.homeTile = drop.tile || this.pathfinder.pixelToTile(drop.x, drop.y);
+      npc.aiState = (npc._pendingFrozen || npc._guardFrozen) ? 'frozen' : 'idle';
+      npc.idleTimer = 0.35 + Math.random() * 0.8;
+      npc._curDir = 'idle';
+      npc.sprite.textures = npc.frames.idle;
+      npc.sprite.play();
+      return;
+    }
+
+    if (npc.mode === 'patrol') {
+      npc.xBase = drop.x;
+      npc.zone = {
+        ...npc.zone,
+        x: drop.x,
+        yA: Math.max(FH * NPC_SCALE + 8, drop.y - 54),
+        yB: Math.min(this.sceneH, drop.y + 54),
+      };
+      if (npc._pendingFrozen || npc._guardFrozen) {
+        npc.sprite.textures = npc.frames.idle;
+      } else {
+        npc.movingDown = Math.random() > 0.5;
+        npc.sprite.textures = npc.movingDown ? npc.frames.front : npc.frames.back;
+      }
+      npc.sprite.play();
+      return;
+    }
+
+    npc.sprite.textures = npc.frames?.idle?.length ? npc.frames.idle : npc.sprite.textures;
+    npc.sprite.play?.();
+  }
+
+  _isPendingApproval(agent) {
+    if (!agent) return false;
+    const latest = this._agentsById.get(agent.id) || agent;
+    return latest.status === 'waiting' || this._waitingAgents.has(agent.id);
+  }
+
+  _ensureIssueVisuals(npc) {
+    if (!npc) return;
+    if (!npc.emoteSprite) {
+      const marker = this._createIssueMarkerSprite();
+      npc.container.addChild(marker);
+      npc.emoteSprite = marker;
+    }
+  }
+
+  _clearIssueVisuals(npc) {
+    if (!npc) return;
+    if (npc.goldOutlines) {
+      for (const os of npc.goldOutlines) {
+        if (os.parent) os.parent.removeChild(os);
+        os.destroy();
+      }
+      npc.goldOutlines = null;
+    }
+    if (npc.emoteSprite) {
+      if (npc.emoteSprite.parent) npc.emoteSprite.parent.removeChild(npc.emoteSprite);
+      npc.emoteSprite.destroy();
+      npc.emoteSprite = null;
+    }
+  }
+
+  _setPendingNpcState(npc, shouldFreeze) {
+    if (!npc) return;
+    npc._pendingFrozen = shouldFreeze;
+    npc.hasIssue = shouldFreeze || npc._guardFrozen;
+
+    if (shouldFreeze) {
+      if (npc.meetingPartner) {
+        const partner = npc.meetingPartner;
+        partner.meetingPartner = null;
+        if (partner.aiState === 'meeting') {
+          partner.aiState = 'idle';
+          partner.idleTimer = 0.6 + Math.random() * 1.2;
+          partner.sprite.textures = partner.frames.idle;
+          partner.sprite.play();
+        }
+        this._removeBubble(partner);
+      }
+      npc.meetingPartner = null;
+      npc.meetingTimer = 0;
+      this._removeBubble(npc);
+      if (npc.mode === 'pathfind') {
+        npc.aiState = 'frozen';
+        npc.path = null;
+      }
+      npc.sprite.textures = npc.frames.idle;
+      npc.sprite.play();
+      this._ensureIssueVisuals(npc);
+      return;
+    }
+
+    if (!npc._guardFrozen) {
+      this._clearIssueVisuals(npc);
+      npc.hasIssue = false;
+    }
+
+    if (npc.mode === 'pathfind') {
+      npc.aiState = 'idle';
+      npc.idleTimer = 0.6 + Math.random() * 1.2;
+    }
+  }
+
+  _syncPendingNpcStates() {
+    for (const npc of this.npcs) {
+      if (!npc?.agent) continue;
+      const shouldFreeze = this._isPendingApproval(npc.agent);
+      if (shouldFreeze !== Boolean(npc._pendingFrozen)) {
+        this._setPendingNpcState(npc, shouldFreeze);
+      } else if (shouldFreeze) {
+        npc.hasIssue = true;
+        this._ensureIssueVisuals(npc);
+      }
+    }
   }
 
   _createNPC(agent, idx) {
@@ -296,18 +688,12 @@ export default class GameEngine {
     nameTag.y = -FH * NPC_SCALE - 2;
     container.addChild(nameTag);
 
-    // Exclamation emote
+    // Issue marker
     let emoteSprite = null;
-    const hasIssue = agent.status === 'waiting' || agent.status === 'error' ||
-                     this._waitingAgents.has(agent.id);
-    if (hasIssue && this.spriteLoader.emoteFrames.length) {
-      emoteSprite = new PIXI.AnimatedSprite(this.spriteLoader.emoteFrames);
-      emoteSprite.animationSpeed = 0.15;
-      emoteSprite.anchor.set(0.5, 1);
-      emoteSprite.scale.set(1.0);
-      emoteSprite.y = -FH * NPC_SCALE - 8;
-      emoteSprite.x = 8;
-      emoteSprite.play();
+    const hasPendingApproval = this._isPendingApproval(agent);
+    const hasIssue = hasPendingApproval;
+    if (hasIssue) {
+      emoteSprite = this._createIssueMarkerSprite();
       container.addChild(emoteSprite);
     }
 
@@ -317,36 +703,24 @@ export default class GameEngine {
     const hw = FW * NPC_SCALE, hh = FH * NPC_SCALE;
     container.hitArea = new PIXI.Rectangle(-hw / 2, -hh, hw, hh);
 
-    // Gold outline on character: 8 solid-gold copies at 2px offsets (all around)
     let _goldOutlines = null;
-    if (hasIssue) {
-      // add after shadow and before main sprite
-      _goldOutlines = this._createGoldOutlineSprites(sprite, container, 2, 1);
-    }
 
     container.on('pointerover', () => {
+      if (this._dragContext) return;
+      const pendingNow = this._isPendingApproval(agent);
       const gp = container.getGlobalPosition();
       const rect = this.app.view.getBoundingClientRect();
       this.onNpcHover?.({
         agent, charName, state,
         snippet: this._getSnippet(agent),
         event: this._getLatestEvent(agent),
-        isPending: hasIssue,
+        isPending: pendingNow,
       }, {
         x: rect.left + gp.x,
         y: Math.max(4, rect.top + gp.y - FH * NPC_SCALE * this.world.scale.x - 16),
       });
     });
     container.on('pointerout', () => this.onNpcLeave?.());
-    container.on('pointertap', () => {
-      this.onNpcClick?.({
-        agent, charName, state,
-        snippet: this._getSnippet(agent),
-        event: this._getLatestEvent(agent),
-        events: this._eventsByAgent.get(agent.id) || [],
-        isPending: hasIssue,
-      });
-    });
 
     this.npcLayer.addChild(container);
 
@@ -390,10 +764,10 @@ export default class GameEngine {
       npcObj = {
         agent, container, sprite, frames, charName, emoteSprite,
         goldOutlines: _goldOutlines, hasIssue,
-        _originalHasIssue: hasIssue, _guardFrozen: false,
+        _originalHasIssue: hasIssue, _guardFrozen: false, _pendingFrozen: hasPendingApproval,
         mode: 'pathfind',
-        speed: 0.3 + Math.random() * 0.2,
-        aiState: 'idle', _curDir: 'idle',
+        speed: 0.45 + Math.random() * 0.25,
+        aiState: hasPendingApproval ? 'frozen' : 'idle', _curDir: 'idle',
         idleTimer: 2 + Math.random() * 3,
         path: null, pathIdx: 0,
         homeTile: this.pathfinder.pixelToTile(startPx.x, startPx.y),
@@ -401,6 +775,10 @@ export default class GameEngine {
         _lastX: startPx.x, _lastY: startPx.y,
         meetingTimer: 0, meetingPartner: null, bubble: null,
       };
+      if (hasPendingApproval) {
+        npcObj.sprite.textures = npcObj.frames.idle;
+        npcObj.sprite.play();
+      }
     } else {
       // Static patrol mode
       const zone    = WALK_ZONES[idx % WALK_ZONES.length];
@@ -413,13 +791,32 @@ export default class GameEngine {
       npcObj = {
         agent, container, sprite, frames, charName, emoteSprite,
         goldOutlines: _goldOutlines, hasIssue,
-        _originalHasIssue: hasIssue, _guardFrozen: false,
+        _originalHasIssue: hasIssue, _guardFrozen: false, _pendingFrozen: hasPendingApproval,
         mode: 'patrol',
-        speed: 0.2 + Math.random() * 0.35,
+        speed: 0.32 + Math.random() * 0.38,
         movingDown,
         zone, xBase: zone.x + xOffset,
       };
+      if (hasPendingApproval) {
+        npcObj.sprite.textures = npcObj.frames.idle;
+        npcObj.sprite.play();
+      }
     }
+
+    this._attachNpcDragHandlers(npcObj, () => {
+      const pendingNow = this._isPendingApproval(agent);
+      if (pendingNow) {
+        this.onPendingClick?.();
+        return;
+      }
+      this.onNpcClick?.({
+        agent, charName, state,
+        snippet: this._getSnippet(agent),
+        event: this._getLatestEvent(agent),
+        events: this._eventsByAgent.get(agent.id) || [],
+        isPending: pendingNow,
+      });
+    });
 
     return npcObj;
   }
@@ -443,19 +840,11 @@ export default class GameEngine {
     sprite.scale.set(NPC_SCALE);
     sprite.play();
 
-    // Gold outline behind pending sprite
-    const goldOutlines = this._createGoldOutlineSprites(sprite, container, 2);
+    const goldOutlines = null;
     container.addChild(sprite);
 
-    if (this.spriteLoader.emoteFrames.length) {
-      const emote = new PIXI.AnimatedSprite(this.spriteLoader.emoteFrames);
-      emote.animationSpeed = 0.15;
-      emote.anchor.set(0.5, 1);
-      emote.scale.set(1.0);
-      emote.y = -FH * NPC_SCALE - 6;
-      emote.play();
-      container.addChild(emote);
-    }
+    const emoteSprite = this._createIssueMarkerSprite();
+    container.addChild(emoteSprite);
 
     const label = new PIXI.Text('PENDING', {
       fontFamily: 'Press Start 2P', fontSize: 4, fill: 0xF59E0B, align: 'center',
@@ -478,12 +867,11 @@ export default class GameEngine {
     container.zIndex = Math.round(container.y);
 
     container.eventMode = 'static';
-    container.cursor    = 'pointer';
     container.hitArea   = new PIXI.Rectangle(-20, -FH * NPC_SCALE, 40, FH * NPC_SCALE);
-    container.on('pointertap', () => this.onPendingClick?.());
 
     // Hover shows tooltip too
     container.on('pointerover', () => {
+      if (this._dragContext) return;
       const gp = container.getGlobalPosition();
       const rect = this.app.view.getBoundingClientRect();
       this.onNpcHover?.({
@@ -501,7 +889,21 @@ export default class GameEngine {
     container.on('pointerout', () => this.onNpcLeave?.());
 
     this.npcLayer.addChild(container);
-    return { container, sprite, goldOutlines };
+    const pendingNpc = {
+      container,
+      sprite,
+      goldOutlines,
+      emoteSprite,
+      charName,
+      mode: 'pending',
+      _dragActive: false,
+      _pendingFrozen: true,
+      _guardFrozen: false,
+      meetingTimer: 0,
+      meetingPartner: null,
+    };
+    this._attachNpcDragHandlers(pendingNpc, () => this.onPendingClick?.());
+    return pendingNpc;
   }
 
   // ─── Speech Bubbles ──────────────────────────────────────────
@@ -512,26 +914,28 @@ export default class GameEngine {
     const bc = new PIXI.Container();
     const truncated = text.length > BUBBLE_MAX_CHARS ? text.substring(0, BUBBLE_MAX_CHARS) + '…' : text;
     const bt = new PIXI.Text(truncated, {
-      fontFamily: 'Press Start 2P', fontSize: 3.5, fill: 0x3a3020,
-      wordWrap: true, wordWrapWidth: 110, lineHeight: 7,
+      fontFamily: 'Press Start 2P', fontSize: 15, fill: 0x3a3020,
+      wordWrap: true, wordWrapWidth: 360, lineHeight: 22,
+      align: 'center',
     });
     bt.anchor.set(0.5, 1);
 
-    const pad = 7;
+    const pad = 22;
     const bg = new PIXI.Graphics();
     bg.beginFill(0xFFFDF8, 0.94);
     bg.lineStyle(1, 0xB2773F, 0.6);
-    const bw = bt.width + pad * 2, bh = bt.height + pad * 2;
-    bg.drawRoundedRect(-bw / 2, -bh, bw, bh, 4);
+    const bw = Math.max(320, bt.width + pad * 2);
+    const bh = Math.max(120, bt.height + pad * 2);
+    bg.drawRoundedRect(-bw / 2, -bh, bw, bh, 10);
     bg.endFill();
     // Small triangle pointer at bottom
     bg.beginFill(0xFFFDF8, 0.94);
-    bg.moveTo(-4, 0); bg.lineTo(0, 5); bg.lineTo(4, 0);
+    bg.moveTo(-12, 0); bg.lineTo(0, 15); bg.lineTo(12, 0);
     bg.endFill();
 
     bt.y = -pad;
     bc.addChild(bg); bc.addChild(bt);
-    bc.y = -FH * NPC_SCALE - 8;
+    bc.y = -FH * NPC_SCALE - 36;
     bc.alpha = 0;
     npc.container.addChild(bc);
     npc.bubble = bc;
@@ -577,7 +981,7 @@ export default class GameEngine {
           if (npc.bubble.alpha >= 1) npc._bubbleFadeIn = false;
         }
 
-        if (npc._guardFrozen) {
+        if (npc._dragActive || npc._guardFrozen || npc._pendingFrozen) {
           // Frozen by guard — stay in place
         } else if (npc.mode === 'patrol') {
           this._updatePatrol(npc, delta);
@@ -587,27 +991,24 @@ export default class GameEngine {
 
         npc.container.zIndex = Math.round(npc.container.y);
 
-        // Sync gold outline textures with the main sprite's current frame
-        if (npc.goldOutlines) {
-          const curTex = npc.sprite.texture;
-          const pulse = Math.sin(Date.now() / 400) * 0.15 + 0.8;
-          for (const os of npc.goldOutlines) {
-            os.texture = curTex;
-            os.alpha = pulse;
-          }
+        if (npc.emoteSprite) {
+          const bob = Math.sin(Date.now() / 240) * 5;
+          const pulse = Math.sin(Date.now() / 220) * 0.08 + 0.98;
+          npc.emoteSprite.y = -FH * NPC_SCALE - 2 + bob;
+          npc.emoteSprite.scale.set(ISSUE_MARKER_SCALE * pulse);
+          npc.emoteSprite.alpha = Math.sin(Date.now() / 260) * 0.08 + 0.94;
         }
       }
 
-      // Pending NPC: sync gold outlines + gentle glow
+      // Pending NPC: keep a gentle glow + marker pulse
       if (this.pendingNpc) {
         this.pendingNpc.container.alpha = Math.sin(Date.now() / 500) * 0.12 + 0.88;
-        if (this.pendingNpc.goldOutlines) {
-          const curTex = this.pendingNpc.sprite.texture;
-          const pulse = Math.sin(Date.now() / 400) * 0.15 + 0.8;
-          for (const os of this.pendingNpc.goldOutlines) {
-            os.texture = curTex;
-            os.alpha = pulse;
-          }
+        if (this.pendingNpc.emoteSprite) {
+          const bob = Math.sin(Date.now() / 240) * 5;
+          const pulse = Math.sin(Date.now() / 220) * 0.08 + 0.98;
+          this.pendingNpc.emoteSprite.y = -FH * NPC_SCALE - 2 + bob;
+          this.pendingNpc.emoteSprite.scale.set(ISSUE_MARKER_SCALE * pulse);
+          this.pendingNpc.emoteSprite.alpha = Math.sin(Date.now() / 260) * 0.08 + 0.94;
         }
       }
 
@@ -854,22 +1255,8 @@ export default class GameEngine {
     npc.sprite.textures = npc.frames.idle;
     npc.sprite.play();
 
-    if (!npc.goldOutlines) {
-      npc.goldOutlines = this._createGoldOutlineSprites(npc.sprite, npc.container, 2, 1);
-    }
     npc.hasIssue = true;
-
-    if (!npc.emoteSprite && this.spriteLoader.emoteFrames.length) {
-      const emote = new PIXI.AnimatedSprite(this.spriteLoader.emoteFrames);
-      emote.animationSpeed = 0.15;
-      emote.anchor.set(0.5, 1);
-      emote.scale.set(1.0);
-      emote.y = -FH * NPC_SCALE - 8;
-      emote.x = 8;
-      emote.play();
-      npc.container.addChild(emote);
-      npc.emoteSprite = emote;
-    }
+    this._ensureIssueVisuals(npc);
   }
 
   _unfreezeNpc(npc) {
@@ -881,19 +1268,12 @@ export default class GameEngine {
       npc.idleTimer = 1 + Math.random() * 2;
     }
 
-    if (npc.goldOutlines && !npc._originalHasIssue) {
-      for (const os of npc.goldOutlines) {
-        if (os.parent) os.parent.removeChild(os);
-        os.destroy();
-      }
-      npc.goldOutlines = null;
+    if (npc._pendingFrozen || this._isPendingApproval(npc.agent)) {
+      this._setPendingNpcState(npc, true);
+      return;
     }
-    if (npc.emoteSprite && !npc._originalHasIssue) {
-      if (npc.emoteSprite.parent) npc.emoteSprite.parent.removeChild(npc.emoteSprite);
-      npc.emoteSprite.destroy();
-      npc.emoteSprite = null;
-    }
-    npc.hasIssue = npc._originalHasIssue || false;
+    this._clearIssueVisuals(npc);
+    npc.hasIssue = false;
   }
 
   _unfreezeAllNpcs() {
@@ -927,8 +1307,8 @@ export default class GameEngine {
     if (this._guardPortalPoint) return this._guardPortalPoint;
     this._guardPortalPoint = {
       // Left-middle office area in town map
-      x: Math.round(this.sceneW * 0.13),
-      y: Math.round(this.sceneH * 0.525),
+      x: Math.round(this.sceneW * 0.205),
+      y: Math.round(this.sceneH * 0.67),
     };
     return this._guardPortalPoint;
   }
@@ -947,7 +1327,7 @@ export default class GameEngine {
       anim.anchor.set(0.5, 1);
       anim.x = x;
       anim.y = y;
-      anim.scale.set(1.15);
+      anim.scale.set(GUARD_PORTAL_SCALE);
       anim.zIndex = Math.round(y) + 1000;
       anim.loop = false;
       // Slightly slower portal for a clearer spawn/recall beat.
@@ -971,20 +1351,20 @@ export default class GameEngine {
 
     const shadow = new PIXI.Graphics();
     shadow.beginFill(0x000000, 0.14);
-    shadow.drawEllipse(0, -1, 10, 3.3);
+    shadow.drawEllipse(0, -1, 10 * GUARD_SHADOW_SCALE, 3.3 * GUARD_SHADOW_SCALE);
     shadow.endFill();
     container.addChild(shadow);
 
     const spriteFrames = this._guardWalkFrames.length ? this._guardWalkFrames : this._guardIdleFrames;
     const body = new PIXI.AnimatedSprite(spriteFrames.length ? spriteFrames : [PIXI.Texture.WHITE]);
     body.anchor.set(0.5, 1);
-    body.scale.set(1.05);
+    body.scale.set(GUARD_BODY_SCALE);
     body.animationSpeed = 0.16;
     if (spriteFrames.length) {
       body.play();
     } else {
-      body.width = 14;
-      body.height = 14;
+      body.width = 14 * GUARD_BODY_SCALE;
+      body.height = 14 * GUARD_BODY_SCALE;
       body.tint = 0x9ac9ff;
       body.alpha = 0.9;
       body.y = 4;
@@ -1072,8 +1452,8 @@ export default class GameEngine {
       const slot = i % 5;
       const row = Math.floor(i / 5);
       unit.returnTarget = {
-        x: gate.x + (slot - 2) * 8,
-        y: gate.y - row * 6,
+        x: gate.x + (slot - 2) * 16,
+        y: gate.y - row * 12,
       };
       unit.patrolTarget = null;
       unit.targetNpc = null;
@@ -1233,13 +1613,23 @@ export default class GameEngine {
     this._events = events;
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
+    this._syncPendingNpcStates();
   }
 
   /** Clean up PixiJS resources. */
   destroy() {
+    this._clearCursorStateTimer();
+    this._setCursorState('normal');
+    if (this._windowPointerMove) window.removeEventListener('pointermove', this._windowPointerMove);
+    if (this._windowPointerUp) {
+      window.removeEventListener('pointerup', this._windowPointerUp);
+      window.removeEventListener('pointercancel', this._windowPointerUp);
+      window.removeEventListener('blur', this._windowPointerUp);
+    }
+    this._dragContext = null;
     this._clearGuardsImmediate();
     this._resizeObs?.disconnect();
-    this.app?.destroy(true, { children: true, texture: true, baseTexture: true });
+    this.app?.destroy(true, { children: true, texture: false, baseTexture: false });
     this.app = null;
   }
 }

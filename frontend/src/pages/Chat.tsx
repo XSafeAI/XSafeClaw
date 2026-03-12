@@ -2,24 +2,35 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
-  Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2,
+  Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
+  Settings2, Brain, Cpu, ShieldAlert, ExternalLink,
 } from 'lucide-react';
-import { chatAPI } from '../services/api';
+import { useNavigate } from 'react-router-dom';
+import { chatAPI, guardAPI } from '../services/api';
 
 /* ==================== Types ==================== */
+interface PendingImage {
+  id: string;
+  file: File;
+  dataUrl: string;   // for preview
+  base64: string;    // raw base64 (no prefix)
+  mimeType: string;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'error' | 'tool_call';
   content: string;
   timestamp: Date;
   pending?: boolean;
+  images?: { dataUrl: string }[];
   // tool call fields
   tool_id?: string;
   tool_name?: string;
   args?: any;
   result?: any;
   is_error?: boolean;
-  result_pending?: boolean; // true while waiting for the result
+  result_pending?: boolean;
 }
 
 interface StoredSession {
@@ -70,6 +81,28 @@ function extractMessageText(msg: any): string {
   }
   if (typeof msg.text === 'string') return msg.text;
   return '';
+}
+
+function parsePromptModelSwitch(input: string): string | null {
+  const text = input.trim();
+
+  const patterns: RegExp[] = [
+    /^switch\s+model\s+to\s+(.+)$/i,
+    /^use\s+model\s+(.+)$/i,
+    /^切换模型(?:到|为)?\s*(.+)$/,
+    /^改用模型\s*(.+)$/,
+    /^换模型(?:到|为)?\s*(.+)$/,
+  ];
+
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (!m) continue;
+    const ref = (m[1] || '').trim();
+    if (!ref || ref.includes(' ')) return null;
+    return `/model ${ref}`;
+  }
+
+  return null;
 }
 
 /* ==================== Tool Call Bubble ==================== */
@@ -185,9 +218,26 @@ function Bubble({ msg }: { msg: ChatMessage }) {
               <span className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce [animation-delay:300ms]" />
             </div>
           ) : (
-            <p className="text-[13px] text-text-primary whitespace-pre-wrap leading-relaxed break-words">
-              {msg.content}
-            </p>
+            <>
+              {msg.images && msg.images.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {msg.images.map((img, i) => (
+                    <img
+                      key={i}
+                      src={img.dataUrl}
+                      alt={`attachment ${i + 1}`}
+                      className="max-w-[200px] max-h-[160px] rounded-lg object-cover border border-border/40 cursor-pointer hover:opacity-90 transition-opacity"
+                      onClick={() => window.open(img.dataUrl, '_blank')}
+                    />
+                  ))}
+                </div>
+              )}
+              {msg.content && (
+                <p className="text-[13px] text-text-primary whitespace-pre-wrap leading-relaxed break-words">
+                  {msg.content}
+                </p>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -204,10 +254,44 @@ export default function Chat() {
   const [connecting, setConnecting] = useState(false);
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null); // key being loaded
+  const [isComposing, setIsComposing] = useState(false);
+
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [showSettings, setShowSettings] = useState(false);
+  const [availableModels, setAvailableModels] = useState<{ id: string; name: string; provider: string; reasoning: boolean }[]>([]);
+  const [defaultModel, setDefaultModel] = useState('');
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string>(''); // '' = default
+  const [thinkingLevel, setThinkingLevel] = useState<string>(''); // '' = default/off
+  const [patchingSession, setPatchingSession] = useState(false);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+
+  const [guardPending, setGuardPending] = useState<{
+    id: string; tool_name: string; risk_source: string | null;
+    failure_mode: string | null; real_world_harm: string | null;
+  }[]>([]);
+  const navigate = useNavigate();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const inFlightRef = useRef(false);
+  const composingRef = useRef(false);
+  const lastCompositionEndAtRef = useRef(0);
+
+  const MAX_IMAGES = 8;
+  const MAX_SINGLE_SIZE = 5 * 1024 * 1024; // 5 MB per image
+
+  const THINKING_LEVELS = [
+    { value: '',        label: 'Default' },
+    { value: 'off',     label: 'Off' },
+    { value: 'minimal', label: 'Minimal' },
+    { value: 'low',     label: 'Low' },
+    { value: 'medium',  label: 'Medium' },
+    { value: 'high',    label: 'High' },
+    { value: 'xhigh',  label: 'Max' },
+  ];
 
   const activeMessages: ChatMessage[] = activeKey ? (messageMap[activeKey] ?? []) : [];
 
@@ -276,6 +360,127 @@ export default function Chat() {
     if (activeKey) loadHistory(activeKey);
   }, [activeKey]); // eslint-disable-line
 
+  // Load available models once
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setModelsLoading(true);
+      try {
+        const res = await chatAPI.availableModels();
+        if (!cancelled) {
+          setAvailableModels(res.data.models);
+          setDefaultModel(res.data.default_model);
+        }
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setModelsLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Poll guard pending items for the active session
+  useEffect(() => {
+    if (!activeKey) { setGuardPending([]); return; }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { data } = await guardAPI.pending(false);
+        if (cancelled) return;
+        const forSession = data.filter((p: any) => p.session_key === activeKey || p.session_key?.endsWith(activeKey));
+        setGuardPending(forSession.map((p: any) => ({
+          id: p.id,
+          tool_name: p.tool_name,
+          risk_source: p.risk_source ?? null,
+          failure_mode: p.failure_mode ?? null,
+          real_world_harm: p.real_world_harm ?? null,
+        })));
+      } catch { /* ignore */ }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activeKey]);
+
+  // Close model dropdown on outside click
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!modelDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [modelDropdownOpen]);
+
+  // Apply model / thinking change to the active session
+  const applySessionSettings = async (model: string, thinking: string) => {
+    if (!activeKey) return;
+    setPatchingSession(true);
+    try {
+      await chatAPI.patchSession(activeKey, {
+        model: model || null,
+        thinking_level: thinking || null,
+      });
+    } catch (err: any) {
+      console.error('Failed to patch session:', err);
+    } finally {
+      setPatchingSession(false);
+    }
+  };
+
+  /* --- Image handling --- */
+  const fileToBase64 = (file: File): Promise<{ dataUrl: string; base64: string }> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.split(',')[1] ?? '';
+        resolve({ dataUrl, base64 });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const addImages = async (files: FileList | File[]) => {
+    const arr = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (arr.length === 0) return;
+    const remaining = MAX_IMAGES - pendingImages.length;
+    const toAdd = arr.slice(0, remaining);
+    const results: PendingImage[] = [];
+    for (const file of toAdd) {
+      if (file.size > MAX_SINGLE_SIZE) continue;
+      const { dataUrl, base64 } = await fileToBase64(file);
+      results.push({ id: uuidv4(), file, dataUrl, base64, mimeType: file.type });
+    }
+    setPendingImages(prev => [...prev, ...results]);
+  };
+
+  const removeImage = (id: string) => {
+    setPendingImages(prev => prev.filter(img => img.id !== id));
+  };
+
+  const handlePaste = useCallback((e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        const file = items[i].getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      addImages(imageFiles);
+    }
+  }, [pendingImages.length]); // eslint-disable-line
+
+  useEffect(() => {
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [handlePaste]);
+
   /* --- New Session --- */
   const handleNewSession = async () => {
     if (connecting) return;
@@ -301,6 +506,11 @@ export default function Chat() {
   /* --- Switch session --- */
   const handleSelectSession = (key: string) => {
     setActiveKey(key);
+    setSelectedModel('');
+    setThinkingLevel('');
+    setShowSettings(false);
+    setModelDropdownOpen(false);
+    setModelSearch('');
   };
 
   /* --- Refresh active session history from backend --- */
@@ -324,26 +534,44 @@ export default function Chat() {
   /* --- Send (streaming via SSE) --- */
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || !activeKey || inFlightRef.current) return;
+    const hasImages = pendingImages.length > 0;
+    if ((!text && !hasImages) || !activeKey || inFlightRef.current) return;
+
+    const modelCommand = parsePromptModelSwitch(text);
+    const textToSend = modelCommand ?? text;
 
     const key = activeKey;
     inFlightRef.current = true;
 
+    const imagesToSend = [...pendingImages];
     setInput('');
+    setPendingImages([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setSending(true);
 
-    const userMsg: ChatMessage = { id: uuidv4(), role: 'user', content: text, timestamp: new Date() };
+    const userMsg: ChatMessage = {
+      id: uuidv4(), role: 'user', content: text, timestamp: new Date(),
+      images: imagesToSend.map(img => ({ dataUrl: img.dataUrl })),
+    };
     const pendingId = uuidv4();
     const pendingMsg: ChatMessage = { id: pendingId, role: 'assistant', content: '', timestamp: new Date(), pending: true };
 
     setMessageMap(prev => ({ ...prev, [key]: [...(prev[key] ?? []), userMsg, pendingMsg] }));
 
+    const body: any = { session_key: key, message: textToSend || '(see attached image)' };
+    if (imagesToSend.length > 0) {
+      body.images = imagesToSend.map(img => ({
+        mime_type: img.mimeType,
+        data: img.base64,
+        file_name: img.file.name,
+      }));
+    }
+
     try {
       const response = await fetch('/api/chat/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_key: key, message: text }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok || !response.body) {
@@ -474,6 +702,17 @@ export default function Chat() {
     }
   };
 
+  const handleQuickModelSwitch = async () => {
+    if (!activeKey || patchingSession) return;
+    const modelRef = (selectedModel || '').trim();
+    if (!modelRef) return;
+    setShowSettings(false);
+    setModelDropdownOpen(false);
+    setModelSearch('');
+    await applySessionSettings(modelRef, thinkingLevel);
+  };
+
+
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     const ta = e.target;
@@ -482,8 +721,30 @@ export default function Chat() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key !== 'Enter') return;
+
+    const native = e.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
+    const isImeComposing =
+      isComposing ||
+      composingRef.current ||
+      !!native.isComposing ||
+      native.keyCode === 229 ||
+      Date.now() - lastCompositionEndAtRef.current < 30;
+
+    if (isImeComposing) return;
+
+    if (!e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
   };
+
+  const [dragOver, setDragOver] = useState(false);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer.files.length > 0) addImages(e.dataTransfer.files);
+  }, [pendingImages.length]); // eslint-disable-line
 
   return (
     <div className="absolute inset-0 flex flex-col">
@@ -563,7 +824,23 @@ export default function Chat() {
         </div>
 
         {/* Main chat area */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-surface-0">
+        <div
+          className={`flex-1 flex flex-col overflow-hidden bg-surface-0 relative ${dragOver ? 'ring-2 ring-accent/40 ring-inset' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+        >
+          {/* Drag overlay */}
+          {dragOver && activeKey && (
+            <div className="absolute inset-0 z-50 bg-accent/5 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
+              <div className="bg-surface-1 border-2 border-dashed border-accent/50 rounded-2xl px-10 py-8 text-center shadow-2xl">
+                <ImagePlus className="w-10 h-10 text-accent mx-auto mb-3" />
+                <p className="text-sm font-medium text-text-primary">Drop images here</p>
+                <p className="text-[12px] text-text-muted mt-1">PNG, JPG, GIF, WebP · Max {MAX_IMAGES} images</p>
+              </div>
+            </div>
+          )}
+
           {!activeKey ? (
             /* Empty state */
             <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
@@ -586,24 +863,233 @@ export default function Chat() {
           ) : (
             <>
               {/* Session info bar */}
-              <div className="flex-shrink-0 px-6 py-2.5 border-b border-border flex items-center justify-between bg-surface-1/40">
-                <div className="flex items-center gap-2 min-w-0">
-                  <p className="text-[12px] font-semibold text-text-primary truncate">
-                    {sessions.find(s => s.key === activeKey)?.label ?? activeKey}
-                  </p>
-                  <span className="text-[10px] font-mono text-text-muted border border-border rounded px-1.5 py-0.5 flex-shrink-0">
-                    {activeKey.slice(0, 18)}…
-                  </span>
+              <div className="flex-shrink-0 border-b border-border bg-surface-1/40">
+                <div className="px-6 py-2.5 flex items-center justify-between">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <p className="text-[12px] font-semibold text-text-primary truncate">
+                      {sessions.find(s => s.key === activeKey)?.label ?? activeKey}
+                    </p>
+                    {/* Current model badge */}
+                    {selectedModel && (
+                      <span className="text-[10px] font-mono text-accent border border-accent/30 bg-accent/5 rounded px-1.5 py-0.5 flex-shrink-0 truncate max-w-[180px]">
+                        <Cpu className="w-2.5 h-2.5 inline mr-1 -mt-px" />{selectedModel}
+                      </span>
+                    )}
+                    {/* Thinking badge */}
+                    {thinkingLevel && thinkingLevel !== 'off' && (
+                      <span className="text-[10px] font-mono text-amber-400 border border-amber-400/30 bg-amber-400/5 rounded px-1.5 py-0.5 flex-shrink-0">
+                        <Brain className="w-2.5 h-2.5 inline mr-1 -mt-px" />{thinkingLevel}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button
+                      onClick={handleQuickModelSwitch}
+                      disabled={sending || !activeKey || !selectedModel}
+                      className="px-2 py-1 text-[11px] rounded border border-border text-text-secondary hover:text-text-primary hover:bg-surface-2 disabled:opacity-50"
+                      title={selectedModel ? `Send /model ${selectedModel}` : 'Pick a model in settings first'}
+                    >
+                      Switch Model
+                    </button>
+                    <button
+                      onClick={() => setShowSettings(v => !v)}
+                      title="Session settings"
+                      className={`p-1.5 rounded-md transition-all ${
+                        showSettings
+                          ? 'text-accent bg-accent/10'
+                          : 'text-text-muted hover:text-text-primary hover:bg-surface-2'
+                      }`}
+                    >
+                      <Settings2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={handleRefreshHistory}
+                      disabled={loadingHistory === activeKey}
+                      title="Reload history"
+                      className="p-1.5 text-text-muted hover:text-text-primary hover:bg-surface-2 rounded-md transition-all"
+                    >
+                      <RotateCcw className={`w-3.5 h-3.5 ${loadingHistory === activeKey ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
                 </div>
-                <button
-                  onClick={handleRefreshHistory}
-                  disabled={loadingHistory === activeKey}
-                  title="Reload latest history from OpenClaw session file"
-                  className="p-1.5 text-text-muted hover:text-text-primary hover:bg-surface-2 rounded-md transition-all"
-                >
-                  <RotateCcw className={`w-3.5 h-3.5 ${loadingHistory === activeKey ? 'animate-spin' : ''}`} />
-                </button>
+
+                {/* Settings panel */}
+                {showSettings && (
+                  <div className="px-6 py-3 border-t border-border/60 bg-surface-0/60 space-y-3">
+                    {/* Model selector */}
+                    <div className="relative" ref={modelDropdownRef}>
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5 flex items-center gap-1.5">
+                        <Cpu className="w-3 h-3" /> Model
+                        {patchingSession && <Loader2 className="w-3 h-3 animate-spin text-accent" />}
+                      </label>
+
+                      {/* Trigger button */}
+                      <button
+                        onClick={() => { setModelDropdownOpen(v => !v); setModelSearch(''); }}
+                        className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-surface-1 border border-border rounded-lg text-[12px] hover:border-accent/40 transition-all"
+                      >
+                        <span className={selectedModel ? 'text-text-primary font-medium' : 'text-text-muted'}>
+                          {selectedModel || defaultModel || 'Select model…'}
+                        </span>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          {selectedModel && (
+                            <span
+                              onClick={e => { e.stopPropagation(); setSelectedModel(''); applySessionSettings('', thinkingLevel); }}
+                              className="text-text-muted hover:text-red-400 transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                            </span>
+                          )}
+                          <ChevronDown className={`w-3.5 h-3.5 text-text-muted transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`} />
+                        </div>
+                      </button>
+
+                      {/* Dropdown */}
+                      {modelDropdownOpen && (
+                        <div className="absolute z-50 left-0 right-0 mt-1 bg-surface-1 border border-border rounded-lg shadow-xl overflow-hidden">
+                          {/* Search filter */}
+                          <div className="px-3 py-2 border-b border-border/60">
+                            <input
+                              type="text"
+                              value={modelSearch}
+                              onChange={e => setModelSearch(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && modelSearch.trim()) {
+                                  setSelectedModel(modelSearch.trim());
+                                  setModelDropdownOpen(false);
+                                  setModelSearch('');
+                                  applySessionSettings(modelSearch.trim(), thinkingLevel);
+                                } else if (e.key === 'Escape') {
+                                  setModelDropdownOpen(false);
+                                }
+                              }}
+                              placeholder="Filter models… (Enter to use custom ID)"
+                              autoFocus
+                              className="w-full text-[11px] px-2 py-1.5 bg-surface-0 border border-border rounded text-text-primary placeholder-text-muted focus:outline-none focus:border-accent/50"
+                            />
+                          </div>
+
+                          {/* Model list */}
+                          <div className="max-h-56 overflow-y-auto">
+                            {modelsLoading ? (
+                              <div className="px-3 py-6 flex items-center justify-center gap-2 text-text-muted">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading…
+                              </div>
+                            ) : (() => {
+                              const filtered = modelSearch
+                                ? availableModels.filter(m =>
+                                    m.id.toLowerCase().includes(modelSearch.toLowerCase()) ||
+                                    m.name.toLowerCase().includes(modelSearch.toLowerCase())
+                                  )
+                                : availableModels;
+                              const grouped = filtered.reduce<Record<string, typeof filtered>>((acc, m) => {
+                                (acc[m.provider] ??= []).push(m);
+                                return acc;
+                              }, {});
+                              const providers = Object.keys(grouped).sort();
+                              if (providers.length === 0) {
+                                return (
+                                  <div className="px-3 py-4 text-[11px] text-text-muted text-center">
+                                    No models found.
+                                    {modelSearch && <span className="block mt-1">Press Enter to use "<span className="font-mono text-text-secondary">{modelSearch}</span>"</span>}
+                                  </div>
+                                );
+                              }
+                              return providers.map(prov => (
+                                <div key={prov}>
+                                  <p className="px-3 pt-2.5 pb-1 text-[9px] font-bold uppercase tracking-widest text-text-muted sticky top-0 bg-surface-1 border-b border-border/30">{prov}</p>
+                                  {grouped[prov].map(m => {
+                                    const isSelected = m.id === selectedModel;
+                                    const isDefault = m.id === defaultModel;
+                                    return (
+                                      <button
+                                        key={m.id}
+                                        onClick={() => {
+                                          setSelectedModel(m.id);
+                                          setModelDropdownOpen(false);
+                                          setModelSearch('');
+                                          applySessionSettings(m.id, thinkingLevel);
+                                        }}
+                                        className={`w-full text-left px-3 py-2 text-[11px] hover:bg-accent/10 transition-colors flex items-center justify-between gap-2 ${
+                                          isSelected ? 'text-accent bg-accent/5 font-medium' : 'text-text-secondary'
+                                        }`}
+                                      >
+                                        <span className="truncate">{m.name || m.id.split('/')[1]}</span>
+                                        <span className="flex items-center gap-1.5 flex-shrink-0">
+                                          {m.reasoning && <span title="Reasoning"><Brain className="w-3 h-3 text-amber-400" /></span>}
+                                          {isDefault && <span className="text-[9px] text-accent bg-accent/10 rounded px-1 py-0.5">default</span>}
+                                          {isSelected && <CheckCircle2 className="w-3 h-3 text-accent" />}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ));
+                            })()}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Thinking level */}
+                    <div>
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5 flex items-center gap-1.5">
+                        <Brain className="w-3 h-3" /> Thinking Level
+                      </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {THINKING_LEVELS.map(lvl => (
+                          <button
+                            key={lvl.value}
+                            onClick={() => {
+                              setThinkingLevel(lvl.value);
+                              applySessionSettings(selectedModel, lvl.value);
+                            }}
+                            className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${
+                              thinkingLevel === lvl.value
+                                ? 'border-accent/50 bg-accent/10 text-accent font-medium'
+                                : 'border-border bg-surface-1 text-text-secondary hover:bg-surface-2 hover:text-text-primary'
+                            }`}
+                          >
+                            {lvl.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
+
+              {/* Guard interception banner */}
+              {guardPending.length > 0 && (
+                <div className="flex-shrink-0 mx-6 mt-3">
+                  {guardPending.map(gp => (
+                    <div key={gp.id} className="flex items-start gap-3 px-4 py-3 bg-red-500/8 border border-red-500/25 rounded-xl mb-2 animate-pulse">
+                      <ShieldAlert className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[13px] font-semibold text-red-400">
+                          Tool call <code className="bg-red-500/15 px-1.5 py-0.5 rounded text-[12px]">{gp.tool_name}</code> blocked by Guard
+                        </p>
+                        <p className="text-[12px] text-text-muted mt-0.5">
+                          Awaiting human approval. The agent is paused until this is resolved.
+                        </p>
+                        {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
+                          <div className="mt-1.5 text-[11px] text-text-secondary space-y-0.5">
+                            {gp.risk_source && <p><span className="text-amber-400 font-medium">Risk Source:</span> {gp.risk_source}</p>}
+                            {gp.failure_mode && <p><span className="text-orange-400 font-medium">Failure Mode:</span> {gp.failure_mode}</p>}
+                            {gp.real_world_harm && <p><span className="text-red-400 font-medium">Real World Harm:</span> {gp.real_world_harm}</p>}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => navigate('/monitor')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 text-[12px] font-semibold rounded-lg transition-colors flex-shrink-0"
+                      >
+                        Review <ExternalLink className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Messages */}
               <div className="flex-1 overflow-y-auto px-8 py-5 space-y-5">
@@ -626,17 +1112,67 @@ export default function Chat() {
 
               {/* Input */}
               <div className="flex-shrink-0 px-8 py-4 border-t border-border bg-surface-0">
-                <div className={`flex items-end gap-3 bg-surface-1 border rounded-xl px-4 py-3 transition-all ${
+                {/* Image preview strip */}
+                {pendingImages.length > 0 && (
+                  <div className="flex gap-2 mb-3 flex-wrap">
+                    {pendingImages.map(img => (
+                      <div key={img.id} className="relative group">
+                        <img
+                          src={img.dataUrl}
+                          alt={img.file.name}
+                          className="w-16 h-16 rounded-lg object-cover border border-border"
+                        />
+                        <button
+                          onClick={() => removeImage(img.id)}
+                          className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                        <p className="text-[9px] text-text-muted text-center mt-0.5 truncate max-w-[64px]">
+                          {img.file.name}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={e => { if (e.target.files) addImages(e.target.files); e.target.value = ''; }}
+                />
+
+                <div className={`flex items-center gap-3 bg-surface-1 border rounded-xl px-4 py-3 transition-all ${
                   sending
                     ? 'border-border opacity-80'
                     : 'border-border focus-within:border-accent/50 focus-within:ring-2 focus-within:ring-accent/15'
                 }`}>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={sending || pendingImages.length >= MAX_IMAGES}
+                    title={pendingImages.length >= MAX_IMAGES ? `Max ${MAX_IMAGES} images` : 'Attach image'}
+                    className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-surface-2 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >
+                    <ImagePlus className="w-4 h-4" />
+                  </button>
                   <textarea
                     ref={textareaRef}
                     value={input}
                     onChange={handleInputChange}
                     onKeyDown={handleKeyDown}
-                    placeholder={sending ? 'Waiting for response…' : 'Message (↵ to send, Shift+↵ for line breaks)'}
+                    onCompositionStart={() => {
+                      composingRef.current = true;
+                      setIsComposing(true);
+                    }}
+                    onCompositionEnd={() => {
+                      composingRef.current = false;
+                      lastCompositionEndAtRef.current = Date.now();
+                      setIsComposing(false);
+                    }}
+                    placeholder={sending ? 'Waiting for response…' : 'Message (↵ send, Shift+↵ newline, Ctrl+V paste image)'}
                     rows={1}
                     disabled={sending}
                     autoFocus
@@ -645,7 +1181,7 @@ export default function Chat() {
                   />
                   <button
                     onClick={handleSend}
-                    disabled={!input.trim() || sending}
+                    disabled={(!input.trim() && pendingImages.length === 0) || sending}
                     className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg bg-accent text-white hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm shadow-accent/20"
                   >
                     {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}

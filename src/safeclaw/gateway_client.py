@@ -261,6 +261,7 @@ class GatewayClient:
         message: str,
         thinking: str | None = None,
         timeout_ms: int | None = None,
+        attachments: list[dict] | None = None,
     ):
         """
         Async generator that streams chat response as delta chunks.
@@ -351,6 +352,8 @@ class GatewayClient:
                 params["thinking"] = thinking
             if timeout_ms:
                 params["timeoutMs"] = timeout_ms
+            if attachments:
+                params["attachments"] = attachments
 
             await self._request("chat.send", params)
 
@@ -497,6 +500,42 @@ class GatewayClient:
             })
         except Exception:
             pass  # non-fatal; tool events just won't show
+
+    async def patch_session(
+        self,
+        session_key: str,
+        *,
+        label: str | None = None,
+        model_override: str | None = None,
+        provider_override: str | None = None,
+        verbose_level: str | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+    ) -> dict | None:
+        """Patch session metadata such as model overrides and thinking level.
+
+        `model` uses the combined "provider/model" format supported by
+        sessions.patch (preferred over separate model_override / provider_override).
+        """
+        params: dict[str, Any] = {"key": session_key}
+        if label:
+            params["label"] = label
+        if model:
+            params["model"] = model
+        elif model_override or provider_override:
+            if model_override:
+                params["modelOverride"] = model_override
+            if provider_override:
+                params["providerOverride"] = provider_override
+        if verbose_level:
+            params["verboseLevel"] = verbose_level
+        if thinking_level is not None:
+            params["thinkingLevel"] = thinking_level
+
+        if len(params) == 1:
+            return None
+
+        return await self._request("sessions.patch", params)
 
     async def load_history(self, session_key: str, limit: int = 50) -> list:
         """Load chat history via chat.history WebSocket API."""

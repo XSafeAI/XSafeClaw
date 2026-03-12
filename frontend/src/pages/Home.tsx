@@ -42,7 +42,7 @@ function Card({ icon: Icon, title, description, onClick, accent }: ActionCard) {
 export default function Home() {
   const navigate = useNavigate();
   const goToWorld = () => {
-    window.location.href = '/world.html';
+    navigate('/world');
   };
 
   return (
@@ -50,10 +50,7 @@ export default function Home() {
 
       {/* ── Logo + title ── */}
       <div className="flex flex-col items-center gap-4 mb-16">
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-accent to-purple-500
-          flex items-center justify-center text-white font-bold text-2xl shadow-xl shadow-accent/25">
-          S
-        </div>
+        <img src="/logo.png" alt="SafeClaw" className="w-20 h-20 rounded-2xl shadow-xl shadow-accent/25" />
         <div className="text-center space-y-2">
           <h1 className="text-[32px] font-bold text-text-primary tracking-tight">
             SafeClaw

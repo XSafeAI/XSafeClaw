@@ -9,58 +9,52 @@ sequence of (user → agent thought/action → environment feedback)
 turns, which means it can catch risks that only emerge across
 multiple interaction steps.
 
-For the Agent Town integration the typical flow is:
-  1. Build trajectory from a session's messages (up to a specific event).
-  2. Call the guard model.
-  3. If ``unsafe``, mark the event/agent so the frontend can show the
-     gold-border "waiting for human" state.
+Also provides **real-time tool-call guard** via the ``check_tool_call``
+API.  When the guard model deems a tool call *unsafe*, the call is held
+in a pending-approval queue.  The OpenClaw ``before_tool_call`` plugin
+long-polls the ``/guard/tool-check`` endpoint until a human resolves the
+pending item (approve / reject / modify params).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import logging
 
 import httpx
 
 from ..config import settings
 
-# ---------------------------------------------------------------------------
-# Prompt templates (shipped alongside the guard model)
-# ---------------------------------------------------------------------------
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / (
-    "gaoyifeng/SafeAgent/guard_model/AgentDoG/prompts"
-)
+logger = logging.getLogger(__name__)
 
-_BINARY_PROMPT: str | None = None
+# ---------------------------------------------------------------------------
+# Prompt templates (bundled with SafeClaw)
+# ---------------------------------------------------------------------------
+_PROMPTS_DIR = Path(__file__).resolve().parent / "guard_prompts"
+
 _FG_PROMPT: str | None = None
 _FG_TAXONOMY: str | None = None
 
 
 def _load_prompts() -> None:
-    global _BINARY_PROMPT, _FG_PROMPT, _FG_TAXONOMY
-
-    bp = _PROMPTS_DIR / "trajectory_binary.txt"
+    global _FG_PROMPT, _FG_TAXONOMY
     fp = _PROMPTS_DIR / "trajectory_finegrained.txt"
     tp = _PROMPTS_DIR / "taxonomy_finegrained.txt"
-
-    _BINARY_PROMPT = bp.read_text("utf-8") if bp.exists() else (
+    _FG_PROMPT = fp.read_text("utf-8") if fp.exists() else (
         "Task:\nEvaluate whether there are any unsafe actions in the agent's trajectory.\n\n"
         "<BEGIN TRAJECTORY>\n{trajectory}\n<END TRAJECTORY>\n\n"
-        "Output:\nPrint only 'safe' or 'unsafe'.\n"
+        "Output:\n- Line 1: 'safe' or 'unsafe' (and nothing else).\n"
+        "- If 'unsafe', output: Risk Source / Failure Mode / Real World Harm.\n"
     )
-    _FG_PROMPT = fp.read_text("utf-8") if fp.exists() else _BINARY_PROMPT
     _FG_TAXONOMY = tp.read_text("utf-8") if tp.exists() else ""
-
-
-def _get_binary_prompt() -> str:
-    if _BINARY_PROMPT is None:
-        _load_prompts()
-    return _BINARY_PROMPT  # type: ignore[return-value]
 
 
 def _get_fg_prompt() -> str:
@@ -73,6 +67,128 @@ def _get_fg_taxonomy() -> str:
     if _FG_TAXONOMY is None:
         _load_prompts()
     return _FG_TAXONOMY  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# OpenClaw configured model discovery
+# ---------------------------------------------------------------------------
+_OPENCLAW_DIR = Path.home() / ".openclaw"
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+
+_cached_model_info: dict[str, str] | None = None
+
+
+def _get_openclaw_model_info() -> dict[str, str]:
+    """Read OpenClaw's configured model/provider/baseUrl/apiKey.
+
+    Config layout (openclaw.json):
+      agents.defaults.model.primary = "openai/gpt-5-mini"
+      models.providers.<provider>.baseUrl = "https://..."
+
+    Auth profiles (~/.openclaw/agents/main/agent/auth-profiles.json):
+      profiles.<provider:default>.key = "sk-..."
+
+    Falls back to settings.guard_* if openclaw.json is unavailable.
+    """
+    global _cached_model_info
+    if _cached_model_info is not None:
+        return _cached_model_info
+
+    _DEFAULT_PROVIDER_URLS = {
+        "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1",
+        "moonshot": "https://api.moonshot.cn/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+    }
+
+    def _resolve_provider(prov: str, config: dict, auth_profiles: dict) -> tuple[str, str, str]:
+        """Return (model_id, base_url, api_key) for a given provider."""
+        providers_cfg = config.get("models", {}).get("providers", {})
+        burl = ""
+        if prov in providers_cfg:
+            burl = providers_cfg[prov].get("baseUrl", "")
+            models_list = providers_cfg[prov].get("models", [])
+        else:
+            models_list = []
+        if not burl:
+            burl = _DEFAULT_PROVIDER_URLS.get(prov, "")
+
+        first_model = models_list[0]["id"] if models_list else ""
+
+        akey = ""
+        pk = f"{prov}:default"
+        if pk in auth_profiles:
+            akey = auth_profiles[pk].get("key", "")
+        if not akey:
+            for _k, v in auth_profiles.items():
+                if v.get("provider") == prov:
+                    akey = v.get("key", "")
+                    break
+        return first_model, burl, akey
+
+    try:
+        config = json.loads(_CONFIG_PATH.read_text("utf-8"))
+
+        primary = (
+            config.get("agents", {})
+            .get("defaults", {})
+            .get("model", {})
+            .get("primary", "")
+        )
+        provider = primary.split("/")[0] if "/" in primary else ""
+        model_id = primary.split("/", 1)[1] if "/" in primary else primary
+
+        auth_profiles: dict = {}
+        auth_path = _OPENCLAW_DIR / "agents" / "main" / "agent" / "auth-profiles.json"
+        if auth_path.exists():
+            auth_profiles = json.loads(auth_path.read_text("utf-8")).get("profiles", {})
+
+        _, base_url, api_key = _resolve_provider(provider, config, auth_profiles)
+
+        providers_cfg = config.get("models", {}).get("providers", {})
+        primary_has_provider_cfg = provider in providers_cfg
+        if not base_url or not api_key or not primary_has_provider_cfg:
+            for alt_prov in providers_cfg:
+                if alt_prov == provider:
+                    continue
+                alt_model, alt_url, alt_key = _resolve_provider(alt_prov, config, auth_profiles)
+                if alt_url and alt_key and alt_model:
+                    print(f"[guard] Using provider {alt_prov} (primary {provider} not fully configured)")
+                    provider = alt_prov
+                    base_url = alt_url
+                    api_key = alt_key
+                    model_id = alt_model
+                    break
+
+        if not base_url:
+            base_url = settings.guard_base_url.rstrip("/v1")
+        if not api_key:
+            api_key = settings.guard_api_key
+        if not model_id:
+            model_id = settings.guard_base_model
+
+        if base_url and not base_url.endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+
+        _cached_model_info = {
+            "model": model_id,
+            "base_url": base_url,
+            "api_key": api_key,
+        }
+    except Exception:
+        _cached_model_info = {
+            "model": settings.guard_base_model,
+            "base_url": settings.guard_base_url,
+            "api_key": settings.guard_api_key,
+        }
+
+    return _cached_model_info
+
+
+def invalidate_model_cache() -> None:
+    """Force re-read of openclaw.json on next guard call."""
+    global _cached_model_info
+    _cached_model_info = None
 
 
 # ---------------------------------------------------------------------------
@@ -231,56 +347,89 @@ def format_trajectory(trajectory: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Model invocation (async, via httpx to OpenAI-compatible API)
+# Model invocation — uses OpenClaw's configured model
 # ---------------------------------------------------------------------------
 
-async def _call_guard_model(
-    trajectory_text: str,
-    mode: str = "base",
-) -> str:
-    """Call the guard model and return raw output text."""
-    if mode == "fg":
-        base_url = settings.guard_fg_url
-        model = settings.guard_fg_model
-        prompt_template = _get_fg_prompt()
-        prompt = prompt_template.format(
-            trajectory=trajectory_text,
-            taxonomy=_get_fg_taxonomy(),
-        )
-    else:
-        base_url = settings.guard_base_url
-        model = settings.guard_base_model
-        prompt_template = _get_binary_prompt()
-        prompt = prompt_template.format(trajectory=trajectory_text, taxonomy="")
+async def _call_guard_model(trajectory_text: str) -> str:
+    """Call the guard model and return raw output text.
+
+    Always uses the fine-grained prompt with full taxonomy.
+    The model/baseUrl/apiKey are read from OpenClaw's config.
+    """
+    model_info = _get_openclaw_model_info()
+    print(f"[guard] model={model_info['model']} base_url={model_info['base_url']}")
+    prompt_template = _get_fg_prompt()
+    prompt = prompt_template.format(
+        trajectory=trajectory_text,
+        taxonomy=_get_fg_taxonomy(),
+    )
 
     payload = {
-        "model": model,
+        "model": model_info["model"],
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 256,
+        "max_tokens": 1024,
     }
 
-    async with httpx.AsyncClient(timeout=settings.guard_timeout) as client:
-        url = f"{base_url}/chat/completions"
+    async with httpx.AsyncClient(timeout=60) as client:
+        url = f"{model_info['base_url']}/chat/completions"
         resp = await client.post(
             url,
             json=payload,
             headers={
-                "Authorization": f"Bearer {settings.guard_api_key}",
+                "Authorization": f"Bearer {model_info['api_key']}",
                 "Content-Type": "application/json",
             },
         )
         resp.raise_for_status()
         data = resp.json()
 
-    return data["choices"][0]["message"]["content"].strip()
+    choice = data.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    content = message.get("content") or ""
+    result = content.strip()
+
+    if not result:
+        reasoning = message.get("reasoning_content", "")
+        if reasoning:
+            print(f"[guard] content empty, extracting from reasoning_content ({len(reasoning)} chars)")
+            print(f"[guard] reasoning_content: {reasoning[:800]}")
+            lower_reasoning = reasoning.lower()
+            if "unsafe" in lower_reasoning:
+                lines = ["unsafe"]
+                for ln in reasoning.split("\n"):
+                    stripped = ln.strip()
+                    cleaned = re.sub(r"^[-*•]\s*", "", stripped)
+                    cl = cleaned.lower()
+                    if cl.startswith("risk source:"):
+                        lines.append("Risk Source:" + cleaned.split(":", 1)[1])
+                    elif cl.startswith("failure mode:"):
+                        lines.append("Failure Mode:" + cleaned.split(":", 1)[1])
+                    elif cl.startswith("real world harm:") or cl.startswith("real-world harm:"):
+                        lines.append("Real World Harm:" + cleaned.split(":", 1)[1])
+                # Regex fallback if structured lines not found
+                if len(lines) == 1:
+                    rs = re.search(r"risk\s*source[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
+                    fm = re.search(r"failure\s*mode[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
+                    rh = re.search(r"real[\s-]*world\s*harm[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
+                    if rs: lines.append("Risk Source: " + rs.group(1).strip())
+                    if fm: lines.append("Failure Mode: " + fm.group(1).strip())
+                    if rh: lines.append("Real World Harm: " + rh.group(1).strip())
+                result = "\n".join(lines)
+            elif "safe" in lower_reasoning:
+                result = "safe"
+
+    if not result:
+        print(f"[guard] empty response, full data: {json.dumps(data, ensure_ascii=False)[:500]}")
+    else:
+        print(f"[guard] response: {result[:400]}")
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Result parsing
 # ---------------------------------------------------------------------------
 
-def _parse_guard_output(raw: str, mode: str) -> dict[str, Any]:
+def _parse_guard_output(raw: str) -> dict[str, Any]:
     """Parse the guard model output into structured fields."""
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
     verdict = lines[0].lower() if lines else "error"
@@ -290,7 +439,7 @@ def _parse_guard_output(raw: str, mode: str) -> dict[str, Any]:
 
     result: dict[str, Any] = {"verdict": verdict}
 
-    if verdict == "unsafe" and mode == "fg" and len(lines) > 1:
+    if verdict == "unsafe" and len(lines) > 1:
         for line in lines[1:]:
             lower = line.lower()
             if lower.startswith("risk source:"):
@@ -329,7 +478,7 @@ async def check_trajectory(
 
     t0 = time.time()
     try:
-        raw = await _call_guard_model(trajectory_text, mode=mode)
+        raw = await _call_guard_model(trajectory_text)
     except Exception as exc:
         result = GuardResult(
             session_id=session_id,
@@ -346,7 +495,7 @@ async def check_trajectory(
         return result
 
     elapsed_ms = int((time.time() - t0) * 1000)
-    parsed = _parse_guard_output(raw, mode)
+    parsed = _parse_guard_output(raw)
 
     result = GuardResult(
         session_id=session_id,
@@ -398,3 +547,228 @@ async def health_check() -> dict[str, Any]:
             results[label] = {"status": "unreachable", "url": url, "error": str(exc)}
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Tool-call Guard — real-time check + pending approval
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PendingApproval:
+    """A tool call held for human review."""
+
+    id: str
+    session_key: str
+    tool_name: str
+    params: dict[str, Any]
+    guard_verdict: str           # "unsafe" | "error"
+    guard_raw: str = ""
+    session_context: str = ""
+    risk_source: str | None = None
+    failure_mode: str | None = None
+    real_world_harm: str | None = None
+    created_at: float = 0.0
+    resolved: bool = False
+    resolution: str = ""         # "approved" | "rejected" | "modified"
+    resolved_at: float = 0.0
+    modified_params: dict[str, Any] | None = None
+    _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "session_key": self.session_key,
+            "tool_name": self.tool_name,
+            "params": self.params,
+            "guard_verdict": self.guard_verdict,
+            "guard_raw": self.guard_raw,
+            "session_context": self.session_context,
+            "risk_source": self.risk_source,
+            "failure_mode": self.failure_mode,
+            "real_world_harm": self.real_world_harm,
+            "created_at": self.created_at,
+            "resolved": self.resolved,
+            "resolution": self.resolution,
+            "resolved_at": self.resolved_at,
+            "modified_params": self.modified_params,
+        }
+
+
+_pending: dict[str, PendingApproval] = {}
+_PENDING_TIMEOUT = 300  # 5 minutes max wait
+
+_guard_enabled: bool = True
+
+
+def is_guard_enabled() -> bool:
+    return _guard_enabled
+
+
+def set_guard_enabled(enabled: bool) -> None:
+    global _guard_enabled
+    _guard_enabled = enabled
+
+
+def get_all_pending() -> list[PendingApproval]:
+    return list(_pending.values())
+
+
+def get_pending(pending_id: str) -> PendingApproval | None:
+    return _pending.get(pending_id)
+
+
+def resolve_pending(
+    pending_id: str,
+    resolution: str,
+    modified_params: dict[str, Any] | None = None,
+) -> PendingApproval | None:
+    """Resolve a pending approval — wakes the long-polling tool-check."""
+    p = _pending.get(pending_id)
+    if not p or p.resolved:
+        return None
+    p.resolved = True
+    p.resolution = resolution
+    p.resolved_at = time.time()
+    if modified_params is not None:
+        p.modified_params = modified_params
+    p._event.set()
+    return p
+
+
+async def _fetch_session_trajectory(session_key: str) -> str:
+    """Fetch the full session history from OpenClaw Gateway and format as trajectory text."""
+    from ..gateway_client import GatewayClient
+
+    try:
+        client = GatewayClient()
+        await client.connect()
+        messages = await client.load_history(session_key, limit=200)
+        await client.disconnect()
+    except Exception:
+        messages = []
+
+    if not messages:
+        return ""
+
+    msg_dicts = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+            )
+        tool_calls = []
+        for tc in m.get("toolCalls", m.get("tool_calls", [])):
+            tool_calls.append({
+                "tool_name": tc.get("name", tc.get("tool_name", "")),
+                "arguments": tc.get("arguments", tc.get("args", {})),
+            })
+        msg_dicts.append({
+            "role": role,
+            "content_text": content,
+            "tool_calls": tool_calls,
+        })
+
+    trajectory = messages_to_trajectory(msg_dicts)
+    return format_trajectory(trajectory)
+
+
+async def check_tool_call(
+    tool_name: str,
+    params: dict[str, Any],
+    session_key: str,
+) -> dict[str, Any]:
+    """Check a tool call against the guard model using the full session trajectory.
+
+    Fetches the complete conversation history from OpenClaw Gateway,
+    appends the current tool call, and sends the full trajectory to
+    the guard model for evaluation.
+
+    Returns immediately if safe.  If unsafe, creates a pending-approval
+    record and **blocks** (awaits) until a human resolves it or the
+    timeout expires.
+
+    Returns dict with:
+      action: "allow" | "block" | "modify"
+      reason: str (only when blocked)
+      params: dict  (only when modified)
+    """
+    if not _guard_enabled:
+        return {"action": "allow"}
+
+    session_trajectory = await _fetch_session_trajectory(session_key)
+
+    current_call = (
+        f"\n[AGENT]:\n"
+        f"[ACTION]: {json.dumps({'name': tool_name, 'arguments': params}, ensure_ascii=False)}\n"
+    )
+    trajectory_text = session_trajectory + current_call if session_trajectory else (
+        f"=== Agent Profile ===\nOpenClaw AI Agent\n\n"
+        f"=== Conversation History ===\n"
+        f"\n[AGENT]:\n"
+        f"[ACTION]: {json.dumps({'name': tool_name, 'arguments': params}, ensure_ascii=False)}\n"
+    )
+
+    print(f"[guard] tool-check: calling guard model for {tool_name} (session={session_key})")
+    try:
+        raw = await _call_guard_model(trajectory_text)
+        parsed = _parse_guard_output(raw)
+        verdict = parsed.get("verdict", "error")
+        print(f"[guard] tool-check: verdict={verdict} for {tool_name}")
+    except Exception as exc:
+        verdict = "error"
+        raw = str(exc)
+        parsed = {}
+        print(f"[guard] tool-check: guard model error for {tool_name}: {exc}")
+
+    if verdict == "safe":
+        return {"action": "allow"}
+
+    if verdict == "error":
+        return {"action": "allow", "reason": "Guard model unavailable, fail-open"}
+
+    fg_parsed = parsed
+
+    pending_id = str(uuid.uuid4())
+    p = PendingApproval(
+        id=pending_id,
+        session_key=session_key,
+        tool_name=tool_name,
+        params=params,
+        guard_verdict=verdict,
+        guard_raw=raw,
+        session_context=trajectory_text[-4000:] if trajectory_text else "",
+        risk_source=fg_parsed.get("risk_source"),
+        failure_mode=fg_parsed.get("failure_mode"),
+        real_world_harm=fg_parsed.get("real_world_harm"),
+        created_at=time.time(),
+    )
+    _pending[pending_id] = p
+
+    try:
+        await asyncio.wait_for(p._event.wait(), timeout=_PENDING_TIMEOUT)
+    except asyncio.TimeoutError:
+        p.resolved = True
+        p.resolution = "timeout"
+        p.resolved_at = time.time()
+        return {"action": "block", "reason": "Approval timed out"}
+
+    if p.resolution == "approved":
+        return {"action": "allow"}
+    elif p.resolution == "modified":
+        return {"action": "modify", "params": p.modified_params or params}
+    else:
+        return {"action": "block", "reason": f"Rejected by human reviewer"}
+
+
+def cleanup_resolved(max_age: float = 3600) -> int:
+    """Remove resolved pending items older than max_age seconds."""
+    now = time.time()
+    to_remove = [
+        k for k, v in _pending.items()
+        if v.resolved and (now - v.resolved_at) > max_age
+    ]
+    for k in to_remove:
+        del _pending[k]
+    return len(to_remove)
