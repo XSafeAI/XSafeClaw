@@ -86,6 +86,63 @@ def _build_device_auth_payload(
     return "|".join(parts)
 
 
+async def auto_approve_pending_devices() -> list[str]:
+    """Approve only the SafeClaw device's pending pairing request.
+
+    Reads the local device identity to get our deviceId, then only
+    approves requests that match it — never touches other devices.
+    """
+    import subprocess
+    approved: list[str] = []
+
+    local_identity = _load_device_identity()
+    local_device_id = local_identity.get("deviceId", "") if local_identity else ""
+    if not local_device_id:
+        print("⚠️  No local device identity found; cannot auto-approve")
+        return approved
+
+    try:
+        result = subprocess.run(
+            ["openclaw", "devices", "list", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        raw = result.stdout.strip()
+        if not raw:
+            return approved
+        try:
+            devices = json.loads(raw)
+        except json.JSONDecodeError:
+            return approved
+
+        if isinstance(devices, dict):
+            devices = devices.get("devices", devices.get("requests", [devices]))
+        if not isinstance(devices, list):
+            return approved
+
+        for dev in devices:
+            dev_id = dev.get("deviceId") or dev.get("device_id", "")
+            req_id = dev.get("requestId") or dev.get("id") or dev_id
+            status = dev.get("status", "").lower()
+            if status == "approved" or not req_id:
+                continue
+            if dev_id != local_device_id:
+                continue
+            sub = subprocess.run(
+                ["openclaw", "devices", "approve", str(req_id)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if sub.returncode == 0:
+                approved.append(str(req_id))
+                print(f"✅ Auto-approved SafeClaw device: {req_id}")
+            else:
+                print(f"⚠️  Failed to approve device {req_id}: {sub.stderr.strip()}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️  auto_approve_pending_devices error: {e}")
+    return approved
+
+
 # ─── GatewayClient ──────────────────────────────────────────────────────────
 
 class GatewayClient:
@@ -103,6 +160,25 @@ class GatewayClient:
 
     async def connect(self) -> None:
         """Connect to the gateway and complete the HelloOk handshake."""
+        try:
+            await self._try_connect()
+        except Exception as e:
+            if "pairing" not in str(e).lower():
+                raise
+            print("🔑 Device pairing required — auto-approving...")
+            await self.disconnect()
+            approved = await auto_approve_pending_devices()
+            if not approved:
+                raise Exception(
+                    "pairing required but no pending devices found to approve. "
+                    "Run 'openclaw devices list' manually."
+                ) from e
+            await asyncio.sleep(1)
+            self._connected = asyncio.Event()
+            await self._try_connect()
+
+    async def _try_connect(self) -> None:
+        """Single connection attempt to the gateway."""
         import websockets
 
         if not self._url or not self._token:
@@ -113,7 +189,6 @@ class GatewayClient:
             if not self._token:
                 self._token = cfg.get("auth", {}).get("token")
 
-        # Load device identity for signing
         self._device = _load_device_identity()
 
         self._ws = await websockets.connect(
@@ -121,8 +196,6 @@ class GatewayClient:
         )
         self._reader_task = asyncio.create_task(self._read_loop())
 
-        # _read_loop will fire _send_connect when the challenge arrives.
-        # If no challenge within 2 s, send connect without nonce.
         try:
             await asyncio.wait_for(self._connected.wait(), timeout=2.0)
         except asyncio.TimeoutError:

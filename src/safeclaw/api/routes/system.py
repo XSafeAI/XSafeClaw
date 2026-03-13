@@ -1573,6 +1573,17 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         tmp.rename(_CONFIG_PATH)
 
 
+async def _auto_approve_devices() -> None:
+    """Auto-approve any pending OpenClaw device pairing requests."""
+    from ...gateway_client import auto_approve_pending_devices
+    try:
+        approved = await auto_approve_pending_devices()
+        if approved:
+            print(f"🔑 Auto-approved {len(approved)} device(s) during configuration")
+    except Exception as e:
+        print(f"⚠️  Device auto-approve skipped: {e}")
+
+
 def _install_safeclaw_guard_plugin() -> None:
     """Copy safeclaw-guard plugin files to ~/.openclaw/extensions/ so OpenClaw loads them."""
     src_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugins" / "safeclaw-guard"
@@ -1739,6 +1750,9 @@ async def onboard_config(body: OnboardConfigRequest):
 
     # ── Install SafeClaw Guard plugin into OpenClaw extensions ─────────
     _install_safeclaw_guard_plugin()
+
+    # ── Auto-approve pending device pairing requests ─────────────────
+    await _auto_approve_devices()
 
     workspace = str(Path(body.workspace).expanduser())
     return {
