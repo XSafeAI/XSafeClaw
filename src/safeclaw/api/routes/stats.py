@@ -1,6 +1,11 @@
 """Statistics API endpoints."""
 
+from __future__ import annotations
+
+import json
+import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -10,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...database import get_db
 from ...models import Message, Session, ToolCall
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_OPENCLAW_DIR = Path.home() / ".openclaw"
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 
 
 @router.post("/resync")
@@ -200,3 +209,145 @@ async def get_daily_stats(
         )
         for row in rows
     ]
+
+
+def _read_openclaw_config() -> dict:
+    if _CONFIG_PATH.exists():
+        try:
+            return json.loads(_CONFIG_PATH.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _get_channels_info(config: dict) -> list[dict]:
+    channels = config.get("channels", {})
+    result = []
+    for name, cfg in channels.items():
+        result.append({
+            "name": name,
+            "enabled": cfg.get("enabled", True),
+            "accounts": len(cfg.get("accounts", {})),
+        })
+    return result
+
+
+def _get_model_info(config: dict) -> dict:
+    primary = (
+        config.get("agents", {})
+        .get("defaults", {})
+        .get("model", {})
+        .get("primary", "")
+    )
+    provider = primary.split("/")[0] if "/" in primary else ""
+    model_id = primary.split("/", 1)[1] if "/" in primary else primary
+
+    providers_cfg = config.get("models", {}).get("providers", {})
+    cost_cfg = {}
+    for prov_name, prov_data in providers_cfg.items():
+        for m in prov_data.get("models", []):
+            if m.get("id") == model_id or prov_name == provider:
+                cost_cfg = m.get("cost", {})
+                break
+        if cost_cfg:
+            break
+
+    return {
+        "primary": primary,
+        "provider": provider,
+        "modelId": model_id,
+        "cost": cost_cfg,
+    }
+
+
+def _compute_cost(tokens: dict, cost_cfg: dict) -> float:
+    if not cost_cfg:
+        return 0.0
+    inp = (tokens.get("input", 0) or 0) * (cost_cfg.get("input", 0) or 0)
+    out = (tokens.get("output", 0) or 0) * (cost_cfg.get("output", 0) or 0)
+    cr = (tokens.get("cacheRead", 0) or 0) * (cost_cfg.get("cacheRead", 0) or 0)
+    cw = (tokens.get("cacheWrite", 0) or 0) * (cost_cfg.get("cacheWrite", 0) or 0)
+    return (inp + out + cr + cw) / 1_000_000
+
+
+@router.get("/dashboard")
+async def get_dashboard(
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregated dashboard: sessions, channels, tokens, cost, model info."""
+    config = _read_openclaw_config()
+
+    session_count = (await db.execute(select(func.count(Session.session_id)))).scalar_one() or 0
+    message_count = (await db.execute(select(func.count(Message.id)))).scalar_one() or 0
+    assistant_count = (await db.execute(
+        select(func.count(Message.id)).where(Message.role == "assistant")
+    )).scalar_one() or 0
+    user_count = (await db.execute(
+        select(func.count(Message.id)).where(Message.role == "user")
+    )).scalar_one() or 0
+    tool_call_count = (await db.execute(select(func.count(ToolCall.id)))).scalar_one() or 0
+
+    token_row = (await db.execute(
+        select(
+            func.sum(Message.total_tokens).label("total"),
+            func.sum(Message.input_tokens).label("input"),
+            func.sum(Message.output_tokens).label("output"),
+        ).where(Message.role == "assistant")
+    )).one()
+
+    yesterday = datetime.now(timezone.utc) - timedelta(hours=24)
+    active_24h = (await db.execute(
+        select(func.count(Session.session_id)).where(Session.last_activity_at >= yesterday)
+    )).scalar_one() or 0
+
+    tokens = {
+        "total": token_row.total or 0,
+        "input": token_row.input or 0,
+        "output": token_row.output or 0,
+    }
+
+    model_info = _get_model_info(config)
+    cost = _compute_cost(tokens, model_info.get("cost", {}))
+
+    channels = _get_channels_info(config)
+
+    model_stats_stmt = (
+        select(
+            Message.provider,
+            Message.model_id,
+            func.count(Message.id).label("count"),
+            func.sum(Message.total_tokens).label("tokens"),
+        )
+        .where(Message.role == "assistant")
+        .where(Message.provider.isnot(None))
+        .group_by(Message.provider, Message.model_id)
+        .order_by(func.count(Message.id).desc())
+    )
+    model_rows = (await db.execute(model_stats_stmt)).all()
+    models = [
+        {
+            "provider": r.provider or "unknown",
+            "modelId": r.model_id or "unknown",
+            "messages": r.count or 0,
+            "tokens": r.tokens or 0,
+        }
+        for r in model_rows
+    ]
+
+    return {
+        "sessions": {
+            "total": session_count,
+            "active24h": active_24h,
+        },
+        "messages": {
+            "total": message_count,
+            "assistant": assistant_count,
+            "user": user_count,
+        },
+        "toolCalls": tool_call_count,
+        "tokens": tokens,
+        "cost": round(cost, 6),
+        "channels": channels,
+        "model": model_info,
+        "models": models,
+    }

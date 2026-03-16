@@ -10,6 +10,7 @@ import {
   ChevronDown, ChevronRight,
   ShieldAlert, ScanLine, Shield,
   Brain, FileText, Eye, EyeOff,
+  Hash, Cpu, DollarSign, Radio,
 } from 'lucide-react';
 import { sessionsAPI, eventsAPI, statsAPI, guardAPI, skillsAPI, memoryAPI } from '../services/api';
 import api from '../services/api';
@@ -304,7 +305,20 @@ function SkillsPanel() {
       const res = await skillsAPI.list();
       const payload = res.data;
       if (payload.error) setError(payload.error);
-      setSkills(payload.skills || []);
+      const merged = (payload.skills || []).map((s: any) => {
+        const scan = s.scanStatus;
+        if (scan && typeof scan === 'object') {
+          return {
+            ...s,
+            scanStatus: scan.status as any,
+            scanRiskType: scan.risk_type || scan.riskType || '',
+            scanDetails: scan.details || '',
+            scanTime: scan.scanned_at || scan.scannedAt || 0,
+          };
+        }
+        return s;
+      });
+      setSkills(merged);
     } catch (err: any) {
       console.error('[Skills] fetch error:', err);
       setError(`Failed to fetch skills: ${err?.message || err}`);
@@ -568,7 +582,20 @@ function MemoryPanel() {
   const fetchFiles = useCallback(async () => {
     try {
       const res = await memoryAPI.list();
-      setFiles(res.data.files || []);
+      const merged = (res.data.files || []).map((f: any) => {
+        const scan = f.scan;
+        if (scan && typeof scan === 'object') {
+          return {
+            ...f,
+            scanStatus: scan.status as any,
+            scanRiskType: scan.risk_type || scan.riskType || '',
+            scanDetails: scan.details || '',
+            scanTime: scan.scanned_at || scan.scannedAt || 0,
+          };
+        }
+        return f;
+      });
+      setFiles(merged);
     } catch (err: any) {
       setError(`Failed to fetch memory files: ${err?.message || err}`);
     }
@@ -1022,6 +1049,102 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
   );
 }
 
+/* ============ Dashboard Stats Panel ============ */
+function DashboardPanel({ data }: { data: any }) {
+  const sessions = data.sessions || {};
+  const messages = data.messages || {};
+  const tokens = data.tokens || {};
+  const channels = data.channels || [];
+  const model = data.model || {};
+  const models = data.models || [];
+  const cost = data.cost ?? 0;
+  const toolCalls = data.toolCalls ?? 0;
+
+  const formatTokens = (n: number) => {
+    if (!n) return '0';
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return n.toString();
+  };
+
+  const cards: { icon: any; label: string; value: string | number; sub?: string; accent?: string }[] = [
+    {
+      icon: Users,
+      label: 'Sessions',
+      value: sessions.total ?? 0,
+      sub: `${sessions.active24h ?? 0} active (24h)`,
+      accent: 'text-blue-400',
+    },
+    {
+      icon: Radio,
+      label: 'Channels',
+      value: channels.length,
+      sub: channels.map((c: any) => c.name).join(', ') || 'None',
+      accent: 'text-emerald-400',
+    },
+    {
+      icon: MessageSquare,
+      label: 'Messages',
+      value: messages.total ?? 0,
+      sub: `${messages.user ?? 0} user · ${messages.assistant ?? 0} assistant`,
+      accent: 'text-violet-400',
+    },
+    {
+      icon: Wrench,
+      label: 'Tool Calls',
+      value: toolCalls,
+      accent: 'text-amber-400',
+    },
+    {
+      icon: Hash,
+      label: 'Tokens',
+      value: formatTokens(tokens.total ?? 0),
+      sub: tokens.total ? `↓${formatTokens(tokens.input)} ↑${formatTokens(tokens.output)}` : 'N/A',
+      accent: 'text-cyan-400',
+    },
+    {
+      icon: DollarSign,
+      label: 'Est. Cost',
+      value: cost > 0 ? `$${cost.toFixed(4)}` : '$0',
+      sub: model.primary || 'N/A',
+      accent: 'text-rose-400',
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      {cards.map((card) => {
+        const Icon = card.icon;
+        return (
+          <div
+            key={card.label}
+            className="bg-surface-1 border border-border rounded-xl p-3.5 hover:border-border-active transition-colors group"
+          >
+            <div className="flex items-center gap-2 mb-2">
+              <div className={`w-7 h-7 rounded-lg bg-surface-0 flex items-center justify-center ${card.accent || 'text-text-muted'} group-hover:scale-105 transition-transform`}>
+                <Icon className="w-3.5 h-3.5" />
+              </div>
+              <span className="text-[10px] font-medium text-text-muted uppercase tracking-wider">{card.label}</span>
+            </div>
+            <p className="text-lg font-bold text-text-primary leading-none">{card.value}</p>
+            {card.sub && (
+              <p className="text-[10px] text-text-muted mt-1.5 truncate" title={card.sub}>{card.sub}</p>
+            )}
+          </div>
+        );
+      })}
+      {models.length > 0 && (
+        <div className="col-span-2 sm:col-span-3 lg:col-span-6 flex items-center gap-2 px-1">
+          <Cpu className="w-3 h-3 text-text-muted flex-shrink-0" />
+          <span className="text-[10px] text-text-muted">
+            Models: {models.map((m: any) => `${m.provider}/${m.modelId} (${m.messages} msgs)`).join(' · ')}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============ Main Page ============ */
 export default function Monitor() {
   const [searchParams] = useSearchParams();
@@ -1038,21 +1161,21 @@ export default function Monitor() {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('active');
   const [pendingCount, setPendingCount] = useState(0);
+  const [dashboard, setDashboard] = useState<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   /* ---------- Data fetching ---------- */
   const fetchData = useCallback(async () => {
     try {
-      const [sessRes, statsRes, eventsRes] = await Promise.all([
+      const [sessRes, statsRes, eventsRes, dashRes] = await Promise.all([
         sessionsAPI.list({ page: 1, page_size: 50 }),
         statsAPI.overview().catch(() => ({ data: {} as any })),
         api.get('/events/', { params: { limit: 100 } }).catch(() => ({ data: { events: [] } })),
+        statsAPI.dashboard().catch(() => ({ data: null })),
       ]);
 
       const items = sessRes.data.items || sessRes.data;
-      // Handle both possible response shapes
       const sessionList: any[] = Array.isArray(items) ? items : [];
-      // Normalize: API may return { sessions: [...] }
       const rawSessions = (sessRes.data as any).sessions || sessionList;
       setSessions(Array.isArray(rawSessions) ? rawSessions : []);
 
@@ -1066,6 +1189,8 @@ export default function Monitor() {
         tools:    s.total_tool_calls ?? 0,
         events:   s.total_events ?? 0,
       });
+
+      if (dashRes.data) setDashboard(dashRes.data);
     } catch (err) {
       console.error('Failed to fetch data', err);
     } finally {
@@ -1261,6 +1386,9 @@ export default function Monitor() {
         {/* ========== Tab: Agent — Timeline ========== */}
         {activeTab === 'agent' && (
           <div className="space-y-4">
+            {/* Dashboard Stats Panel */}
+            {dashboard && <DashboardPanel data={dashboard} />}
+
             {/* Toolbar */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">

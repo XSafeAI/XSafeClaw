@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 router = APIRouter()
 
 # --------------- Data file path ---------------
-_DATA_FILE = Path(__file__).resolve().parents[4] / "external" / "RedWork" / "data" / "generate" / "decomposed_epoch1.jsonl"
+_DATA_FILE = Path(__file__).resolve().parents[2] / "data" / "redteam" / "decomposed_epoch1.jsonl"
 
 
 def _load_records() -> list[dict]:

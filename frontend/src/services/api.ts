@@ -187,6 +187,9 @@ export const statsAPI = {
   
   toolUsage: () =>
     api.get('/stats/tool-usage'),
+
+  dashboard: () =>
+    api.get<any>('/stats/dashboard'),
 };
 
 // Guard API
