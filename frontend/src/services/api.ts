@@ -307,4 +307,31 @@ export const systemAPI = {
     ),
 };
 
+export const skillsAPI = {
+  list: () => api.get<{ skills: any[]; error?: string }>('/skills/list'),
+  check: () => api.get<{ checks: any[] }>('/skills/check'),
+  update: (skillKey: string, data: { enabled?: boolean; api_key?: string; env?: Record<string, string> }) =>
+    api.post(`/skills/${skillKey}/update`, data),
+  content: (skillKey: string) =>
+    api.get<{ key: string; content: string; path: string; sizeBytes: number; modifiedAt: number }>(`/skills/${skillKey}/content`),
+  scanAll: (keys?: string[], force?: boolean) =>
+    api.post<{ results: any[] }>('/skills/scan-all', { keys, force }),
+  scanOne: (skillKey: string, force?: boolean) =>
+    api.post<any>(`/skills/${skillKey}/scan`, { force }),
+  scanStatus: () =>
+    api.get<Record<string, any>>('/skills/scan-status'),
+};
+
+export const memoryAPI = {
+  list: () => api.get<{ files: any[] }>('/memory/list'),
+  content: (fileKey: string) =>
+    api.get<{ key: string; content: string; sizeBytes: number; modifiedAt: number }>(`/memory/content/${fileKey}`),
+  scanAll: (keys?: string[], force?: boolean) =>
+    api.post<{ results: any[] }>('/memory/scan-all', { keys, force }),
+  scanOne: (fileKey: string, force?: boolean) =>
+    api.post<any>(`/memory/${fileKey}/scan`, { force }),
+  scanStatus: () =>
+    api.get<Record<string, any>>('/memory/scan-status'),
+};
+
 export default api;

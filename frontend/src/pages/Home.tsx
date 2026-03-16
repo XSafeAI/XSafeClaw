@@ -42,7 +42,7 @@ function Card({ icon: Icon, title, description, onClick, accent }: ActionCard) {
 export default function Home() {
   const navigate = useNavigate();
   const goToWorld = () => {
-    navigate('/world');
+    window.location.href = '/agent-town.html';
   };
 
   return (

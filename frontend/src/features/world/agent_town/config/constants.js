@@ -99,6 +99,7 @@ export const CHAR_NAMES = [
 // ── NPC meeting interaction ──
 export const MEETING_DIST     = 40;   // pixel distance to trigger
 export const MEETING_TIME     = 4;    // seconds NPCs chat
+export const MEETING_COOLDOWN = 60;   // seconds before the same pair can chat again
 export const BUBBLE_MAX_CHARS = 96;
 
 // ── Walk zones (static mode patrol paths) ──

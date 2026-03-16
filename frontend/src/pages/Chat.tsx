@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
-  Settings2, Brain, Cpu, ShieldAlert, ExternalLink,
+  Settings2, Brain, Cpu, ShieldAlert, ExternalLink, Shield,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { chatAPI, guardAPI } from '../services/api';
@@ -267,6 +267,8 @@ export default function Chat() {
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
 
+  const [guardOn, setGuardOn] = useState(true);
+
   const [guardPending, setGuardPending] = useState<{
     id: string; tool_name: string; risk_source: string | null;
     failure_mode: string | null; real_world_harm: string | null;
@@ -359,6 +361,17 @@ export default function Chat() {
   useEffect(() => {
     if (activeKey) loadHistory(activeKey);
   }, [activeKey]); // eslint-disable-line
+
+  // Load initial guard state
+  useEffect(() => {
+    guardAPI.getEnabled().then(r => setGuardOn(r.data.enabled)).catch(() => {});
+  }, []);
+
+  const toggleGuard = async () => {
+    const next = !guardOn;
+    setGuardOn(next);
+    try { await guardAPI.setEnabled(next); } catch { setGuardOn(!next); }
+  };
 
   // Load available models once
   useEffect(() => {
@@ -754,14 +767,27 @@ export default function Chat() {
           <h1 className="text-xl font-bold text-text-primary">Safe Chat</h1>
           <p className="text-[13px] text-text-muted mt-1">A secure gateway to chat with your Claw agent.</p>
         </div>
-        <button
-          onClick={handleNewSession}
-          disabled={connecting}
-          className="flex items-center gap-2 px-4 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20"
-        >
-          {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          {connecting ? 'Connecting…' : 'New Session'}
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={toggleGuard}
+            className="flex items-center gap-2 group"
+            title={guardOn ? 'Guard is ON — tool calls will be checked' : 'Guard is OFF — tool calls pass through'}
+          >
+            <span className={`text-[12px] font-semibold transition-colors ${guardOn ? 'text-emerald-400' : 'text-text-muted'}`}>
+              <Shield className="w-4 h-4 inline -mt-0.5 mr-1" />Guard
+            </span>
+            <div className={`relative w-9 h-5 rounded-full transition-colors ${guardOn ? 'bg-emerald-500' : 'bg-surface-2'}`}>
+              <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${guardOn ? 'translate-x-[18px]' : 'translate-x-[2px]'}`} />
+            </div>
+          </button>
+          <button
+            onClick={handleNewSession}
+            disabled={connecting}
+            className="flex items-center gap-2 px-4 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20"
+          >
+            {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            {connecting ? 'Connecting…' : 'New Session'}
+          </button>
+        </div>
       </div>
 
       {/* Body */}

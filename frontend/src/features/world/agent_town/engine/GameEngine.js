@@ -6,7 +6,7 @@ import {
   FW, FH, NPC_SCALE, CHAR_NAMES, BG_COLOR,
   MAP_MODE, TILED_MAP_URL, TILED_BASE_PATH, DEFAULT_MAP_CONFIG,
   SCENE_IMAGE_URL, SCENE_W, SCENE_H,
-  WALK_ZONES, MEETING_DIST, MEETING_TIME, BUBBLE_MAX_CHARS,
+  WALK_ZONES, MEETING_DIST, MEETING_TIME, MEETING_COOLDOWN, BUBBLE_MAX_CHARS,
 } from '../config/constants';
 
 const GUARD_PORTAL_URL = '/portals/3.png';
@@ -38,6 +38,7 @@ export default class GameEngine {
     this._eventsByAgent = new Map();
     this._waitingAgents = new Set();
     this._agentsById = new Map();
+    this._meetingCooldowns = new Map();
     this.guardLayer = null;
     this.guardFxLayer = null;
     this.guardUnits = [];
@@ -253,6 +254,7 @@ export default class GameEngine {
     this._events = events;
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
+    this._meetingCooldowns.clear();
 
     const maxSceneAgents = this.pathfinder
       ? Math.min(agents.length, Math.max(CHAR_NAMES.length, 1))
@@ -369,6 +371,7 @@ export default class GameEngine {
     if (!npc) return;
     if (npc.meetingPartner) {
       const partner = npc.meetingPartner;
+      this._setMeetingPairCooldown(npc, partner);
       partner.meetingPartner = null;
       if (partner.aiState === 'meeting') {
         partner.aiState = 'idle';
@@ -382,6 +385,35 @@ export default class GameEngine {
     npc.meetingPartner = null;
     npc.meetingTimer = 0;
     this._removeBubble(npc);
+  }
+
+  _getNpcMeetingId(npc) {
+    return npc?.agent?.id || npc?.agent?.name || npc?.charName || null;
+  }
+
+  _getMeetingPairKey(a, b) {
+    const aId = this._getNpcMeetingId(a);
+    const bId = this._getNpcMeetingId(b);
+    if (!aId || !bId) return null;
+    return [aId, bId].sort().join('::');
+  }
+
+  _isMeetingPairCoolingDown(a, b) {
+    const key = this._getMeetingPairKey(a, b);
+    if (!key) return false;
+    const expiresAt = this._meetingCooldowns.get(key);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+      this._meetingCooldowns.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  _setMeetingPairCooldown(a, b, durationSeconds = MEETING_COOLDOWN) {
+    const key = this._getMeetingPairKey(a, b);
+    if (!key) return;
+    this._meetingCooldowns.set(key, Date.now() + durationSeconds * 1000);
   }
 
   _attachNpcDragHandlers(npc, activate) {
@@ -486,6 +518,103 @@ export default class GameEngine {
       x: Math.max(halfW, Math.min(this.sceneW - halfW, x)),
       y: Math.max(minY, Math.min(this.sceneH, y)),
     };
+  }
+
+  _canNpcStandAt(npc, x, y) {
+    if (!this.pathfinder || npc?.mode !== 'pathfind') return true;
+    const tile = this.pathfinder.pixelToTile(x, y);
+    return this.pathfinder.isWalkable(tile.x, tile.y);
+  }
+
+  _getNpcFootRadius() {
+    // Use a foot-circle instead of the full sprite width: the character art is
+    // visually wide after scaling, but only the lower body should influence
+    // crowd spacing and meeting placement.
+    return Math.max(14, Math.round(FW * NPC_SCALE * 0.19));
+  }
+
+  _getNpcPersonalSpacing(a, b) {
+    return this._getNpcFootRadius(a) + this._getNpcFootRadius(b) + 4;
+  }
+
+  _getNpcMeetingSpacing(a, b) {
+    return Math.max(
+      this._getNpcPersonalSpacing(a, b) + 18,
+      Math.round(FW * NPC_SCALE * 0.6),
+    );
+  }
+
+  _getNpcMeetingTriggerDistance(a, b) {
+    return Math.max(MEETING_DIST, this._getNpcMeetingSpacing(a, b) - 18);
+  }
+
+  _pushNpcPairApart(a, b, targetDistance, maxCorrection = Number.POSITIVE_INFINITY) {
+    if (!a?.container || !b?.container || a === b) return;
+    if (a._dragActive || b._dragActive) return;
+
+    const ax = a.container.x;
+    const ay = a.container.y;
+    const bx = b.container.x;
+    const by = b.container.y;
+    let dx = bx - ax;
+    let dy = by - ay;
+    let dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist >= targetDistance) return;
+
+    if (dist < 0.001) {
+      dx = ax <= bx ? 1 : -1;
+      dy = 0;
+      dist = 1;
+    }
+
+    let nx = dx / dist;
+    let ny = dy / dist;
+
+    // When characters meet on mostly vertical paths, horizontal separation
+    // looks much more natural than stacking one "behind" the other.
+    if (Math.abs(nx) < 0.28) {
+      nx = ax <= bx ? 1 : -1;
+      ny = 0;
+    }
+
+    const overlap = targetDistance - dist;
+    const push = Math.min(maxCorrection, overlap / 2);
+    const nextA = this._clampDropPoint(ax - nx * push, ay - ny * push);
+    const nextB = this._clampDropPoint(bx + nx * push, by + ny * push);
+
+    if (this._canNpcStandAt(a, nextA.x, nextA.y)) {
+      a.container.x = nextA.x;
+      a.container.y = nextA.y;
+      a._lastX = nextA.x;
+      a._lastY = nextA.y;
+    }
+
+    if (this._canNpcStandAt(b, nextB.x, nextB.y)) {
+      b.container.x = nextB.x;
+      b.container.y = nextB.y;
+      b._lastX = nextB.x;
+      b._lastY = nextB.y;
+    }
+  }
+
+  _applyNpcCrowdSeparation() {
+    for (let i = 0; i < this.npcs.length; i++) {
+      const a = this.npcs[i];
+      if (!a?.container || a.mode === 'pending') continue;
+
+      for (let j = i + 1; j < this.npcs.length; j++) {
+        const b = this.npcs[j];
+        if (!b?.container || b.mode === 'pending') continue;
+
+        const sameMeeting = a.meetingPartner === b && b.meetingPartner === a;
+        const targetDistance = sameMeeting
+          ? this._getNpcMeetingSpacing(a, b)
+          : this._getNpcPersonalSpacing(a, b);
+        const maxCorrection = sameMeeting ? 8 : 2.8;
+        this._pushNpcPairApart(a, b, targetDistance, maxCorrection);
+      }
+    }
   }
 
   _findNearestWalkableTile(tx, ty, maxRadius = 16) {
@@ -609,6 +738,7 @@ export default class GameEngine {
     if (shouldFreeze) {
       if (npc.meetingPartner) {
         const partner = npc.meetingPartner;
+        this._setMeetingPairCooldown(npc, partner);
         partner.meetingPartner = null;
         if (partner.aiState === 'meeting') {
           partner.aiState = 'idle';
@@ -962,9 +1092,10 @@ export default class GameEngine {
           for (let j = i + 1; j < this.npcs.length; j++) {
             const b = this.npcs[j];
             if (!b || b.aiState !== 'walking') continue;
+            if (this._isMeetingPairCoolingDown(a, b)) continue;
             const dx = a.container.x - b.container.x;
             const dy = a.container.y - b.container.y;
-            if (Math.sqrt(dx * dx + dy * dy) < MEETING_DIST) {
+            if (Math.sqrt(dx * dx + dy * dy) < this._getNpcMeetingTriggerDistance(a, b)) {
               this._startMeeting(a, b);
             }
           }
@@ -988,7 +1119,12 @@ export default class GameEngine {
         } else if (npc.mode === 'pathfind' && this.pathfinder) {
           this._updatePathfind(npc, delta);
         }
+      }
 
+      this._applyNpcCrowdSeparation();
+
+      for (const npc of this.npcs) {
+        if (!npc) continue;
         npc.container.zIndex = Math.round(npc.container.y);
 
         if (npc.emoteSprite) {
@@ -1018,9 +1154,11 @@ export default class GameEngine {
   }
 
   _startMeeting(a, b) {
+    if (this._isMeetingPairCoolingDown(a, b)) return;
     a.aiState = 'meeting'; b.aiState = 'meeting';
     a.meetingTimer = MEETING_TIME; b.meetingTimer = MEETING_TIME;
     a.meetingPartner = b; b.meetingPartner = a;
+    this._pushNpcPairApart(a, b, this._getNpcMeetingSpacing(a, b));
 
     if (a.container.x < b.container.x) {
       a._curDir = 'right_idle';
@@ -1160,6 +1298,7 @@ export default class GameEngine {
       case 'meeting':
         npc.meetingTimer -= delta / 60;
         if (npc.meetingTimer <= 0) {
+          this._setMeetingPairCooldown(npc, npc.meetingPartner);
           this._removeBubble(npc);
           npc.aiState = 'idle'; npc.idleTimer = 1 + Math.random() * 2;
           npc._curDir = 'idle'; npc._failedPaths = 0;

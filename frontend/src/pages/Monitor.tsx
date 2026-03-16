@@ -3,13 +3,15 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Activity, MessageSquare, Wrench, Clock,
   User, Bot, Terminal,
-  RefreshCw, Zap, Users, ListChecks, ShieldCheck,
+  RefreshCw, Zap, Users, ListChecks, ShieldCheck, Puzzle,
   Plus, Minus, Maximize2, X, Filter,
   Check, Pencil, Loader2, AlertTriangle,
   CheckCircle2, XCircle, Timer,
   ChevronDown, ChevronRight,
+  ShieldAlert, ScanLine, Shield,
+  Brain, FileText, Eye, EyeOff,
 } from 'lucide-react';
-import { sessionsAPI, eventsAPI, statsAPI, guardAPI } from '../services/api';
+import { sessionsAPI, eventsAPI, statsAPI, guardAPI, skillsAPI, memoryAPI } from '../services/api';
 import api from '../services/api';
 import ActivityTab from './ActivityTab';
 
@@ -225,12 +227,544 @@ function TimeAxis({ ticks, labelWidth }: { ticks: { pct: number; label: string }
   );
 }
 
+/* ============ Scan Badge ============ */
+function ScanBadge({ status, riskType, details }: { status?: string; riskType?: string; details?: string }) {
+  if (!status || status === 'unscanned') {
+    return (
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-surface-2 text-text-muted flex-shrink-0 flex items-center gap-1" title="Not scanned">
+        <Shield className="w-2.5 h-2.5" /> Unscanned
+      </span>
+    );
+  }
+  if (status === 'safe') {
+    return (
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 flex-shrink-0 flex items-center gap-1" title="Safe">
+        <Shield className="w-2.5 h-2.5" /> Safe
+      </span>
+    );
+  }
+  if (status === 'unsafe') {
+    return (
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400 flex-shrink-0 flex items-center gap-1 animate-pulse" title={`Unsafe: ${riskType} — ${details}`}>
+        <ShieldAlert className="w-2.5 h-2.5" /> Unsafe
+      </span>
+    );
+  }
+  if (status === 'outdated') {
+    return (
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex-shrink-0 flex items-center gap-1" title="File changed since last scan">
+        <Shield className="w-2.5 h-2.5" /> Outdated
+      </span>
+    );
+  }
+  return (
+    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 flex items-center gap-1" title="Scan error">
+      <Shield className="w-2.5 h-2.5" /> Error
+    </span>
+  );
+}
+
+/* ============ Skills Panel ============ */
+interface SkillItem {
+  name: string; description?: string; emoji?: string; source?: string;
+  eligible: boolean; configEnabled: boolean; hasApiKey: boolean;
+  configEnv: Record<string, string>; missing?: any; skillKey?: string;
+  path?: string; disabled?: boolean;
+  scanStatus?: 'safe' | 'unsafe' | 'error' | 'unscanned' | 'outdated';
+  scanRiskType?: string; scanDetails?: string; scanTime?: number;
+}
+
+function SkillsPanel() {
+  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [filter, setFilter] = useState<'all' | 'eligible' | 'unavailable' | 'disabled'>('all');
+  const [search, setSearch] = useState('');
+  const [toggling, setToggling] = useState<Set<string>>(new Set());
+  const [scanning, setScanning] = useState(false);
+  const [scanningKeys, setScanningKeys] = useState<Set<string>>(new Set());
+  const [scanProgress, setScanProgress] = useState('');
+  const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
+  const [expandedContent, setExpandedContent] = useState('');
+  const [loadingContent, setLoadingContent] = useState(false);
+
+  const loadSkillContent = async (key: string) => {
+    if (expandedSkill === key) { setExpandedSkill(null); return; }
+    setExpandedSkill(key);
+    setLoadingContent(true);
+    try {
+      const res = await skillsAPI.content(key);
+      setExpandedContent(res.data.content || '');
+    } catch { setExpandedContent('Failed to load content'); }
+    setLoadingContent(false);
+  };
+
+  const fetchSkills = useCallback(async () => {
+    try {
+      const res = await skillsAPI.list();
+      const payload = res.data;
+      if (payload.error) setError(payload.error);
+      setSkills(payload.skills || []);
+    } catch (err: any) {
+      console.error('[Skills] fetch error:', err);
+      setError(`Failed to fetch skills: ${err?.message || err}`);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { fetchSkills(); }, [fetchSkills]);
+
+  const toggleSkill = async (key: string, enabled: boolean) => {
+    setToggling(prev => new Set(prev).add(key));
+    try {
+      await skillsAPI.update(key, { enabled });
+      setSkills(prev => prev.map(s => (s.skillKey || s.name) === key ? { ...s, configEnabled: enabled } : s));
+    } catch { /* ignore */ }
+    setToggling(prev => { const n = new Set(prev); n.delete(key); return n; });
+  };
+
+  const scanAllSkills = async () => {
+    setScanning(true);
+    setScanProgress('Starting security scan…');
+    try {
+      const needScan = skills.filter(s => s.scanStatus !== 'safe');
+      const eligibleKeys = needScan.filter(s => s.eligible).map(s => s.skillKey || s.name);
+      const otherKeys = needScan.filter(s => !s.eligible).map(s => s.skillKey || s.name);
+      const total = eligibleKeys.length + otherKeys.length;
+      if (eligibleKeys.length > 0) {
+        setScanProgress(`Scanning ${eligibleKeys.length} eligible skills (${total} total)…`);
+        await skillsAPI.scanAll(eligibleKeys);
+        await fetchSkills();
+      }
+      if (otherKeys.length > 0) {
+        setScanProgress(`Scanning ${otherKeys.length} remaining skills…`);
+        await skillsAPI.scanAll(otherKeys);
+      }
+      setScanProgress('Scan complete. Refreshing…');
+      await fetchSkills();
+    } catch (err: any) {
+      setError(`Scan failed: ${err?.message || err}`);
+    }
+    setScanning(false);
+    setScanProgress('');
+  };
+
+  const scanSingleSkill = async (key: string) => {
+    setScanningKeys(prev => new Set(prev).add(key));
+    try {
+      const res = await skillsAPI.scanOne(key, true);
+      setSkills(prev => prev.map(s => {
+        if ((s.skillKey || s.name) !== key) return s;
+        return { ...s, scanStatus: res.data?.status || 'error', scanRiskType: res.data?.risk_type || '', scanDetails: res.data?.details || '', scanTime: res.data?.scanned_at || 0 };
+      }));
+    } catch { /* ignore */ }
+    setScanningKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
+  };
+
+  const filtered = useMemo(() => {
+    let list = skills;
+    if (filter === 'eligible') list = list.filter(s => s.eligible);
+    if (filter === 'unavailable') list = list.filter(s => !s.eligible);
+    if (filter === 'disabled') list = list.filter(s => !s.configEnabled);
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(s => s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q));
+    }
+    return list;
+  }, [skills, filter, search]);
+
+  const scanCounts = useMemo(() => ({
+    safe: skills.filter(s => s.scanStatus === 'safe').length,
+    unsafe: skills.filter(s => s.scanStatus === 'unsafe').length,
+    unscanned: skills.filter(s => !s.scanStatus || s.scanStatus === 'unscanned' || s.scanStatus === 'outdated' || s.scanStatus === 'error').length,
+  }), [skills]);
+
+  if (loading) return (
+    <div className="flex items-center justify-center py-20 gap-3 text-text-muted">
+      <Loader2 className="w-5 h-5 animate-spin" /> Loading skills…
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      {error && (
+        <div className="px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-[12px] text-red-400 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {error}
+        </div>
+      )}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
+            <Shield className="w-3.5 h-3.5 text-emerald-400" /> {scanCounts.safe} Safe
+          </div>
+          {scanCounts.unsafe > 0 && (
+            <div className="flex items-center gap-1.5 text-[12px] text-red-400 font-semibold animate-pulse">
+              <ShieldAlert className="w-3.5 h-3.5" /> {scanCounts.unsafe} Unsafe
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
+            {scanCounts.unscanned} Pending
+          </div>
+        </div>
+        <button
+          onClick={scanAllSkills}
+          disabled={scanning}
+          className="flex items-center gap-2 px-4 py-2 bg-accent/10 text-accent text-[12px] font-semibold rounded-lg hover:bg-accent/20 disabled:opacity-50 transition-all"
+        >
+          {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
+          {scanning ? scanProgress : 'Scan All'}
+        </button>
+      </div>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          {(['all', 'eligible', 'unavailable', 'disabled'] as const).map(f => {
+            const count = f === 'all' ? skills.length : f === 'eligible' ? skills.filter(s => s.eligible).length : f === 'unavailable' ? skills.filter(s => !s.eligible).length : skills.filter(s => !s.configEnabled).length;
+            return (
+              <button key={f} onClick={() => setFilter(f)}
+                className={`px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-all ${filter === f ? 'bg-accent/15 border-accent/40 text-accent' : 'bg-surface-0 border-border text-text-secondary hover:border-border'}`}>
+                {f.charAt(0).toUpperCase() + f.slice(1)} ({count})
+              </button>
+            );
+          })}
+        </div>
+        <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search skills…"
+          className="px-3 py-1.5 bg-surface-0 border border-border rounded-lg text-[12px] w-44 text-text-primary placeholder-text-muted focus:outline-none focus:border-accent/40" />
+      </div>
+      {filtered.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-text-muted">
+          <Puzzle className="w-10 h-10 opacity-20 mb-3" />
+          <p className="text-sm">No skills found</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {filtered.map(skill => {
+            const key = skill.skillKey || skill.name;
+            const isToggling = toggling.has(key);
+            const isSkillScanning = scanningKeys.has(key);
+            return (
+              <div key={key}
+                className={`group relative border rounded-xl p-4 transition-all ${
+                  skill.scanStatus === 'unsafe' ? 'bg-red-500/5 border-red-500/30 hover:border-red-500/50'
+                    : !skill.configEnabled ? 'bg-surface-0/40 border-border/50 opacity-50 hover:opacity-70'
+                    : skill.eligible ? 'bg-surface-1/80 border-border hover:border-emerald-500/30'
+                    : 'bg-surface-1/80 border-border hover:border-amber-500/30'
+                }`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="text-lg flex-shrink-0">{skill.emoji || '🔧'}</span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-[13px] font-semibold text-text-primary truncate">{skill.name}</p>
+                        {skill.eligible ? (
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 flex-shrink-0">Ready</span>
+                        ) : (
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex-shrink-0">Unavailable</span>
+                        )}
+                        <ScanBadge status={skill.scanStatus} riskType={skill.scanRiskType} details={skill.scanDetails} />
+                      </div>
+                      {skill.source && <p className="text-[10px] text-text-muted font-mono">{skill.source}</p>}
+                      {skill.path && <p className="text-[10px] text-text-muted font-mono truncate max-w-[260px]" title={skill.path}>{skill.path}</p>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
+                    <button onClick={() => loadSkillContent(key)}
+                      className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title={expandedSkill === key ? 'Hide preview' : 'Preview SKILL.md'}>
+                      {expandedSkill === key ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                    <button onClick={() => scanSingleSkill(key)} disabled={isSkillScanning}
+                      className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Re-scan this skill">
+                      {isSkillScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
+                    </button>
+                    <button onClick={() => toggleSkill(key, !skill.configEnabled)} disabled={isToggling}
+                      title={skill.configEnabled ? 'Disable skill' : 'Enable skill'}>
+                      {isToggling ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-text-muted" />
+                      ) : (
+                        <div className={`relative w-8 h-[18px] rounded-full transition-colors ${skill.configEnabled ? 'bg-emerald-500' : 'bg-surface-2'}`}>
+                          <div className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${skill.configEnabled ? 'translate-x-[15px]' : 'translate-x-[2px]'}`} />
+                        </div>
+                      )}
+                    </button>
+                  </div>
+                </div>
+                {skill.description && <p className="text-[11px] text-text-secondary mt-2 line-clamp-2 leading-relaxed">{skill.description}</p>}
+                {skill.scanStatus === 'unsafe' && (skill.scanRiskType || skill.scanDetails) && (
+                  <div className="mt-2 px-2.5 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    {skill.scanRiskType && <p className="text-[10px] font-semibold text-red-400 uppercase tracking-wider">{skill.scanRiskType.replace(/_/g, ' ')}</p>}
+                    {skill.scanDetails && <p className="text-[10px] text-red-300/80 mt-0.5 leading-relaxed">{skill.scanDetails}</p>}
+                  </div>
+                )}
+                {!skill.eligible && skill.missing && (
+                  <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                    {skill.missing.bins?.filter(Boolean).map((bin: string) => (
+                      <span key={bin} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20">missing: {bin}</span>
+                    ))}
+                    {skill.missing.anyBins?.filter(Boolean).map((bin: string) => (
+                      <span key={bin} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20">need: {bin}</span>
+                    ))}
+                    {skill.missing.env?.filter(Boolean).map((e: string) => (
+                      <span key={e} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">${e}</span>
+                    ))}
+                    {skill.missing.config?.filter(Boolean).map((c: string) => (
+                      <span key={c} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">cfg: {c}</span>
+                    ))}
+                    {skill.missing.os?.filter(Boolean).map((o: string) => (
+                      <span key={o} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">os: {o}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                  {skill.hasApiKey && <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 uppercase tracking-wider">API Key</span>}
+                  {Object.keys(skill.configEnv || {}).length > 0 && <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 uppercase tracking-wider">Env</span>}
+                </div>
+                {expandedSkill === key && (
+                  <div className="mt-3 border-t border-border/50 pt-3">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">SKILL.md Preview</span>
+                      <button onClick={() => setExpandedSkill(null)} className="text-text-muted hover:text-text-primary">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {loadingContent ? (
+                      <div className="flex items-center gap-2 text-text-muted py-4 justify-center">
+                        <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+                      </div>
+                    ) : (
+                      <pre className="text-[10px] leading-relaxed text-text-secondary bg-surface-0 rounded-lg p-3 max-h-[300px] overflow-auto whitespace-pre-wrap break-words font-mono border border-border/30">{expandedContent}</pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============ Memory Panel ============ */
+interface MemoryFile {
+  key: string; name: string; path: string; relPath: string; sizeBytes: number;
+  modifiedAt: number; preview: string; lines: number; category: string;
+  scanStatus?: 'safe' | 'unsafe' | 'error' | 'unscanned' | 'outdated';
+  scanRiskType?: string; scanDetails?: string; scanTime?: number;
+}
+
+function MemoryPanel() {
+  const [files, setFiles] = useState<MemoryFile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [catFilter, setCatFilter] = useState<'all' | 'memory' | 'workspace'>('all');
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [expandedContent, setExpandedContent] = useState('');
+  const [loadingContent, setLoadingContent] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanningKeys, setScanningKeys] = useState<Set<string>>(new Set());
+  const [scanProgress, setScanProgress] = useState('');
+
+  const fetchFiles = useCallback(async () => {
+    try {
+      const res = await memoryAPI.list();
+      setFiles(res.data.files || []);
+    } catch (err: any) {
+      setError(`Failed to fetch memory files: ${err?.message || err}`);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { fetchFiles(); }, [fetchFiles]);
+
+  const loadContent = async (key: string) => {
+    if (expandedKey === key) { setExpandedKey(null); return; }
+    setExpandedKey(key);
+    setLoadingContent(true);
+    try {
+      const res = await memoryAPI.content(key);
+      setExpandedContent(res.data.content || '');
+    } catch { setExpandedContent('Failed to load content'); }
+    setLoadingContent(false);
+  };
+
+  const scanAll = async () => {
+    setScanning(true);
+    setScanProgress('Starting memory scan…');
+    try {
+      const needScan = files.filter(f => f.scanStatus !== 'safe');
+      const memKeys = needScan.filter(f => f.category === 'memory').map(f => f.key);
+      const wsKeys = needScan.filter(f => f.category === 'workspace').map(f => f.key);
+      const total = memKeys.length + wsKeys.length;
+      if (memKeys.length > 0) {
+        setScanProgress(`Scanning ${memKeys.length} memory files (${total} total)…`);
+        await memoryAPI.scanAll(memKeys);
+        await fetchFiles();
+      }
+      if (wsKeys.length > 0) {
+        setScanProgress(`Scanning ${wsKeys.length} workspace files…`);
+        await memoryAPI.scanAll(wsKeys);
+      }
+      setScanProgress('Scan complete. Refreshing…');
+      await fetchFiles();
+    } catch (err: any) {
+      setError(`Scan failed: ${err?.message || err}`);
+    }
+    setScanning(false);
+    setScanProgress('');
+  };
+
+  const scanSingle = async (key: string) => {
+    setScanningKeys(prev => new Set(prev).add(key));
+    try {
+      const res = await memoryAPI.scanOne(key, true);
+      setFiles(prev => prev.map(f => {
+        if (f.key !== key) return f;
+        return { ...f, scanStatus: res.data?.status || 'error', scanRiskType: res.data?.risk_type || '', scanDetails: res.data?.details || '', scanTime: res.data?.scanned_at || 0 };
+      }));
+    } catch { /* ignore */ }
+    setScanningKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
+  };
+
+  const filtered = useMemo(() => {
+    if (catFilter === 'all') return files;
+    return files.filter(f => f.category === catFilter);
+  }, [files, catFilter]);
+
+  const scanCounts = useMemo(() => ({
+    safe: files.filter(f => f.scanStatus === 'safe').length,
+    unsafe: files.filter(f => f.scanStatus === 'unsafe').length,
+    unscanned: files.filter(f => !f.scanStatus || f.scanStatus === 'unscanned' || f.scanStatus === 'outdated' || f.scanStatus === 'error').length,
+  }), [files]);
+
+  if (loading) return (
+    <div className="flex items-center justify-center py-20 gap-3 text-text-muted">
+      <Loader2 className="w-5 h-5 animate-spin" /> Loading memory files…
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      {error && (
+        <div className="px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-[12px] text-red-400 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {error}
+        </div>
+      )}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
+            <Shield className="w-3.5 h-3.5 text-emerald-400" /> {scanCounts.safe} Safe
+          </div>
+          {scanCounts.unsafe > 0 && (
+            <div className="flex items-center gap-1.5 text-[12px] text-red-400 font-semibold animate-pulse">
+              <ShieldAlert className="w-3.5 h-3.5" /> {scanCounts.unsafe} Unsafe
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 text-[12px] text-text-muted">{scanCounts.unscanned} Pending</div>
+        </div>
+        <button onClick={scanAll} disabled={scanning}
+          className="flex items-center gap-2 px-4 py-2 bg-accent/10 text-accent text-[12px] font-semibold rounded-lg hover:bg-accent/20 disabled:opacity-50 transition-all">
+          {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
+          {scanning ? scanProgress : 'Scan All'}
+        </button>
+      </div>
+      <div className="flex items-center gap-2">
+        {(['all', 'memory', 'workspace'] as const).map(f => {
+          const count = f === 'all' ? files.length : files.filter(x => x.category === f).length;
+          return (
+            <button key={f} onClick={() => setCatFilter(f)}
+              className={`px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-all ${catFilter === f ? 'bg-accent/15 border-accent/40 text-accent' : 'bg-surface-0 border-border text-text-secondary hover:border-border'}`}>
+              {f.charAt(0).toUpperCase() + f.slice(1)} ({count})
+            </button>
+          );
+        })}
+      </div>
+      {filtered.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-text-muted">
+          <Brain className="w-10 h-10 opacity-20 mb-3" />
+          <p className="text-sm">No memory files found</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map(file => {
+            const isExpanded = expandedKey === file.key;
+            const isFileScanning = scanningKeys.has(file.key);
+            return (
+              <div key={file.key} className={`group border rounded-xl p-4 transition-all ${
+                file.scanStatus === 'unsafe' ? 'bg-red-500/5 border-red-500/30' : 'bg-surface-1/80 border-border hover:border-accent/30'
+              }`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <FileText className="w-4 h-4 text-text-muted flex-shrink-0" />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-[13px] font-semibold text-text-primary">{file.name}</p>
+                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${file.category === 'memory' ? 'bg-blue-500/15 text-blue-400' : 'bg-purple-500/15 text-purple-400'}`}>
+                          {file.category}
+                        </span>
+                        <ScanBadge status={file.scanStatus} riskType={file.scanRiskType} details={file.scanDetails} />
+                      </div>
+                      <div className="flex items-center gap-3 mt-0.5 text-[10px] text-text-muted">
+                        <span>{(file.sizeBytes / 1024).toFixed(1)} KB</span>
+                        <span>{file.lines} lines</span>
+                        <span>{new Date(file.modifiedAt * 1000).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
+                    <button onClick={() => loadContent(file.key)}
+                      className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title={isExpanded ? 'Hide preview' : 'Preview content'}>
+                      {isExpanded ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                    <button onClick={() => scanSingle(file.key)} disabled={isFileScanning}
+                      className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Re-scan">
+                      {isFileScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+                {file.preview && !isExpanded && (
+                  <p className="text-[11px] text-text-secondary mt-2 line-clamp-2 leading-relaxed font-mono">{file.preview}</p>
+                )}
+                {file.scanStatus === 'unsafe' && (file.scanRiskType || file.scanDetails) && (
+                  <div className="mt-2 px-2.5 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    {file.scanRiskType && <p className="text-[10px] font-semibold text-red-400 uppercase tracking-wider">{file.scanRiskType.replace(/_/g, ' ')}</p>}
+                    {file.scanDetails && <p className="text-[10px] text-red-300/80 mt-0.5 leading-relaxed">{file.scanDetails}</p>}
+                  </div>
+                )}
+                {isExpanded && (
+                  <div className="mt-3 border-t border-border/50 pt-3">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">Full Content</span>
+                      <button onClick={() => setExpandedKey(null)} className="text-text-muted hover:text-text-primary"><X className="w-3.5 h-3.5" /></button>
+                    </div>
+                    {loadingContent ? (
+                      <div className="flex items-center gap-2 text-text-muted py-4 justify-center">
+                        <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+                      </div>
+                    ) : (
+                      <pre className="text-[10px] leading-relaxed text-text-secondary bg-surface-0 rounded-lg p-3 max-h-[400px] overflow-auto whitespace-pre-wrap break-words font-mono border border-border/30">{expandedContent}</pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============ Tab Config ============ */
 const monitorTabs = [
   { id: 'world',    name: 'Town',      icon: Activity },
   { id: 'agent',    name: 'Agents',     icon: Users },
   { id: 'activity', name: 'Activities', icon: ListChecks },
-  { id: 'approval', name: 'Pending Approvals',   icon: ShieldCheck },
+  { id: 'skills',   name: 'Skills',    icon: Puzzle },
+  { id: 'memory',   name: 'Memory',    icon: Brain },
+  { id: 'approval', name: 'Pending Approvals', icon: ShieldCheck },
 ] as const;
 type MonitorTabId = (typeof monitorTabs)[number]['id'];
 
@@ -670,7 +1204,7 @@ export default function Monitor() {
   }
 
   const LABEL_W = 152;
-  const tabCounts: Record<MonitorTabId, number> = { world: 0, agent: stats.sessions, activity: stats.events, approval: pendingCount };
+  const tabCounts: Record<MonitorTabId, number> = { world: 0, agent: stats.sessions, activity: stats.events, skills: 0, memory: 0, approval: pendingCount };
 
   return (
     <div className="min-h-screen">
@@ -903,6 +1437,8 @@ export default function Monitor() {
         {activeTab === 'activity' && <ActivityTab />}
 
         {/* ========== Tab: Approval ========== */}
+        {activeTab === 'skills' && <SkillsPanel />}
+        {activeTab === 'memory' && <MemoryPanel />}
         {activeTab === 'approval' && (
           <ApprovalPanel onCountChange={setPendingCount} />
         )}

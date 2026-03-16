@@ -1718,6 +1718,255 @@
   gap: 14px;
 }
 
+/* Refinement pass - unify console and card visuals */
+.tc-shell {
+  padding: 14px 18px 12px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 217, 142, 0.09), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 20%),
+    transparent;
+}
+
+.tc-shell::after {
+  content: '';
+  position: absolute;
+  inset: 10px;
+  pointer-events: none;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 246, 224, 0.04);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 236, 196, 0.03), transparent 32%),
+    linear-gradient(135deg, rgba(255, 230, 188, 0.02), transparent 42%);
+  opacity: 0.9;
+}
+
+.tc-frame {
+  padding-top: 32px;
+}
+
+.tc-tabbar {
+  left: 18px;
+  gap: 6px;
+  filter: drop-shadow(0 8px 16px rgba(11, 6, 17, 0.24));
+}
+
+.tc-tab {
+  min-width: 64px;
+  height: 28px;
+  padding: 0 12px 3px;
+  border-radius: 10px 10px 0 0;
+  transition: transform 0.14s ease, filter 0.14s ease, box-shadow 0.14s ease;
+}
+
+.tc-tab:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+
+.tc-tab-active {
+  transform: translateY(-5px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 -3px 0 rgba(255, 255, 255, 0.45),
+    0 10px 18px rgba(58, 35, 4, 0.12);
+}
+
+.tc-panel {
+  border-radius: 16px;
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, 0.09),
+    0 16px 34px rgba(13, 6, 24, 0.42);
+}
+
+.tc-panel-inner {
+  padding: 16px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 220, 150, 0.1), transparent 34%),
+    linear-gradient(180deg, rgba(255, 238, 203, 0.16), rgba(255, 238, 203, 0)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 0, rgba(255, 255, 255, 0.045) 1px, transparent 1px, transparent 16px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0, rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 16px),
+    linear-gradient(180deg, #3b2954 0%, #251a38 100%);
+}
+
+.tc-ornate-panel {
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 226, 177, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0)),
+    linear-gradient(180deg, #302246 0%, #1d162d 100%);
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 240, 205, 0.08),
+    0 10px 24px rgba(0, 0, 0, 0.24);
+}
+
+.tc-ornate-panel::before,
+.tc-ornate-panel::after {
+  width: 22px;
+  height: 22px;
+  opacity: 0.56;
+}
+
+.tc-roster-card,
+.tc-task-card,
+.tc-guard-card {
+  border-radius: 12px;
+  border-color: rgba(255, 224, 177, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.01)),
+    rgba(255, 255, 255, 0.03);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.05),
+    0 10px 22px rgba(9, 7, 16, 0.14);
+}
+
+.tc-roster-card:hover,
+.tc-task-card:hover,
+.tc-guard-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(240, 187, 96, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.06),
+    0 14px 28px rgba(9, 7, 16, 0.22);
+}
+
+.tc-roster-card-selected {
+  border-color: rgba(240, 187, 96, 0.48);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 223, 170, 0.18),
+    0 0 18px rgba(240, 187, 96, 0.12),
+    0 14px 30px rgba(9, 7, 16, 0.18);
+}
+
+.tc-stage-hero {
+  padding: 14px;
+}
+
+.tc-stage-showcase-panel {
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 238, 198, 0.12), transparent 18%),
+    radial-gradient(circle at 50% 15%, rgba(255, 223, 170, 0.18), transparent 55%),
+    linear-gradient(180deg, #382851 0%, #21172f 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 246, 224, 0.05),
+    0 14px 28px rgba(10, 4, 20, 0.24);
+}
+
+.tc-stage-info-panel {
+  padding: 14px;
+  border-radius: 16px;
+  border-color: rgba(255, 224, 177, 0.1);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.02);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.04),
+    0 10px 20px rgba(9, 7, 16, 0.14);
+}
+
+.tc-ledger-panel,
+.tc-chat-panel {
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 224, 177, 0.08);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 226, 177, 0.08), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.01)),
+    rgba(255, 255, 255, 0.015);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.04),
+    0 12px 24px rgba(9, 7, 16, 0.14);
+}
+
+.tc-ledger-item {
+  padding: 10px 11px;
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.04),
+    0 8px 18px rgba(8, 6, 15, 0.12);
+}
+
+.tc-chat-messages {
+  margin-top: 12px;
+  padding: 12px 12px 8px;
+  border: 1px solid rgba(255, 224, 177, 0.08);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015)),
+    rgba(10, 9, 16, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.04),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  scrollbar-gutter: stable;
+}
+
+.tc-chat-bubble,
+.tc-chat-tool {
+  border-radius: 14px;
+  border-color: rgba(255, 224, 177, 0.1);
+  padding: 10px 11px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.04),
+    0 10px 20px rgba(8, 6, 15, 0.12);
+}
+
+.tc-chat-bubble-user {
+  max-width: 78%;
+}
+
+.tc-chat-bubble-assistant,
+.tc-chat-bubble-error,
+.tc-chat-tool {
+  max-width: 90%;
+}
+
+.tc-chat-tool {
+  border-color: rgba(179, 153, 255, 0.18);
+}
+
+.tc-chat-composer {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 224, 177, 0.08);
+  gap: 10px;
+}
+
+.tc-chat-input {
+  border: 1px solid rgba(255, 224, 177, 0.12);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)),
+    rgba(7, 7, 12, 0.44);
+  transition: border-color 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
+}
+
+.tc-chat-input:focus {
+  border-color: rgba(241, 201, 124, 0.5);
+  box-shadow:
+    0 0 0 2px rgba(241, 201, 124, 0.12),
+    inset 0 1px 0 rgba(255, 246, 224, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)),
+    rgba(7, 7, 12, 0.52);
+}
+
+.tc-chat-send {
+  min-height: 92px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 248, 230, 0.18),
+    0 10px 20px rgba(25, 12, 3, 0.18);
+}
+
+.tc-control-main,
+.tc-control-card {
+  padding: 18px;
+}
+
+.tc-guard-list,
+.tc-task-grid {
+  gap: 12px;
+}
+
 .tc-control-main,
 .tc-control-card {
   min-height: 0;

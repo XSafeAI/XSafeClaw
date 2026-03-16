@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from ..config import settings
 from ..database import close_db, init_db
 from ..services.message_sync_service import MessageSyncService
-from .routes import events, guard, messages, sessions, stats, tool_calls, assets, redteam, chat, system, trace
+from .routes import events, guard, memory, messages, sessions, skills, stats, tool_calls, assets, redteam, chat, system, trace
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
@@ -87,6 +87,8 @@ app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(system.router, prefix="/api/system", tags=["System"])
 app.include_router(trace.router, prefix="/api/trace", tags=["Trace"])
 app.include_router(guard.router, prefix="/api/guard", tags=["Guard"])
+app.include_router(skills.router, prefix="/api/skills", tags=["Skills"])
+app.include_router(memory.router, prefix="/api/memory", tags=["Memory"])
 
 # Serve embedded frontend static files (production mode)
 if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():

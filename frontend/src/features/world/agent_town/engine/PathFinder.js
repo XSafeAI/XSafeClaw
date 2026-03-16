@@ -9,33 +9,88 @@ export default class PathFinder {
    * @param {number} tileH     tile height in pixels
    */
   constructor(grid, tileW, tileH) {
-    this.grid  = grid;
-    this.rows  = grid.length;
-    this.cols  = grid[0].length;
+    this.rawGrid = grid.map((row) => row.slice());
+    this.rows  = this.rawGrid.length;
+    this.cols  = this.rawGrid[0].length;
     this.tileW = tileW;
     this.tileH = tileH;
+    this.footPaddingX = Math.max(4, Math.round(this.tileW * 0.18));
+    this.footPaddingY = Math.max(3, Math.round(this.tileH * 0.12));
+    this.footInsetY = Math.max(2, Math.round(this.tileH * 0.08));
+    this.grid = this._buildNavigationGrid();
 
     // Pre-compute walkable tile list for random selection
     this._walkable = [];
     for (let y = 0; y < this.rows; y++)
       for (let x = 0; x < this.cols; x++)
-        if (grid[y][x] === 0) this._walkable.push({ x, y });
+        if (this.grid[y][x] === 0) this._walkable.push({ x, y });
+  }
+
+  _isWalkableInGrid(grid, tx, ty) {
+    return tx >= 0 && tx < this.cols && ty >= 0 && ty < this.rows
+      && grid[ty][tx] === 0;
+  }
+
+  _isBlockedInRawGrid(tx, ty) {
+    return !this._isWalkableInGrid(this.rawGrid, tx, ty);
+  }
+
+  _buildNavigationGrid() {
+    const next = this.rawGrid.map((row) => row.slice());
+
+    for (let y = 0; y < this.rows; y++) {
+      for (let x = 0; x < this.cols; x++) {
+        if (this.rawGrid[y][x] !== 0) continue;
+
+        const leftBlocked = this._isBlockedInRawGrid(x - 1, y);
+        const rightBlocked = this._isBlockedInRawGrid(x + 1, y);
+        const upBlocked = this._isBlockedInRawGrid(x, y - 1);
+        const downBlocked = this._isBlockedInRawGrid(x, y + 1);
+        const blockedCount = Number(leftBlocked) + Number(rightBlocked) + Number(upBlocked) + Number(downBlocked);
+
+        // Treat very tight squeeze points as blocked so large sprites stay a
+        // little farther away from props and wall silhouettes.
+        const horizontalSqueeze = leftBlocked && rightBlocked;
+        const verticalSqueeze = upBlocked && downBlocked;
+        const pocketed = blockedCount >= 3;
+        if (horizontalSqueeze || verticalSqueeze || pocketed) {
+          next[y][x] = 1;
+        }
+      }
+    }
+
+    return next;
   }
 
   isWalkable(tx, ty) {
-    return tx >= 0 && tx < this.cols && ty >= 0 && ty < this.rows
-           && this.grid[ty][tx] === 0;
+    return this._isWalkableInGrid(this.grid, tx, ty);
   }
 
   pixelToTile(px, py) {
+    // NPC containers use bottom-center as the logical "feet" point.
+    // `tileToPixel()` returns the exact bottom edge of a tile, so we need
+    // a tiny epsilon here to keep the inverse mapping stable on boundaries.
+    const footEpsilon = 1e-6;
     return {
       x: Math.max(0, Math.min(this.cols - 1, Math.floor(px / this.tileW))),
-      y: Math.max(0, Math.min(this.rows - 1, Math.floor(py / this.tileH))),
+      y: Math.max(0, Math.min(this.rows - 1, Math.floor((py - footEpsilon) / this.tileH))),
     };
   }
 
   tileToPixel(tx, ty) {
-    return { x: tx * this.tileW + this.tileW / 2, y: ty * this.tileH + this.tileH };
+    let x = tx * this.tileW + this.tileW / 2;
+    let y = ty * this.tileH + this.tileH - this.footInsetY;
+
+    const leftBlocked = this._isBlockedInRawGrid(tx - 1, ty);
+    const rightBlocked = this._isBlockedInRawGrid(tx + 1, ty);
+    const downBlocked = this._isBlockedInRawGrid(tx, ty + 1);
+
+    if (leftBlocked && !rightBlocked) x += this.footPaddingX;
+    else if (rightBlocked && !leftBlocked) x -= this.footPaddingX;
+
+    if (downBlocked) y -= this.footPaddingY;
+
+    return { x, y };
   }
 
   /**
