@@ -1,3 +1,11 @@
+type DeepString<T> = {
+  [K in keyof T]: T[K] extends string ? string
+    : T[K] extends readonly string[] ? string[]
+    : DeepString<T[K]>;
+};
+
+export type Translations = DeepString<typeof en>;
+
 export const en = {
   common: {
     active: 'Active',
@@ -417,4 +425,4 @@ export const en = {
     enterDashboard: 'Enter Dashboard',
     reviewTitle: 'Review Configuration',
   },
-} as const;
+};

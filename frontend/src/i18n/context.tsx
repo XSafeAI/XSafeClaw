@@ -1,9 +1,9 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-import { en } from './locales/en';
+import { en, type Translations } from './locales/en';
 import { zh } from './locales/zh';
 
 export type Locale = 'en' | 'zh';
-export type Translations = typeof en;
+export type { Translations };
 
 const locales: Record<Locale, Translations> = { en, zh };
 const LS_KEY = 'xsafeclaw:locale';

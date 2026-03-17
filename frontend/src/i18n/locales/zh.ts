@@ -1,7 +1,6 @@
-import type { en } from './en';
-type T = typeof en;
+import type { Translations } from './en';
 
-export const zh: T = {
+export const zh: Translations = {
   common: {
     active: '运行中',
     loading: '加载中…',
@@ -420,4 +419,4 @@ export const zh: T = {
     enterDashboard: '进入仪表盘',
     reviewTitle: '配置预览',
   },
-} as const;
+};
