@@ -10,6 +10,7 @@ import {
   ArrowDownToLine,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
+import { useI18n } from '../i18n';
 
 type Stage =
   | 'checking'
@@ -21,16 +22,10 @@ type Stage =
 interface LogLine { id: number; text: string; kind: 'output' | 'info' | 'success' | 'error'; }
 let _lid = 0;
 
-const STEPS = [
-  { id: 1, label: 'Detect' },
-  { id: 2, label: 'Environment' },
-  { id: 3, label: 'Install' },
-];
-
-function StepBar({ active }: { active: number }) {
+function StepBar({ active, steps }: { active: number; steps: { id: number; label: string }[] }) {
   return (
     <div className="flex items-center mx-auto w-fit mb-8">
-      {STEPS.map((step, i) => (
+      {steps.map((step, i) => (
         <div key={step.id} className="flex items-center">
           <div className="flex flex-col items-center gap-1">
             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all
@@ -41,19 +36,19 @@ function StepBar({ active }: { active: number }) {
               {step.label}
             </span>
           </div>
-          {i < STEPS.length - 1 && <div className={`w-16 h-0.5 mx-2 mb-5 ${active > step.id ? 'bg-emerald-500/60' : 'bg-border'}`} />}
+          {i < steps.length - 1 && <div className={`w-16 h-0.5 mx-2 mb-5 ${active > step.id ? 'bg-emerald-500/60' : 'bg-border'}`} />}
         </div>
       ))}
     </div>
   );
 }
 
-function TerminalLog({ lines }: { lines: LogLine[] }) {
+function TerminalLog({ lines, waitingText }: { lines: LogLine[]; waitingText?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => { ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' }); }, [lines]);
   return (
     <div ref={ref} className="bg-[#0d0d0d] border border-border rounded-xl p-4 font-mono text-[12px] leading-5 h-40 overflow-y-auto space-y-0.5">
-      {lines.length === 0 && <span className="text-text-muted">Waiting...</span>}
+      {lines.length === 0 && <span className="text-text-muted">{waitingText}</span>}
       {lines.map(l => (
         <div key={l.id} className={l.kind === 'success' ? 'text-emerald-400' : l.kind === 'error' ? 'text-red-400' : l.kind === 'info' ? 'text-sky-400' : 'text-text-secondary'}>
           <span className="text-text-muted select-none">$ </span>{l.text}
@@ -89,6 +84,7 @@ interface NodeStatus {
 
 export default function Setup() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const [stage, setStage] = useState<Stage>('checking');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
@@ -157,7 +153,7 @@ export default function Setup() {
               addLog(d.text);
             } else if (d.type === 'done') {
               if (d.success) {
-                addLog('Installation complete!', 'success');
+                addLog(t.setup.installComplete, 'success');
                 setTimeout(() => navigate('/configure', { replace: true }), 1000);
               } else {
                 addLog(`npm exited with code ${d.exit_code}`, 'error');
@@ -178,6 +174,12 @@ export default function Setup() {
     }
   };
 
+  const steps = [
+    { id: 1, label: t.setup.steps.detect },
+    { id: 2, label: t.setup.steps.environment },
+    { id: 3, label: t.setup.steps.install },
+  ];
+
   const stepActive =
     stage === 'checking' || stage === 'not_installed' ? 1
     : stage === 'downloading_node' ? 2
@@ -189,19 +191,19 @@ export default function Setup() {
         <div className="flex flex-col items-center gap-3 mb-8">
           <img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
           <div className="text-center">
-            <p className="text-[22px] font-bold text-text-primary tracking-tight">XSafeClaw</p>
-            <p className="text-[13px] text-text-muted mt-0.5">Keeping Your Claw Safe.</p>
+            <p className="text-[22px] font-bold text-text-primary tracking-tight">{t.setup.title}</p>
+            <p className="text-[13px] text-text-muted mt-0.5">{t.setup.subtitle}</p>
           </div>
         </div>
 
         <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
-          <StepBar active={stepActive} />
+          <StepBar active={stepActive} steps={steps} />
 
           {/* Checking */}
           {stage === 'checking' && (
             <div className="flex flex-col items-center gap-4 py-6">
               <Loader2 className="w-10 h-10 text-accent animate-spin" />
-              <p className="text-text-secondary font-medium">Detecting OpenClaw...</p>
+              <p className="text-text-secondary font-medium">{t.setup.detecting}</p>
             </div>
           )}
 
@@ -211,16 +213,15 @@ export default function Setup() {
               <div className="flex items-start gap-4 p-4 bg-warning/10 border border-warning/30 rounded-xl">
                 <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">OpenClaw not found</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.notFound}</p>
                   <p className="text-[12px] text-text-muted mt-1">
-                    XSafeClaw requires the <span className="text-accent font-mono">openclaw</span> CLI.
-                    Click below to install — Node.js will be set up automatically if needed.
+                    {t.setup.notFoundDesc}
                   </p>
                 </div>
               </div>
               <button onClick={handleInstall}
                 className="w-full flex items-center justify-center gap-2.5 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
-                <Download className="w-4 h-4" /> Install OpenClaw <ChevronRight className="w-4 h-4" />
+                <Download className="w-4 h-4" /> {t.setup.installBtn} <ChevronRight className="w-4 h-4" />
               </button>
             </div>
           )}
@@ -231,9 +232,9 @@ export default function Setup() {
               <div className="flex items-start gap-4 p-4 bg-sky-500/10 border border-sky-500/30 rounded-xl">
                 <ArrowDownToLine className="w-5 h-5 text-sky-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">Setting up Node.js</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.nodeSetup}</p>
                   <p className="text-[12px] text-text-muted mt-1">
-                    npm was not found on your system. Automatically downloading a portable Node.js runtime...
+                    {t.setup.nodeSetupDesc}
                   </p>
                 </div>
               </div>
@@ -247,7 +248,7 @@ export default function Setup() {
                     <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
                   )}
                   <span className={`text-[13px] ${nodeStatus.step === 'resolving' ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
-                    {nodeStatus.step === 'resolving' ? 'Resolving latest LTS version...' : `Node.js ${nodeStatus.version ?? ''} (LTS)`}
+                    {nodeStatus.step === 'resolving' ? t.setup.resolvingLTS : t.setup.nodeLTS.replace('{v}', nodeStatus.version ?? '')}
                   </span>
                 </div>
 
@@ -261,14 +262,14 @@ export default function Setup() {
                         <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
                       )}
                       <span className={`text-[13px] ${nodeStatus.step === 'downloading' ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
-                        {nodeStatus.step === 'downloading' ? 'Downloading...' : 'Download complete'}
+                        {nodeStatus.step === 'downloading' ? t.setup.downloading : t.setup.downloadComplete}
                       </span>
                     </div>
                     {nodeStatus.step === 'downloading' && nodeStatus.percent !== undefined && (
                       <div className="ml-7">
                         <ProgressBar
                           percent={nodeStatus.percent}
-                          label={nodeStatus.progressText ?? 'Downloading...'}
+                          label={nodeStatus.progressText ?? t.setup.downloading}
                         />
                       </div>
                     )}
@@ -284,14 +285,14 @@ export default function Setup() {
                       <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
                     )}
                     <span className={`text-[13px] ${nodeStatus.step === 'extracting' ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
-                      {nodeStatus.step === 'extracting' ? 'Extracting files...' : 'Node.js ready'}
+                      {nodeStatus.step === 'extracting' ? t.setup.extracting : t.setup.nodeReady}
                     </span>
                   </div>
                 )}
               </div>
 
               {/* Terminal log underneath for verbose output */}
-              {logs.length > 0 && <TerminalLog lines={logs} />}
+              {logs.length > 0 && <TerminalLog lines={logs} waitingText={t.setup.waiting} />}
             </div>
           )}
 
@@ -301,11 +302,11 @@ export default function Setup() {
               <div className="flex items-center gap-3">
                 <Loader2 className="w-5 h-5 text-accent animate-spin flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">Installing OpenClaw...</p>
-                  <p className="text-[12px] text-text-muted">Running <span className="font-mono text-accent">npm install -g openclaw@latest</span>. This may take a minute.</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.installing}</p>
+                  <p className="text-[12px] text-text-muted">{t.setup.installingDesc}</p>
                 </div>
               </div>
-              <TerminalLog lines={logs} />
+              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
             </div>
           )}
 
@@ -315,34 +316,34 @@ export default function Setup() {
               <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
                 <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">Installation failed</p>
-                  <p className="text-[12px] text-text-muted mt-1">Check the log for details. You can also install Node.js and OpenClaw manually.</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
+                  <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
                 </div>
               </div>
-              <TerminalLog lines={logs} />
+              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
 
               <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
                 <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
-                  <Terminal className="w-3.5 h-3.5" /> Manual install commands
+                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
                 </p>
                 <div className="space-y-1.5 font-mono text-[12px]">
-                  <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">Install Node.js (if needed)</span></p>
+                  <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNode}</span></p>
                   <p className="text-emerald-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
-                  <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">Install OpenClaw</span></p>
+                  <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
                   <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
                 </div>
               </div>
 
               <button onClick={() => { setLogs([]); setNodeStatus(null); handleInstall(); }}
                 className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
-                Retry Installation
+                {t.setup.retryInstall}
               </button>
             </div>
           )}
         </div>
 
         <p className="text-center text-[11px] text-text-muted mt-6">
-          Powered by XSafeClaw
+          {t.common.poweredBy}
         </p>
       </div>
     </div>

@@ -9,12 +9,13 @@ import {
   CheckCircle2, XCircle, Timer,
   ChevronDown, ChevronRight,
   ShieldAlert, ScanLine, Shield,
-  Brain, FileText, Eye, EyeOff,
+  Brain, FileText,
   Hash, Cpu, DollarSign, Radio,
 } from 'lucide-react';
 import { sessionsAPI, eventsAPI, statsAPI, guardAPI, skillsAPI, memoryAPI } from '../services/api';
 import api from '../services/api';
 import ActivityTab from './ActivityTab';
+import { useI18n } from '../i18n';
 
 /* ============ Types ============ */
 interface SessionItem {
@@ -59,11 +60,7 @@ interface EventMessage {
 
 type SessionFilter = 'active' | 'today' | 'all';
 
-const FILTER_OPTIONS: { id: SessionFilter; label: string }[] = [
-  { id: 'active', label: 'Active' },
-  { id: 'today',  label: 'Today' },
-  { id: 'all',    label: 'All' },
-];
+const FILTER_IDS: SessionFilter[] = ['active', 'today', 'all'];
 
 /* ============ Color Palette ============ */
 const SESSION_COLORS = [
@@ -230,37 +227,38 @@ function TimeAxis({ ticks, labelWidth }: { ticks: { pct: number; label: string }
 
 /* ============ Scan Badge ============ */
 function ScanBadge({ status, riskType, details }: { status?: string; riskType?: string; details?: string }) {
+  const { t } = useI18n();
   if (!status || status === 'unscanned') {
     return (
-      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-surface-2 text-text-muted flex-shrink-0 flex items-center gap-1" title="Not scanned">
-        <Shield className="w-2.5 h-2.5" /> Unscanned
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-surface-2 text-text-muted flex-shrink-0 flex items-center gap-1" title={t.monitor.skills.notScanned}>
+        <Shield className="w-2.5 h-2.5" /> {t.monitor.skills.unscanned}
       </span>
     );
   }
   if (status === 'safe') {
     return (
-      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 flex-shrink-0 flex items-center gap-1" title="Safe">
-        <Shield className="w-2.5 h-2.5" /> Safe
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 flex-shrink-0 flex items-center gap-1" title={t.monitor.skills.safe}>
+        <Shield className="w-2.5 h-2.5" /> {t.monitor.skills.safe}
       </span>
     );
   }
   if (status === 'unsafe') {
     return (
-      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400 flex-shrink-0 flex items-center gap-1 animate-pulse" title={`Unsafe: ${riskType} — ${details}`}>
-        <ShieldAlert className="w-2.5 h-2.5" /> Unsafe
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400 flex-shrink-0 flex items-center gap-1 animate-pulse" title={`${t.monitor.skills.unsafe}: ${riskType} — ${details}`}>
+        <ShieldAlert className="w-2.5 h-2.5" /> {t.monitor.skills.unsafe}
       </span>
     );
   }
   if (status === 'outdated') {
     return (
-      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex-shrink-0 flex items-center gap-1" title="File changed since last scan">
-        <Shield className="w-2.5 h-2.5" /> Outdated
+      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex-shrink-0 flex items-center gap-1" title={t.monitor.skills.fileChanged}>
+        <Shield className="w-2.5 h-2.5" /> {t.monitor.skills.outdated}
       </span>
     );
   }
   return (
-    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 flex items-center gap-1" title="Scan error">
-      <Shield className="w-2.5 h-2.5" /> Error
+    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 flex items-center gap-1" title={t.monitor.skills.scanError}>
+      <Shield className="w-2.5 h-2.5" /> {t.monitor.skills.error}
     </span>
   );
 }
@@ -276,6 +274,7 @@ interface SkillItem {
 }
 
 function SkillsPanel() {
+  const { t } = useI18n();
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -395,9 +394,16 @@ function SkillsPanel() {
 
   if (loading) return (
     <div className="flex items-center justify-center py-20 gap-3 text-text-muted">
-      <Loader2 className="w-5 h-5 animate-spin" /> Loading skills…
+      <Loader2 className="w-5 h-5 animate-spin" /> {t.monitor.skills.loadingSkills}
     </div>
   );
+
+  const filterLabels: Record<string, string> = {
+    all: t.monitor.skills.filterAll,
+    eligible: t.monitor.skills.filterEligible,
+    unavailable: t.monitor.skills.filterUnavailable,
+    disabled: t.monitor.skills.filterDisabled,
+  };
 
   return (
     <div className="space-y-4">
@@ -409,15 +415,15 @@ function SkillsPanel() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
-            <Shield className="w-3.5 h-3.5 text-emerald-400" /> {scanCounts.safe} Safe
+            <Shield className="w-3.5 h-3.5 text-emerald-400" /> {scanCounts.safe} {t.monitor.skills.safe}
           </div>
           {scanCounts.unsafe > 0 && (
             <div className="flex items-center gap-1.5 text-[12px] text-red-400 font-semibold animate-pulse">
-              <ShieldAlert className="w-3.5 h-3.5" /> {scanCounts.unsafe} Unsafe
+              <ShieldAlert className="w-3.5 h-3.5" /> {scanCounts.unsafe} {t.monitor.skills.unsafe}
             </div>
           )}
           <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
-            {scanCounts.unscanned} Pending
+            {scanCounts.unscanned} {t.monitor.skills.pending}
           </div>
         </div>
         <button
@@ -426,7 +432,7 @@ function SkillsPanel() {
           className="flex items-center gap-2 px-4 py-2 bg-accent/10 text-accent text-[12px] font-semibold rounded-lg hover:bg-accent/20 disabled:opacity-50 transition-all"
         >
           {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
-          {scanning ? scanProgress : 'Scan All'}
+          {scanning ? scanProgress : t.monitor.skills.scanAll}
         </button>
       </div>
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -436,18 +442,18 @@ function SkillsPanel() {
             return (
               <button key={f} onClick={() => setFilter(f)}
                 className={`px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-all ${filter === f ? 'bg-accent/15 border-accent/40 text-accent' : 'bg-surface-0 border-border text-text-secondary hover:border-border'}`}>
-                {f.charAt(0).toUpperCase() + f.slice(1)} ({count})
+                {filterLabels[f]} ({count})
               </button>
             );
           })}
         </div>
-        <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search skills…"
+        <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder={t.monitor.skills.searchPlaceholder}
           className="px-3 py-1.5 bg-surface-0 border border-border rounded-lg text-[12px] w-44 text-text-primary placeholder-text-muted focus:outline-none focus:border-accent/40" />
       </div>
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-text-muted">
           <Puzzle className="w-10 h-10 opacity-20 mb-3" />
-          <p className="text-sm">No skills found</p>
+          <p className="text-sm">{t.monitor.skills.noSkills}</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -457,12 +463,13 @@ function SkillsPanel() {
             const isSkillScanning = scanningKeys.has(key);
             return (
               <div key={key}
-                className={`group relative border rounded-xl p-4 transition-all ${
+                onClick={() => loadSkillContent(key)}
+                className={`group relative border rounded-xl p-4 transition-all cursor-pointer ${
                   skill.scanStatus === 'unsafe' ? 'bg-red-500/5 border-red-500/30 hover:border-red-500/50'
                     : !skill.configEnabled ? 'bg-surface-0/40 border-border/50 opacity-50 hover:opacity-70'
                     : skill.eligible ? 'bg-surface-1/80 border-border hover:border-emerald-500/30'
                     : 'bg-surface-1/80 border-border hover:border-amber-500/30'
-                }`}>
+                } ${expandedSkill === key ? 'ring-1 ring-accent/40' : ''}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <span className="text-lg flex-shrink-0">{skill.emoji || '🔧'}</span>
@@ -470,9 +477,9 @@ function SkillsPanel() {
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-[13px] font-semibold text-text-primary truncate">{skill.name}</p>
                         {skill.eligible ? (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 flex-shrink-0">Ready</span>
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 flex-shrink-0">{t.monitor.skills.ready}</span>
                         ) : (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex-shrink-0">Unavailable</span>
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex-shrink-0">{t.monitor.skills.unavailable}</span>
                         )}
                         <ScanBadge status={skill.scanStatus} riskType={skill.scanRiskType} details={skill.scanDetails} />
                       </div>
@@ -480,19 +487,14 @@ function SkillsPanel() {
                       {skill.path && <p className="text-[10px] text-text-muted font-mono truncate max-w-[260px]" title={skill.path}>{skill.path}</p>}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
-                    <button onClick={() => loadSkillContent(key)}
-                      className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title={expandedSkill === key ? 'Hide preview' : 'Preview SKILL.md'}>
-                      {expandedSkill === key ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
+                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5" onClick={e => e.stopPropagation()}>
                     <button onClick={() => scanSingleSkill(key)} disabled={isSkillScanning}
                       className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title="Re-scan this skill">
+                      title={t.monitor.skills.rescan}>
                       {isSkillScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
                     </button>
                     <button onClick={() => toggleSkill(key, !skill.configEnabled)} disabled={isToggling}
-                      title={skill.configEnabled ? 'Disable skill' : 'Enable skill'}>
+                      title={skill.configEnabled ? t.monitor.skills.disable : t.monitor.skills.enable}>
                       {isToggling ? (
                         <Loader2 className="w-4 h-4 animate-spin text-text-muted" />
                       ) : (
@@ -534,9 +536,9 @@ function SkillsPanel() {
                   {Object.keys(skill.configEnv || {}).length > 0 && <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 uppercase tracking-wider">Env</span>}
                 </div>
                 {expandedSkill === key && (
-                  <div className="mt-3 border-t border-border/50 pt-3">
+                  <div className="mt-3 border-t border-border/50 pt-3" onClick={e => e.stopPropagation()}>
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">SKILL.md Preview</span>
+                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">{t.monitor.skills.preview}</span>
                       <button onClick={() => setExpandedSkill(null)} className="text-text-muted hover:text-text-primary">
                         <X className="w-3.5 h-3.5" />
                       </button>
@@ -568,6 +570,7 @@ interface MemoryFile {
 }
 
 function MemoryPanel() {
+  const { t } = useI18n();
   const [files, setFiles] = useState<MemoryFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -666,7 +669,7 @@ function MemoryPanel() {
 
   if (loading) return (
     <div className="flex items-center justify-center py-20 gap-3 text-text-muted">
-      <Loader2 className="w-5 h-5 animate-spin" /> Loading memory files…
+      <Loader2 className="w-5 h-5 animate-spin" /> {t.monitor.memory.loadingMemory}
     </div>
   );
 
@@ -680,19 +683,19 @@ function MemoryPanel() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1.5 text-[12px] text-text-muted">
-            <Shield className="w-3.5 h-3.5 text-emerald-400" /> {scanCounts.safe} Safe
+            <Shield className="w-3.5 h-3.5 text-emerald-400" /> {scanCounts.safe} {t.monitor.memory.safe}
           </div>
           {scanCounts.unsafe > 0 && (
             <div className="flex items-center gap-1.5 text-[12px] text-red-400 font-semibold animate-pulse">
-              <ShieldAlert className="w-3.5 h-3.5" /> {scanCounts.unsafe} Unsafe
+              <ShieldAlert className="w-3.5 h-3.5" /> {scanCounts.unsafe} {t.monitor.memory.unsafe}
             </div>
           )}
-          <div className="flex items-center gap-1.5 text-[12px] text-text-muted">{scanCounts.unscanned} Pending</div>
+          <div className="flex items-center gap-1.5 text-[12px] text-text-muted">{scanCounts.unscanned} {t.monitor.memory.pending}</div>
         </div>
         <button onClick={scanAll} disabled={scanning}
           className="flex items-center gap-2 px-4 py-2 bg-accent/10 text-accent text-[12px] font-semibold rounded-lg hover:bg-accent/20 disabled:opacity-50 transition-all">
           {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
-          {scanning ? scanProgress : 'Scan All'}
+          {scanning ? scanProgress : t.monitor.memory.scanAll}
         </button>
       </div>
       <div className="flex items-center gap-2">
@@ -709,7 +712,7 @@ function MemoryPanel() {
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-text-muted">
           <Brain className="w-10 h-10 opacity-20 mb-3" />
-          <p className="text-sm">No memory files found</p>
+          <p className="text-sm">{t.monitor.memory.noMemory}</p>
         </div>
       ) : (
         <div className="space-y-2">
@@ -717,9 +720,11 @@ function MemoryPanel() {
             const isExpanded = expandedKey === file.key;
             const isFileScanning = scanningKeys.has(file.key);
             return (
-              <div key={file.key} className={`group border rounded-xl p-4 transition-all ${
-                file.scanStatus === 'unsafe' ? 'bg-red-500/5 border-red-500/30' : 'bg-surface-1/80 border-border hover:border-accent/30'
-              }`}>
+              <div key={file.key}
+                onClick={() => loadContent(file.key)}
+                className={`group border rounded-xl p-4 transition-all cursor-pointer ${
+                  file.scanStatus === 'unsafe' ? 'bg-red-500/5 border-red-500/30' : 'bg-surface-1/80 border-border hover:border-accent/30'
+                } ${isExpanded ? 'ring-1 ring-accent/40' : ''}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <FileText className="w-4 h-4 text-text-muted flex-shrink-0" />
@@ -732,18 +737,13 @@ function MemoryPanel() {
                         <ScanBadge status={file.scanStatus} riskType={file.scanRiskType} details={file.scanDetails} />
                       </div>
                       <div className="flex items-center gap-3 mt-0.5 text-[10px] text-text-muted">
-                        <span>{(file.sizeBytes / 1024).toFixed(1)} KB</span>
-                        <span>{file.lines} lines</span>
+                        <span>{(file.sizeBytes / 1024).toFixed(1)} {t.monitor.memory.kb}</span>
+                        <span>{file.lines} {t.monitor.memory.lines}</span>
                         <span>{new Date(file.modifiedAt * 1000).toLocaleString()}</span>
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
-                    <button onClick={() => loadContent(file.key)}
-                      className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title={isExpanded ? 'Hide preview' : 'Preview content'}>
-                      {isExpanded ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
+                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5" onClick={e => e.stopPropagation()}>
                     <button onClick={() => scanSingle(file.key)} disabled={isFileScanning}
                       className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
                       title="Re-scan">
@@ -761,9 +761,9 @@ function MemoryPanel() {
                   </div>
                 )}
                 {isExpanded && (
-                  <div className="mt-3 border-t border-border/50 pt-3">
+                  <div className="mt-3 border-t border-border/50 pt-3" onClick={e => e.stopPropagation()}>
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">Full Content</span>
+                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">{t.monitor.memory.fullContent}</span>
                       <button onClick={() => setExpandedKey(null)} className="text-text-muted hover:text-text-primary"><X className="w-3.5 h-3.5" /></button>
                     </div>
                     {loadingContent ? (
@@ -785,15 +785,8 @@ function MemoryPanel() {
 }
 
 /* ============ Tab Config ============ */
-const monitorTabs = [
-  { id: 'world',    name: 'Town',      icon: Activity },
-  { id: 'agent',    name: 'Agents',     icon: Users },
-  { id: 'activity', name: 'Activities', icon: ListChecks },
-  { id: 'skills',   name: 'Skills',    icon: Puzzle },
-  { id: 'memory',   name: 'Memory',    icon: Brain },
-  { id: 'approval', name: 'Pending Approvals', icon: ShieldCheck },
-] as const;
-type MonitorTabId = (typeof monitorTabs)[number]['id'];
+const MONITOR_TAB_IDS = ['world', 'agent', 'activity', 'skills', 'memory', 'approval'] as const;
+type MonitorTabId = (typeof MONITOR_TAB_IDS)[number];
 
 /* ============ Pending Approvals Panel ============ */
 interface PendingItem {
@@ -815,6 +808,7 @@ interface PendingItem {
 }
 
 function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void }) {
+  const { t } = useI18n();
   const [items, setItems] = useState<PendingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [showResolved, setShowResolved] = useState(false);
@@ -897,10 +891,10 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
       {/* Header bar */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h2 className="text-sm font-semibold text-text-primary">Tool Call Approvals</h2>
+          <h2 className="text-sm font-semibold text-text-primary">{t.monitor.approvals.title}</h2>
           {pending.length > 0 && (
             <span className="px-2.5 py-1 rounded-full bg-red-500/15 text-red-400 text-xs font-semibold animate-pulse">
-              {pending.length} pending
+              {t.monitor.approvals.nPending.replace('{n}', String(pending.length))}
             </span>
           )}
         </div>
@@ -918,8 +912,8 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
           <div className="w-14 h-14 rounded-2xl bg-surface-2 flex items-center justify-center mb-4">
             <ShieldCheck className="w-7 h-7 text-text-muted" />
           </div>
-          <p className="text-sm font-medium text-text-secondary mb-1">No Pending Approvals</p>
-          <p className="text-[12px] text-text-muted max-w-xs">Tool calls flagged as unsafe will appear here for review.</p>
+          <p className="text-sm font-medium text-text-secondary mb-1">{t.monitor.approvals.noApprovals}</p>
+          <p className="text-[12px] text-text-muted max-w-xs">{t.monitor.approvals.noApprovalsDesc}</p>
         </div>
       )}
 
@@ -937,7 +931,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
               </div>
               <div className="flex items-center gap-3 text-xs text-text-muted">
                 <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{timeAgo(item.created_at)}</span>
-                <span>Session: <code className="text-accent">{item.session_key.slice(0, 12)}…</code></span>
+                <span>{t.common.session}: <code className="text-accent">{item.session_key.slice(0, 12)}…</code></span>
               </div>
               {(item.risk_source || item.failure_mode || item.real_world_harm) && (
                 <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
@@ -954,7 +948,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
               >
                 {resolving === item.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                Approve
+                {t.common.approve}
               </button>
               <button
                 onClick={() => handleModify(item.id)}
@@ -962,7 +956,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50"
               >
                 <Pencil className="w-3.5 h-3.5" />
-                {editingId === item.id ? 'Save' : 'Modify'}
+                {editingId === item.id ? t.common.save : t.common.modify}
               </button>
               <button
                 onClick={() => handleResolve(item.id, 'rejected')}
@@ -970,7 +964,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50"
               >
                 <X className="w-3.5 h-3.5" />
-                Reject
+                {t.common.reject}
               </button>
             </div>
           </div>
@@ -978,7 +972,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
           {/* Session Context */}
           {item.session_context && (
             <div className="px-5 pt-2 pb-1">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Session Trajectory</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">{t.monitor.approvals.sessionTrajectory}</p>
               <pre className="bg-surface-0 border border-border rounded-lg p-3 text-[11px] font-mono text-text-secondary whitespace-pre-wrap break-words overflow-y-auto max-h-64 leading-relaxed">
                 {item.session_context}
               </pre>
@@ -991,7 +985,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
               className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary mb-2 transition-colors"
             >
               {expandedId === item.id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-              Parameters
+              {t.common.parameters}
             </button>
             {expandedId === item.id && (
               <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
@@ -1000,7 +994,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
             )}
             {editingId === item.id && (
               <div className="mt-3">
-                <label className="text-xs text-text-muted font-semibold mb-1 block">Edit parameters (JSON):</label>
+                <label className="text-xs text-text-muted font-semibold mb-1 block">{t.common.editParamsJson}</label>
                 <textarea
                   value={editParams}
                   onChange={e => setEditParams(e.target.value)}
@@ -1011,7 +1005,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
                   onClick={() => setEditingId(null)}
                   className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors"
                 >
-                  Cancel editing
+                  {t.common.cancelEditing}
                 </button>
               </div>
             )}
@@ -1027,7 +1021,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
             className="flex items-center gap-2 text-sm text-text-muted hover:text-text-primary transition-colors mb-3"
           >
             {showResolved ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-            Resolved ({resolved.length})
+            {t.monitor.approvals.resolved.replace('{n}', String(resolved.length))}
           </button>
           {showResolved && (
             <div className="space-y-2">
@@ -1051,6 +1045,7 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
 
 /* ============ Dashboard Stats Panel ============ */
 function DashboardPanel({ data }: { data: any }) {
+  const { t } = useI18n();
   const sessions = data.sessions || {};
   const messages = data.messages || {};
   const tokens = data.tokens || {};
@@ -1070,41 +1065,41 @@ function DashboardPanel({ data }: { data: any }) {
   const cards: { icon: any; label: string; value: string | number; sub?: string; accent?: string }[] = [
     {
       icon: Users,
-      label: 'Sessions',
+      label: t.monitor.dashboard.sessions,
       value: sessions.total ?? 0,
-      sub: `${sessions.active24h ?? 0} active (24h)`,
+      sub: t.monitor.dashboard.active24h.replace('{n}', String(sessions.active24h ?? 0)),
       accent: 'text-blue-400',
     },
     {
       icon: Radio,
-      label: 'Channels',
+      label: t.monitor.dashboard.channels,
       value: channels.length,
-      sub: channels.map((c: any) => c.name).join(', ') || 'None',
+      sub: channels.map((c: any) => c.name).join(', ') || t.monitor.dashboard.none,
       accent: 'text-emerald-400',
     },
     {
       icon: MessageSquare,
-      label: 'Messages',
+      label: t.monitor.dashboard.messages,
       value: messages.total ?? 0,
-      sub: `${messages.user ?? 0} user · ${messages.assistant ?? 0} assistant`,
+      sub: t.monitor.dashboard.userAssistant.replace('{u}', String(messages.user ?? 0)).replace('{a}', String(messages.assistant ?? 0)),
       accent: 'text-violet-400',
     },
     {
       icon: Wrench,
-      label: 'Tool Calls',
+      label: t.monitor.dashboard.toolCalls,
       value: toolCalls,
       accent: 'text-amber-400',
     },
     {
       icon: Hash,
-      label: 'Tokens',
+      label: t.monitor.dashboard.tokens,
       value: formatTokens(tokens.total ?? 0),
       sub: tokens.total ? `↓${formatTokens(tokens.input)} ↑${formatTokens(tokens.output)}` : 'N/A',
       accent: 'text-cyan-400',
     },
     {
       icon: DollarSign,
-      label: 'Est. Cost',
+      label: t.monitor.dashboard.estCost,
       value: cost > 0 ? `$${cost.toFixed(4)}` : '$0',
       sub: model.primary || 'N/A',
       accent: 'text-rose-400',
@@ -1147,10 +1142,11 @@ function DashboardPanel({ data }: { data: any }) {
 
 /* ============ Main Page ============ */
 export default function Monitor() {
+  const { t } = useI18n();
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as MonitorTabId | null) ?? 'agent';
   const [activeTab, setActiveTab] = useState<MonitorTabId>(
-    monitorTabs.some(t => t.id === initialTab) ? initialTab : 'agent'
+    MONITOR_TAB_IDS.includes(initialTab as any) ? initialTab! : 'agent'
   );
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [allEvents, setAllEvents] = useState<EventItem[]>([]);
@@ -1329,6 +1325,22 @@ export default function Monitor() {
   }
 
   const LABEL_W = 152;
+
+  const monitorTabs: { id: MonitorTabId; name: string; icon: typeof Activity }[] = [
+    { id: 'world',    name: t.monitor.tabs.town,      icon: Activity },
+    { id: 'agent',    name: t.monitor.tabs.agents,     icon: Users },
+    { id: 'activity', name: t.monitor.tabs.activities, icon: ListChecks },
+    { id: 'skills',   name: t.monitor.tabs.skills,     icon: Puzzle },
+    { id: 'memory',   name: t.monitor.tabs.memory,     icon: Brain },
+    { id: 'approval', name: t.monitor.tabs.approvals,  icon: ShieldCheck },
+  ];
+
+  const filterLabelsMap: Record<SessionFilter, string> = {
+    active: t.monitor.agents.active,
+    today: t.monitor.agents.today,
+    all: t.monitor.agents.all,
+  };
+
   const tabCounts: Record<MonitorTabId, number> = { world: 0, agent: stats.sessions, activity: stats.events, skills: 0, memory: 0, approval: pendingCount };
 
   return (
@@ -1337,13 +1349,13 @@ export default function Monitor() {
       <div className="border-b border-border">
         <div className="px-8 py-6">
           <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold text-text-primary">Claw Monitor</h1>
+            <h1 className="text-xl font-bold text-text-primary">{t.monitor.title}</h1>
             <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
-              Running
+              {t.common.active}
             </span>
           </div>
           <p className="text-[13px] text-text-muted mt-2">
-            Real-time monitoring of agent chats, tasks, and tool call activities.
+            {t.monitor.subtitle}
           </p>
         </div>
         <div className="px-8 flex items-center gap-1">
@@ -1379,7 +1391,7 @@ export default function Monitor() {
         {activeTab === 'world' && (
           <div className="flex flex-col items-center justify-center h-[60vh] gap-4 text-text-muted select-none">
             <Activity className="w-12 h-12 opacity-20" />
-            <p className="text-sm opacity-40">Town view — coming soon</p>
+            <p className="text-sm opacity-40">{t.monitor.town}</p>
           </div>
         )}
 
@@ -1392,26 +1404,26 @@ export default function Monitor() {
             {/* Toolbar */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <h2 className="text-sm font-semibold text-text-primary">Timeline</h2>
+                <h2 className="text-sm font-semibold text-text-primary">{t.monitor.timeline.title}</h2>
                 <span className="text-[11px] text-text-muted">
-                  {visibleRows.length} session{visibleRows.length !== 1 && 's'} · {visibleEvents.length} task{visibleEvents.length !== 1 && 's'}
+                  {t.monitor.timeline.sessionsTasks.replace('{s}', String(visibleRows.length)).replace('{t}', String(visibleEvents.length))}
                 </span>
               </div>
               <div className="flex items-center gap-2">
                 {/* Session filter */}
                 <div className="flex items-center gap-0.5 bg-surface-1 border border-border rounded-lg p-0.5">
                   <Filter className="w-3.5 h-3.5 text-text-muted ml-2 mr-1" />
-                  {FILTER_OPTIONS.map(opt => (
+                  {FILTER_IDS.map(fid => (
                     <button
-                      key={opt.id}
-                      onClick={() => setSessionFilter(opt.id)}
+                      key={fid}
+                      onClick={() => setSessionFilter(fid)}
                       className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all
-                        ${sessionFilter === opt.id
+                        ${sessionFilter === fid
                           ? 'bg-accent/15 text-accent shadow-sm'
                           : 'text-text-muted hover:text-text-secondary'
                         }`}
                     >
-                      {opt.label}
+                      {filterLabelsMap[fid]}
                     </button>
                   ))}
                 </div>
@@ -1419,16 +1431,16 @@ export default function Monitor() {
                 <div className="w-px h-5 bg-border mx-1" />
 
                 {/* Zoom controls */}
-                <button onClick={zoomIn} className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors" title="Zoom in">
+                <button onClick={zoomIn} className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors" title={t.monitor.timeline.zoomIn}>
                   <Plus className="w-4 h-4" />
                 </button>
-                <button onClick={zoomOut} className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors" title="Zoom out">
+                <button onClick={zoomOut} className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors" title={t.monitor.timeline.zoomOut}>
                   <Minus className="w-4 h-4" />
                 </button>
-                <button onClick={fitAll} className="h-8 px-3 flex items-center gap-1.5 rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors text-[12px] font-medium" title="Fit to view">
-                  <Maximize2 className="w-3.5 h-3.5" /> Fit
+                <button onClick={fitAll} className="h-8 px-3 flex items-center gap-1.5 rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors text-[12px] font-medium" title={t.monitor.timeline.fit}>
+                  <Maximize2 className="w-3.5 h-3.5" /> {t.monitor.timeline.fit}
                 </button>
-                <button onClick={fetchData} className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors ml-1" title="Refresh">
+                <button onClick={fetchData} className="w-8 h-8 flex items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary hover:border-border-active transition-colors ml-1" title={t.monitor.timeline.refresh}>
                   <RefreshCw className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -1438,8 +1450,8 @@ export default function Monitor() {
             {visibleEvents.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-32 bg-surface-1 border border-border rounded-xl">
                 <Activity className="w-12 h-12 mb-3 text-text-muted opacity-30" />
-                <p className="text-sm text-text-secondary">No tasks recorded yet</p>
-                <p className="text-xs text-text-muted mt-1">Tasks will appear here as agents run</p>
+                <p className="text-sm text-text-secondary">{t.monitor.timeline.noTasks}</p>
+                <p className="text-xs text-text-muted mt-1">{t.monitor.timeline.tasksWillAppear}</p>
               </div>
             ) : (
               <div className="bg-surface-1 border border-border rounded-xl overflow-hidden">
@@ -1532,8 +1544,8 @@ export default function Monitor() {
                       {selectedEvent.status}
                     </span>
                     <div className="flex items-center gap-4 text-[11px] text-text-muted">
-                      <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3" />{selectedEvent.total_messages} messages</span>
-                      <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{selectedEvent.total_tool_calls} tool calls</span>
+                      <span className="flex items-center gap-1"><MessageSquare className="w-3 h-3" />{selectedEvent.total_messages} {t.monitor.timeline.messages}</span>
+                      <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{selectedEvent.total_tool_calls} {t.monitor.timeline.toolCalls}</span>
                       <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{durationStr(selectedEvent.started_at, selectedEvent.completed_at)}</span>
                     </div>
                   </div>
@@ -1550,7 +1562,7 @@ export default function Monitor() {
                   {eventMessages.length === 0 ? (
                     <div className="flex items-center justify-center py-10 text-text-muted">
                       <RefreshCw className="w-4 h-4 animate-spin mr-2" />
-                      <span className="text-sm">Loading messages…</span>
+                      <span className="text-sm">{t.monitor.timeline.loadingMessages}</span>
                     </div>
                   ) : (
                     eventMessages.map(msg => <MessageBubble key={msg.message_id} msg={msg} />)

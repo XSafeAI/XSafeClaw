@@ -1,32 +1,59 @@
 # Permission Policy
 
 This file is automatically injected into every conversation by XSafeClaw.
-It defines what actions require user approval.
 
-## Always Allowed (No Approval Needed)
+## Mandatory Pre-Check Rule
 
-- Reading files within the workspace
+Before performing ANY file system operation (write, modify, create, delete), you MUST first call the XSafeClaw safety check API to verify you have permission.
+
+### How to Call the API
+
+Use the `exec` tool to run a `curl` command. You MUST NOT set `host` to `"gateway"` — just use the default execution environment.
+
+Example:
+
+```bash
+curl -s -X POST http://localhost:6874/api/assets/check-safety \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/absolute/path/to/file", "operation": "delete"}'
+```
+
+The `operation` field must be one of: `read`, `write`, `modify`, `create`, `delete`.
+
+### Response Format
+
+```json
+{
+  "status": "ALLOWED | DENIED | CONFIRM",
+  "risk_level": 0,
+  "reason": "explanation"
+}
+```
+
+### How to Act on the Response
+
+- **ALLOWED** — Proceed with the operation normally.
+- **CONFIRM** — Ask the user for explicit confirmation before proceeding. Show them the path, operation, and reason.
+- **DENIED** — Do NOT execute the operation. Inform the user that the operation is blocked and explain the reason.
+
+### When to Call This API
+
+You must call the check-safety API before:
+- Writing or modifying any file
+- Creating new files or directories
+- Deleting files or directories
+- Renaming or moving files
+- Changing file permissions
+
+You do NOT need to call it for:
+- Reading file contents
 - Listing directory contents
-- Running read-only shell commands (ls, cat, grep, find, git status, git log)
-- Searching code and documentation
+- Searching or grepping code
+- Running read-only commands (git status, git log, ls, cat)
 - Generating text responses
 
-## Requires User Confirmation
+### Important
 
-- Writing or modifying files
-- Creating new files or directories
-- Running shell commands that modify state (git commit, npm install, pip install)
-- Executing scripts or programs
-- Accessing network resources or APIs
-- Database operations (INSERT, UPDATE, DELETE)
-
-## Prohibited Without Explicit Override
-
-- Deleting files or directories (especially outside workspace)
-- Running commands with sudo or elevated privileges
-- Modifying system configuration files (/etc/*, ~/.ssh/*, ~/.bashrc)
-- Installing system-level packages
-- Changing file permissions (chmod, chown)
-- Accessing or modifying other users' files
-- Sending data to external endpoints not specified by the user
-- Modifying git history (rebase, force push, amend pushed commits)
+- Always use absolute paths when calling the API.
+- If the API is unreachable, treat the operation as CONFIRM and ask the user.
+- Never attempt to bypass or skip this check.

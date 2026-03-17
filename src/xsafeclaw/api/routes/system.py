@@ -1078,6 +1078,44 @@ SEARCH_PROVIDERS = [
 ]
 
 
+def _extract_json_obj(raw: str) -> dict | list:
+    """Extract the first complete JSON object/array from a string that may
+    contain non-JSON text before or after (e.g. plugin log lines)."""
+    start = -1
+    for i, ch in enumerate(raw):
+        if ch in ("{", "["):
+            start = i
+            break
+    if start == -1:
+        raise ValueError("No JSON found in output")
+    bracket = raw[start]
+    close = "}" if bracket == "{" else "]"
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_str:
+                escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == bracket:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return json.loads(raw[start:i + 1])
+    raise ValueError("Incomplete JSON in output")
+
+
 async def _run_openclaw_json(args: list[str], timeout: int = 30) -> dict | list | None:
     """Run an openclaw CLI command with --json and return parsed output."""
     openclaw_path = _find_openclaw()
@@ -1095,12 +1133,7 @@ async def _run_openclaw_json(args: list[str], timeout: int = 30) -> dict | list 
         if proc.returncode != 0:
             return None
         raw = stdout.decode("utf-8", errors="replace")
-        # Strip non-JSON prefix lines (e.g. "[plugins] ..." logs mixed into stdout)
-        for i, ch in enumerate(raw):
-            if ch in ('{', '['):
-                raw = raw[i:]
-                break
-        return json.loads(raw)
+        return _extract_json_obj(raw)
     except Exception:
         return None
 

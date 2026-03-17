@@ -127,6 +127,45 @@ def _build_skill_paths() -> dict[str, str]:
     return skill_map
 
 
+def _extract_json(raw: str) -> dict | list:
+    """Extract the first complete JSON object/array from a string that may
+    contain non-JSON text before or after (e.g. plugin log lines)."""
+    start = -1
+    for i, ch in enumerate(raw):
+        if ch in ("{", "["):
+            start = i
+            break
+    if start == -1:
+        raise ValueError("No JSON object/array found in output")
+
+    bracket = raw[start]
+    close = "}" if bracket == "{" else "]"
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_str:
+                escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == bracket:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return json.loads(raw[start:i + 1])
+    raise ValueError("Incomplete JSON in output")
+
+
 def _file_sha256(path: Path) -> str:
     """SHA-256 hex digest of a file, empty string if not exists."""
     if not path.exists():
@@ -185,12 +224,8 @@ async def list_skills():
 
     try:
         raw = result.stdout
-        for i, ch in enumerate(raw):
-            if ch in ("{", "["):
-                raw = raw[i:]
-                break
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        data = _extract_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=f"Invalid JSON from openclaw: {exc}")
 
     config = _read_config()
@@ -239,12 +274,8 @@ async def check_skills():
 
     try:
         raw = result.stdout
-        for i, ch in enumerate(raw):
-            if ch in ("{", "["):
-                raw = raw[i:]
-                break
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
+        return _extract_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=f"Invalid JSON from openclaw: {exc}")
 
 

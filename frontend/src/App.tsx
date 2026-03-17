@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { useI18n } from './i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Layout from './components/Layout';
 import Home from './pages/Home';
@@ -31,6 +32,7 @@ function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useI18n();
 
   useEffect(() => {
     (async () => {
@@ -74,7 +76,7 @@ function AppRoutes() {
       <div className="min-h-screen bg-surface-0 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
           <img src="/logo.png" alt="XSafeClaw" className="w-14 h-14 rounded-xl animate-pulse" />
-          <p className="text-text-muted text-sm">Starting XSafeClaw...</p>
+          <p className="text-text-muted text-sm">{t.common.startingApp}</p>
         </div>
       </div>
     );

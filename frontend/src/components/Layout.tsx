@@ -1,13 +1,7 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, ScanSearch, MessageSquare, Sun, Moon } from 'lucide-react';
-
-const navigation = [
-  { name: 'Claw Monitor',    href: '/monitor',        icon: Monitor,        desc: 'Real-time Monitoring' },
-  { name: 'Safe Chat',       href: '/chat',            icon: MessageSquare,  desc: 'Chat with Agent' },
-  { name: 'Asset Shield',    href: '/assets',          icon: Shield,         desc: 'Asset Scanning' },
-  { name: 'Safety Rehearsal', href: '/safety-rehearsal', icon: ScanSearch,     desc: 'Safety Rehearsal' },
-];
+import { Shield, Monitor, ChevronRight, ScanSearch, MessageSquare, Sun, Moon, Languages } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 function useTheme() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -26,6 +20,14 @@ function useTheme() {
 export default function Layout() {
   const location = useLocation();
   const { theme, toggle } = useTheme();
+  const { locale, setLocale, t } = useI18n();
+
+  const navigation = [
+    { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,       desc: t.layout.descMonitor },
+    { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
+    { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
+    { name: t.layout.safetyRehearsal, href: '/safety-rehearsal',  icon: ScanSearch,     desc: t.layout.descRehearsal },
+  ];
 
   return (
     <div className="flex min-h-screen">
@@ -35,14 +37,14 @@ export default function Layout() {
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
           <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />
           <div className="flex items-center gap-2">
-            <span className="text-[15px] font-bold text-text-primary tracking-tight">XSafeClaw</span>
+            <span className="text-[15px] font-bold text-text-primary tracking-tight">{t.layout.brand}</span>
             <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">V0.1.1</span>
           </div>
         </div>
 
         {/* Nav Label */}
         <div className="px-5 pt-6 pb-2">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">Navigation</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">{t.layout.nav}</p>
         </div>
 
         {/* Nav Items */}
@@ -52,7 +54,7 @@ export default function Layout() {
             const isActive = location.pathname === item.href || (item.href === '/monitor' && location.pathname === '/');
             return (
               <NavLink
-                key={item.name}
+                key={item.href}
                 to={item.href}
                 className={`
                   group flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150
@@ -72,20 +74,29 @@ export default function Layout() {
           })}
         </nav>
 
-        {/* Bottom: theme toggle + status */}
+        {/* Bottom: theme toggle + lang toggle + status */}
         <div className="p-4 border-t border-border space-y-2">
+          {/* Language toggle */}
+          <button
+            onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-all"
+          >
+            <Languages className="w-4 h-4 text-accent flex-shrink-0" />
+            <span className="text-[12px] font-medium">{t.layout.langToggle}</span>
+          </button>
+
           {/* Theme toggle */}
           <button
             onClick={toggle}
             className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-all"
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={theme === 'dark' ? t.layout.switchToLight : t.layout.switchToDark}
           >
             {theme === 'dark'
               ? <Sun className="w-4 h-4 text-warning flex-shrink-0" />
               : <Moon className="w-4 h-4 text-accent flex-shrink-0" />
             }
             <span className="text-[12px] font-medium">
-              {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+              {theme === 'dark' ? t.layout.lightMode : t.layout.darkMode}
             </span>
           </button>
 
@@ -96,8 +107,8 @@ export default function Layout() {
               <span className="relative inline-flex rounded-full h-2 w-2 bg-success"></span>
             </span>
             <div>
-              <p className="text-[11px] font-medium text-text-primary">System Online</p>
-              <p className="text-[10px] text-text-muted">All services running</p>
+              <p className="text-[11px] font-medium text-text-primary">{t.layout.systemOnline}</p>
+              <p className="text-[10px] text-text-muted">{t.layout.allServicesRunning}</p>
             </div>
           </div>
         </div>

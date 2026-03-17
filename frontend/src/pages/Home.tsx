@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { Users, Globe } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 interface ActionCard {
   icon: React.ElementType;
@@ -41,6 +42,7 @@ function Card({ icon: Icon, title, description, onClick, accent }: ActionCard) {
 
 export default function Home() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const goToWorld = () => {
     window.location.href = '/agent-town.html';
   };
@@ -53,9 +55,9 @@ export default function Home() {
         <img src="/logo.png" alt="XSafeClaw" className="w-20 h-20 rounded-2xl shadow-xl shadow-accent/25" />
         <div className="text-center space-y-2">
           <h1 className="text-[32px] font-bold text-text-primary tracking-tight">
-            XSafeClaw
+            {t.home.title}
           </h1>
-          <p className="text-[15px] text-text-muted">Keeping Your Claw Safe.</p>
+          <p className="text-[15px] text-text-muted">{t.home.subtitle}</p>
         </div>
       </div>
 
@@ -63,15 +65,15 @@ export default function Home() {
       <div className="grid grid-cols-2 gap-6 w-full max-w-2xl">
         <Card
           icon={Globe}
-          title="Agent Town"
-          description="Manage and observe all your AI agents in one place."
+          title={t.home.agentTown}
+          description={t.home.agentTownDesc}
           onClick={goToWorld}
           accent
         />
         <Card
           icon={Users}
-          title="Agent Dashboard"
-          description="A dashboard to monitor and manage your AI agents."
+          title={t.home.agentDashboard}
+          description={t.home.agentDashboardDesc}
           onClick={() => navigate('/monitor?tab=agent')}
         />
       </div>

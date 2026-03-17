@@ -276,12 +276,12 @@ async def scan_skill(
         raw_output = await _call_scan_model(content)
         parsed = _parse_scan_output(raw_output)
     except Exception as exc:
-        logger.error("Skill scan failed for %s: %s", skill_key, exc)
+        logger.error("Skill scan failed for %s: %r", skill_key, exc, exc_info=True)
         return SkillScanResult(
             skill_key=skill_key,
             status="error",
             risk_type="none",
-            details=f"Scan failed: {exc}",
+            details=f"Scan failed: {type(exc).__name__}: {exc}",
             file_hash=file_hash,
             scanned_at=time.time(),
             path=str(skill_md_path),

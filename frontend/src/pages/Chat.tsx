@@ -3,10 +3,10 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
-  Settings2, Brain, Cpu, ShieldAlert, ExternalLink, Shield,
+  Settings2, Brain, Cpu, Shield, Check, Pencil, AlertTriangle,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import { chatAPI, guardAPI } from '../services/api';
+import { useI18n } from '../i18n';
 
 /* ==================== Types ==================== */
 interface PendingImage {
@@ -59,12 +59,12 @@ function fmtTime(d: Date) {
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-function fmtDate(iso: string) {
+function fmtDate(iso: string, todayLabel = 'Today', yesterdayLabel = 'Yesterday') {
   const d = new Date(iso);
   const now = new Date();
   const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
-  if (diffDays === 0) return 'Today';
-  if (diffDays === 1) return 'Yesterday';
+  if (diffDays === 0) return todayLabel;
+  if (diffDays === 1) return yesterdayLabel;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
@@ -107,6 +107,7 @@ function parsePromptModelSwitch(input: string): string | null {
 
 /* ==================== Tool Call Bubble ==================== */
 function ToolCallBubble({ msg }: { msg: ChatMessage }) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
 
   const formatValue = (v: any): string => {
@@ -148,7 +149,7 @@ function ToolCallBubble({ msg }: { msg: ChatMessage }) {
             {/* Arguments */}
             {msg.args !== undefined && (
               <div className="px-4 py-3 border-b border-border/60">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">Arguments</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">{t.chat.arguments}</p>
                 <pre className="text-[11px] font-mono text-text-secondary bg-surface-0/60 rounded-lg p-2.5 overflow-x-auto whitespace-pre-wrap break-all max-h-48">
                   {formatValue(msg.args)}
                 </pre>
@@ -159,12 +160,12 @@ function ToolCallBubble({ msg }: { msg: ChatMessage }) {
             {msg.result_pending ? (
               <div className="px-4 py-3 flex items-center gap-2 text-text-muted">
                 <Loader2 className="w-3 h-3 animate-spin" />
-                <span className="text-[12px]">Running…</span>
+                <span className="text-[12px]">{t.chat.running}</span>
               </div>
             ) : msg.result !== undefined ? (
               <div className="px-4 py-3">
                 <p className={`text-[10px] font-semibold uppercase tracking-wider mb-1.5 ${msg.is_error ? 'text-red-400' : 'text-text-muted'}`}>
-                  {msg.is_error ? 'Error' : 'Result'}
+                  {msg.is_error ? t.chat.error : t.chat.result}
                 </p>
                 <pre className={`text-[11px] font-mono rounded-lg p-2.5 overflow-x-auto whitespace-pre-wrap break-all max-h-64 ${
                   msg.is_error
@@ -184,6 +185,7 @@ function ToolCallBubble({ msg }: { msg: ChatMessage }) {
 
 /* ==================== Message Bubble ==================== */
 function Bubble({ msg }: { msg: ChatMessage }) {
+  const { t } = useI18n();
   if (msg.role === 'tool_call') return <ToolCallBubble msg={msg} />;
 
   const isUser = msg.role === 'user';
@@ -201,7 +203,7 @@ function Bubble({ msg }: { msg: ChatMessage }) {
 
       <div className={`flex flex-col gap-1 flex-1 ${isUser ? 'items-end' : 'items-start'}`}>
         <div className={`flex items-center gap-2 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
-          <span className="text-[12px] font-medium text-text-secondary">{isUser ? 'You' : 'Assistant'}</span>
+          <span className="text-[12px] font-medium text-text-secondary">{isUser ? t.chat.you : t.chat.assistant}</span>
           <span className="text-[11px] text-text-muted">{fmtTime(msg.timestamp)}</span>
         </div>
         <div className={`rounded-2xl px-4 py-2.5 max-w-[85%] ${
@@ -270,10 +272,15 @@ export default function Chat() {
   const [guardOn, setGuardOn] = useState(true);
 
   const [guardPending, setGuardPending] = useState<{
-    id: string; tool_name: string; risk_source: string | null;
-    failure_mode: string | null; real_world_harm: string | null;
+    id: string; tool_name: string; params: Record<string, any>;
+    guard_verdict: string; session_context: string;
+    risk_source: string | null; failure_mode: string | null; real_world_harm: string | null;
+    created_at: number;
   }[]>([]);
-  const navigate = useNavigate();
+  const [gpResolving, setGpResolving] = useState<string | null>(null);
+  const [gpEditingId, setGpEditingId] = useState<string | null>(null);
+  const [gpEditParams, setGpEditParams] = useState('');
+  const [gpExpandedId, setGpExpandedId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -282,17 +289,19 @@ export default function Chat() {
   const composingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
 
+  const { t } = useI18n();
+
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024; // 5 MB per image
 
   const THINKING_LEVELS = [
-    { value: '',        label: 'Default' },
-    { value: 'off',     label: 'Off' },
-    { value: 'minimal', label: 'Minimal' },
-    { value: 'low',     label: 'Low' },
-    { value: 'medium',  label: 'Medium' },
-    { value: 'high',    label: 'High' },
-    { value: 'xhigh',  label: 'Max' },
+    { value: '',        label: t.chat.thinkingLevels.default },
+    { value: 'off',     label: t.chat.thinkingLevels.off },
+    { value: 'minimal', label: t.chat.thinkingLevels.minimal },
+    { value: 'low',     label: t.chat.thinkingLevels.low },
+    { value: 'medium',  label: t.chat.thinkingLevels.medium },
+    { value: 'high',    label: t.chat.thinkingLevels.high },
+    { value: 'xhigh',  label: t.chat.thinkingLevels.max },
   ];
 
   const activeMessages: ChatMessage[] = activeKey ? (messageMap[activeKey] ?? []) : [];
@@ -367,6 +376,28 @@ export default function Chat() {
     guardAPI.getEnabled().then(r => setGuardOn(r.data.enabled)).catch(() => {});
   }, []);
 
+  const handleGpResolve = async (id: string, resolution: string, modifiedParams?: Record<string, any>) => {
+    setGpResolving(id);
+    try {
+      await guardAPI.resolve(id, resolution, modifiedParams);
+      setGuardPending(prev => prev.filter(p => p.id !== id));
+    } catch (e) { console.error('resolve failed', e); }
+    finally { setGpResolving(null); setGpEditingId(null); }
+  };
+
+  const handleGpModify = (id: string) => {
+    if (gpEditingId === id) {
+      try {
+        const parsed = JSON.parse(gpEditParams);
+        handleGpResolve(id, 'modified', parsed);
+      } catch { alert(t.common.invalidJson); }
+    } else {
+      const item = guardPending.find(i => i.id === id);
+      setGpEditingId(id);
+      setGpEditParams(JSON.stringify(item?.params ?? {}, null, 2));
+    }
+  };
+
   const toggleGuard = async () => {
     const next = !guardOn;
     setGuardOn(next);
@@ -402,9 +433,13 @@ export default function Chat() {
         setGuardPending(forSession.map((p: any) => ({
           id: p.id,
           tool_name: p.tool_name,
+          params: p.params ?? {},
+          guard_verdict: p.guard_verdict ?? 'unsafe',
+          session_context: p.session_context ?? '',
           risk_source: p.risk_source ?? null,
           failure_mode: p.failure_mode ?? null,
           real_world_harm: p.real_world_harm ?? null,
+          created_at: p.created_at ?? 0,
         })));
       } catch { /* ignore */ }
     };
@@ -510,7 +545,7 @@ export default function Chat() {
       setMessageMap(prev => ({ ...prev, [key]: [] }));
       setActiveKey(key);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to connect to OpenClaw gateway. Is it running?');
+      alert(err.response?.data?.detail || t.chat.connectFailed);
     } finally {
       setConnecting(false);
     }
@@ -764,16 +799,19 @@ export default function Chat() {
       {/* Header */}
       <div className="flex-shrink-0 border-b border-border px-8 py-5 flex items-center justify-between bg-surface-0">
         <div>
-          <h1 className="text-xl font-bold text-text-primary">Safe Chat</h1>
-          <p className="text-[13px] text-text-muted mt-1">A secure gateway to chat with your Claw agent.</p>
+          <div className="flex items-center gap-4">
+            <h1 className="text-xl font-bold text-text-primary">{t.chat.title}</h1>
+            <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">{t.common.active}</span>
+          </div>
+          <p className="text-[13px] text-text-muted mt-1">{t.chat.subtitle}</p>
         </div>
         <div className="flex items-center gap-3">
           <button onClick={toggleGuard}
             className="flex items-center gap-2 group"
-            title={guardOn ? 'Guard is ON — tool calls will be checked' : 'Guard is OFF — tool calls pass through'}
+            title={guardOn ? t.chat.guardOn : t.chat.guardOff}
           >
             <span className={`text-[12px] font-semibold transition-colors ${guardOn ? 'text-emerald-400' : 'text-text-muted'}`}>
-              <Shield className="w-4 h-4 inline -mt-0.5 mr-1" />Guard
+              <Shield className="w-4 h-4 inline -mt-0.5 mr-1" />{t.chat.guard}
             </span>
             <div className={`relative w-9 h-5 rounded-full transition-colors ${guardOn ? 'bg-emerald-500' : 'bg-surface-2'}`}>
               <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${guardOn ? 'translate-x-[18px]' : 'translate-x-[2px]'}`} />
@@ -785,7 +823,7 @@ export default function Chat() {
             className="flex items-center gap-2 px-4 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20"
           >
             {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            {connecting ? 'Connecting…' : 'New Session'}
+            {connecting ? t.chat.connecting : t.chat.newSession}
           </button>
         </div>
       </div>
@@ -797,14 +835,14 @@ export default function Chat() {
         <div className="w-56 flex-shrink-0 border-r border-border bg-surface-1 flex flex-col overflow-hidden">
           <div className="px-4 py-3 flex-shrink-0 border-b border-border">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
-              Sessions ({sessions.length})
+              {t.chat.sessions.replace('{n}', String(sessions.length))}
             </p>
           </div>
           <div className="flex-1 overflow-y-auto py-2 space-y-0.5 px-2">
             {sessions.length === 0 ? (
               <div className="text-center py-10">
                 <MessageSquare className="w-6 h-6 text-text-muted mx-auto mb-2" />
-                <p className="text-[11px] text-text-muted">No sessions yet</p>
+                <p className="text-[11px] text-text-muted">{t.chat.noSessions}</p>
               </div>
             ) : (
               sessions.map(s => {
@@ -830,7 +868,7 @@ export default function Chat() {
                       <div className="flex items-center gap-1 mt-0.5">
                         <Clock className="w-2.5 h-2.5 text-text-muted flex-shrink-0" />
                         <p className="text-[10px] text-text-muted truncate">
-                          {fmtDate(s.createdAt)}
+                          {fmtDate(s.createdAt, t.chat.today, t.chat.yesterday)}
                           {messageMap[s.key] !== undefined && ` · ${msgCount} msg${msgCount !== 1 ? 's' : ''}`}
                         </p>
                       </div>
@@ -838,7 +876,7 @@ export default function Chat() {
                     <button
                       onClick={e => handleDeleteSession(s.key, e)}
                       className="opacity-0 group-hover:opacity-100 p-0.5 text-text-muted hover:text-red-400 transition-all flex-shrink-0"
-                      title="Delete session"
+                      title={t.chat.deleteSession}
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -861,8 +899,8 @@ export default function Chat() {
             <div className="absolute inset-0 z-50 bg-accent/5 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
               <div className="bg-surface-1 border-2 border-dashed border-accent/50 rounded-2xl px-10 py-8 text-center shadow-2xl">
                 <ImagePlus className="w-10 h-10 text-accent mx-auto mb-3" />
-                <p className="text-sm font-medium text-text-primary">Drop images here</p>
-                <p className="text-[12px] text-text-muted mt-1">PNG, JPG, GIF, WebP · Max {MAX_IMAGES} images</p>
+                <p className="text-sm font-medium text-text-primary">{t.chat.dropImages}</p>
+                <p className="text-[12px] text-text-muted mt-1">{t.chat.imageFormats.replace('{n}', String(MAX_IMAGES))}</p>
               </div>
             </div>
           )}
@@ -873,9 +911,9 @@ export default function Chat() {
               <div className="w-20 h-20 rounded-3xl bg-surface-1 border border-border flex items-center justify-center mb-6">
                 <MessageSquare className="w-10 h-10 text-text-muted" />
               </div>
-              <h2 className="text-lg font-semibold text-text-secondary mb-2">No session selected</h2>
+              <h2 className="text-lg font-semibold text-text-secondary mb-2">{t.chat.noSession}</h2>
               <p className="text-[13px] text-text-muted max-w-sm mb-6">
-                Select a previous session from the sidebar, or start a new one.
+                {t.chat.noSessionDesc}
               </p>
               <button
                 onClick={handleNewSession}
@@ -883,7 +921,7 @@ export default function Chat() {
                 className="flex items-center gap-2 px-5 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20"
               >
                 {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                {connecting ? 'Connecting…' : 'New Session'}
+                {connecting ? t.chat.connecting : t.chat.newSession}
               </button>
             </div>
           ) : (
@@ -913,13 +951,13 @@ export default function Chat() {
                       onClick={handleQuickModelSwitch}
                       disabled={sending || !activeKey || !selectedModel}
                       className="px-2 py-1 text-[11px] rounded border border-border text-text-secondary hover:text-text-primary hover:bg-surface-2 disabled:opacity-50"
-                      title={selectedModel ? `Send /model ${selectedModel}` : 'Pick a model in settings first'}
+                      title={selectedModel ? `Send /model ${selectedModel}` : t.chat.pickModel}
                     >
-                      Switch Model
+                      {t.chat.switchModel}
                     </button>
                     <button
                       onClick={() => setShowSettings(v => !v)}
-                      title="Session settings"
+                      title={t.chat.sessionSettings}
                       className={`p-1.5 rounded-md transition-all ${
                         showSettings
                           ? 'text-accent bg-accent/10'
@@ -931,7 +969,7 @@ export default function Chat() {
                     <button
                       onClick={handleRefreshHistory}
                       disabled={loadingHistory === activeKey}
-                      title="Reload history"
+                      title={t.chat.reloadHistory}
                       className="p-1.5 text-text-muted hover:text-text-primary hover:bg-surface-2 rounded-md transition-all"
                     >
                       <RotateCcw className={`w-3.5 h-3.5 ${loadingHistory === activeKey ? 'animate-spin' : ''}`} />
@@ -945,7 +983,7 @@ export default function Chat() {
                     {/* Model selector */}
                     <div className="relative" ref={modelDropdownRef}>
                       <label className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5 flex items-center gap-1.5">
-                        <Cpu className="w-3 h-3" /> Model
+                        <Cpu className="w-3 h-3" /> {t.chat.model}
                         {patchingSession && <Loader2 className="w-3 h-3 animate-spin text-accent" />}
                       </label>
 
@@ -955,7 +993,7 @@ export default function Chat() {
                         className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-surface-1 border border-border rounded-lg text-[12px] hover:border-accent/40 transition-all"
                       >
                         <span className={selectedModel ? 'text-text-primary font-medium' : 'text-text-muted'}>
-                          {selectedModel || defaultModel || 'Select model…'}
+                          {selectedModel || defaultModel || t.chat.selectModel}
                         </span>
                         <div className="flex items-center gap-1.5 flex-shrink-0">
                           {selectedModel && (
@@ -989,7 +1027,7 @@ export default function Chat() {
                                   setModelDropdownOpen(false);
                                 }
                               }}
-                              placeholder="Filter models… (Enter to use custom ID)"
+                              placeholder={t.chat.filterModels}
                               autoFocus
                               className="w-full text-[11px] px-2 py-1.5 bg-surface-0 border border-border rounded text-text-primary placeholder-text-muted focus:outline-none focus:border-accent/50"
                             />
@@ -999,7 +1037,7 @@ export default function Chat() {
                           <div className="max-h-56 overflow-y-auto">
                             {modelsLoading ? (
                               <div className="px-3 py-6 flex items-center justify-center gap-2 text-text-muted">
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading…
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> {t.common.loading}
                               </div>
                             ) : (() => {
                               const filtered = modelSearch
@@ -1016,8 +1054,8 @@ export default function Chat() {
                               if (providers.length === 0) {
                                 return (
                                   <div className="px-3 py-4 text-[11px] text-text-muted text-center">
-                                    No models found.
-                                    {modelSearch && <span className="block mt-1">Press Enter to use "<span className="font-mono text-text-secondary">{modelSearch}</span>"</span>}
+                                    {t.chat.noModels}
+                                    {modelSearch && <span className="block mt-1">{t.chat.pressEnterUse.replace('{v}', modelSearch)}</span>}
                                   </div>
                                 );
                               }
@@ -1043,7 +1081,7 @@ export default function Chat() {
                                         <span className="truncate">{m.name || m.id.split('/')[1]}</span>
                                         <span className="flex items-center gap-1.5 flex-shrink-0">
                                           {m.reasoning && <span title="Reasoning"><Brain className="w-3 h-3 text-amber-400" /></span>}
-                                          {isDefault && <span className="text-[9px] text-accent bg-accent/10 rounded px-1 py-0.5">default</span>}
+                                          {isDefault && <span className="text-[9px] text-accent bg-accent/10 rounded px-1 py-0.5">{t.chat.default}</span>}
                                           {isSelected && <CheckCircle2 className="w-3 h-3 text-accent" />}
                                         </span>
                                       </button>
@@ -1060,7 +1098,7 @@ export default function Chat() {
                     {/* Thinking level */}
                     <div>
                       <label className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5 flex items-center gap-1.5">
-                        <Brain className="w-3 h-3" /> Thinking Level
+                        <Brain className="w-3 h-3" /> {t.chat.thinkingLevel}
                       </label>
                       <div className="flex flex-wrap gap-1.5">
                         {THINKING_LEVELS.map(lvl => (
@@ -1085,33 +1123,61 @@ export default function Chat() {
                 )}
               </div>
 
-              {/* Guard interception banner */}
+              {/* Guard inline approval panel */}
               {guardPending.length > 0 && (
-                <div className="flex-shrink-0 mx-6 mt-3">
+                <div className="flex-shrink-0 mx-6 mt-3 space-y-2">
                   {guardPending.map(gp => (
-                    <div key={gp.id} className="flex items-start gap-3 px-4 py-3 bg-red-500/8 border border-red-500/25 rounded-xl mb-2 animate-pulse">
-                      <ShieldAlert className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-semibold text-red-400">
-                          Tool call <code className="bg-red-500/15 px-1.5 py-0.5 rounded text-[12px]">{gp.tool_name}</code> blocked by Guard
-                        </p>
-                        <p className="text-[12px] text-text-muted mt-0.5">
-                          Awaiting human approval. The agent is paused until this is resolved.
-                        </p>
-                        {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
-                          <div className="mt-1.5 text-[11px] text-text-secondary space-y-0.5">
-                            {gp.risk_source && <p><span className="text-amber-400 font-medium">Risk Source:</span> {gp.risk_source}</p>}
-                            {gp.failure_mode && <p><span className="text-orange-400 font-medium">Failure Mode:</span> {gp.failure_mode}</p>}
-                            {gp.real_world_harm && <p><span className="text-red-400 font-medium">Real World Harm:</span> {gp.real_world_harm}</p>}
+                    <div key={gp.id} className="bg-surface-1 border-l-4 border-l-red-500 border border-border rounded-xl overflow-hidden">
+                      <div className="px-5 py-4 flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                            <span className="font-mono text-sm font-semibold text-text-primary">{gp.tool_name}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-semibold uppercase">{gp.guard_verdict}</span>
+                          </div>
+                          <p className="text-[12px] text-text-muted">{t.chat.guardPaused}</p>
+                          {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                              {gp.risk_source && <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-medium">{gp.risk_source}</span>}
+                              {gp.failure_mode && <span className="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 font-medium">{gp.failure_mode}</span>}
+                              {gp.real_world_harm && <span className="px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 font-medium">{gp.real_world_harm}</span>}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <button onClick={() => handleGpResolve(gp.id, 'approved')} disabled={gpResolving === gp.id}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/25 transition-colors disabled:opacity-50">
+                            {gpResolving === gp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} {t.common.approve}
+                          </button>
+                          <button onClick={() => handleGpModify(gp.id)} disabled={gpResolving === gp.id}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50">
+                            <Pencil className="w-3.5 h-3.5" /> {gpEditingId === gp.id ? t.common.save : t.common.modify}
+                          </button>
+                          <button onClick={() => handleGpResolve(gp.id, 'rejected')} disabled={gpResolving === gp.id}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50">
+                            <X className="w-3.5 h-3.5" /> {t.common.reject}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="px-5 pb-4">
+                        <button onClick={() => setGpExpandedId(gpExpandedId === gp.id ? null : gp.id)}
+                          className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary mb-2 transition-colors">
+                          {gpExpandedId === gp.id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />} {t.common.parameters}
+                        </button>
+                        {gpExpandedId === gp.id && (
+                          <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
+                            {JSON.stringify(gp.params, null, 2)}
+                          </pre>
+                        )}
+                        {gpEditingId === gp.id && (
+                          <div className="mt-3">
+                            <label className="text-xs text-text-muted font-semibold mb-1 block">{t.common.editParamsJson}</label>
+                            <textarea value={gpEditParams} onChange={e => setGpEditParams(e.target.value)} rows={6}
+                              className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent resize-y" />
+                            <button onClick={() => setGpEditingId(null)} className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors">{t.common.cancelEditing}</button>
                           </div>
                         )}
                       </div>
-                      <button
-                        onClick={() => navigate('/monitor')}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 text-[12px] font-semibold rounded-lg transition-colors flex-shrink-0"
-                      >
-                        Review <ExternalLink className="w-3 h-3" />
-                      </button>
                     </div>
                   ))}
                 </div>
@@ -1122,13 +1188,13 @@ export default function Chat() {
                 {loadingHistory === activeKey ? (
                   <div className="flex flex-col items-center justify-center h-full">
                     <Loader2 className="w-8 h-8 text-text-muted animate-spin mb-3" />
-                    <p className="text-[13px] text-text-muted">Loading history…</p>
+                    <p className="text-[13px] text-text-muted">{t.chat.loadingHistory}</p>
                   </div>
                 ) : activeMessages.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-full text-center">
                     <Bot className="w-10 h-10 text-text-muted mb-3" />
-                    <p className="text-sm text-text-secondary">Session ready. Say something to get started.</p>
-                    <p className="text-[12px] text-text-muted mt-1">↵ to send · Shift+↵ for new line</p>
+                    <p className="text-sm text-text-secondary">{t.chat.sessionReady}</p>
+                    <p className="text-[12px] text-text-muted mt-1">{t.chat.sendHint}</p>
                   </div>
                 ) : (
                   activeMessages.map(msg => <Bubble key={msg.id} msg={msg} />)
@@ -1179,7 +1245,7 @@ export default function Chat() {
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={sending || pendingImages.length >= MAX_IMAGES}
-                    title={pendingImages.length >= MAX_IMAGES ? `Max ${MAX_IMAGES} images` : 'Attach image'}
+                    title={pendingImages.length >= MAX_IMAGES ? t.chat.maxImages.replace('{n}', String(MAX_IMAGES)) : t.chat.attachImage}
                     className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-surface-2 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                   >
                     <ImagePlus className="w-4 h-4" />
@@ -1198,7 +1264,7 @@ export default function Chat() {
                       lastCompositionEndAtRef.current = Date.now();
                       setIsComposing(false);
                     }}
-                    placeholder={sending ? 'Waiting for response…' : 'Message (↵ send, Shift+↵ newline, Ctrl+V paste image)'}
+                    placeholder={sending ? t.chat.waitingResponse : t.chat.placeholder}
                     rows={1}
                     disabled={sending}
                     autoFocus
@@ -1216,7 +1282,7 @@ export default function Chat() {
                 {sending && (
                   <p className="text-[11px] text-text-muted mt-2 flex items-center gap-1.5">
                     <Loader2 className="w-3 h-3 animate-spin" />
-                    Waiting for agent response…
+                    {t.chat.waitingResponse}
                   </p>
                 )}
               </div>

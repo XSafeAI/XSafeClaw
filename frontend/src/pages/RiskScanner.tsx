@@ -1,12 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Shield, Zap, Loader2, Play, ChevronDown, ChevronRight,
-  AlertTriangle, XCircle, Square,
+  AlertTriangle, XCircle, Square, X, Pencil,
   Crosshair, Send, Clock, Check, Bot, User, MessageSquare,
-  ShieldAlert, ExternalLink,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import { redteamAPI, guardAPI } from '../services/api';
+import { useI18n } from '../i18n';
 
 /* ==================== Types ==================== */
 interface InstructionItem { record_id: string; instruction: string; category: string; }
@@ -26,11 +25,7 @@ interface ChatMessage {
 }
 
 /* ==================== Constants ==================== */
-const tabs = [
-  { id: 'redteam', name: 'Risk Discovery', icon: Crosshair },
-  { id: 'assess',  name: 'Risk Assessment', icon: Shield },
-] as const;
-type TabId = typeof tabs[number]['id'];
+type TabId = 'redteam' | 'assess';
 
 /* ==================== Sub Components ==================== */
 function Card({ children, className = '', style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
@@ -52,6 +47,7 @@ function CardHeader({ icon: Icon, title, badge, action }: { icon: typeof Shield;
 
 /* ==================== Safety Rehearsal Panel ==================== */
 function RedTeamPanel() {
+  const { t } = useI18n();
   const [instructions, setInstructions] = useState<InstructionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string>('');
@@ -68,12 +64,17 @@ function RedTeamPanel() {
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef(false);
-  const navigate = useNavigate();
 
   const [guardPending, setGuardPending] = useState<{
-    id: string; tool_name: string; risk_source: string | null;
-    failure_mode: string | null; real_world_harm: string | null;
+    id: string; tool_name: string; params: Record<string, any>;
+    guard_verdict: string; session_context: string;
+    risk_source: string | null; failure_mode: string | null; real_world_harm: string | null;
+    created_at: number;
   }[]>([]);
+  const [gpResolving, setGpResolving] = useState<string | null>(null);
+  const [gpEditingId, setGpEditingId] = useState<string | null>(null);
+  const [gpEditParams, setGpEditParams] = useState('');
+  const [gpExpandedId, setGpExpandedId] = useState<string | null>(null);
 
   // Poll guard pending items for the active red-team session
   useEffect(() => {
@@ -87,9 +88,13 @@ function RedTeamPanel() {
         setGuardPending(forSession.map((p: any) => ({
           id: p.id,
           tool_name: p.tool_name,
+          params: p.params ?? {},
+          guard_verdict: p.guard_verdict ?? 'unsafe',
+          session_context: p.session_context ?? '',
           risk_source: p.risk_source ?? null,
           failure_mode: p.failure_mode ?? null,
           real_world_harm: p.real_world_harm ?? null,
+          created_at: p.created_at ?? 0,
         })));
       } catch { /* ignore */ }
     };
@@ -97,6 +102,28 @@ function RedTeamPanel() {
     const timer = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [sessionKey]);
+
+  const handleGpResolve = async (id: string, resolution: string, modifiedParams?: Record<string, any>) => {
+    setGpResolving(id);
+    try {
+      await guardAPI.resolve(id, resolution, modifiedParams);
+      setGuardPending(prev => prev.filter(p => p.id !== id));
+    } catch (e) { console.error('resolve failed', e); }
+    finally { setGpResolving(null); setGpEditingId(null); }
+  };
+
+  const handleGpModify = (id: string) => {
+    if (gpEditingId === id) {
+      try {
+        const parsed = JSON.parse(gpEditParams);
+        handleGpResolve(id, 'modified', parsed);
+      } catch { alert(t.common.invalidJson); }
+    } else {
+      const item = guardPending.find(i => i.id === id);
+      setGpEditingId(id);
+      setGpEditParams(JSON.stringify(item?.params ?? {}, null, 2));
+    }
+  };
 
   // Load instructions on mount
   useEffect(() => {
@@ -150,7 +177,7 @@ function RedTeamPanel() {
         setChatMessages(prev => [...prev, {
           id: `sys-${Date.now()}`,
           role: 'system',
-          content: 'Connecting to OpenClaw gateway...',
+          content: t.risk.connectingGateway,
           timestamp: new Date(),
         }]);
         const sessRes = await redteamAPI.startSession();
@@ -159,14 +186,14 @@ function RedTeamPanel() {
         setChatMessages(prev => [...prev, {
           id: `sys-conn-${Date.now()}`,
           role: 'system',
-          content: `Session created: ${key}`,
+          content: t.risk.sessionCreated.replace('{k}', key),
           timestamp: new Date(),
         }]);
       } catch (err: any) {
         setChatMessages(prev => [...prev, {
           id: `sys-err-${Date.now()}`,
           role: 'system',
-          content: `Failed to connect: ${err.response?.data?.detail || err.message}`,
+          content: t.risk.connectFailed.replace('{e}', err.response?.data?.detail || err.message),
           timestamp: new Date(),
           state: 'error',
         }]);
@@ -181,7 +208,7 @@ function RedTeamPanel() {
         setChatMessages(prev => [...prev, {
           id: `sys-abort-${Date.now()}`,
           role: 'system',
-          content: 'Execution aborted by user.',
+          content: t.risk.aborted,
           timestamp: new Date(),
         }]);
         break;
@@ -222,7 +249,7 @@ function RedTeamPanel() {
         setChatMessages(prev => [...prev, {
           id: `err-${i}-${Date.now()}`,
           role: 'system',
-          content: `Error on turn ${i + 1}: ${err.response?.data?.detail || err.message}`,
+          content: t.risk.turnError.replace('{n}', String(i + 1)).replace('{e}', err.response?.data?.detail || err.message),
           timestamp: new Date(),
           state: 'error',
         }]);
@@ -263,14 +290,14 @@ function RedTeamPanel() {
       <div className="col-span-5 flex flex-col gap-5 self-stretch">
         {/* Instruction Selector */}
         <Card className="flex flex-col flex-1">
-          <CardHeader icon={Crosshair} title="Attack Setup" />
+          <CardHeader icon={Crosshair} title={t.risk.attackSetup} />
           <div className="p-5 space-y-5 flex flex-col">
 
             {/* Step 1 — Choose a target task */}
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <span className="w-5 h-5 rounded-full bg-accent flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">1</span>
-                <span className="text-[12px] font-semibold text-text-primary">Choose a target task</span>
+                <span className="text-[12px] font-semibold text-text-primary">{t.risk.chooseTask}</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {loading ? (
@@ -295,7 +322,7 @@ function RedTeamPanel() {
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <span className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0 ${selectedCategory ? 'bg-accent' : 'bg-surface-2'}`}>2</span>
-                <span className={`text-[12px] font-semibold ${selectedCategory ? 'text-text-primary' : 'text-text-muted'}`}>Choose an attack</span>
+                <span className={`text-[12px] font-semibold ${selectedCategory ? 'text-text-primary' : 'text-text-muted'}`}>{t.risk.chooseAttack}</span>
               </div>
               <div className="relative">
                 <button
@@ -305,14 +332,14 @@ function RedTeamPanel() {
                 >
                   <div className="flex items-center gap-2 min-w-0 flex-1">
                     {!selectedCategory ? (
-                      <span className="text-text-muted">Select a task first...</span>
+                      <span className="text-text-muted">{t.risk.selectTask}</span>
                     ) : selectedInstruction ? (
                       <>
                         <span className="text-accent font-semibold flex-shrink-0">{selectedInstruction.record_id}</span>
                         <span className="font-mono text-text-primary truncate">{selectedInstruction.instruction}</span>
                       </>
                     ) : (
-                      <span className="text-text-muted">Select an attack...</span>
+                      <span className="text-text-muted">{t.risk.selectAttack}</span>
                     )}
                   </div>
                   <ChevronDown className={`w-4 h-4 text-text-muted flex-shrink-0 ml-2 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} />
@@ -345,7 +372,7 @@ function RedTeamPanel() {
               className="w-full px-5 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-lg shadow-accent/20"
             >
               {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-              {generating ? 'Generating Attack Plan...' : 'Generate Attack'}
+              {generating ? t.risk.generatePlan : t.risk.generateAttack}
             </button>
             </div>
           </div>
@@ -356,7 +383,7 @@ function RedTeamPanel() {
           <Card>
             <CardHeader
               icon={AlertTriangle}
-              title="Attack Plan"
+              title={t.risk.attackPlan}
               badge={
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400">
                   {result.risk_type.replace(/_/g, ' ')}
@@ -365,11 +392,11 @@ function RedTeamPanel() {
             />
             <div className="p-5 space-y-3">
               <div>
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Scenario</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{t.risk.scenario}</span>
                 <p className="text-[13px] font-medium text-text-primary mt-1">{result.name.replace(/_/g, ' ')}</p>
               </div>
               <div>
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Description</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{t.risk.description}</span>
                 <p className="text-[12px] text-text-secondary mt-1">{result.description}</p>
               </div>
 
@@ -386,9 +413,9 @@ function RedTeamPanel() {
                     }`}
                   >
                     {allDone ? (
-                      <><Check className="w-4 h-4" /> All Turns Completed</>
+                      <><Check className="w-4 h-4" /> {t.risk.allCompleted}</>
                     ) : (
-                      <><Play className="w-4 h-4" /> Run All Turns ({totalTurns})</>
+                      <><Play className="w-4 h-4" /> {t.risk.runAllTurns.replace('{n}', String(totalTurns))}</>
                     )}
                   </button>
                 ) : (
@@ -396,7 +423,7 @@ function RedTeamPanel() {
                     onClick={handleAbort}
                     className="flex-1 px-5 py-3 rounded-lg text-[13px] font-semibold transition-all flex items-center justify-center gap-2 bg-orange-500/15 text-orange-400 border border-orange-500/30 hover:bg-orange-500/25"
                   >
-                    <Square className="w-4 h-4" /> Stop Execution
+                    <Square className="w-4 h-4" /> {t.risk.stopExecution}
                   </button>
                 )}
               </div>
@@ -444,18 +471,18 @@ function RedTeamPanel() {
                           </div>
                         )}
                       </div>
-                      <span className="text-[12px] font-medium text-text-primary">Turn {idx + 1}</span>
+                      <span className="text-[12px] font-medium text-text-primary">{t.risk.turn.replace('{n}', String(idx + 1))}</span>
                       <span className="text-[10px] text-text-muted truncate flex-1">{turn.thought.slice(0, 40)}...</span>
                       {isExpanded ? <ChevronDown className="w-3 h-3 text-text-muted" /> : <ChevronRight className="w-3 h-3 text-text-muted" />}
                     </button>
                     {isExpanded && (
                       <div className="px-4 pb-3">
                         <div className="bg-yellow-500/5 border border-yellow-500/10 rounded-lg p-2.5 mb-2">
-                          <p className="text-[10px] font-semibold text-yellow-400 mb-1">THOUGHT</p>
+                          <p className="text-[10px] font-semibold text-yellow-400 mb-1">{t.risk.thought}</p>
                           <p className="text-[11px] text-text-secondary leading-relaxed">{turn.thought}</p>
                         </div>
                         <div className="bg-surface-0 border border-border rounded-lg p-2.5">
-                          <p className="text-[10px] font-semibold text-red-400 mb-1">ATTACK INPUT</p>
+                          <p className="text-[10px] font-semibold text-red-400 mb-1">{t.risk.attackInput}</p>
                           <p className="text-[11px] text-text-primary font-mono whitespace-pre-wrap break-all leading-relaxed">{turn.output}</p>
                         </div>
                       </div>
@@ -476,9 +503,9 @@ function RedTeamPanel() {
               <div className="w-16 h-16 rounded-2xl bg-surface-2 flex items-center justify-center mb-5">
                 <Crosshair className="w-8 h-8 text-text-muted" />
               </div>
-              <p className="text-sm font-medium text-text-secondary mb-2">Automated Safety Rehearsal</p>
+              <p className="text-sm font-medium text-text-secondary mb-2">{t.risk.autoRehearsal}</p>
               <p className="text-[12px] text-text-muted max-w-sm">
-                Select an attack instruction and generate multi-turn decomposed commands. Then execute them against the agent in a live session.
+                {t.risk.autoRehearsalDesc}
               </p>
             </div>
           </Card>
@@ -490,8 +517,8 @@ function RedTeamPanel() {
               <div className="w-12 h-12 rounded-2xl bg-accent/15 flex items-center justify-center mb-4">
                 <Loader2 className="w-6 h-6 text-accent animate-spin" />
               </div>
-              <p className="text-sm font-semibold text-text-primary mb-1">Generating Attack Plan</p>
-              <p className="text-[12px] text-text-muted">Decomposing instruction into multi-turn attack sequence...</p>
+              <p className="text-sm font-semibold text-text-primary mb-1">{t.risk.generatingPlan}</p>
+              <p className="text-[12px] text-text-muted">{t.risk.generatingPlanDesc}</p>
               <div className="w-48 bg-surface-0 rounded-full h-1.5 overflow-hidden mt-4">
                 <div className="h-full rounded-full bg-gradient-to-r from-accent via-purple-400 to-accent bg-[length:200%_100%] animate-[shimmer_1.5s_linear_infinite]" />
               </div>
@@ -503,7 +530,7 @@ function RedTeamPanel() {
           <Card className="flex flex-col flex-1 overflow-hidden min-h-0">
             <CardHeader
               icon={MessageSquare}
-              title="Safe Chat"
+              title={t.risk.safeChat}
               badge={
                 sessionKey ? (
                   <span className="text-[10px] font-mono bg-surface-2 text-text-muted px-2 py-0.5 rounded-full">
@@ -511,37 +538,67 @@ function RedTeamPanel() {
                   </span>
                 ) : (
                   <span className="text-[10px] bg-surface-2 text-text-muted px-2 py-0.5 rounded-full">
-                    Not started
+                    {t.risk.notStarted}
                   </span>
                 )
               }
             />
 
-            {/* Guard interception banner */}
+            {/* Guard inline approval panel */}
             {guardPending.length > 0 && (
-              <div className="flex-shrink-0 mx-4 mt-3">
+              <div className="flex-shrink-0 mx-4 mt-3 space-y-2">
                 {guardPending.map(gp => (
-                  <div key={gp.id} className="flex items-start gap-3 px-4 py-3 bg-red-500/8 border border-red-500/25 rounded-xl mb-2 animate-pulse">
-                    <ShieldAlert className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[13px] font-semibold text-red-400">
-                        Tool <code className="bg-red-500/15 px-1.5 py-0.5 rounded text-[12px]">{gp.tool_name}</code> blocked by Guard
-                      </p>
-                      <p className="text-[11px] text-text-muted mt-0.5">Agent paused — needs human approval.</p>
-                      {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
-                        <div className="mt-1.5 text-[11px] text-text-secondary space-y-0.5">
-                          {gp.risk_source && <p><span className="text-amber-400 font-medium">Risk Source:</span> {gp.risk_source}</p>}
-                          {gp.failure_mode && <p><span className="text-orange-400 font-medium">Failure Mode:</span> {gp.failure_mode}</p>}
-                          {gp.real_world_harm && <p><span className="text-red-400 font-medium">Real World Harm:</span> {gp.real_world_harm}</p>}
+                  <div key={gp.id} className="bg-surface-1 border-l-4 border-l-red-500 border border-border rounded-xl overflow-hidden">
+                    <div className="px-5 py-4 flex items-start justify-between gap-4">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                          <span className="font-mono text-sm font-semibold text-text-primary">{gp.tool_name}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-semibold uppercase">{gp.guard_verdict}</span>
+                        </div>
+                        <p className="text-[12px] text-text-muted">{t.risk.guardPaused}</p>
+                        {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
+                          <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                            {gp.risk_source && <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-medium">{gp.risk_source}</span>}
+                            {gp.failure_mode && <span className="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 font-medium">{gp.failure_mode}</span>}
+                            {gp.real_world_harm && <span className="px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 font-medium">{gp.real_world_harm}</span>}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <button onClick={() => handleGpResolve(gp.id, 'approved')} disabled={gpResolving === gp.id}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/25 transition-colors disabled:opacity-50">
+                          {gpResolving === gp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} {t.common.approve}
+                        </button>
+                        <button onClick={() => handleGpModify(gp.id)} disabled={gpResolving === gp.id}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50">
+                          <Pencil className="w-3.5 h-3.5" /> {gpEditingId === gp.id ? t.common.save : t.common.modify}
+                        </button>
+                        <button onClick={() => handleGpResolve(gp.id, 'rejected')} disabled={gpResolving === gp.id}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50">
+                          <X className="w-3.5 h-3.5" /> {t.common.reject}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="px-5 pb-4">
+                      <button onClick={() => setGpExpandedId(gpExpandedId === gp.id ? null : gp.id)}
+                        className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary mb-2 transition-colors">
+                        {gpExpandedId === gp.id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />} {t.common.parameters}
+                      </button>
+                      {gpExpandedId === gp.id && (
+                        <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
+                          {JSON.stringify(gp.params, null, 2)}
+                        </pre>
+                      )}
+                      {gpEditingId === gp.id && (
+                        <div className="mt-3">
+                          <label className="text-xs text-text-muted font-semibold mb-1 block">{t.common.editParamsJson}</label>
+                          <textarea value={gpEditParams} onChange={e => setGpEditParams(e.target.value)} rows={6}
+                            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent resize-y" />
+                          <button onClick={() => setGpEditingId(null)} className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors">{t.common.cancelEditing}</button>
                         </div>
                       )}
                     </div>
-                    <button
-                      onClick={() => navigate('/monitor')}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 text-[12px] font-semibold rounded-lg transition-colors flex-shrink-0"
-                    >
-                      Review <ExternalLink className="w-3 h-3" />
-                    </button>
                   </div>
                 ))}
               </div>
@@ -554,9 +611,9 @@ function RedTeamPanel() {
                   <div className="w-14 h-14 rounded-2xl bg-surface-2 flex items-center justify-center mb-4">
                     <Send className="w-7 h-7 text-text-muted" />
                   </div>
-                  <p className="text-sm font-medium text-text-secondary mb-1">Ready to attack</p>
+                  <p className="text-sm font-medium text-text-secondary mb-1">{t.risk.readyToAttack}</p>
                   <p className="text-[12px] text-text-muted max-w-xs">
-                    Click "Run All Turns" to start a live session with the OpenClaw agent and execute the attack plan.
+                    {t.risk.readyToAttackDesc}
                   </p>
                 </div>
               ) : (
@@ -572,7 +629,7 @@ function RedTeamPanel() {
               <div className="px-5 py-3 border-t border-border bg-surface-0/50 flex items-center gap-3">
                 <Loader2 className="w-4 h-4 text-accent animate-spin" />
                 <span className="text-[12px] text-text-secondary">
-                  Executing turn {currentTurn + 1} of {totalTurns}...
+                  {t.risk.executingTurn.replace('{c}', String(currentTurn + 1)).replace('{t}', String(totalTurns))}
                 </span>
               </div>
             )}
@@ -647,15 +704,16 @@ function ChatBubble({ message }: { message: ChatMessage }) {
 
 /* ==================== Risk Assessment Panel (Coming Soon) ==================== */
 function RiskAssessmentPanel() {
+  const { t } = useI18n();
   return (
     <Card>
       <div className="flex flex-col items-center justify-center py-24 text-center">
         <div className="w-16 h-16 rounded-2xl bg-surface-2 flex items-center justify-center mb-5">
           <Shield className="w-8 h-8 text-text-muted" />
         </div>
-        <p className="text-sm font-medium text-text-secondary mb-2">Coming Soon</p>
+        <p className="text-sm font-medium text-text-secondary mb-2">{t.risk.assessmentComing}</p>
         <p className="text-[12px] text-text-muted max-w-sm">
-          Automated risk assessment for agent actions will be available in a future update.
+          {t.risk.assessmentComingDesc}
         </p>
       </div>
     </Card>
@@ -664,8 +722,14 @@ function RiskAssessmentPanel() {
 
 /* ==================== Main Page ==================== */
 export default function RiskScanner() {
+  const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<TabId>('redteam');
   const [guardOn, setGuardOn] = useState(true);
+
+  const tabItems = [
+    { id: 'redteam' as const, name: t.risk.tabs.discovery, icon: Crosshair },
+    { id: 'assess' as const, name: t.risk.tabs.assessment, icon: Shield },
+  ];
 
   useEffect(() => {
     guardAPI.getEnabled().then(r => setGuardOn(r.data.enabled)).catch(() => {});
@@ -684,9 +748,9 @@ export default function RiskScanner() {
         <div className="px-8 py-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <h1 className="text-xl font-bold text-text-primary">Safety Rehearsal</h1>
+              <h1 className="text-xl font-bold text-text-primary">{t.risk.title}</h1>
               <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
-                Ready
+                {t.common.active}
               </span>
             </div>
             <button onClick={toggleGuard}
@@ -703,13 +767,13 @@ export default function RiskScanner() {
             </button>
           </div>
           <p className="text-[13px] text-text-muted mt-2">
-            Find weaknesses in your AI agents before they cause problems.
+            {t.risk.subtitle}
           </p>
         </div>
 
         {/* Tab Bar */}
         <div className="px-8 flex items-center gap-1">
-          {tabs.map(tab => {
+          {tabItems.map(tab => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
             return (

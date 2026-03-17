@@ -11,6 +11,7 @@ import {
   RefreshCw, Trash2, Globe, FolderOpen, Search, Rocket,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
+import { useI18n } from '../i18n';
 
 /* ─── Types ─── */
 interface AuthMethod { id: string; label: string; hint?: string; modelProviders?: string[]; }
@@ -81,13 +82,11 @@ const INITIAL: FormData = {
   customProviderId: '', customCompatibility: 'openai',
 };
 
-const STEP_LABELS = ['Security','Mode','Config','Setup','Workspace','Provider','Gateway','Channels','Search','Skills','Hooks','Finalize','Review'];
-
 /* ─── Progress Bar ─── */
-function StepProgress({ current, skipped }: { current: number; skipped: Set<number> }) {
+function StepProgress({ current, skipped, labels }: { current: number; skipped: Set<number>; labels: string[] }) {
   return (
     <div className="flex items-center justify-center gap-0.5 mb-6">
-      {STEP_LABELS.map((label, i) => {
+      {labels.map((label, i) => {
         const done = i < current && !skipped.has(i);
         const active = i === current;
         const skip = skipped.has(i);
@@ -100,7 +99,7 @@ function StepProgress({ current, skipped }: { current: number; skipped: Set<numb
               </div>
               <span className={`text-[8px] font-medium ${skip ? 'text-text-muted/30' : active ? 'text-accent' : done ? 'text-emerald-400' : 'text-text-muted'}`}>{label}</span>
             </div>
-            {i < STEP_LABELS.length - 1 && <div className={`w-4 h-0.5 mx-0.5 mb-3 ${done && !skipped.has(i + 1) ? 'bg-emerald-500/60' : 'bg-border/50'}`} />}
+            {i < labels.length - 1 && <div className={`w-4 h-0.5 mx-0.5 mb-3 ${done && !skipped.has(i + 1) ? 'bg-emerald-500/60' : 'bg-border/50'}`} />}
           </div>
         );
       })}
@@ -110,22 +109,20 @@ function StepProgress({ current, skipped }: { current: number; skipped: Set<numb
 
 /* ─── Step 0: Security ─── */
 function SecurityStep({ form, setForm }: { form: FormData; setForm: (f: FormData) => void }) {
+  const { t } = useI18n();
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2"><Shield className="w-5 h-5 text-warning" /><h3 className="text-lg font-bold text-text-primary">Security Notice</h3></div>
+      <div className="flex items-center gap-2"><Shield className="w-5 h-5 text-warning" /><h3 className="text-lg font-bold text-text-primary">{t.configure.security.title}</h3></div>
       <div className="bg-warning/5 border border-warning/20 rounded-xl p-5 text-[12px] text-text-secondary leading-relaxed space-y-2">
-        <p className="font-semibold text-text-primary">Please read before continuing.</p>
+        <p className="font-semibold text-text-primary">{t.configure.security.prompt}</p>
         <ul className="list-disc pl-4 space-y-1">
-          <li>OpenClaw is a personal agent with one trusted operator boundary by default.</li>
-          <li>This bot can read files and run actions if tools are enabled. A bad prompt can trick it into doing unsafe things.</li>
-          <li>If multiple users can message one tool-enabled agent, they share that delegated tool authority.</li>
-          <li>If you're not comfortable with security hardening, don't run OpenClaw without help.</li>
+          {t.configure.security.items.map((item: string, i: number) => <li key={i}>{item}</li>)}
         </ul>
-        <p className="text-[11px] text-text-muted">Recommended: pairing/allowlists, sandbox tools, keep secrets out of agent's reach. Run <code className="text-accent">openclaw security audit --deep</code> regularly.</p>
+        <p className="text-[11px] text-text-muted">{t.configure.security.recommend}</p>
       </div>
       <label className="flex items-center gap-3 cursor-pointer p-3 rounded-lg border border-border hover:border-accent/30 transition-all">
         <input type="checkbox" checked={form.riskAccepted} onChange={e => setForm({ ...form, riskAccepted: e.target.checked })} className="w-4 h-4 rounded accent-accent" />
-        <span className="text-[13px] font-medium text-text-primary">I understand this is personal-by-default and shared/multi-user use requires lock-down.</span>
+        <span className="text-[13px] font-medium text-text-primary">{t.configure.security.checkbox}</span>
       </label>
     </div>
   );
@@ -864,6 +861,7 @@ function FinalizeStep({ form, setForm }: { form: FormData; setForm: (f: FormData
 
 /* ─── Step 13: Review ─── */
 function ReviewStep({ form, authProviders, submitting }: { form: FormData; authProviders: AuthProviderInfo[]; submitting: boolean }) {
+  const { t } = useI18n();
   const prov = authProviders.find(p => p.id === form.authProvider);
   const rows = form.mode === 'remote'
     ? [
@@ -892,7 +890,7 @@ function ReviewStep({ form, authProviders, submitting }: { form: FormData; authP
       ];
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2"><CheckCircle className="w-5 h-5 text-emerald-400" /><h3 className="text-lg font-bold text-text-primary">Review Configuration</h3></div>
+      <div className="flex items-center gap-2"><CheckCircle className="w-5 h-5 text-emerald-400" /><h3 className="text-lg font-bold text-text-primary">{t.configure.reviewTitle}</h3></div>
       <div className="bg-surface-0 border border-border rounded-xl overflow-hidden">
         <table className="w-full text-[12px]"><tbody>
           {rows.map(([k, v]) => (
@@ -903,7 +901,7 @@ function ReviewStep({ form, authProviders, submitting }: { form: FormData; authP
           ))}
         </tbody></table>
       </div>
-      {submitting && <div className="flex items-center gap-2 text-accent text-[13px]"><Loader2 className="w-4 h-4 animate-spin" /> Applying configuration...</div>}
+      {submitting && <div className="flex items-center gap-2 text-accent text-[13px]"><Loader2 className="w-4 h-4 animate-spin" /> {t.configure.applying}</div>}
     </div>
   );
 }
@@ -911,6 +909,7 @@ function ReviewStep({ form, authProviders, submitting }: { form: FormData; authP
 /* ─── Main ─── */
 export default function Configure() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormData>(INITIAL);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -1074,12 +1073,12 @@ export default function Configure() {
           <div className="flex flex-col items-center gap-6 py-4">
             <div className="w-16 h-16 rounded-full bg-emerald-500/15 flex items-center justify-center"><CheckCircle className="w-9 h-9 text-emerald-400" /></div>
             <div className="text-center">
-              <p className="text-lg font-bold text-text-primary">{form.mode === 'remote' ? 'Remote Gateway Configured!' : 'Configuration Complete!'}</p>
-              <p className="text-[13px] text-text-secondary mt-2">{form.mode === 'remote' ? 'Remote gateway is configured and ready to use.' : 'XSafeClaw is fully configured and ready to use.'}</p>
+              <p className="text-lg font-bold text-text-primary">{form.mode === 'remote' ? t.configure.remoteComplete : t.configure.configComplete}</p>
+              <p className="text-[13px] text-text-secondary mt-2">{form.mode === 'remote' ? t.configure.remoteCompleteDesc : t.configure.configCompleteDesc}</p>
             </div>
             <button onClick={() => window.location.replace('/home')}
               className="flex items-center gap-2 px-8 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
-              <Settings2 className="w-4 h-4" /> Enter Dashboard <ChevronRight className="w-4 h-4" />
+              <Settings2 className="w-4 h-4" /> {t.configure.enterDashboard} <ChevronRight className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -1092,10 +1091,10 @@ export default function Configure() {
       <div className="w-full max-w-4xl">
         <div className="flex flex-col items-center gap-2 mb-6">
           <img src="/logo.png" alt="XSafeClaw" className="w-12 h-12 rounded-xl shadow-lg shadow-accent/25" />
-          <p className="text-[13px] text-text-muted">Configure OpenClaw</p>
+          <p className="text-[13px] text-text-muted">{t.configure.title}</p>
         </div>
         <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
-          <StepProgress current={step} skipped={skipped} />
+          <StepProgress current={step} skipped={skipped} labels={Object.values(t.configure.steps)} />
           {step === 0 && <SecurityStep form={form} setForm={setForm} />}
           {step === 1 && <ModeStep form={form} setForm={setForm} />}
           {step === 2 && <ConfigStep form={form} setForm={setForm} configSummary={configSummary} />}
@@ -1113,23 +1112,23 @@ export default function Configure() {
           <div className="flex items-center justify-between mt-6 pt-4 border-t border-border">
             <button onClick={goBack} disabled={step === 0}
               className="flex items-center gap-1.5 px-4 py-2 text-[13px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-30 transition-all">
-              <ChevronLeft className="w-4 h-4" /> Back
+              <ChevronLeft className="w-4 h-4" /> {t.common.back}
             </button>
             {step < 12 ? (
               <button onClick={goNext} disabled={!canNext()}
                 className="flex items-center gap-1.5 px-6 py-2.5 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white text-[13px] font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
-                Next <ChevronRight className="w-4 h-4" />
+                {t.common.next} <ChevronRight className="w-4 h-4" />
               </button>
             ) : (
               <button onClick={handleSubmit} disabled={submitting}
                 className="flex items-center gap-1.5 px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-[13px] font-semibold rounded-xl transition-all shadow-lg shadow-emerald-500/25">
                 {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                {submitting ? 'Applying...' : 'Apply Configuration'}
+                {submitting ? t.configure.applyingBtn : t.configure.applyBtn}
               </button>
             )}
           </div>
         </div>
-        <p className="text-center text-[11px] text-text-muted mt-6">Powered by XSafeClaw</p>
+        <p className="text-center text-[11px] text-text-muted mt-6">{t.common.poweredBy}</p>
       </div>
     </div>
   );
