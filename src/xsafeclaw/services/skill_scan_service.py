@@ -14,7 +14,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_CACHE_PATH = Path.home() / ".safeclaw" / "skill_scan_cache.json"
+_CACHE_PATH = Path.home() / ".xsafeclaw" / "skill_scan_cache.json"
 
 _SCAN_PROMPT = """\
 You are a security auditor specializing in AI agent skill definitions.

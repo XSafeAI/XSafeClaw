@@ -187,9 +187,9 @@ export default function Setup() {
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
       <div className="w-full max-w-xl">
         <div className="flex flex-col items-center gap-3 mb-8">
-          <img src="/logo.png" alt="SafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
+          <img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
           <div className="text-center">
-            <p className="text-[22px] font-bold text-text-primary tracking-tight">SafeClaw</p>
+            <p className="text-[22px] font-bold text-text-primary tracking-tight">XSafeClaw</p>
             <p className="text-[13px] text-text-muted mt-0.5">Keeping Your Claw Safe.</p>
           </div>
         </div>
@@ -213,7 +213,7 @@ export default function Setup() {
                 <div>
                   <p className="text-sm font-semibold text-text-primary">OpenClaw not found</p>
                   <p className="text-[12px] text-text-muted mt-1">
-                    SafeClaw requires the <span className="text-accent font-mono">openclaw</span> CLI.
+                    XSafeClaw requires the <span className="text-accent font-mono">openclaw</span> CLI.
                     Click below to install — Node.js will be set up automatically if needed.
                   </p>
                 </div>
@@ -342,7 +342,7 @@ export default function Setup() {
         </div>
 
         <p className="text-center text-[11px] text-text-muted mt-6">
-          Powered by SafeClaw
+          Powered by XSafeClaw
         </p>
       </div>
     </div>

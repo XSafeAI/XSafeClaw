@@ -73,8 +73,8 @@ function AppRoutes() {
     return (
       <div className="min-h-screen bg-surface-0 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          <img src="/logo.png" alt="SafeClaw" className="w-14 h-14 rounded-xl animate-pulse" />
-          <p className="text-text-muted text-sm">Starting SafeClaw...</p>
+          <img src="/logo.png" alt="XSafeClaw" className="w-14 h-14 rounded-xl animate-pulse" />
+          <p className="text-text-muted text-sm">Starting XSafeClaw...</p>
         </div>
       </div>
     );
@@ -90,7 +90,7 @@ function AppRoutes() {
         <Route path="/" element={<Monitor />} />
         <Route path="/monitor" element={<Monitor />} />
         <Route path="/assets" element={<Assets />} />
-        <Route path="/risk-scanner" element={<RiskScanner />} />
+        <Route path="/safety-rehearsal" element={<RiskScanner />} />
         <Route path="/chat" element={<Chat />} />
       </Route>
     </Routes>

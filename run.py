@@ -9,17 +9,17 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import uvicorn
 
-from safeclaw.config import settings
+from xsafeclaw.config import settings
 
 if __name__ == "__main__":
-    print("🚀 Starting SafeClaw Application...")
+    print("🚀 Starting XSafeClaw Application...")
     print(f"📍 Database: {settings.database_url}")
     print(f"📂 Watching: {settings.openclaw_sessions_dir}")
     print(f"🌐 API: http://{settings.api_host}:{settings.api_port}")
     print()
     
     uvicorn.run(
-        "safeclaw.api.main:app",
+        "xsafeclaw.api.main:app",
         host=settings.api_host,
         port=settings.api_port,
         reload=settings.api_reload,

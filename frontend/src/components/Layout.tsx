@@ -6,17 +6,17 @@ const navigation = [
   { name: 'Claw Monitor',    href: '/monitor',        icon: Monitor,        desc: 'Real-time Monitoring' },
   { name: 'Safe Chat',       href: '/chat',            icon: MessageSquare,  desc: 'Chat with Agent' },
   { name: 'Asset Shield',    href: '/assets',          icon: Shield,         desc: 'Asset Scanning' },
-  { name: 'Safety Rehearsal', href: '/risk-scanner',    icon: ScanSearch,     desc: 'Safety Rehearsal' },
+  { name: 'Safety Rehearsal', href: '/safety-rehearsal', icon: ScanSearch,     desc: 'Safety Rehearsal' },
 ];
 
 function useTheme() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('safeclaw:theme') as 'dark' | 'light') ?? 'dark';
+    return (localStorage.getItem('xsafeclaw:theme') as 'dark' | 'light') ?? 'dark';
   });
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('safeclaw:theme', theme);
+    localStorage.setItem('xsafeclaw:theme', theme);
   }, [theme]);
 
   const toggle = () => setTheme(t => t === 'dark' ? 'light' : 'dark');
@@ -33,9 +33,9 @@ export default function Layout() {
       <aside className="w-56 flex-shrink-0 bg-surface-1 border-r border-border flex flex-col">
         {/* Logo */}
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
-          <img src="/logo.png" alt="SafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />
+          <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />
           <div className="flex items-center gap-2">
-            <span className="text-[15px] font-bold text-text-primary tracking-tight">SafeClaw</span>
+            <span className="text-[15px] font-bold text-text-primary tracking-tight">XSafeClaw</span>
             <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">V0.1.1</span>
           </div>
         </div>

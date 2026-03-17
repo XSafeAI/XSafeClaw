@@ -8,9 +8,9 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from safeclaw.config import settings
-from safeclaw.database import init_db
-from safeclaw.services.message_sync_service import MessageSyncService
+from xsafeclaw.config import settings
+from xsafeclaw.database import init_db
+from xsafeclaw.services.message_sync_service import MessageSyncService
 
 
 async def main():

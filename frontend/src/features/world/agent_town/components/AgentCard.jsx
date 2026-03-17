@@ -193,7 +193,7 @@ function previewValue(value, limit = 180) {
   }
 }
 
-function ToolCallBubble({ msg }) {
+function AgentDialogToolMessage({ msg }) {
   const argsPreview = previewValue(msg.args || msg.content || '', Number.POSITIVE_INFINITY);
   const resultPreview = previewValue(msg.result, Number.POSITIVE_INFINITY);
   const toolState = msg.result_pending
@@ -203,32 +203,32 @@ function ToolCallBubble({ msg }) {
       : resultPreview
         ? 'TOOL RESULT'
         : 'TOOL CALL';
-  const toolRoleClass = msg.result_pending
-    ? 'agent-card-role-tool-running'
+  const stateClass = msg.result_pending
+    ? 'agent-dialog-tag-tool-running'
     : msg.is_error
-      ? 'agent-card-role-tool-error'
+      ? 'agent-dialog-tag-tool-error'
       : resultPreview
-        ? 'agent-card-role-tool-result'
-        : 'agent-card-role-tool';
+        ? 'agent-dialog-tag-tool-result'
+        : 'agent-dialog-tag-tool';
 
   return (
-    <div className="tc-chat-tool agent-card-tool-bubble">
-      <div className="tc-chat-tool-head">
-        <span className="agent-card-head-main">
-          <span className={`agent-card-role-chip ${toolRoleClass}`}>{toolState}</span>
-          <span className="agent-card-tool-name">{msg.tool_name || 'unknown'}</span>
-        </span>
-        <span>{fmtTime(msg.timestamp)}</span>
+    <div className="agent-dialog-item agent-dialog-item-tool">
+      <div className="agent-dialog-meta">
+        <div className="agent-dialog-meta-main">
+          <span className={`agent-dialog-tag ${stateClass}`}>{toolState}</span>
+          <span className="agent-dialog-tool-name">{msg.tool_name || 'unknown'}</span>
+        </div>
+        <span className="agent-dialog-time">{fmtTime(msg.timestamp)}</span>
       </div>
       {argsPreview ? (
-        <div className="tc-chat-tool-preview">
+        <div className="agent-dialog-code agent-dialog-code-args">
           {argsPreview}
         </div>
       ) : null}
       {msg.result_pending ? (
-        <div className="tc-chat-tool-result">Running...</div>
+        <div className="agent-dialog-code agent-dialog-code-result">Running...</div>
       ) : resultPreview ? (
-        <div className={`tc-chat-tool-result ${msg.is_error ? 'agent-card-tool-result-error' : ''}`}>
+        <div className={`agent-dialog-code agent-dialog-code-result ${msg.is_error ? 'agent-dialog-code-error' : ''}`}>
           {resultPreview}
         </div>
       ) : null}
@@ -236,44 +236,44 @@ function ToolCallBubble({ msg }) {
   );
 }
 
-function ChatBubble({ msg }) {
+function AgentDialogMessage({ msg }) {
   if (msg.role === 'tool_call') {
-    return <ToolCallBubble msg={msg} />;
+    return <AgentDialogToolMessage msg={msg} />;
   }
 
-  const bubbleClass = msg.stopped
-    ? 'agent-card-bubble-stopped'
+  const kindClass = msg.stopped
+    ? 'agent-dialog-item-stop'
     : msg.role === 'user'
-      ? 'tc-chat-bubble-user'
+      ? 'agent-dialog-item-user'
       : msg.role === 'error'
-        ? 'tc-chat-bubble-error'
-        : 'tc-chat-bubble-assistant';
+        ? 'agent-dialog-item-error'
+        : 'agent-dialog-item-assistant';
   const roleLabel = msg.stopped
-    ? 'STOP REQUESTED'
+    ? 'STOPPED'
     : msg.role === 'user'
-      ? 'COMMAND'
+      ? 'USER'
       : msg.role === 'error'
         ? 'ERROR'
-        : 'AGENT';
+        : 'ASSISTANT';
   const roleChipClass = msg.stopped
-    ? 'agent-card-role-stopped'
+    ? 'agent-dialog-tag-stop'
     : msg.role === 'user'
-      ? 'agent-card-role-user'
+      ? 'agent-dialog-tag-user'
       : msg.role === 'error'
-        ? 'agent-card-role-error'
-        : 'agent-card-role-assistant';
+        ? 'agent-dialog-tag-error'
+        : 'agent-dialog-tag-agent';
 
   return (
-    <div className={`tc-chat-bubble ${bubbleClass}`}>
-      <div className="tc-chat-bubble-head">
-        <span className="agent-card-head-main">
-          <span className={`agent-card-role-chip ${roleChipClass}`}>{roleLabel}</span>
-        </span>
-        <span>{fmtTime(msg.timestamp)}</span>
+    <div className={`agent-dialog-item ${kindClass}`}>
+      <div className="agent-dialog-meta">
+        <div className="agent-dialog-meta-main">
+          <span className={`agent-dialog-tag ${roleChipClass}`}>{roleLabel}</span>
+        </div>
+        <span className="agent-dialog-time">{fmtTime(msg.timestamp)}</span>
       </div>
-      <div className="tc-chat-bubble-body">
+      <div className="agent-dialog-text">
         {msg.pending ? (
-          <div className="tc-chat-typing">
+          <div className="agent-dialog-typing">
             <span />
             <span />
             <span />
@@ -632,68 +632,69 @@ export default function AgentCard({ data, onClose, onJourney }) {
             </div>
           </section>
 
-          <section className="tc-ornate-panel agent-card-chat-panel">
-            <div className="agent-card-chat-head">
-              <div>
-                <div className="tc-control-overline">Continue Task</div>
-                <h3 className="tc-control-title">Latest Conversation</h3>
+          <section className="agent-dialog-panel">
+            <div className="agent-dialog-head">
+              <div className="agent-dialog-head-copy">
+                <div className="agent-dialog-overline">Bound Session</div>
+                <h3 className="agent-dialog-title">Conversation</h3>
               </div>
-              <div className="agent-card-chat-badges">
-                <span className="tc-control-badge">{displayMessages.length} MSG</span>
-                <span className="tc-chat-live">
+              <div className="agent-dialog-head-side">
+                <span className="agent-dialog-counter">{displayMessages.length} MSG</span>
+                <span className="agent-dialog-status">
                   {sending ? 'TRANSMITTING' : loadingHistory ? 'SYNCING' : sessionKey ? 'READY' : 'UNBOUND'}
                 </span>
               </div>
             </div>
 
-            <div className="agent-card-chat-stage">
-              <div className="agent-card-chat-scroll">
-                <div className="tc-chat-messages agent-card-chat-messages">
-                  {loadingHistory ? (
-                    <div className="tc-chat-empty-inline">Syncing full session history...</div>
-                  ) : displayMessages.length === 0 ? (
-                    <div className="tc-chat-empty-inline">
-                      No conversation loaded yet. Type below to brief this agent with the next task.
-                    </div>
-                  ) : (
-                    displayMessages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)
-                  )}
-                  <div ref={messagesEndRef} />
+            <div className="agent-dialog-log">
+              {loadingHistory ? (
+                <div className="agent-dialog-empty">Syncing full session history...</div>
+              ) : displayMessages.length === 0 ? (
+                <div className="agent-dialog-empty">
+                  No conversation loaded yet. Type below to continue this session.
                 </div>
-              </div>
+              ) : (
+                displayMessages.map((msg) => <AgentDialogMessage key={msg.id} msg={msg} />)
+              )}
+              <div ref={messagesEndRef} />
+            </div>
 
-              <div className="tc-chat-composer agent-card-composer">
-                <div className="tc-chat-composer-head">
-                  <span className="tc-chat-composer-label">Command Input</span>
-                  <span className="tc-chat-composer-tip">
-                    {sending ? 'Stop is reserved here as a relay placeholder.' : 'Enter to send, Shift+Enter for newline.'}
-                  </span>
-                </div>
-                <textarea
-                  ref={textareaRef}
-                  className="tc-chat-input agent-card-input"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onCompositionStart={() => setIsComposing(true)}
-                  onCompositionEnd={() => setIsComposing(false)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey && !isComposing && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  placeholder={sessionKey ? 'Assign the next mission...' : 'This agent is not bound to an active session.'}
-                  disabled={!sessionKey || sending}
-                />
-                <button
-                  type="button"
-                  className={`tc-chat-send agent-card-send ${sending ? 'agent-card-send-stop' : ''}`}
-                  onClick={sending ? handleStop : handleSend}
-                  disabled={sending ? false : !sessionKey || !input.trim()}
-                >
-                  {sending ? 'Stop' : 'Send Task'}
-                </button>
-              </div>
+            <div className="agent-dialog-compose">
+              <textarea
+                ref={textareaRef}
+                className="agent-dialog-input"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onCompositionStart={() => setIsComposing(true)}
+                onCompositionEnd={() => setIsComposing(false)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !isComposing && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                placeholder={sessionKey ? 'Reply in this session...' : 'This agent is not bound to an active session.'}
+                disabled={!sessionKey || sending}
+              />
+              <button
+                type="button"
+                className={`agent-dialog-send ${sending ? 'agent-dialog-send-stop' : ''}`}
+                onClick={sending ? handleStop : handleSend}
+                disabled={sending ? false : !sessionKey || !input.trim()}
+                aria-label={sending ? 'Stop current response' : 'Send message'}
+                title={sending ? 'Stop current response' : 'Send message'}
+              >
+                {sending ? (
+                  <svg className="agent-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                  </svg>
+                ) : (
+                  <svg className="agent-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 12.5 19 4l-3.8 16-4.3-5-6.9-2.5Z" />
+                    <path d="M10.9 15 19 4" />
+                  </svg>
+                )}
+              </button>
             </div>
           </section>
         </div>

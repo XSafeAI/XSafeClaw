@@ -1029,66 +1029,6 @@ wheels = [
 ]
 
 [[package]]
-name = "safeclaw"
-version = "0.1.3"
-source = { editable = "." }
-dependencies = [
-    { name = "aiosqlite" },
-    { name = "cryptography" },
-    { name = "fastapi" },
-    { name = "greenlet" },
-    { name = "httpx" },
-    { name = "psutil" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pynvml" },
-    { name = "python-dotenv" },
-    { name = "rich" },
-    { name = "sqlalchemy" },
-    { name = "typer" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "watchdog" },
-    { name = "websockets" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "black" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiosqlite", specifier = ">=0.19.0" },
-    { name = "black", marker = "extra == 'dev'", specifier = ">=23.12.0" },
-    { name = "cryptography", specifier = ">=46.0.5" },
-    { name = "fastapi", specifier = ">=0.109.0" },
-    { name = "greenlet", specifier = ">=3.3.1" },
-    { name = "httpx", specifier = ">=0.26.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
-    { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pydantic", specifier = ">=2.5.3" },
-    { name = "pydantic-settings", specifier = ">=2.1.0" },
-    { name = "pynvml", specifier = ">=13.0.1" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "rich", specifier = ">=13.7.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.9" },
-    { name = "sqlalchemy", specifier = ">=2.0.25" },
-    { name = "typer", specifier = ">=0.9.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
-    { name = "watchdog", specifier = ">=4.0.0" },
-    { name = "websockets", specifier = ">=16.0" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "shellingham"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1483,3 +1423,63 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9a/3f/f70e03f40ffc9a30d817eef7da1be72ee4956ba8d7255c399a01b135902a/websockets-16.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:a653aea902e0324b52f1613332ddf50b00c06fdaf7e92624fbf8c77c78fa5767", size = 178735, upload-time = "2026-01-10T09:23:42.259Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
 ]
+
+[[package]]
+name = "xsafeclaw"
+version = "0.1.3"
+source = { editable = "." }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "cryptography" },
+    { name = "fastapi" },
+    { name = "greenlet" },
+    { name = "httpx" },
+    { name = "psutil" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pynvml" },
+    { name = "python-dotenv" },
+    { name = "rich" },
+    { name = "sqlalchemy" },
+    { name = "typer" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "watchdog" },
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "black" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.19.0" },
+    { name = "black", marker = "extra == 'dev'", specifier = ">=23.12.0" },
+    { name = "cryptography", specifier = ">=46.0.5" },
+    { name = "fastapi", specifier = ">=0.109.0" },
+    { name = "greenlet", specifier = ">=3.3.1" },
+    { name = "httpx", specifier = ">=0.26.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
+    { name = "psutil", specifier = ">=5.9.0" },
+    { name = "pydantic", specifier = ">=2.5.3" },
+    { name = "pydantic-settings", specifier = ">=2.1.0" },
+    { name = "pynvml", specifier = ">=13.0.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "rich", specifier = ">=13.7.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.9" },
+    { name = "sqlalchemy", specifier = ">=2.0.25" },
+    { name = "typer", specifier = ">=0.9.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
+    { name = "watchdog", specifier = ">=4.0.0" },
+    { name = "websockets", specifier = ">=16.0" },
+]
+provides-extras = ["dev"]

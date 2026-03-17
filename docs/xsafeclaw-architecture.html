@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SafeClaw Security Architecture</title>
+<title>XSafeClaw Security Architecture</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Noto+Serif+SC:wght@400;600&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -244,7 +244,7 @@ code {
 .scard h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 .scard p { font-size: 10px; color: var(--text-dim); line-height: 1.6; }
 
-/* SafeClaw Proactive Zone */
+/* XSafeClaw Proactive Zone */
 .sclaw-zone {
   background: linear-gradient(135deg, rgba(124,106,239,0.05), rgba(6,182,212,0.05));
   border: 1.5px solid var(--accent); border-radius: 14px;
@@ -326,7 +326,7 @@ code {
 <body>
 
 <div class="hero">
-  <h1>SafeClaw 安全架构</h1>
+  <h1>XSafeClaw 安全架构</h1>
   <div class="sub">Multi-Layer Guard & Proactive Safety for AI Agents</div>
 </div>
 
@@ -340,7 +340,7 @@ code {
     <div class="src"><div class="ic">📱</div><div class="lb">Telegram</div><div class="sb">Bot API</div></div>
     <div class="src"><div class="ic">🔗</div><div class="lb">Slack</div><div class="sb">Socket Mode</div></div>
     <div class="src"><div class="ic">🌐</div><div class="lb">Web UI</div><div class="sb">WebSocket</div></div>
-    <div class="src highlight"><div class="ic">🛡️</div><div class="lb" style="color:var(--accent)">SafeClaw UI</div><div class="sb">SafeChat</div></div>
+    <div class="src highlight"><div class="ic">🛡️</div><div class="lb" style="color:var(--accent)">XSafeClaw UI</div><div class="sb">SafeChat</div></div>
   </div>
 
   <div class="arr">▼</div>
@@ -349,7 +349,7 @@ code {
   <div class="gw">
     <span class="tag tag-blue">OpenClaw Gateway — 最小改动</span>
     <h3>Gateway 控制平面</h3>
-    <div class="desc">HTTP/WebSocket · Channel Manager · Session Routing · Event Broadcasting · <strong style="color:var(--accent)">Skills 由 SafeClaw 注入</strong></div>
+    <div class="desc">HTTP/WebSocket · Channel Manager · Session Routing · Event Broadcasting · <strong style="color:var(--accent)">Skills 由 XSafeClaw 注入</strong></div>
     <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 14px;">
       <div class="gc">
         <div class="ci">📡</div>
@@ -364,7 +364,7 @@ code {
       <div class="gc guard">
         <div class="ci">🔧</div>
         <h4>工具执行</h4>
-        <div class="cd"><code>before_tool_call</code><br>→ HTTP 调用 SafeClaw<br>→ Allow / Block / Pending</div>
+        <div class="cd"><code>before_tool_call</code><br>→ HTTP 调用 XSafeClaw<br>→ Allow / Block / Pending</div>
       </div>
       <div class="gc llm-mod">
         <div class="ci">🔀</div>
@@ -374,17 +374,17 @@ code {
       <div class="gc skill-inject">
         <div class="ci">📋</div>
         <h4>注入安全 Skills</h4>
-        <div class="cd">🛡️ 资产保护 Skill<br>🎯 红队预演 Skill<br><code>SafeClaw → Agent Skills</code></div>
+        <div class="cd">🛡️ 资产保护 Skill<br>🎯 红队预演 Skill<br><code>XSafeClaw → Agent Skills</code></div>
       </div>
     </div>
   </div>
 
   <div class="arr-bidi">▼ ▲ <span style="font-size:10px;color:var(--accent)">Skill / Memory 管理 & 文件扫描</span></div>
 
-  <!-- SafeClaw Proactive Safety Zone -->
+  <!-- XSafeClaw Proactive Safety Zone -->
   <div class="sclaw-zone">
-    <span class="tag tag-purple">SafeClaw 后端 — 主动安全层</span>
-    <h3>SafeClaw 主动防御系统</h3>
+    <span class="tag tag-purple">XSafeClaw 后端 — 主动安全层</span>
+    <h3>XSafeClaw 主动防御系统</h3>
     <div class="desc">Skill/Memory 文件安全扫描 · 工具调用轨迹级 Guard · 资产访问权限控制 · 红队预演 → Skill 生成 · 全生命周期安全介入</div>
     <div class="sclaw-inner">
       <div class="sci scan-guard">
@@ -413,7 +413,7 @@ code {
       <div class="sci">
         <div class="si">🏗️</div>
         <h4>资产保护 Skill</h4>
-        <div class="sd">注入 Agent 的安全 Skill。修改文件/资产前必须调用 SafeClaw 接口判定权限和安全性，"修改审批"能力</div>
+        <div class="sd">注入 Agent 的安全 Skill。修改文件/资产前必须调用 XSafeClaw 接口判定权限和安全性，"修改审批"能力</div>
         <div class="sa">
           <span>权限检查</span>
           <span>危险操作拦截</span>
@@ -439,7 +439,7 @@ code {
 
   <!-- Safe Router -->
   <div class="sr">
-    <span class="tag tag-red">SafeClaw 新增组件 — LLM 代理层</span>
+    <span class="tag tag-red">XSafeClaw 新增组件 — LLM 代理层</span>
     <h3>Safe Router — LLM 代理 & 安全网关</h3>
     <div class="desc">OpenAI 兼容 API 代理，拦截所有 LLM 调用，在转发前后应用 Input/Output Guard</div>
     <div class="rg">
@@ -505,7 +505,7 @@ code {
     <tbody>
       <tr>
         <td><span class="badge b-cyn">SKILL/MEMORY SCAN</span></td>
-        <td>SafeClaw 后端 → Agent 加载前</td>
+        <td>XSafeClaw 后端 → Agent 加载前</td>
         <td>扫描 <code>~/.openclaw/skills/</code> 和 <code>memory/</code> 目录内所有文件，校验哈希与内容安全</td>
         <td>所有 Agent 实例启动前</td>
         <td>阻止加载 / 告警 / 隔离</td>
@@ -521,13 +521,13 @@ code {
         <td><span class="badge b-red">TOOL TRAJECTORY</span></td>
         <td>Gateway → Agent → 工具执行前 + 离线分析</td>
         <td><code>before_tool_call</code> hook 实时拦截 + AgentDoG 离线轨迹评估闭环</td>
-        <td>所有来源 (Channel + Web + SafeClaw)</td>
+        <td>所有来源 (Channel + Web + XSafeClaw)</td>
         <td>Block / Allow / Pending / 风险标记</td>
       </tr>
       <tr>
         <td><span class="badge b-pur">ASSET GUARD</span></td>
         <td>Agent 内部 → 修改文件/资产前</td>
-        <td>Agent 通过注入的<strong>资产保护 Skill</strong> 主动调用 SafeClaw 权限接口</td>
+        <td>Agent 通过注入的<strong>资产保护 Skill</strong> 主动调用 XSafeClaw 权限接口</td>
         <td>所有文件写入/修改/删除操作</td>
         <td>Allow / Deny / 建议安全修改方式</td>
       </tr>
@@ -540,7 +540,7 @@ code {
       </tr>
       <tr>
         <td><span class="badge" style="background:rgba(245,158,11,0.15);color:#f59e0b">RED TEAM SKILL</span></td>
-        <td>SafeClaw 后端 → 离线预演 → 注入 Agent</td>
+        <td>XSafeClaw 后端 → 离线预演 → 注入 Agent</td>
         <td>红队攻击预演 → 提取风险场景 → 自动生成安全执行指南 Skill</td>
         <td>覆盖已知高风险任务场景</td>
         <td>引导安全执行 / 规避不安全操作</td>
@@ -556,15 +556,15 @@ code {
   <div class="flow-step">
     <div class="fn fn-c">0</div>
     <div class="fc">
-      <h4>SafeClaw → Skill/Memory 扫描 → <span style="color:var(--cyan)">SCAN GUARD ✓</span></h4>
-      <p>Agent 启动前，SafeClaw 扫描 <code>~/.openclaw/skills/</code> 和 <code>memory/</code> 目录下所有文件。校验文件哈希、检测恶意指令注入、比对白名单。不安全的 skill 或被篡改的 memory 将被隔离，不加载到 Agent 中。</p>
+      <h4>XSafeClaw → Skill/Memory 扫描 → <span style="color:var(--cyan)">SCAN GUARD ✓</span></h4>
+      <p>Agent 启动前，XSafeClaw 扫描 <code>~/.openclaw/skills/</code> 和 <code>memory/</code> 目录下所有文件。校验文件哈希、检测恶意指令注入、比对白名单。不安全的 skill 或被篡改的 memory 将被隔离，不加载到 Agent 中。</p>
     </div>
   </div>
   <div class="flow-step">
     <div class="fn fn-p">0.5</div>
     <div class="fc">
-      <h4>SafeClaw → 注入安全 Skills → <span style="color:var(--accent)">SKILL INJECT ✓</span></h4>
-      <p>SafeClaw 将两个安全 Skill 注入 Agent：<strong>① 资产保护 Skill</strong>（指导 Agent 修改文件前先调用 SafeClaw API 获取权限）和 <strong>② 红队预演 Skill</strong>（包含已知风险场景和安全执行指南，由红队预演系统自动生成和更新）。</p>
+      <h4>XSafeClaw → 注入安全 Skills → <span style="color:var(--accent)">SKILL INJECT ✓</span></h4>
+      <p>XSafeClaw 将两个安全 Skill 注入 Agent：<strong>① 资产保护 Skill</strong>（指导 Agent 修改文件前先调用 XSafeClaw API 获取权限）和 <strong>② 红队预演 Skill</strong>（包含已知风险场景和安全执行指南，由红队预演系统自动生成和更新）。</p>
     </div>
   </div>
   <div class="flow-step">
@@ -585,7 +585,7 @@ code {
     <div class="fn fn-a">3</div>
     <div class="fc">
       <h4>Agent → Safe Router (LLM 调用) → <span style="color:var(--amber)">INPUT GUARD ✓</span></h4>
-      <p>Agent 构造 Prompt 并调用 LLM。由于 <code>baseUrl</code> 指向 Safe Router，请求先到达 SafeClaw。<strong>Input Guard</strong> 检查完整 Prompt（包含用户消息 + system prompt + 历史上下文）。若不安全 → 拦截并返回错误。</p>
+      <p>Agent 构造 Prompt 并调用 LLM。由于 <code>baseUrl</code> 指向 Safe Router，请求先到达 XSafeClaw。<strong>Input Guard</strong> 检查完整 Prompt（包含用户消息 + system prompt + 历史上下文）。若不安全 → 拦截并返回错误。</p>
     </div>
   </div>
   <div class="flow-step">
@@ -599,14 +599,14 @@ code {
     <div class="fn fn-r">5</div>
     <div class="fc">
       <h4>Agent → 工具调用 → <span style="color:var(--red)">TOOL GUARD ✓</span></h4>
-      <p>LLM 回复中包含工具调用时，Agent 尝试执行。<code>before_tool_call</code> hook 触发 → 调用 SafeClaw Guard API。评估工具名 + 参数 + 会话上下文。返回 <code>allow</code> / <code>block</code> / <code>pending</code>（等待人工审批）。</p>
+      <p>LLM 回复中包含工具调用时，Agent 尝试执行。<code>before_tool_call</code> hook 触发 → 调用 XSafeClaw Guard API。评估工具名 + 参数 + 会话上下文。返回 <code>allow</code> / <code>block</code> / <code>pending</code>（等待人工审批）。</p>
     </div>
   </div>
   <div class="flow-step">
     <div class="fn fn-p">5.5</div>
     <div class="fc">
       <h4>Agent → 修改文件 → <span style="color:var(--accent)">ASSET GUARD ✓</span></h4>
-      <p>当 Agent 需要修改文件或资产时，<strong>资产保护 Skill</strong> 引导 Agent 先调用 SafeClaw 的资产权限接口 <code>/guard/asset-check</code>，传入目标路径、操作类型、变更内容。SafeClaw 判定后返回 <code>allow</code> / <code>deny</code> / <code>suggest_safe_alternative</code>。</p>
+      <p>当 Agent 需要修改文件或资产时，<strong>资产保护 Skill</strong> 引导 Agent 先调用 XSafeClaw 的资产权限接口 <code>/guard/asset-check</code>，传入目标路径、操作类型、变更内容。XSafeClaw 判定后返回 <code>allow</code> / <code>deny</code> / <code>suggest_safe_alternative</code>。</p>
     </div>
   </div>
   <div class="flow-step">
@@ -630,17 +630,17 @@ code {
     <div class="scard ca">
       <div class="si">🔌</div>
       <h4>Tool Guard 插件</h4>
-      <p>极薄的 JS/TS 模块，作为 OpenClaw 插件安装。注册 <code>before_tool_call</code> hook，向 SafeClaw Guard API 发 HTTP 请求。支持阻断和异步审批。</p>
+      <p>极薄的 JS/TS 模块，作为 OpenClaw 插件安装。注册 <code>before_tool_call</code> hook，向 XSafeClaw Guard API 发 HTTP 请求。支持阻断和异步审批。</p>
     </div>
     <div class="scard cc">
       <div class="si">🔍</div>
       <h4>Skill/Memory 扫描引擎</h4>
-      <p>SafeClaw 后端服务。定期 / Agent 启动前扫描 skill 和 memory 文件。文件哈希校验、内容审查（检测 prompt injection）、白名单比对。隔离不安全文件并告警。</p>
+      <p>XSafeClaw 后端服务。定期 / Agent 启动前扫描 skill 和 memory 文件。文件哈希校验、内容审查（检测 prompt injection）、白名单比对。隔离不安全文件并告警。</p>
     </div>
     <div class="scard cp">
       <div class="si">🏗️</div>
       <h4>安全 Skill 体系</h4>
-      <p><strong>资产保护 Skill:</strong> 给 Agent 提供 SafeClaw 资产权限 API 接口，指导 Agent 修改文件前先检查权限。<br><strong>红队预演 Skill:</strong> 自动化红队攻击 → 提取风险场景 → 生成安全执行指南，动态更新。</p>
+      <p><strong>资产保护 Skill:</strong> 给 Agent 提供 XSafeClaw 资产权限 API 接口，指导 Agent 修改文件前先检查权限。<br><strong>红队预演 Skill:</strong> 自动化红队攻击 → 提取风险场景 → 生成安全执行指南，动态更新。</p>
     </div>
     <div class="scard cg">
       <div class="si">🧠</div>
@@ -688,7 +688,7 @@ code {
       </tr>
       <tr>
         <td>资产保护机制</td>
-        <td>通过 Skill 引导 Agent 主动调用 SafeClaw API，而非强制拦截</td>
+        <td>通过 Skill 引导 Agent 主动调用 XSafeClaw API，而非强制拦截</td>
         <td>利用 OpenClaw 原生 Skill 系统，Agent 自然遵循；配合 Tool Guard 形成双保险</td>
       </tr>
       <tr>
@@ -701,7 +701,7 @@ code {
 </div>
 
 <div class="footer">
-  SafeClaw · AI Agent 安全运维平台 · Architecture v2.0 — Multi-Layer Guard & Proactive Safety
+  XSafeClaw · AI Agent 安全运维平台 · Architecture v2.0 — Multi-Layer Guard & Proactive Safety
 </div>
 
 </body>

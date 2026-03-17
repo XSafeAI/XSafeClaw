@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CHAR_NAMES, USE_AGENT_TOWN_MOCK } from '../config/constants';
 import {
   buildMockAssistantReply,
@@ -116,6 +116,12 @@ function readFetchError(response, fallbackText) {
   return response.json()
     .then((json) => json?.detail || json?.message || fallbackText)
     .catch(() => fallbackText);
+}
+
+function isAbortError(err) {
+  return err instanceof DOMException
+    ? err.name === 'AbortError'
+    : err instanceof Error && err.name === 'AbortError';
 }
 
 function extractMessageText(msg) {
@@ -373,6 +379,18 @@ export default function TownConsole({
   const [pendingModelId, setPendingModelId] = useState('');
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [createError, setCreateError] = useState('');
+  const streamControllerRef = useRef(null);
+  const stopRequestedRef = useRef(false);
+  const mockReplyTimeoutRef = useRef(null);
+
+  useEffect(() => () => {
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    if (mockReplyTimeoutRef.current) {
+      window.clearTimeout(mockReplyTimeoutRef.current);
+      mockReplyTimeoutRef.current = null;
+    }
+  }, []);
 
   const loadConsoleData = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
@@ -710,11 +728,28 @@ export default function TownConsole({
       [currentIdentity]: [...(prev[currentIdentity] || []), userMsg, pendingMsg],
     }));
     setSendingIdentity(currentIdentity);
+    stopRequestedRef.current = false;
+
+    const finalizeStoppedMessage = () => {
+      setMessageMap((prev) => ({
+        ...prev,
+        [currentIdentity]: (prev[currentIdentity] || []).map((msg) => (
+          msg.id === pendingId
+            ? {
+                ...msg,
+                content: 'Stop requested. The interrupt hook is active here now.',
+                pending: false,
+                stopped: true,
+              }
+            : msg
+        )),
+      }));
+    };
 
     try {
       if (USE_AGENT_TOWN_MOCK) {
         const reply = buildMockAssistantReply(text, currentAgent);
-        window.setTimeout(() => {
+        mockReplyTimeoutRef.current = window.setTimeout(() => {
           setMessageMap((prev) => ({
             ...prev,
             [currentIdentity]: (prev[currentIdentity] || []).map((msg) => (
@@ -723,14 +758,19 @@ export default function TownConsole({
                 : msg
             )),
           }));
+          mockReplyTimeoutRef.current = null;
         }, 420);
         return;
       }
+
+      const controller = new AbortController();
+      streamControllerRef.current = controller;
 
       const response = await fetch('/api/chat/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_key: currentSessionKey, message: text }),
+        signal: controller.signal,
       });
 
       if (!response.ok || !response.body) {
@@ -824,6 +864,11 @@ export default function TownConsole({
         }
       }
     } catch (err) {
+      if (stopRequestedRef.current || isAbortError(err)) {
+        finalizeStoppedMessage();
+        return;
+      }
+
       setMessageMap((prev) => ({
         ...prev,
         [currentIdentity]: (prev[currentIdentity] || []).map((msg) => (
@@ -838,12 +883,28 @@ export default function TownConsole({
         )),
       }));
     } finally {
+      if (mockReplyTimeoutRef.current && stopRequestedRef.current) {
+        window.clearTimeout(mockReplyTimeoutRef.current);
+        mockReplyTimeoutRef.current = null;
+      }
+      streamControllerRef.current = null;
+      stopRequestedRef.current = false;
       setSendingIdentity('');
       window.setTimeout(() => {
         loadConsoleData();
       }, 800);
     }
   }, [currentAgent, currentIdentity, currentInput, currentSessionKey, loadConsoleData, sendingIdentity]);
+
+  const handleStopTask = useCallback(() => {
+    if (!sendingIdentity) return;
+    stopRequestedRef.current = true;
+    if (mockReplyTimeoutRef.current) {
+      window.clearTimeout(mockReplyTimeoutRef.current);
+      mockReplyTimeoutRef.current = null;
+    }
+    streamControllerRef.current?.abort();
+  }, [sendingIdentity]);
 
   const handleSelectCurrentNeighbor = useCallback((direction) => {
     if (!filteredAgents.length || !currentAgent) return;
@@ -895,6 +956,7 @@ export default function TownConsole({
                     setInputMap((prev) => ({ ...prev, [currentIdentity]: value }));
                   }}
                   onSendTask={handleSendTask}
+                  onStopTask={handleStopTask}
                   onInspectAgent={handleInspectAgent}
                   onPreviousAgent={() => handleSelectCurrentNeighbor(-1)}
                   onNextAgent={() => handleSelectCurrentNeighbor(1)}

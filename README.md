@@ -1,4 +1,4 @@
-# SafeClaw
+# XSafeClaw
 
 <div align="center">
 
@@ -15,9 +15,9 @@ Real-time monitoring, security scanning, and red team testing for OpenClaw AI ag
 
 ---
 
-## What is SafeClaw?
+## What is XSafeClaw?
 
-SafeClaw is a security-focused companion for [OpenClaw](https://openclaw.ai) AI agents. It provides a unified dashboard to monitor agent activity, scan system assets, and perform automated red team testing — all from a single `safeclaw start` command.
+XSafeClaw is a security-focused companion for [OpenClaw](https://openclaw.ai) AI agents. It provides a unified dashboard to monitor agent activity, scan system assets, and perform automated red team testing — all from a single `xsafeclaw start` command.
 
 ### Core Modules
 
@@ -36,22 +36,22 @@ SafeClaw is a security-focused companion for [OpenClaw](https://openclaw.ai) AI 
 ### Option A: Install from GitHub (recommended)
 
 ```bash
-pip install git+https://github.com/dyf-2316/SafeClaw.git
+pip install git+https://github.com/dyf-2316/XSafeClaw.git
 ```
 
 ### Option B: Clone and install locally
 
 ```bash
-git clone https://github.com/dyf-2316/SafeClaw.git
-cd SafeClaw
+git clone https://github.com/dyf-2316/XSafeClaw.git
+cd XSafeClaw
 pip install .
 ```
 
 ### Option C: Development install
 
 ```bash
-git clone https://github.com/dyf-2316/SafeClaw.git
-cd SafeClaw
+git clone https://github.com/dyf-2316/XSafeClaw.git
+cd XSafeClaw
 pip install -e ".[dev]"
 ```
 
@@ -62,21 +62,21 @@ pip install -e ".[dev]"
 ## Quick Start
 
 ```bash
-safeclaw start
+xsafeclaw start
 ```
 
-Browser opens automatically at `http://127.0.0.1:6874`. Database is created at `~/.safeclaw/data.db` on first launch.
+Browser opens automatically at `http://127.0.0.1:6874`. Database is created at `~/.xsafeclaw/data.db` on first launch.
 
 ### CLI Reference
 
 ```
-Usage: safeclaw [OPTIONS] COMMAND [ARGS]...
+Usage: xsafeclaw [OPTIONS] COMMAND [ARGS]...
 
 Commands:
-  start    Start the SafeClaw server
-  version  Show SafeClaw version
+  start    Start the XSafeClaw server
+  version  Show XSafeClaw version
 
-Options for `safeclaw start`:
+Options for `xsafeclaw start`:
   -p, --port INTEGER       Server port              [default: 6874]
   -h, --host TEXT          Bind address             [default: 127.0.0.1]
       --no-browser         Don't open browser automatically
@@ -86,17 +86,17 @@ Options for `safeclaw start`:
 Examples:
 
 ```bash
-safeclaw start                          # default settings
-safeclaw start --port 8080              # custom port
-safeclaw start --host 0.0.0.0           # accessible from LAN
-safeclaw start --no-browser --reload    # headless dev mode
+xsafeclaw start                          # default settings
+xsafeclaw start --port 8080              # custom port
+xsafeclaw start --host 0.0.0.0           # accessible from LAN
+xsafeclaw start --no-browser --reload    # headless dev mode
 ```
 
 ---
 
 ## Development Setup
 
-For contributing or modifying SafeClaw, run the backend and frontend as separate processes with hot reload.
+For contributing or modifying XSafeClaw, run the backend and frontend as separate processes with hot reload.
 
 ### Prerequisites
 
@@ -107,8 +107,8 @@ For contributing or modifying SafeClaw, run the backend and frontend as separate
 ### 1. Clone & Install Backend
 
 ```bash
-git clone https://github.com/dyf-2316/SafeClaw.git
-cd SafeClaw
+git clone https://github.com/dyf-2316/XSafeClaw.git
+cd XSafeClaw
 
 uv venv
 uv pip install -e ".[dev]"
@@ -155,7 +155,7 @@ cd frontend
 npm run build
 ```
 
-Outputs to `src/safeclaw/static/`. After building, `safeclaw start` serves the embedded frontend directly.
+Outputs to `src/xsafeclaw/static/`. After building, `xsafeclaw start` serves the embedded frontend directly.
 
 ---
 
@@ -177,7 +177,7 @@ Outputs to `src/safeclaw/static/`. After building, `safeclaw start` serves the e
         +-----------+-----------+
         |                       |
    SQLite DB           OpenClaw Sessions
- ~/.safeclaw/           ~/.openclaw/
+ ~/.xsafeclaw/           ~/.openclaw/
    data.db            agents/main/sessions/
 ```
 
@@ -196,9 +196,9 @@ Outputs to `src/safeclaw/static/`. After building, `safeclaw start` serves the e
 ## Project Structure
 
 ```
-SafeClaw/
-├── src/safeclaw/                  # Python package
-│   ├── cli.py                     # CLI entry point (safeclaw start)
+XSafeClaw/
+├── src/xsafeclaw/                  # Python package
+│   ├── cli.py                     # CLI entry point (xsafeclaw start)
 │   ├── config.py                  # Settings (pydantic-settings)
 │   ├── database.py                # SQLite async engine
 │   ├── gateway_client.py          # OpenClaw gateway client
@@ -235,18 +235,18 @@ SafeClaw/
 
 ## Configuration
 
-SafeClaw reads settings from environment variables or a `.env` file:
+XSafeClaw reads settings from environment variables or a `.env` file:
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `~/.safeclaw/data.db` | Database path (auto-created) |
+| `DATABASE_URL` | `~/.xsafeclaw/data.db` | Database path (auto-created) |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session JSONL directory |
 | `API_HOST` | `0.0.0.0` | Server bind address |
 | `API_PORT` | `6874` | Server port |
 | `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `ENABLE_FILE_WATCHER` | `true` | Auto-watch and sync session files |
 | `WATCH_INTERVAL_SECONDS` | `1` | File watcher polling interval |
-| `DATA_DIR` | `~/.safeclaw` | Data directory for DB and config |
+| `DATA_DIR` | `~/.xsafeclaw` | Data directory for DB and config |
 
 ---
 

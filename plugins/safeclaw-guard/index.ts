@@ -1,15 +1,50 @@
 /**
- * SafeClaw Guard Plugin for OpenClaw.
+ * XSafeClaw Guard Plugin for OpenClaw.
  *
- * Registers a `before_tool_call` hook that sends every tool call to the
- * SafeClaw backend for safety evaluation.  If the guard model deems the
- * call unsafe the request is held server-side until a human approves,
- * rejects, or modifies the parameters.
+ * 1. `before_tool_call` — sends every tool call to XSafeClaw for safety
+ *    evaluation; unsafe calls are held until human approval.
+ * 2. `before_prompt_build` — injects SAFETY.md and PERMISSION.md from the
+ *    workspace into every conversation's system prompt.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/safeclaw-guard";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 const TIMEOUT_MS = 310_000;
+
+const SAFETY_FILES = ["SAFETY.md", "PERMISSION.md"] as const;
+
+function resolveWorkspaceDir(ctxWorkspaceDir?: string): string | null {
+  if (ctxWorkspaceDir) return ctxWorkspaceDir;
+  const configPath = join(homedir(), ".openclaw", "openclaw.json");
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      if (config.workspace) return config.workspace;
+    } catch { /* ignore */ }
+  }
+  const fallback = join(homedir(), ".openclaw", "workspace");
+  return existsSync(fallback) ? fallback : null;
+}
+
+const fileCache = new Map<string, { content: string; mtimeMs: number }>();
+
+function readCachedFile(filePath: string): string | null {
+  try {
+    if (!existsSync(filePath)) return null;
+    const { mtimeMs } = statSync(filePath);
+    const cached = fileCache.get(filePath);
+    if (cached && cached.mtimeMs === mtimeMs) return cached.content;
+    const content = readFileSync(filePath, "utf-8").trim();
+    if (!content) return null;
+    fileCache.set(filePath, { content, mtimeMs });
+    return content;
+  } catch {
+    return null;
+  }
+}
 
 export default function register(api: OpenClawPluginApi) {
   const cfg = (api.pluginConfig ?? {}) as { safeclawUrl?: string };
@@ -20,6 +55,26 @@ export default function register(api: OpenClawPluginApi) {
   ).replace(/\/$/, "");
   const toolCheckUrl = `${baseUrl}/api/guard/tool-check`;
 
+  // ── Hook: inject SAFETY.md & PERMISSION.md into system prompt ──────
+  api.on("before_prompt_build", (_event, ctx) => {
+    const wsDir = resolveWorkspaceDir(ctx.workspaceDir);
+    if (!wsDir) return;
+
+    const sections: string[] = [];
+    for (const filename of SAFETY_FILES) {
+      const content = readCachedFile(join(wsDir, filename));
+      if (content) {
+        sections.push(`## ${filename}\n${content}`);
+      }
+    }
+    if (sections.length === 0) return;
+
+    return {
+      prependSystemContext: sections.join("\n\n"),
+    };
+  });
+
+  // ── Hook: tool-call guard ──────────────────────────────────────────
   api.on("before_tool_call", async (event, ctx) => {
     try {
       const controller = new AbortController();
@@ -54,7 +109,7 @@ export default function register(api: OpenClawPluginApi) {
       if (result.action === "block") {
         return {
           block: true,
-          blockReason: result.reason || "Blocked by SafeClaw guard",
+          blockReason: result.reason || "Blocked by XSafeClaw guard",
         };
       }
 
@@ -65,7 +120,7 @@ export default function register(api: OpenClawPluginApi) {
       if (err?.name === "AbortError") {
         return {
           block: true,
-          blockReason: "SafeClaw guard approval timed out",
+          blockReason: "XSafeClaw guard approval timed out",
         };
       }
       api.logger.warn?.(

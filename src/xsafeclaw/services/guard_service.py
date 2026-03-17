@@ -36,7 +36,7 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prompt templates (bundled with SafeClaw)
+# Prompt templates (bundled with XSafeClaw)
 # ---------------------------------------------------------------------------
 _PROMPTS_DIR = Path(__file__).resolve().parent / "guard_prompts"
 

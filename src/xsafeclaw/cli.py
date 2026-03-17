@@ -1,4 +1,4 @@
-"""SafeClaw CLI — `safeclaw start` to launch the server."""
+"""XSafeClaw CLI — `xsafeclaw start` to launch the server."""
 
 import webbrowser
 from pathlib import Path
@@ -7,13 +7,13 @@ import typer
 from rich.console import Console
 
 app = typer.Typer(
-    name="safeclaw",
-    help="SafeClaw — Keeping Your Claw Safe.",
+    name="xsafeclaw",
+    help="XSafeClaw — Keeping Your Claw Safe.",
     add_completion=False,
 )
 console = Console()
 
-DATA_DIR = Path.home() / ".safeclaw"
+DATA_DIR = Path.home() / ".xsafeclaw"
 
 
 def _ensure_data_dir() -> None:
@@ -27,13 +27,13 @@ def start(
     no_browser: bool = typer.Option(False, "--no-browser", help="Don't open browser automatically"),
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload (dev mode)"),
 ) -> None:
-    """Start the SafeClaw server."""
+    """Start the XSafeClaw server."""
     import uvicorn
 
     _ensure_data_dir()
 
     url = f"http://{host}:{port}"
-    console.print(f"[bold green]🐾 SafeClaw[/bold green] starting at [link={url}]{url}[/link]")
+    console.print(f"[bold green]🐾 XSafeClaw[/bold green] starting at [link={url}]{url}[/link]")
     console.print(f"   Database: {DATA_DIR / 'data.db'}")
 
     if not no_browser:
@@ -41,7 +41,7 @@ def start(
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     uvicorn.run(
-        "safeclaw.api.main:app",
+        "xsafeclaw.api.main:app",
         host=host,
         port=port,
         reload=reload,
@@ -51,8 +51,8 @@ def start(
 
 @app.command()
 def version() -> None:
-    """Show SafeClaw version."""
-    console.print("[bold]SafeClaw[/bold] v0.1.0")
+    """Show XSafeClaw version."""
+    console.print("[bold]XSafeClaw[/bold] v0.1.0")
 
 
 if __name__ == "__main__":

@@ -87,7 +87,7 @@ def _build_device_auth_payload(
 
 
 async def auto_approve_pending_devices() -> list[str]:
-    """Approve only the SafeClaw device's pending pairing request.
+    """Approve only the XSafeClaw device's pending pairing request.
 
     Reads the local device identity to get our deviceId, then only
     approves requests that match it — never touches other devices.
@@ -133,7 +133,7 @@ async def auto_approve_pending_devices() -> list[str]:
             )
             if sub.returncode == 0:
                 approved.append(str(req_id))
-                print(f"✅ Auto-approved SafeClaw device: {req_id}")
+                print(f"✅ Auto-approved XSafeClaw device: {req_id}")
             else:
                 print(f"⚠️  Failed to approve device {req_id}: {sub.stderr.strip()}")
     except FileNotFoundError:
@@ -228,7 +228,7 @@ class GatewayClient:
             "maxProtocol": 3,
             "client": {
                 "id":          client_id,
-                "displayName": "SafeClaw",
+                "displayName": "XSafeClaw",
                 "version":     "1.0.0",
                 "platform":    "linux",
                 "mode":        client_mode,

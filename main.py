@@ -1,5 +1,5 @@
 def main():
-    print("Hello from safeclawscaffold!")
+    print("Hello from xsafeclaw!")
 
 
 if __name__ == "__main__":

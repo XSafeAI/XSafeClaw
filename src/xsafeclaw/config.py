@@ -19,8 +19,8 @@ class Settings(BaseSettings):
 
     # Data directory
     data_dir: Path = Field(
-        default=Path.home() / ".safeclaw",
-        description="SafeClaw data directory",
+        default=Path.home() / ".xsafeclaw",
+        description="XSafeClaw data directory",
     )
 
     # Database

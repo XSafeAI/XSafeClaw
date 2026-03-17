@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CHAR_BASE, CHAR_NAMES } from '../config/constants';
 
 const FILTER_META = [
@@ -182,39 +182,25 @@ function RosterPortrait({ charName, status }) {
   );
 }
 
-function RosterCard({ agent, selected, charName, summary, lastEvent, onSelect, helpers }) {
-  const serial = helpers.shortId(agent.id).toUpperCase();
+function RosterCard({ agent, selected, charName, onSelect, helpers }) {
+  const identity = helpers.getAgentIdentity(agent);
+  const serial = String(agent.pid || helpers.shortId(identity || agent.id || 'UNSET')).toUpperCase();
+  const statusKey = agent.status || 'offline';
+  const statusLabel = FILTER_META.find((item) => item.id === statusKey)?.label || String(statusKey).toUpperCase();
   return (
     <button
       type="button"
-      className={`tc-roster-card ${selected ? 'tc-roster-card-selected' : ''}`}
+      className={`tc-roster-card tc-roster-card-compact ${selected ? 'tc-roster-card-selected' : ''}`}
       onClick={onSelect}
+      title={identity || agent.id || agent.pid || 'unknown-agent'}
+      aria-label={`Open operative ${serial}`}
     >
-      <div className="tc-roster-card-head">
+      <div className="tc-roster-card-head tc-roster-card-head-compact">
         <RosterPortrait charName={charName} status={agent.status || 'offline'} />
-        <div className="tc-roster-copy">
-          <div className="tc-roster-name">{agent.name}</div>
-          <div className="tc-roster-model">{agent.model || agent.provider || 'Unknown model'}</div>
+        <div className="tc-roster-copy tc-roster-copy-compact">
+          <span className={`tc-roster-status-text tc-roster-status-${statusKey}`}>{statusLabel}</span>
+          <span className="tc-roster-id-text">{`ID ${serial}`}</span>
         </div>
-        <div className={`tc-roster-status tc-status-${agent.status || 'offline'}`}>{agent.status || 'offline'}</div>
-      </div>
-
-      <div className="tc-roster-meta-row">
-        <span className="tc-roster-serial">ID {serial}</span>
-        <span className="tc-roster-link">{agent.channel || 'session-link'}</span>
-      </div>
-
-      <div className="tc-roster-strip">
-        <span>C {summary.completed}</span>
-        <span>F {summary.failed}</span>
-        <span>R {summary.running}</span>
-        <span>! {summary.flagged}</span>
-      </div>
-
-      <div className="tc-roster-note">{helpers.pickEventSnippet(lastEvent) || 'Awaiting fresh instructions.'}</div>
-      <div className="tc-roster-foot">
-        <span>{agent.channel || 'session'}</span>
-        <span>{lastEvent?.start_time ? helpers.fmtRelative(lastEvent.start_time) : 'newly idle'}</span>
       </div>
     </button>
   );
@@ -229,17 +215,91 @@ function SummaryTile({ label, value, tone = '' }) {
   );
 }
 
-function ChatBubble({ msg, helpers }) {
-  const roleLabel = msg.role === 'user' ? 'COMMAND' : msg.role === 'error' ? 'ERROR' : 'AGENT';
+function previewChatValue(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function getMessageTimestampValue(value) {
+  if (value instanceof Date) return value.getTime();
+  const time = new Date(value || 0).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function ToolCallBubble({ msg, helpers }) {
+  const argsPreview = previewChatValue(msg.args || msg.content || '');
+  const resultPreview = previewChatValue(msg.result);
+  const toolState = msg.result_pending
+    ? 'TOOL RUNNING'
+    : msg.is_error
+      ? 'TOOL ERROR'
+      : resultPreview
+        ? 'TOOL RESULT'
+        : 'TOOL CALL';
+  const toolName = msg.tool_name || 'unknown';
+
   return (
-    <div className={`tc-chat-last tc-chat-last-${msg.role}`}>
-      <div className="tc-chat-last-head">
-        <span>{roleLabel}</span>
-        <span>{helpers.fmtTime(msg.timestamp)}</span>
+    <div className="console-dialog-item console-dialog-item-tool">
+      <div className="console-dialog-meta">
+        <div className="console-dialog-meta-main">
+          <span className="console-dialog-tag console-dialog-tag-tool">{toolState}</span>
+          <span className="console-dialog-tool-name">{toolName}</span>
+        </div>
+        <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
       </div>
-      <div className="tc-chat-last-body">
+      {argsPreview ? <div className="console-dialog-code console-dialog-code-args">{argsPreview}</div> : null}
+      {msg.result_pending ? (
+        <div className="console-dialog-code console-dialog-code-result">Running...</div>
+      ) : resultPreview ? (
+        <div className={`console-dialog-code console-dialog-code-result ${msg.is_error ? 'console-dialog-code-error' : ''}`}>{resultPreview}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function ChatBubble({ msg, helpers }) {
+  if (msg.role === 'tool_call') {
+    return <ToolCallBubble msg={msg} helpers={helpers} />;
+  }
+
+  const entryClass = msg.stopped
+    ? 'console-dialog-item-stop'
+    : msg.role === 'user'
+      ? 'console-dialog-item-user'
+      : msg.role === 'error'
+        ? 'console-dialog-item-error'
+        : 'console-dialog-item-assistant';
+  const roleLabel = msg.stopped
+    ? 'STOPPED'
+    : msg.role === 'user'
+      ? 'USER'
+      : msg.role === 'error'
+        ? 'ERROR'
+        : 'ASSISTANT';
+  const roleClass = msg.stopped
+    ? 'console-dialog-tag-stop'
+    : msg.role === 'user'
+      ? 'console-dialog-tag-user'
+      : msg.role === 'error'
+        ? 'console-dialog-tag-error'
+        : 'console-dialog-tag-agent';
+
+  return (
+    <div className={`console-dialog-item ${entryClass}`}>
+      <div className="console-dialog-meta">
+        <div className="console-dialog-meta-main">
+          <span className={`console-dialog-tag ${roleClass}`}>{roleLabel}</span>
+        </div>
+        <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
+      </div>
+      <div className="console-dialog-text">
         {msg.pending ? (
-          <div className="tc-chat-typing">
+          <div className="console-dialog-typing">
             <span />
             <span />
             <span />
@@ -269,6 +329,7 @@ export default function CrewTab({
   onFilterChange,
   onChangeInput,
   onSendTask,
+  onStopTask,
   onInspectAgent,
   onPreviousAgent,
   onNextAgent,
@@ -287,9 +348,19 @@ export default function CrewTab({
   helpers,
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
-  const latestDialogueMessage = [...activeMessages].reverse().find((msg) => (
-    msg.role === 'assistant' || msg.role === 'user' || msg.role === 'error'
-  )) || null;
+  const chatEndRef = useRef(null);
+  const conversationMessages = useMemo(() => activeMessages
+    .filter((msg) => (
+      msg.role === 'assistant'
+      || msg.role === 'user'
+      || msg.role === 'error'
+      || msg.role === 'tool_call'
+    ))
+    .sort((a, b) => getMessageTimestampValue(a.timestamp) - getMessageTimestampValue(b.timestamp)), [activeMessages]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: 'end' });
+  }, [conversationMessages, currentAgent?.id, loadingHistory, sending]);
 
   return (
     <div className="tc-crew-layout">
@@ -363,10 +434,9 @@ export default function CrewTab({
             ))}
           </div>
         </section>
-
         <section className="tc-ornate-panel tc-sidebar-section tc-roster-panel">
           <BannerHeader label="ROSTER" />
-          <div className="tc-panel-microcopy">Active operatives available for direct command.</div>
+          <div className="tc-panel-microcopy">Select one operative to expand details.</div>
           <div className="tc-roster-list">
             {agents.length === 0 ? (
               <div className="tc-empty">No agent matched this status.</div>
@@ -376,8 +446,6 @@ export default function CrewTab({
                   key={`${agent.id}-${helpers.getAgentIdentity(agent)}`}
                   agent={agent}
                   charName={charNameMap[agent.id] || CHAR_NAMES[0]}
-                  summary={helpers.summarizeTasks(eventsByAgentList[agent.id] || [])}
-                  lastEvent={eventsByAgent[agent.id] || null}
                   selected={currentAgent ? helpers.getAgentIdentity(agent) === helpers.getAgentIdentity(currentAgent) : false}
                   onSelect={() => onSelectAgent(agent)}
                   helpers={helpers}
@@ -392,68 +460,68 @@ export default function CrewTab({
         {currentAgent ? (
           <>
             <section className="tc-ornate-panel tc-stage-hero">
-              <div className="tc-stage-hero-main">
-                <div className="tc-stage-showcase-panel">
-                  <div className="tc-stage-showcase-topline">VIEW PORT</div>
-                  <div className="tc-stage-showcase-frame">
-                    <div className="tc-showcase-wrap">
-                      <ShowcaseNavButton direction="left" onClick={onPreviousAgent} />
-                      <AgentShowcase
-                        agentId={currentAgent.id}
-                        charName={currentChar}
-                        status={currentAgent.status}
-                      />
-                      <ShowcaseNavButton direction="right" onClick={onNextAgent} />
+            <div className="tc-stage-hero-main">
+              <div className="tc-stage-showcase-panel">
+                <div className="tc-stage-showcase-topline">VIEW PORT</div>
+                <div className="tc-stage-showcase-frame">
+                  <div className="tc-showcase-wrap">
+                    <ShowcaseNavButton direction="left" onClick={onPreviousAgent} />
+                    <AgentShowcase
+                      agentId={currentAgent.id}
+                      charName={currentChar}
+                      status={currentAgent.status}
+                    />
+                    <ShowcaseNavButton direction="right" onClick={onNextAgent} />
+                  </div>
+                </div>
+                <div className="tc-stage-showcase-floor">L/R cycle active shell</div>
+              </div>
+
+              <div className="tc-stage-info-panel">
+                <div className="tc-stage-overline">TACTICAL PROFILE</div>
+                <div className="tc-stage-info-head">
+                  <div>
+                    <div className="tc-stage-agent-name">{currentAgent.name}</div>
+                    <div className="tc-stage-agent-sub">
+                      {currentAgent.provider || 'unknown'} · {currentAgent.model || 'model pending'}
                     </div>
                   </div>
-                  <div className="tc-stage-showcase-floor">L/R cycle active shell</div>
+                  <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
+                    {(currentAgent.status || 'offline').toUpperCase()}
+                  </div>
                 </div>
 
-                <div className="tc-stage-info-panel">
-                  <div className="tc-stage-overline">TACTICAL PROFILE</div>
-                  <div className="tc-stage-info-head">
-                    <div>
-                      <div className="tc-stage-agent-name">{currentAgent.name}</div>
-                      <div className="tc-stage-agent-sub">
-                        {currentAgent.provider || 'unknown'} · {currentAgent.model || 'model pending'}
-                      </div>
-                    </div>
-                    <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
-                      {(currentAgent.status || 'offline').toUpperCase()}
-                    </div>
-                  </div>
+                <div className="tc-stage-summary-grid">
+                  <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
+                  <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-bad" />
+                  <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
+                  <SummaryTile label="Flagged" value={currentSummary.flagged} tone="tc-summary-warn" />
+                </div>
 
-                  <div className="tc-stage-summary-grid">
-                    <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
-                    <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-bad" />
-                    <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
-                    <SummaryTile label="Flagged" value={currentSummary.flagged} tone="tc-summary-warn" />
-                  </div>
+                <div className="tc-stage-kv-grid">
+                  <div>PID</div>
+                  <span>{currentAgent.pid || helpers.shortId(currentAgent.id)}</span>
+                  <div>Channel</div>
+                  <span>{currentAgent.channel || 'session'}</span>
+                  <div>Seen</div>
+                  <span>{helpers.fmtDate(currentAgent.first_seen_at)}</span>
+                  <div>Latest</div>
+                  <span>{currentEvents[0]?.start_time ? helpers.fmtDate(currentEvents[0].start_time) : 'No task yet'}</span>
+                </div>
 
-                  <div className="tc-stage-kv-grid">
-                    <div>PID</div>
-                    <span>{currentAgent.pid || helpers.shortId(currentAgent.id)}</span>
-                    <div>Channel</div>
-                    <span>{currentAgent.channel || 'session'}</span>
-                    <div>Seen</div>
-                    <span>{helpers.fmtDate(currentAgent.first_seen_at)}</span>
-                    <div>Latest</div>
-                    <span>{currentEvents[0]?.start_time ? helpers.fmtDate(currentEvents[0].start_time) : 'No task yet'}</span>
-                  </div>
+                <div className="tc-stage-blurb">
+                  {helpers.pickEventSnippet(currentEvents[0]) || 'This agent is waiting for your next mission dispatch.'}
+                </div>
 
-                  <div className="tc-stage-blurb">
-                    {helpers.pickEventSnippet(currentEvents[0]) || 'This agent is waiting for your next mission dispatch.'}
-                  </div>
-
-                  <div className="tc-stage-actions">
-                    <button type="button" className="tc-stage-inspect" onClick={() => onInspectAgent(currentAgent)}>
-                      Inspect Log
-                    </button>
-                    <span className="tc-stage-tip">Journey stays tucked into inspect view.</span>
-                  </div>
+                <div className="tc-stage-actions">
+                  <button type="button" className="tc-stage-inspect" onClick={() => onInspectAgent(currentAgent)}>
+                    Inspect Log
+                  </button>
+                  <span className="tc-stage-tip">Journey stays tucked into inspect view.</span>
                 </div>
               </div>
-            </section>
+            </div>
+          </section>
 
             <section className="tc-stage-bottom">
               <div className="tc-ornate-panel tc-ledger-panel">
@@ -480,58 +548,67 @@ export default function CrewTab({
                 </div>
               </div>
 
-              <div className="tc-ornate-panel tc-chat-panel">
-                <div className="tc-chat-header">
-                  <div>
-                    <div className="tc-chat-title">MISSION CONSOLE</div>
-                    <div className="tc-chat-key">
-                      {helpers.getAgentSessionKey(currentAgent) || 'Session binding unavailable'}
-                    </div>
+              <section className="console-dialog-shell">
+                <div className="console-dialog-frame">
+                  <div className="console-dialog-head">
+                    <div className="console-dialog-title">CONVERSATION</div>
+                    <div className="console-dialog-status">{sending ? 'TRANSMITTING' : loadingHistory ? 'SYNCING' : 'READY'}</div>
                   </div>
-                  <div className="tc-chat-live">{sending ? 'TRANSMITTING' : loadingHistory ? 'SYNCING' : 'READY'}</div>
-                </div>
-                <div className="tc-panel-microcopy">Continue the bound session directly from this command relay.</div>
 
-                <div className="tc-chat-messages">
-                  {loadingHistory ? (
-                    <div className="tc-chat-empty-inline">Syncing session log...</div>
-                  ) : !latestDialogueMessage ? (
-                    <div className="tc-chat-empty-inline">
-                      New agent can be briefed here. Existing agents continue on the same session.
-                    </div>
-                  ) : (
-                    <ChatBubble key={latestDialogueMessage.id} msg={latestDialogueMessage} helpers={helpers} />
-                  )}
-                </div>
-
-                <div className="tc-chat-composer">
-                  <div className="tc-chat-composer-head">
-                    <span className="tc-chat-composer-label">COMMAND INPUT</span>
-                    <span className="tc-chat-composer-tip">Enter to transmit, Shift+Enter for newline.</span>
+                  <div className="console-dialog-log">
+                    {loadingHistory ? (
+                      <div className="console-dialog-empty">Syncing session log...</div>
+                    ) : conversationMessages.length === 0 ? (
+                      <div className="console-dialog-empty">No session messages yet.</div>
+                    ) : (
+                      conversationMessages.map((msg) => (
+                        <ChatBubble key={msg.id} msg={msg} helpers={helpers} />
+                      ))
+                    )}
+                    <div ref={chatEndRef} />
                   </div>
-                  <textarea
-                    className="tc-chat-input"
-                    value={currentInput}
-                    onChange={(e) => onChangeInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        onSendTask();
-                      }
-                    }}
-                    placeholder="Assign the next mission..."
-                    disabled={!helpers.getAgentSessionKey(currentAgent) || sending}
-                  />
-                  <button
-                    type="button"
-                    className="tc-chat-send"
-                    onClick={onSendTask}
-                    disabled={!helpers.getAgentSessionKey(currentAgent) || !currentInput.trim() || sending}
-                  >
-                    {sending ? 'Sending...' : 'Send Task'}
-                  </button>
+
+                  <div className="console-dialog-compose">
+                    <input
+                      type="text"
+                      className="console-dialog-input"
+                      value={currentInput}
+                      onChange={(e) => onChangeInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          if (sending) {
+                            onStopTask?.();
+                          } else {
+                            onSendTask();
+                          }
+                        }
+                      }}
+                      placeholder="Reply in this session..."
+                      disabled={!helpers.getAgentSessionKey(currentAgent)}
+                    />
+                    <button
+                      type="button"
+                      className={`console-dialog-send ${sending ? 'console-dialog-send-stop' : ''}`}
+                      onClick={sending ? onStopTask : onSendTask}
+                      disabled={sending ? false : !helpers.getAgentSessionKey(currentAgent) || !currentInput.trim()}
+                      aria-label={sending ? 'Stop current response' : 'Send message'}
+                      title={sending ? 'Stop current response' : 'Send message'}
+                    >
+                      {sending ? (
+                        <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                          <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                        </svg>
+                      ) : (
+                        <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M4 12.5 19 4l-3.8 16-4.3-5-6.9-2.5Z" />
+                          <path d="M10.9 15 19 4" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              </section>
             </section>
           </>
         ) : (

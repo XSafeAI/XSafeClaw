@@ -185,7 +185,7 @@ async def get_system_status():
 import platform as _platform
 import tempfile
 
-_NODE_INSTALL_DIR = Path.home() / ".safeclaw" / "node"
+_NODE_INSTALL_DIR = Path.home() / ".xsafeclaw" / "node"
 _NODE_DIST_INDEX = "https://nodejs.org/dist/index.json"
 
 
@@ -246,7 +246,7 @@ async def _download_with_progress(url: str, dest: Path):
 
 
 async def _install_node(env: dict):
-    """Download and extract Node.js to ~/.safeclaw/node/. Yields SSE data lines."""
+    """Download and extract Node.js to ~/.xsafeclaw/node/. Yields SSE data lines."""
     plat, arch = _node_platform_arch()
 
     yield f"data: {json.dumps({'type': 'node_status', 'step': 'resolving'})}\n\n"
@@ -267,7 +267,7 @@ async def _install_node(env: dict):
     url = f"https://nodejs.org/dist/{version}/{archive_name}"
     yield f"data: {json.dumps({'type': 'node_status', 'step': 'downloading', 'url': url, 'version': version})}\n\n"
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="safeclaw-node-"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="xsafeclaw-node-"))
     archive_path = tmp_dir / archive_name
 
     try:
@@ -1554,7 +1554,7 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         web["search"] = search
         changed = True
 
-    # SafeClaw Guard plugin — always register
+    # XSafeClaw Guard plugin — always register
     plugins = config.setdefault("plugins", {})
     entries = plugins.setdefault("entries", {})
     if "safeclaw-guard" not in entries or not isinstance(entries.get("safeclaw-guard"), dict):
@@ -1595,6 +1595,25 @@ def _install_safeclaw_guard_plugin() -> None:
         src_file = src_dir / fname
         if src_file.exists():
             shutil.copy2(src_file, dst_dir / fname)
+
+
+def _deploy_safety_files(workspace: str) -> None:
+    """Deploy SAFETY.md and PERMISSION.md into the OpenClaw workspace.
+
+    Only writes files that don't already exist so user customizations are preserved.
+    """
+    templates_dir = Path(__file__).resolve().parent.parent.parent / "data" / "templates"
+    ws = Path(workspace).expanduser()
+    if not ws.is_dir():
+        ws.mkdir(parents=True, exist_ok=True)
+
+    for fname in ("SAFETY.md", "PERMISSION.md"):
+        dst = ws / fname
+        if dst.exists():
+            continue
+        src = templates_dir / fname
+        if src.exists():
+            shutil.copy2(src, dst)
 
 
 class FeishuTestRequest(BaseModel):
@@ -1748,8 +1767,11 @@ async def onboard_config(body: OnboardConfigRequest):
     # ── Post-patch extras not supported by CLI flags ─────────────────────
     _patch_config_extras(body)
 
-    # ── Install SafeClaw Guard plugin into OpenClaw extensions ─────────
+    # ── Install XSafeClaw Guard plugin into OpenClaw extensions ─────────
     _install_safeclaw_guard_plugin()
+
+    # ── Deploy SAFETY.md & PERMISSION.md into workspace ──────────────
+    _deploy_safety_files(body.workspace)
 
     # ── Auto-approve pending device pairing requests ─────────────────
     await _auto_approve_devices()

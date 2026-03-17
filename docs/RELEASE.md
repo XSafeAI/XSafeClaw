@@ -1,4 +1,4 @@
-# SafeClaw 发布指南
+# XSafeClaw 发布指南
 
 ## 前置条件
 
@@ -25,19 +25,19 @@ npm run build
 cd ..
 ```
 
-构建产物会输出到 `src/safeclaw/static/`，随 Python 包一起分发。
+构建产物会输出到 `src/xsafeclaw/static/`，随 Python 包一起分发。
 
 ### 3. 排除大文件
 
-`src/safeclaw/static/` 中的 `Map/` 和 `music/` 目录体积较大，需要在 `pyproject.toml` 中排除以满足 PyPI 100MB 限制：
+`src/xsafeclaw/static/` 中的 `Map/` 和 `music/` 目录体积较大，需要在 `pyproject.toml` 中排除以满足 PyPI 100MB 限制：
 
 ```toml
 [tool.hatch.build.targets.wheel]
-packages = ["src/safeclaw"]
-exclude = ["src/safeclaw/static/Map", "src/safeclaw/static/music"]
+packages = ["src/xsafeclaw"]
+exclude = ["src/xsafeclaw/static/Map", "src/xsafeclaw/static/music"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["src/safeclaw/static/Map", "src/safeclaw/static/music"]
+exclude = ["src/xsafeclaw/static/Map", "src/xsafeclaw/static/music"]
 ```
 
 ### 4. 安装构建工具
@@ -65,8 +65,8 @@ ls -lh dist/
 ```
 
 预期产物：
-- `safeclaw-x.y.z-py3-none-any.whl`（wheel）
-- `safeclaw-x.y.z.tar.gz`（sdist）
+- `xsafeclaw-x.y.z-py3-none-any.whl`（wheel）
+- `xsafeclaw-x.y.z.tar.gz`（sdist）
 
 ### 7. 上传到 PyPI
 
@@ -76,12 +76,12 @@ uv run twine upload dist/* -u __token__ -p <YOUR_PYPI_API_TOKEN>
 
 将 `<YOUR_PYPI_API_TOKEN>` 替换为你的 Token（以 `pypi-` 开头）。
 
-上传成功后可在 https://pypi.org/project/safeclaw/ 查看。
+上传成功后可在 https://pypi.org/project/xsafeclaw/ 查看。
 
 ### 8. 验证安装
 
 ```bash
-pip install safeclaw==x.y.z
+pip install xsafeclaw==x.y.z
 ```
 
 ## 快速命令（一键复制）

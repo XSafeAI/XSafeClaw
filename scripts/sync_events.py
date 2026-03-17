@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from safeclaw.services import EventSyncService
+from xsafeclaw.services import EventSyncService
 
 
 async def main():

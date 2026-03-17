@@ -1517,6 +1517,468 @@ body.agent-town-page-cursor.cursor-grab-full *,
   gap: 8px;
 }
 
+.agent-dialog-panel {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 224, 177, 0.12);
+  background:
+    radial-gradient(circle at top, rgba(255, 231, 190, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)),
+    rgba(11, 9, 18, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 247, 230, 0.05),
+    0 14px 36px rgba(7, 5, 15, 0.18);
+  overflow: hidden;
+}
+
+.agent-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-dialog-head-copy {
+  min-width: 0;
+}
+
+.agent-dialog-overline {
+  color: #d1a96a;
+  font-family: var(--px-font);
+  font-size: 7px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.agent-dialog-title {
+  margin: 6px 0 0;
+  color: #f8ebd2;
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.agent-dialog-head-side {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-dialog-counter,
+.agent-dialog-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 224, 177, 0.12);
+  font-family: var(--px-font);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-dialog-counter {
+  color: #f4dfa8;
+  background: rgba(255, 223, 170, 0.08);
+}
+
+.agent-dialog-status {
+  color: #f5eddc;
+  background: rgba(110, 96, 178, 0.16);
+  border-color: rgba(154, 137, 225, 0.22);
+}
+
+.agent-dialog-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 8px;
+  padding-bottom: 126px;
+  scrollbar-gutter: stable;
+}
+
+.agent-dialog-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #d9bf8f;
+  font-family: var(--px-font);
+  font-size: 8px;
+  line-height: 1.7;
+  padding: 18px 12px;
+}
+
+.agent-dialog-item {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: fit-content;
+  max-width: min(100%, 80%);
+  align-self: flex-start;
+}
+
+.agent-dialog-item + .agent-dialog-item {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.agent-dialog-item-user {
+  align-self: flex-end;
+}
+
+.agent-dialog-item-tool {
+  width: 100%;
+  max-width: none;
+  align-self: stretch;
+}
+
+.agent-dialog-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.agent-dialog-meta-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-dialog-item-user .agent-dialog-meta {
+  justify-content: flex-start;
+  flex-direction: row-reverse;
+}
+
+.agent-dialog-item-tool .agent-dialog-meta {
+  justify-content: space-between;
+}
+
+.agent-dialog-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-family: var(--px-font);
+  font-size: 6px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-dialog-tag-user {
+  color: #fff0cf;
+  background: rgba(240, 187, 96, 0.22);
+  border-color: rgba(240, 187, 96, 0.3);
+}
+
+.agent-dialog-tag-agent {
+  color: #ddd1ff;
+  background: rgba(154, 137, 225, 0.16);
+  border-color: rgba(154, 137, 225, 0.24);
+}
+
+.agent-dialog-tag-error {
+  color: #ffc4c4;
+  background: rgba(191, 47, 47, 0.18);
+  border-color: rgba(255, 117, 117, 0.24);
+}
+
+.agent-dialog-tag-stop {
+  color: #ffe0a0;
+  background: rgba(240, 187, 96, 0.14);
+  border-color: rgba(240, 187, 96, 0.2);
+}
+
+.agent-dialog-tag-tool,
+.agent-dialog-tag-tool-running,
+.agent-dialog-tag-tool-result,
+.agent-dialog-tag-tool-error {
+  color: #e1d7ff;
+  background: rgba(105, 86, 185, 0.18);
+  border-color: rgba(156, 126, 255, 0.26);
+}
+
+.agent-dialog-tag-tool-running {
+  color: #d8e5ff;
+  background: rgba(83, 131, 255, 0.16);
+  border-color: rgba(124, 161, 255, 0.24);
+}
+
+.agent-dialog-tag-tool-result {
+  color: #dfffe8;
+  background: rgba(96, 179, 125, 0.16);
+  border-color: rgba(129, 214, 159, 0.24);
+}
+
+.agent-dialog-tag-tool-error {
+  color: #ffc9c9;
+  background: rgba(191, 47, 47, 0.18);
+  border-color: rgba(255, 117, 117, 0.24);
+}
+
+.agent-dialog-time {
+  flex-shrink: 0;
+  color: #aa9778;
+  font-family: var(--px-font);
+  font-size: 7px;
+  letter-spacing: 0.04em;
+}
+
+.agent-dialog-tool-name {
+  min-width: 0;
+  color: #f3ead7;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.agent-dialog-text,
+.agent-dialog-code {
+  color: #f4ead7;
+  font-size: 12px;
+  line-height: 1.78;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 224, 177, 0.1);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(255, 255, 255, 0.025);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.04);
+}
+
+.agent-dialog-item-user .agent-dialog-text {
+  color: #fff0cf;
+  border-color: rgba(240, 187, 96, 0.3);
+  background:
+    linear-gradient(180deg, rgba(240, 187, 96, 0.26), rgba(240, 187, 96, 0.1)),
+    rgba(82, 50, 14, 0.58);
+  border-top-right-radius: 6px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 243, 220, 0.08),
+    0 8px 18px rgba(56, 31, 5, 0.18);
+}
+
+.agent-dialog-item-assistant .agent-dialog-text {
+  border-color: rgba(154, 137, 225, 0.18);
+  background:
+    linear-gradient(180deg, rgba(154, 137, 225, 0.12), rgba(154, 137, 225, 0.04)),
+    rgba(22, 17, 35, 0.45);
+  border-top-left-radius: 6px;
+}
+
+.agent-dialog-item-error .agent-dialog-text {
+  color: #ffbeb5;
+  border-color: rgba(255, 117, 117, 0.2);
+  background:
+    linear-gradient(180deg, rgba(191, 47, 47, 0.16), rgba(191, 47, 47, 0.04)),
+    rgba(44, 13, 15, 0.44);
+  border-top-left-radius: 6px;
+}
+
+.agent-dialog-item-stop .agent-dialog-text {
+  color: #ffd995;
+  border-color: rgba(240, 187, 96, 0.18);
+  background:
+    linear-gradient(180deg, rgba(240, 187, 96, 0.14), rgba(240, 187, 96, 0.04)),
+    rgba(40, 25, 11, 0.42);
+  border-top-left-radius: 6px;
+}
+
+.agent-dialog-code {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.agent-dialog-code-args {
+  color: #d7ccff;
+}
+
+.agent-dialog-code-result {
+  color: #fff2d0;
+}
+
+.agent-dialog-code-error {
+  color: #ffb8af;
+}
+
+.agent-dialog-compose {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  z-index: 1;
+}
+
+.agent-dialog-input {
+  width: 100%;
+  min-height: 94px;
+  resize: none;
+  padding: 12px 62px 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 224, 177, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(19, 15, 31, 0.92);
+  color: #f5eddc;
+  font-size: 12px;
+  line-height: 1.7;
+  outline: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.05),
+    0 14px 24px rgba(8, 6, 15, 0.28);
+}
+
+.agent-dialog-input::placeholder {
+  color: rgba(245, 224, 188, 0.46);
+}
+
+.agent-dialog-input:focus {
+  border-color: rgba(240, 187, 96, 0.3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 224, 0.06),
+    0 0 0 1px rgba(240, 187, 96, 0.12);
+}
+
+.agent-dialog-send {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 40px;
+  min-height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(240, 187, 96, 0.18);
+  background: rgba(96, 63, 23, 0.48);
+  color: #fff1d5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.05);
+  cursor: pointer;
+}
+
+.agent-dialog-send:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.agent-dialog-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agent-dialog-send-stop {
+  border-color: #aa5b44;
+  background: rgba(123, 58, 45, 0.6);
+}
+
+.agent-dialog-send-icon {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-dialog-send-stop .agent-dialog-send-icon {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke: none;
+}
+
+.agent-dialog-typing {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 0;
+}
+
+.agent-dialog-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #efc16a;
+  animation: agentDialogTyping 1s infinite ease-in-out;
+}
+
+.agent-dialog-typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.agent-dialog-typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes agentDialogTyping {
+  0%, 80%, 100% {
+    transform: scale(0.7);
+    opacity: 0.5;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.agent-dialog-log::-webkit-scrollbar {
+  width: 7px;
+}
+
+.agent-dialog-log::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(239, 193, 106, 0.5), rgba(170, 122, 51, 0.42));
+  border-radius: 999px;
+}
+
+.agent-dialog-log::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 999px;
+}
+
+@media (max-width: 720px) {
+  .agent-dialog-head,
+  .agent-dialog-head-side {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .agent-dialog-compose {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+
+  .agent-dialog-send {
+    width: 40px;
+  }
+}
+
 .agent-card-thread-strip {
   display: flex;
   flex-wrap: wrap;

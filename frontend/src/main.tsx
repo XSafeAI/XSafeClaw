@@ -4,7 +4,7 @@ import './index.css'
 import App from './App'
 
 // Apply saved theme immediately to avoid flash-of-wrong-theme
-const savedTheme = localStorage.getItem('safeclaw:theme') ?? 'dark';
+const savedTheme = localStorage.getItem('xsafeclaw:theme') ?? 'dark';
 document.documentElement.setAttribute('data-theme', savedTheme);
 
 createRoot(document.getElementById('root')!).render(

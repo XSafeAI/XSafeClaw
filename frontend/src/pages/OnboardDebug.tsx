@@ -300,7 +300,7 @@ export default function OnboardDebug() {
 
         {/* Header */}
         <div className="flex flex-col items-center gap-3 mb-10">
-          <img src="/logo.png" alt="SafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
+          <img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
           <div className="text-center">
             <p className="text-[22px] font-bold text-text-primary tracking-tight">Onboard Debugger</p>
             <p className="text-[13px] text-text-muted mt-0.5">Run and debug <span className="font-mono">openclaw onboard --install-daemon</span></p>
@@ -424,7 +424,7 @@ export default function OnboardDebug() {
         )}
 
         <p className="text-center text-[11px] text-text-muted mt-6">
-          Onboard Debugger · SafeClaw V1.0
+          Onboard Debugger · XSafeClaw V1.0
         </p>
       </div>
     </div>

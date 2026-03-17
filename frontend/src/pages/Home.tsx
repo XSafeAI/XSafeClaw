@@ -50,10 +50,10 @@ export default function Home() {
 
       {/* ── Logo + title ── */}
       <div className="flex flex-col items-center gap-4 mb-16">
-        <img src="/logo.png" alt="SafeClaw" className="w-20 h-20 rounded-2xl shadow-xl shadow-accent/25" />
+        <img src="/logo.png" alt="XSafeClaw" className="w-20 h-20 rounded-2xl shadow-xl shadow-accent/25" />
         <div className="text-center space-y-2">
           <h1 className="text-[32px] font-bold text-text-primary tracking-tight">
-            SafeClaw
+            XSafeClaw
           </h1>
           <p className="text-[15px] text-text-muted">Keeping Your Claw Safe.</p>
         </div>

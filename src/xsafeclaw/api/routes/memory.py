@@ -23,6 +23,7 @@ _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _WORKSPACE_CONFIG_FILES = (
     "AGENTS.md", "SOUL.md", "USER.md", "IDENTITY.md",
     "TOOLS.md", "BOOTSTRAP.md", "HEARTBEAT.md",
+    "SAFETY.md", "PERMISSION.md",
 )
 
 

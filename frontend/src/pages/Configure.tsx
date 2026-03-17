@@ -1069,13 +1069,13 @@ export default function Configure() {
   if (done) return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
       <div className="w-full max-w-lg">
-        <div className="flex flex-col items-center gap-3 mb-8"><img src="/logo.png" alt="SafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" /></div>
+        <div className="flex flex-col items-center gap-3 mb-8"><img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" /></div>
         <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
           <div className="flex flex-col items-center gap-6 py-4">
             <div className="w-16 h-16 rounded-full bg-emerald-500/15 flex items-center justify-center"><CheckCircle className="w-9 h-9 text-emerald-400" /></div>
             <div className="text-center">
               <p className="text-lg font-bold text-text-primary">{form.mode === 'remote' ? 'Remote Gateway Configured!' : 'Configuration Complete!'}</p>
-              <p className="text-[13px] text-text-secondary mt-2">{form.mode === 'remote' ? 'Remote gateway is configured and ready to use.' : 'SafeClaw is fully configured and ready to use.'}</p>
+              <p className="text-[13px] text-text-secondary mt-2">{form.mode === 'remote' ? 'Remote gateway is configured and ready to use.' : 'XSafeClaw is fully configured and ready to use.'}</p>
             </div>
             <button onClick={() => window.location.replace('/home')}
               className="flex items-center gap-2 px-8 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
@@ -1091,7 +1091,7 @@ export default function Configure() {
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
       <div className="w-full max-w-4xl">
         <div className="flex flex-col items-center gap-2 mb-6">
-          <img src="/logo.png" alt="SafeClaw" className="w-12 h-12 rounded-xl shadow-lg shadow-accent/25" />
+          <img src="/logo.png" alt="XSafeClaw" className="w-12 h-12 rounded-xl shadow-lg shadow-accent/25" />
           <p className="text-[13px] text-text-muted">Configure OpenClaw</p>
         </div>
         <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
@@ -1129,7 +1129,7 @@ export default function Configure() {
             )}
           </div>
         </div>
-        <p className="text-center text-[11px] text-text-muted mt-6">Powered by SafeClaw</p>
+        <p className="text-center text-[11px] text-text-muted mt-6">Powered by XSafeClaw</p>
       </div>
     </div>
   );

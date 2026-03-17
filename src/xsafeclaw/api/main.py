@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global message_sync_service
     
     # Startup
-    print("🚀 Starting SafeClaw Application...")
+    print("🚀 Starting XSafeClaw Application...")
     
     # Initialize database
     await init_db()
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     
     # Shutdown
-    print("🛑 Shutting down SafeClaw Application...")
+    print("🛑 Shutting down XSafeClaw Application...")
     
     if message_sync_service:
         await message_sync_service.stop()
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # Create FastAPI app
 app = FastAPI(
-    title="SafeClaw API",
+    title="XSafeClaw API",
     description="Real-time monitoring and analytics system for OpenClaw AI agents",
     version="0.1.0",
     lifespan=lifespan,
@@ -105,7 +105,7 @@ else:
     @app.get("/", tags=["Root"])
     async def root():
         return {
-            "name": "SafeClaw",
+            "name": "XSafeClaw",
             "version": "1.0.0",
             "status": "running",
             "message_sync_service_running": message_sync_service.is_running() if message_sync_service else False,

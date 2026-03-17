@@ -12,7 +12,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_CACHE_DIR = Path.home() / ".safeclaw"
+_CACHE_DIR = Path.home() / ".xsafeclaw"
 _CACHE_PATH = _CACHE_DIR / "memory_scan_cache.json"
 
 

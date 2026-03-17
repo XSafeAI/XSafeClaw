@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 # Import from internal asset_scanner module
 try:
-    from safeclaw.asset_scanner import AssetScanner, SafetyGuard
+    from xsafeclaw.asset_scanner import AssetScanner, SafetyGuard
 except ImportError:
     AssetScanner = None
     SafetyGuard = None

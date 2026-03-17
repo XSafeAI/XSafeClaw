@@ -8,11 +8,11 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from safeclaw.config import settings
-from safeclaw.database import init_db
+from xsafeclaw.config import settings
+from xsafeclaw.database import init_db
 
 # Import all models to ensure they're registered with Base.metadata
-from safeclaw.models import Event, Message, Session, ToolCall  # noqa: F401
+from xsafeclaw.models import Event, Message, Session, ToolCall  # noqa: F401
 
 
 async def main() -> None:
