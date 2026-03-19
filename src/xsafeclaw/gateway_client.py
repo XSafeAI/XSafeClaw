@@ -241,7 +241,13 @@ class GatewayClient:
         self._reader_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
-        """Connect to the gateway and complete the HelloOk handshake."""
+        """Connect to the gateway and complete the HelloOk handshake.
+
+        Strategy:
+        1. Try connecting with device identity + token
+        2. If pairing required, auto-approve and retry
+        3. If auto-approve fails, fall back to token-only auth
+        """
         try:
             await self._try_connect()
         except Exception as e:
@@ -250,16 +256,27 @@ class GatewayClient:
             print("🔑 Device pairing required — auto-approving...")
             await self.disconnect()
             approved = await auto_approve_pending_devices()
-            if not approved:
-                raise Exception(
-                    "pairing required but no pending devices found to approve. "
-                    "Run 'openclaw devices list' manually to check pending "
-                    "devices, then 'openclaw devices approve <id>'. "
-                    "Is the gateway running?"
-                ) from e
-            await asyncio.sleep(2)
+            if approved:
+                await asyncio.sleep(2)
+                self._connected = asyncio.Event()
+                try:
+                    await self._try_connect()
+                    return
+                except Exception:
+                    pass
+
+            print("⚠️  Auto-approve failed, falling back to token-only auth...")
+            await self.disconnect()
+            self._device = None
             self._connected = asyncio.Event()
-            await self._try_connect()
+            try:
+                await self._try_connect()
+                print("✅ Connected with token-only auth (no device identity)")
+            except Exception as e2:
+                raise Exception(
+                    "Failed to connect to OpenClaw gateway. "
+                    "Is the gateway running? Check with 'openclaw status'."
+                ) from e2
 
     async def _try_connect(self) -> None:
         """Single connection attempt to the gateway."""

@@ -755,9 +755,8 @@
   color: #f7ead2;
   font-size: 11px;
   line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .tc-stage-identity-value-mono,
