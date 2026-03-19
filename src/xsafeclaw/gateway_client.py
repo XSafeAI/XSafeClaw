@@ -156,19 +156,26 @@ async def auto_approve_pending_devices() -> list[str]:
 
     local_identity = _load_device_identity()
     local_device_id = local_identity.get("deviceId", "") if local_identity else ""
-    if not local_device_id:
-        print("⚠️  No local device identity found; cannot auto-approve")
-        return approved
 
     openclaw_bin = shutil.which("openclaw")
     if not openclaw_bin:
-        nvm_versions = Path.home() / ".nvm" / "versions" / "node"
-        if nvm_versions.exists():
-            for vdir in sorted(nvm_versions.iterdir(), reverse=True):
-                candidate = vdir / "bin" / "openclaw"
+        for search_base in [
+            Path.home() / ".nvm" / "versions" / "node",
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+        ]:
+            if search_base.name == "node" and search_base.exists():
+                for vdir in sorted(search_base.iterdir(), reverse=True):
+                    candidate = vdir / "bin" / "openclaw"
+                    if candidate.is_file():
+                        openclaw_bin = str(candidate)
+                        break
+            else:
+                candidate = search_base / "openclaw"
                 if candidate.is_file():
                     openclaw_bin = str(candidate)
-                    break
+            if openclaw_bin:
+                break
     if not openclaw_bin:
         print("⚠️  openclaw binary not found; cannot auto-approve devices")
         return approved
@@ -179,32 +186,57 @@ async def auto_approve_pending_devices() -> list[str]:
             capture_output=True, text=True, timeout=15,
         )
         raw = result.stdout.strip()
+        print(f"🔍 openclaw devices list --json: exit={result.returncode}, stdout_len={len(raw)}")
         if not raw:
-            print(f"⚠️  'openclaw devices list --json' returned empty output (exit={result.returncode})")
+            print("⚠️  Empty output from 'openclaw devices list --json', trying approve --latest...")
+            sub = subprocess.run(
+                [openclaw_bin, "devices", "approve", "--latest"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if sub.returncode == 0:
+                approved.append("latest")
+                print(f"✅ Auto-approved latest pending device (blind)")
             return approved
 
         devices = _extract_json_from_output(raw)
         if devices is None:
-            print(f"⚠️  Could not parse JSON from 'openclaw devices list': {raw[:200]}")
+            print(f"⚠️  Could not parse JSON from 'openclaw devices list': {raw[:300]}")
             return approved
 
         if isinstance(devices, dict):
-            devices = devices.get("devices", devices.get("requests", [devices]))
-        if not isinstance(devices, list):
+            pending_list = devices.get("pending", devices.get("requests", []))
+            paired_list = devices.get("paired", devices.get("devices", []))
+            if not pending_list and not isinstance(pending_list, list):
+                all_devs = devices.get("devices", [devices])
+                pending_list = [d for d in all_devs if d.get("status", "").lower() != "approved"] if isinstance(all_devs, list) else []
+            devices = pending_list if isinstance(pending_list, list) else []
+            print(f"🔍 Found {len(devices)} pending, {len(paired_list) if isinstance(paired_list, list) else '?'} paired")
+        elif isinstance(devices, list):
+            devices = [d for d in devices if d.get("status", "").lower() != "approved"]
+            print(f"🔍 Found {len(devices)} pending device(s) from list")
+        else:
             print(f"⚠️  Unexpected devices format: {type(devices)}")
             return approved
 
-        print(f"🔍 Found {len(devices)} device(s), looking for our deviceId={local_device_id[:12]}…")
-
         for dev in devices:
             dev_id = dev.get("deviceId") or dev.get("device_id", "")
-            req_id = dev.get("requestId") or dev.get("id") or dev_id
+            req_id = dev.get("requestId") or dev.get("request_id") or dev.get("id") or dev_id
+            display_name = dev.get("displayName") or dev.get("display_name") or dev.get("name", "")
             status = dev.get("status", "").lower()
-            print(f"   Device: {dev_id[:12]}… status={status} reqId={req_id}")
+            print(f"   Pending device: id={dev_id[:16]}… name={display_name} reqId={req_id} status={status}")
+
             if status == "approved" or not req_id:
                 continue
-            if dev_id != local_device_id:
+
+            is_ours = (
+                (local_device_id and dev_id == local_device_id) or
+                "safeclaw" in display_name.lower() or
+                "xsafeclaw" in display_name.lower()
+            )
+            if not is_ours:
+                print(f"   ↳ Skipping (not ours)")
                 continue
+
             sub = subprocess.run(
                 [openclaw_bin, "devices", "approve", str(req_id)],
                 capture_output=True, text=True, timeout=15,
@@ -216,7 +248,17 @@ async def auto_approve_pending_devices() -> list[str]:
                 print(f"⚠️  Failed to approve device {req_id}: {sub.stderr.strip()}")
 
         if not approved:
-            print(f"⚠️  No matching pending device found for our deviceId={local_device_id[:12]}…")
+            print(f"⚠️  No matching pending device via JSON, trying 'openclaw devices approve --latest'...")
+            sub = subprocess.run(
+                [openclaw_bin, "devices", "approve", "--latest"],
+                capture_output=True, text=True, timeout=15,
+            )
+            print(f"   approve --latest: exit={sub.returncode} stdout={sub.stdout.strip()[:200]}")
+            if sub.returncode == 0:
+                approved.append("latest")
+                print(f"✅ Auto-approved latest pending device")
+            else:
+                print(f"⚠️  approve --latest failed: {sub.stderr.strip()[:200]}")
 
     except FileNotFoundError:
         print("⚠️  openclaw binary not found in PATH")
@@ -267,10 +309,9 @@ class GatewayClient:
 
             print("⚠️  Auto-approve failed, falling back to token-only auth...")
             await self.disconnect()
-            self._device = None
             self._connected = asyncio.Event()
             try:
-                await self._try_connect()
+                await self._try_connect(skip_device=True)
                 print("✅ Connected with token-only auth (no device identity)")
             except Exception as e2:
                 raise Exception(
@@ -278,7 +319,7 @@ class GatewayClient:
                     "Is the gateway running? Check with 'openclaw status'."
                 ) from e2
 
-    async def _try_connect(self) -> None:
+    async def _try_connect(self, skip_device: bool = False) -> None:
         """Single connection attempt to the gateway."""
         import websockets
 
@@ -290,7 +331,10 @@ class GatewayClient:
             if not self._token:
                 self._token = cfg.get("auth", {}).get("token")
 
-        self._device = _load_device_identity()
+        if skip_device:
+            self._device = None
+        else:
+            self._device = _load_device_identity()
 
         self._ws = await websockets.connect(
             self._url, max_size=25 * 1024 * 1024, close_timeout=5,

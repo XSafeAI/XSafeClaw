@@ -250,7 +250,6 @@ function getHeatLevel(value) {
 
 function SessionHeatCard({ bins }) {
   const safeBins = Array.isArray(bins) && bins.length ? bins : new Array(24).fill(0);
-  const hasHeat = safeBins.some((value) => Number(value || 0) > 0);
   const hourMarks = [
     { idx: 0, text: '-24H' },
     { idx: 6, text: '-18H' },
@@ -262,10 +261,7 @@ function SessionHeatCard({ bins }) {
   return (
     <section className="tc-stage-info-card tc-stage-info-card-wide">
       <div className="tc-stage-info-card-head">
-        <div>
-          <div className="tc-stage-info-card-title">SESSION HEAT</div>
-          <div className="tc-stage-info-card-subtitle">24H WORKING WINDOW</div>
-        </div>
+        <div className="tc-stage-info-card-title">SESSION HEAT</div>
         <div className="tc-stage-heat-legend tc-stage-heat-legend-head">
           <span>Few</span>
           <div className="tc-stage-heat-legend-swatches" aria-hidden="true">
@@ -300,7 +296,6 @@ function SessionHeatCard({ bins }) {
           </span>
         ))}
       </div>
-      {!hasHeat ? <div className="tc-stage-heat-empty">No working events were recorded in the last 24 hours.</div> : null}
     </section>
   );
 }
@@ -797,8 +792,8 @@ export default function CrewTab({
                 <div className="tc-stage-info-head">
                   <div>
                     <div className="tc-stage-agent-name">{currentAgent.name}</div>
-                    <div className="tc-stage-identity-stack">
-                      <div className="tc-stage-identity-row">
+                    <div className="tc-stage-identity-inline tc-stage-identity-inline-top">
+                      <div className="tc-stage-identity-chip">
                         <span className="tc-stage-identity-label">SESSION ID</span>
                         <span className="tc-stage-identity-value tc-stage-identity-value-mono" title={sessionIdValue}>{sessionIdValue}</span>
                         <button
@@ -809,7 +804,7 @@ export default function CrewTab({
                           {copiedField === 'session-id' ? 'COPIED' : 'COPY'}
                         </button>
                       </div>
-                      <div className="tc-stage-identity-row">
+                      <div className="tc-stage-identity-chip">
                         <span className="tc-stage-identity-label">SESSION KEY</span>
                         <span className="tc-stage-identity-value tc-stage-identity-value-mono" title={sessionKeyValue}>{sessionKeyValue}</span>
                         <button
@@ -837,16 +832,9 @@ export default function CrewTab({
                 <div className="tc-stage-info-cards">
                   <section className="tc-stage-info-card tc-stage-info-card-wide">
                     <div className="tc-stage-info-card-head">
-                      <div>
-                        <div className="tc-stage-info-card-title">IDENTITY &amp; BINDING</div>
-                        <div className="tc-stage-info-card-subtitle">channel, provider, model, and review state</div>
-                      </div>
+                      <div className="tc-stage-info-card-title">IDENTITY &amp; BINDING</div>
                     </div>
                     <div className="tc-stage-meta-strip">
-                      <div className="tc-stage-meta-pill">
-                        <span className="tc-stage-meta-pill-label">Channel</span>
-                        <span className="tc-stage-meta-pill-value">{currentAgent.channel || 'session'}</span>
-                      </div>
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">Provider</span>
                         <span className="tc-stage-meta-pill-value">{currentAgent.provider || 'unknown'}</span>
@@ -854,6 +842,10 @@ export default function CrewTab({
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">Model</span>
                         <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.model || 'model pending'}</span>
+                      </div>
+                      <div className="tc-stage-meta-pill">
+                        <span className="tc-stage-meta-pill-label">Channel</span>
+                        <span className="tc-stage-meta-pill-value">{currentAgent.channel || 'session'}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">Human Reviews</span>

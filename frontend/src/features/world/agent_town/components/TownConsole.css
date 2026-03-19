@@ -244,6 +244,7 @@
 .tc-task-grid {
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 4px;
 }
 
@@ -719,26 +720,6 @@
   color: #d6c0a2;
   font-size: 11px;
   line-height: 1.35;
-}
-
-.tc-stage-identity-stack {
-  margin-top: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tc-stage-identity-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 9px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 224, 177, 0.08);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015)),
-    rgba(23, 17, 34, 0.28);
 }
 
 .tc-stage-identity-label,
@@ -1357,7 +1338,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .tc-stage-info-card-title {
@@ -1368,23 +1349,32 @@
   color: #d7b37a;
 }
 
-.tc-stage-info-card-subtitle {
+.tc-stage-identity-inline,
+.tc-stage-meta-strip {
+  display: grid;
+  gap: 6px;
+}
+
+.tc-stage-identity-inline {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 6px;
+}
+
+.tc-stage-identity-inline-top {
   margin-top: 4px;
-  font-size: 10px;
-  color: #a99479;
-  text-transform: lowercase;
+  margin-bottom: 0;
+  gap: 4px;
 }
 
 .tc-stage-meta-strip {
-  display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
 }
 
+.tc-stage-identity-chip,
 .tc-stage-meta-pill {
   min-width: 0;
-  padding: 8px 9px;
-  border-radius: 10px;
+  padding: 6px 8px;
+  border-radius: 9px;
   border: 1px solid rgba(255, 224, 177, 0.06);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
@@ -1392,12 +1382,46 @@
   box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.03);
 }
 
+.tc-stage-identity-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.tc-stage-meta-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+}
+
+.tc-stage-identity-inline-top .tc-stage-identity-chip {
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.tc-stage-identity-inline-top .tc-stage-identity-label {
+  font-size: 5px;
+}
+
+.tc-stage-identity-inline-top .tc-stage-identity-value {
+  font-size: 10px;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tc-stage-identity-inline-top .tc-stage-copy-btn {
+  padding: 3px 6px 2px;
+  font-size: 5px;
+}
+
 .tc-stage-meta-pill-value {
-  display: block;
-  margin-top: 5px;
   color: #f7ead2;
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 10px;
+  line-height: 1.25;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3955,6 +3979,7 @@
   }
 
   .tc-stage-info-cards,
+  .tc-stage-identity-inline,
   .tc-stage-meta-strip {
     grid-template-columns: 1fr;
   }
