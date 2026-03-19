@@ -24,11 +24,28 @@ async def _load_gateway_config() -> dict:
 
 
 def _load_device_identity() -> dict | None:
-    """Load device identity (Ed25519 key) from ~/.openclaw/identity/device.json."""
+    """Load device identity (Ed25519 key) from ~/.openclaw/identity/device.json.
+    If none exists, generate a new Ed25519 keypair and persist it."""
     p = Path.home() / ".openclaw" / "identity" / "device.json"
-    if not p.exists():
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PrivateFormat, NoEncryption,
+        )
+        key = Ed25519PrivateKey.generate()
+        pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+        device_id = str(uuid.uuid4())
+        identity = {"deviceId": device_id, "privateKeyPem": pem}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+        print(f"🔑 Generated new device identity: {device_id[:12]}…")
+        return identity
+    except Exception as e:
+        print(f"⚠️  Failed to generate device identity: {e}")
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -86,12 +103,54 @@ def _build_device_auth_payload(
     return "|".join(parts)
 
 
+def _extract_json_from_output(raw: str) -> Any:
+    """Extract the first complete JSON object/array from CLI output that may
+    contain non-JSON text before or after (e.g. plugin log lines)."""
+    start = -1
+    for i, ch in enumerate(raw):
+        if ch in ("{", "["):
+            start = i
+            break
+    if start == -1:
+        return None
+    bracket = raw[start]
+    close = "}" if bracket == "{" else "]"
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_str:
+                escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == bracket:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(raw[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 async def auto_approve_pending_devices() -> list[str]:
     """Approve only the XSafeClaw device's pending pairing request.
 
     Reads the local device identity to get our deviceId, then only
     approves requests that match it — never touches other devices.
     """
+    import shutil
     import subprocess
     approved: list[str] = []
 
@@ -101,34 +160,53 @@ async def auto_approve_pending_devices() -> list[str]:
         print("⚠️  No local device identity found; cannot auto-approve")
         return approved
 
+    openclaw_bin = shutil.which("openclaw")
+    if not openclaw_bin:
+        nvm_versions = Path.home() / ".nvm" / "versions" / "node"
+        if nvm_versions.exists():
+            for vdir in sorted(nvm_versions.iterdir(), reverse=True):
+                candidate = vdir / "bin" / "openclaw"
+                if candidate.is_file():
+                    openclaw_bin = str(candidate)
+                    break
+    if not openclaw_bin:
+        print("⚠️  openclaw binary not found; cannot auto-approve devices")
+        return approved
+
     try:
         result = subprocess.run(
-            ["openclaw", "devices", "list", "--json"],
+            [openclaw_bin, "devices", "list", "--json"],
             capture_output=True, text=True, timeout=15,
         )
         raw = result.stdout.strip()
         if not raw:
+            print(f"⚠️  'openclaw devices list --json' returned empty output (exit={result.returncode})")
             return approved
-        try:
-            devices = json.loads(raw)
-        except json.JSONDecodeError:
+
+        devices = _extract_json_from_output(raw)
+        if devices is None:
+            print(f"⚠️  Could not parse JSON from 'openclaw devices list': {raw[:200]}")
             return approved
 
         if isinstance(devices, dict):
             devices = devices.get("devices", devices.get("requests", [devices]))
         if not isinstance(devices, list):
+            print(f"⚠️  Unexpected devices format: {type(devices)}")
             return approved
+
+        print(f"🔍 Found {len(devices)} device(s), looking for our deviceId={local_device_id[:12]}…")
 
         for dev in devices:
             dev_id = dev.get("deviceId") or dev.get("device_id", "")
             req_id = dev.get("requestId") or dev.get("id") or dev_id
             status = dev.get("status", "").lower()
+            print(f"   Device: {dev_id[:12]}… status={status} reqId={req_id}")
             if status == "approved" or not req_id:
                 continue
             if dev_id != local_device_id:
                 continue
             sub = subprocess.run(
-                ["openclaw", "devices", "approve", str(req_id)],
+                [openclaw_bin, "devices", "approve", str(req_id)],
                 capture_output=True, text=True, timeout=15,
             )
             if sub.returncode == 0:
@@ -136,8 +214,12 @@ async def auto_approve_pending_devices() -> list[str]:
                 print(f"✅ Auto-approved XSafeClaw device: {req_id}")
             else:
                 print(f"⚠️  Failed to approve device {req_id}: {sub.stderr.strip()}")
+
+        if not approved:
+            print(f"⚠️  No matching pending device found for our deviceId={local_device_id[:12]}…")
+
     except FileNotFoundError:
-        pass
+        print("⚠️  openclaw binary not found in PATH")
     except Exception as e:
         print(f"⚠️  auto_approve_pending_devices error: {e}")
     return approved
@@ -171,9 +253,11 @@ class GatewayClient:
             if not approved:
                 raise Exception(
                     "pairing required but no pending devices found to approve. "
-                    "Run 'openclaw devices list' manually."
+                    "Run 'openclaw devices list' manually to check pending "
+                    "devices, then 'openclaw devices approve <id>'. "
+                    "Is the gateway running?"
                 ) from e
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             self._connected = asyncio.Event()
             await self._try_connect()
 

@@ -214,15 +214,29 @@ function SummaryTile({ label, value, tone = '' }) {
   );
 }
 
-function DetailField({ label, value, mono = false }) {
-  return (
-    <div className="tc-stage-detail-field">
-      <div className="tc-stage-detail-label">{label}</div>
-      <div className={`tc-stage-detail-value ${mono ? 'tc-stage-detail-value-mono' : ''}`} title={String(value || '')}>
-        {value || '---'}
-      </div>
-    </div>
-  );
+async function copyText(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '---') return false;
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  try {
+    const input = document.createElement('textarea');
+    input.value = text;
+    input.setAttribute('readonly', '');
+    input.style.position = 'absolute';
+    input.style.left = '-9999px';
+    document.body.appendChild(input);
+    input.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(input);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 function getHeatLevel(value) {
@@ -564,11 +578,13 @@ export default function CrewTab({
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
   const chatEndRef = useRef(null);
+  const copyTimerRef = useRef(null);
   const [selectedLedgerTask, setSelectedLedgerTask] = useState(null);
   const [detailMessages, setDetailMessages] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [detailEventData, setDetailEventData] = useState(null);
+  const [copiedField, setCopiedField] = useState('');
   const conversationMessages = useMemo(() => activeMessages
     .filter((msg) => (
       msg.role === 'assistant'
@@ -593,6 +609,10 @@ export default function CrewTab({
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: 'end' });
   }, [conversationMessages, currentAgent?.id, loadingHistory, sending]);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!selectedLedgerTask) return undefined;
@@ -649,6 +669,15 @@ export default function CrewTab({
 
   const detailTask = detailEventData || selectedLedgerTask?.task || null;
   const detailStatusId = mapStageTaskStatus(detailTask?.status || selectedLedgerTask?.task?.status);
+  const sessionIdValue = currentAgent?.id || '---';
+  const sessionKeyValue = helpers.getAgentSessionKey(currentAgent) || currentAgent?.session_key || '---';
+  const handleCopyField = async (field, value) => {
+    const copied = await copyText(value);
+    if (!copied) return;
+    setCopiedField(field);
+    if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopiedField(''), 1200);
+  };
 
   return (
     <div className="tc-crew-layout">
@@ -768,8 +797,29 @@ export default function CrewTab({
                 <div className="tc-stage-info-head">
                   <div>
                     <div className="tc-stage-agent-name">{currentAgent.name}</div>
-                    <div className="tc-stage-agent-sub">
-                      {currentAgent.provider || 'unknown'} · {currentAgent.model || 'model pending'}
+                    <div className="tc-stage-identity-stack">
+                      <div className="tc-stage-identity-row">
+                        <span className="tc-stage-identity-label">SESSION ID</span>
+                        <span className="tc-stage-identity-value tc-stage-identity-value-mono" title={sessionIdValue}>{sessionIdValue}</span>
+                        <button
+                          type="button"
+                          className="tc-stage-copy-btn"
+                          onClick={() => handleCopyField('session-id', sessionIdValue)}
+                        >
+                          {copiedField === 'session-id' ? 'COPIED' : 'COPY'}
+                        </button>
+                      </div>
+                      <div className="tc-stage-identity-row">
+                        <span className="tc-stage-identity-label">SESSION KEY</span>
+                        <span className="tc-stage-identity-value tc-stage-identity-value-mono" title={sessionKeyValue}>{sessionKeyValue}</span>
+                        <button
+                          type="button"
+                          className="tc-stage-copy-btn"
+                          onClick={() => handleCopyField('session-key', sessionKeyValue)}
+                        >
+                          {copiedField === 'session-key' ? 'COPIED' : 'COPY'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                   <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
@@ -789,18 +839,26 @@ export default function CrewTab({
                     <div className="tc-stage-info-card-head">
                       <div>
                         <div className="tc-stage-info-card-title">IDENTITY &amp; BINDING</div>
-                        <div className="tc-stage-info-card-subtitle">identity, session, model, and review stats</div>
+                        <div className="tc-stage-info-card-subtitle">channel, provider, model, and review state</div>
                       </div>
                     </div>
-                    <div className="tc-stage-detail-grid">
-                      <DetailField label="Agent Name" value={currentAgent.name} />
-                      <DetailField label="Agent ID" value={currentAgent.pid || helpers.shortId(currentAgent.id)} mono />
-                      <DetailField label="Session Key" value={helpers.getAgentSessionKey(currentAgent) || currentAgent.session_key || '---'} mono />
-                      <DetailField label="Channel" value={currentAgent.channel || 'session'} />
-                      <DetailField label="Provider" value={currentAgent.provider || 'unknown'} />
-                      <DetailField label="Model" value={currentAgent.model || 'model pending'} mono />
-                      <DetailField label="Dialog Turns" value={String(currentAgent.dialog_turns_total ?? currentEvents.length ?? 0)} mono />
-                      <DetailField label="Human Reviews" value={String(currentAgent.human_interventions_total ?? 0)} mono />
+                    <div className="tc-stage-meta-strip">
+                      <div className="tc-stage-meta-pill">
+                        <span className="tc-stage-meta-pill-label">Channel</span>
+                        <span className="tc-stage-meta-pill-value">{currentAgent.channel || 'session'}</span>
+                      </div>
+                      <div className="tc-stage-meta-pill">
+                        <span className="tc-stage-meta-pill-label">Provider</span>
+                        <span className="tc-stage-meta-pill-value">{currentAgent.provider || 'unknown'}</span>
+                      </div>
+                      <div className="tc-stage-meta-pill">
+                        <span className="tc-stage-meta-pill-label">Model</span>
+                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.model || 'model pending'}</span>
+                      </div>
+                      <div className="tc-stage-meta-pill">
+                        <span className="tc-stage-meta-pill-label">Human Reviews</span>
+                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{String(currentAgent.human_interventions_total ?? 0)}</span>
+                      </div>
                     </div>
                   </section>
 

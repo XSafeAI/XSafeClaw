@@ -721,6 +721,71 @@
   line-height: 1.35;
 }
 
+.tc-stage-identity-stack {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tc-stage-identity-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 224, 177, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015)),
+    rgba(23, 17, 34, 0.28);
+}
+
+.tc-stage-identity-label,
+.tc-stage-meta-pill-label {
+  font-family: var(--px-font);
+  font-size: 6px;
+  letter-spacing: 0.48px;
+  text-transform: uppercase;
+  color: #c9a878;
+}
+
+.tc-stage-identity-value {
+  min-width: 0;
+  color: #f7ead2;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-stage-identity-value-mono,
+.tc-stage-meta-pill-value-mono {
+  font-family: "SFMono-Regular", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.02em;
+}
+
+.tc-stage-copy-btn {
+  border: 1px solid rgba(255, 224, 177, 0.14);
+  border-radius: 999px;
+  padding: 4px 8px 3px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #f0dfbf;
+  font-family: var(--px-font);
+  font-size: 6px;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, transform 0.14s ease;
+}
+
+.tc-stage-copy-btn:hover {
+  border-color: rgba(255, 224, 177, 0.22);
+  background: rgba(255, 224, 177, 0.08);
+  transform: translateY(-1px);
+}
+
 .tc-roster-model {
   white-space: nowrap;
   overflow: hidden;
@@ -1311,13 +1376,13 @@
   text-transform: lowercase;
 }
 
-.tc-stage-detail-grid {
+.tc-stage-meta-strip {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 7px;
 }
 
-.tc-stage-detail-field {
+.tc-stage-meta-pill {
   min-width: 0;
   padding: 8px 9px;
   border-radius: 10px;
@@ -1328,16 +1393,9 @@
   box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.03);
 }
 
-.tc-stage-detail-label {
-  margin-bottom: 5px;
-  font-family: var(--px-font);
-  font-size: 6px;
-  letter-spacing: 0.45px;
-  text-transform: uppercase;
-  color: #c9a878;
-}
-
-.tc-stage-detail-value {
+.tc-stage-meta-pill-value {
+  display: block;
+  margin-top: 5px;
   color: #f7ead2;
   font-size: 11px;
   line-height: 1.45;
@@ -1345,11 +1403,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tc-stage-detail-value-mono {
-  font-family: "SFMono-Regular", "Roboto Mono", Consolas, "Liberation Mono", monospace;
-  letter-spacing: 0.02em;
 }
 
 .tc-stage-heat-grid {
@@ -3903,7 +3956,7 @@
   }
 
   .tc-stage-info-cards,
-  .tc-stage-detail-grid {
+  .tc-stage-meta-strip {
     grid-template-columns: 1fr;
   }
 
