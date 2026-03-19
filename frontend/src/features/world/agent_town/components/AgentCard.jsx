@@ -19,8 +19,9 @@ const EVENT_STATUS_META = {
   error: { label: 'FAILED', className: 'tc-task-failed' },
   failed: { label: 'FAILED', className: 'tc-task-failed' },
   running: { label: 'RUNNING', className: 'tc-task-running' },
-  waiting: { label: 'FLAGGED', className: 'tc-task-flagged' },
-  warning: { label: 'FLAGGED', className: 'tc-task-flagged' },
+  pending: { label: 'PENDING', className: 'tc-task-flagged' },
+  waiting: { label: 'PENDING', className: 'tc-task-flagged' },
+  warning: { label: 'PENDING', className: 'tc-task-flagged' },
 };
 
 function fmtDur(s) {
@@ -306,8 +307,8 @@ export default function AgentCard({ data, onClose, onJourney }) {
     ? 'dot-working'
     : state === 'idle'
       ? 'dot-idle'
-      : state === 'waiting'
-        ? 'dot-waiting'
+      : state === 'pending'
+        ? 'dot-pending'
         : 'dot-offline';
 
   const stateLabel = state === 'working' ? 'RUNNING' : String(state || 'offline').toUpperCase();

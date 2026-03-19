@@ -243,9 +243,28 @@ def get_all_results() -> list[GuardResult]:
     return list(_results.values())
 
 
+def get_latest_results_by_session() -> dict[str, GuardResult]:
+    """Return the latest cached guard result for each session."""
+    latest: dict[str, GuardResult] = {}
+    for result in _results.values():
+        current = latest.get(result.session_id)
+        if current is None or result.checked_at >= current.checked_at:
+            latest[result.session_id] = result
+    return latest
+
+
 def get_unsafe_session_ids() -> set[str]:
     """Return session IDs that have at least one unsafe verdict."""
     return {r.session_id for r in _results.values() if r.verdict == "unsafe"}
+
+
+def get_pending_session_ids() -> set[str]:
+    """Return session IDs whose latest cached verdict is still unsafe."""
+    return {
+        session_id
+        for session_id, result in get_latest_results_by_session().items()
+        if result.verdict == "unsafe"
+    }
 
 
 def clear_results() -> None:

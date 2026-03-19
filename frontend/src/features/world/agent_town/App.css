@@ -492,6 +492,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 .dot-working { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
 .dot-idle    { background: #6d63ff; }
+.dot-pending,
 .dot-waiting { background: #f59e0b; animation: dotPulse 1s ease infinite; }
 .dot-offline { background: #bbb5a8; }
 @keyframes dotPulse {

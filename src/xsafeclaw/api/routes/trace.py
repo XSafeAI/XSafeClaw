@@ -3,10 +3,10 @@
 Returns a unified { agents, events } payload that maps directly
 to the data model expected by the PixiJS Agent Town visualization.
 
-Agent "active" classification mirrors Monitor.tsx's Timeline logic
-exactly: a session is "active" when its most-recent event.started_at
-falls within the cutoff window, with the same fallback chain
-(active → today → all).
+Agent status uses the same buckets as the dashboard monitor:
+- working: active + today buckets combined
+- pending: guard-blocked subset that still needs human attention
+- offline: all remaining sessions from the monitor's "all" set
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from ...services import guard_service
 
 router = APIRouter()
 
-ACTIVE_CUTOFF = dt.timedelta(hours=1)
-TODAY_CUTOFF = dt.timedelta(hours=24)
+RUNNING_CUTOFF = dt.timedelta(hours=1)
+IDLE_CUTOFF = dt.timedelta(hours=24)
 _SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
 
 
@@ -43,8 +43,7 @@ def _short_id(session_id: str) -> str:
 def _classify_sessions(
     latest_event_ts: dict[str, dt.datetime],
 ) -> tuple[set[str], set[str]]:
-    """Return (active_ids, today_ids) using the same algorithm as
-    ``classifyActiveSessions`` in Monitor.tsx."""
+    """Return (active_ids, today_ids) using the same monitor cutoffs."""
     now = dt.datetime.now(dt.timezone.utc)
     active: set[str] = set()
     today: set[str] = set()
@@ -52,41 +51,24 @@ def _classify_sessions(
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=dt.timezone.utc)
         diff = now - ts
-        if diff <= ACTIVE_CUTOFF:
+        if diff <= RUNNING_CUTOFF:
             active.add(sid)
-        if diff <= TODAY_CUTOFF:
+        if diff <= IDLE_CUTOFF:
             today.add(sid)
     return active, today
 
 
-def _resolve_visible_ids(
-    all_ids: list[str],
+def _agent_status_from_buckets(
+    session_id: str,
     active_ids: set[str],
     today_ids: set[str],
-) -> set[str]:
-    """Same fallback chain as Monitor.tsx visibleRows:
-    active → today → all."""
-    if active_ids:
-        return active_ids
-    if today_ids:
-        return today_ids
-    return set(all_ids)
-
-
-def _agent_status_from_event(
-    latest_ts: dt.datetime | None,
+    pending_ids: set[str],
 ) -> str:
-    """running / idle / offline — matches Timeline's visual cues."""
-    if latest_ts is None:
-        return "offline"
-    now = dt.datetime.now(dt.timezone.utc)
-    if latest_ts.tzinfo is None:
-        latest_ts = latest_ts.replace(tzinfo=dt.timezone.utc)
-    diff = (now - latest_ts).total_seconds()
-    if diff < 300:
-        return "running"
-    if diff < 3600:
-        return "idle"
+    """Map session buckets to Agent Town statuses."""
+    if session_id in pending_ids and (session_id in active_ids or session_id in today_ids):
+        return "pending"
+    if session_id in active_ids or session_id in today_ids:
+        return "working"
     return "offline"
 
 
@@ -151,6 +133,67 @@ def _serialize_tool_call(tc: "ToolCall") -> dict[str, Any]:
     }
 
 
+def _to_utc(value: dt.datetime | None) -> dt.datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
+def _build_activity_heat_24h(
+    timestamps: list[dt.datetime],
+    *,
+    now: dt.datetime,
+) -> list[int]:
+    bins = [0] * 24
+    for ts in timestamps:
+        utc_ts = _to_utc(ts)
+        if utc_ts is None:
+            continue
+        diff = now - utc_ts
+        if diff < dt.timedelta(0) or diff > IDLE_CUTOFF:
+            continue
+        hour_index = 23 - int(diff.total_seconds() // 3600)
+        hour_index = max(0, min(23, hour_index))
+        bins[hour_index] += 1
+    return bins
+
+
+def _score_activity_heat(
+    bins: list[int],
+    *,
+    latest_ts: dt.datetime | None,
+    is_active: bool,
+) -> tuple[int, str]:
+    total = sum(bins)
+    recent_2h = sum(bins[-2:])
+    recent_6h = sum(bins[-6:])
+
+    score = 0
+    if total > 0:
+        score = 1
+    if total >= 3 or recent_6h >= 2:
+        score = 2
+    if total >= 6 or recent_6h >= 4:
+        score = 3
+    if is_active or recent_2h >= 2 or total >= 10:
+        score = 4
+
+    latest_utc = _to_utc(latest_ts)
+    if latest_utc is not None and (dt.datetime.now(dt.timezone.utc) - latest_utc) > IDLE_CUTOFF:
+        score = 0
+
+    label_map = {
+        0: "dormant",
+        1: "low",
+        2: "warm",
+        3: "hot",
+        4: "peak",
+    }
+    return score, label_map[score]
+
+
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
@@ -165,9 +208,8 @@ async def get_trace(
     corresponds to a database session and each *event* is one
     user-message turn with its full conversation chain.
 
-    Session visibility uses the **events** table (same data source as
-    the Monitor Timeline) so the two views always agree on which
-    sessions are shown.
+    Session status buckets use the **events** table and mirror the monitor's
+    active / today / all semantics. "All" means every session that has events.
     """
 
     # ── 1. Load all non-deleted sessions ────────────────────────────
@@ -181,13 +223,12 @@ async def get_trace(
     if not sessions:
         return {"agents": [], "events": []}
 
-    session_ids = [s.session_id for s in sessions]
     session_map = {s.session_id: s for s in sessions}
 
     # ── 2. Determine active set via events table (= Timeline logic) ─
     latest_stmt = (
         select(Event.session_id, func.max(Event.started_at).label("latest"))
-        .where(Event.session_id.in_(session_ids))
+        .where(Event.session_id.in_(session_map.keys()))
         .group_by(Event.session_id)
     )
     latest_rows = (await db.execute(latest_stmt)).all()
@@ -196,23 +237,60 @@ async def get_trace(
     }
 
     active_ids, today_ids = _classify_sessions(latest_event_ts)
-    visible_ids = _resolve_visible_ids(session_ids, active_ids, today_ids)
+    session_ids = sorted(
+        latest_event_ts.keys(),
+        key=lambda sid: latest_event_ts[sid],
+        reverse=True,
+    )
+
+    event_rows_result = await db.execute(
+        select(Event.session_id, Event.started_at)
+        .where(Event.session_id.in_(session_ids))
+        .order_by(Event.session_id, Event.started_at)
+    )
+    event_rows = event_rows_result.all()
+    event_timestamps_by_session: dict[str, list[dt.datetime]] = {}
+    dialog_turns_by_session: dict[str, int] = {}
+    for row in event_rows:
+        if not row.started_at:
+            continue
+        event_timestamps_by_session.setdefault(row.session_id, []).append(row.started_at)
+        dialog_turns_by_session[row.session_id] = dialog_turns_by_session.get(row.session_id, 0) + 1
 
     # ── Guard: sessions flagged as unsafe ──────────────────────────
-    unsafe_ids = guard_service.get_unsafe_session_ids()
+    latest_guard_by_session = guard_service.get_latest_results_by_session()
+    pending_ids = guard_service.get_pending_session_ids()
+    all_pending_items = guard_service.get_all_pending()
     session_store_index = _load_session_store_index()
-
-    # ── 3. Build agents (only visible ones) ────────────────────────
-    agents: list[dict[str, Any]] = []
-    visible_session_ids: list[str] = []
-    for s in sessions:
-        sid = s.session_id
-        if sid not in visible_ids:
+    intervention_counts_by_session_key: dict[str, int] = {}
+    for pending_item in all_pending_items:
+        if not pending_item.session_key:
             continue
-        visible_session_ids.append(sid)
-        base_status = _agent_status_from_event(latest_event_ts.get(sid))
-        status = "waiting" if sid in unsafe_ids else base_status
+        intervention_counts_by_session_key[pending_item.session_key] = (
+            intervention_counts_by_session_key.get(pending_item.session_key, 0) + 1
+        )
+
+    now = dt.datetime.now(dt.timezone.utc)
+
+    # ── 3. Build agents for all monitor-visible sessions ───────────
+    agents: list[dict[str, Any]] = []
+    for sid in session_ids:
+        s = session_map.get(sid)
+        if s is None:
+            continue
+        status = _agent_status_from_buckets(sid, active_ids, today_ids, pending_ids)
         session_store = session_store_index.get(sid, {})
+        session_key = session_store.get("session_key") or s.session_key or ""
+        activity_heat_24h = _build_activity_heat_24h(
+            event_timestamps_by_session.get(sid, []),
+            now=now,
+        )
+        heat_score, heat_label = _score_activity_heat(
+            activity_heat_24h,
+            latest_ts=latest_event_ts.get(sid),
+            is_active=sid in active_ids,
+        )
+        human_interventions_total = intervention_counts_by_session_key.get(session_key, 0)
         agents.append({
             "id": sid,
             "name": f"Agent-{_short_id(sid)}",
@@ -221,17 +299,22 @@ async def get_trace(
             "model": session_store.get("model") or s.current_model_name or "",
             "status": status,
             "first_seen_at": _iso(s.first_seen_at),
-            "session_key": session_store.get("session_key"),
+            "session_key": session_key,
             "channel": session_store.get("channel") or s.channel,
+            "dialog_turns_total": dialog_turns_by_session.get(sid, 0),
+            "human_interventions_total": human_interventions_total,
+            "activity_heat_24h": activity_heat_24h,
+            "working_heat_score": heat_score,
+            "working_heat_label": heat_label,
         })
 
-    if not visible_session_ids:
+    if not session_ids:
         return {"agents": [], "events": []}
 
-    # ── 4. Messages for visible sessions ────────────────────────────
+    # ── 4. Messages for all monitor-visible sessions ────────────────
     msg_result = await db.execute(
         select(Message)
-        .where(Message.session_id.in_(visible_session_ids))
+        .where(Message.session_id.in_(session_ids))
         .order_by(Message.session_id, Message.timestamp)
     )
     all_messages = msg_result.scalars().all()
@@ -240,7 +323,7 @@ async def get_trace(
     tc_result = await db.execute(
         select(ToolCall)
         .join(Message, ToolCall.message_db_id == Message.id)
-        .where(Message.session_id.in_(visible_session_ids))
+        .where(Message.session_id.in_(session_ids))
     )
     tc_by_msg: dict[int, list[ToolCall]] = {}
     for tc in tc_result.scalars().all():
@@ -271,7 +354,10 @@ async def get_trace(
         if current_turn:
             turns.append(current_turn)
 
-        for turn in turns:
+        latest_turn_index = len(turns) - 1
+        session_guard = latest_guard_by_session.get(session_id)
+
+        for turn_index, turn in enumerate(turns):
             if not turn:
                 continue
             event_counter += 1
@@ -325,17 +411,21 @@ async def get_trace(
                     pass
 
             guard_result = None
-            if session_id in unsafe_ids:
-                gr = guard_service.get_result(session_id)
-                if gr and gr.verdict == "unsafe":
-                    status = "waiting"
-                    guard_result = {
-                        "verdict": gr.verdict,
-                        "mode": gr.mode,
-                        "risk_source": gr.risk_source,
-                        "failure_mode": gr.failure_mode,
-                        "real_world_harm": gr.real_world_harm,
-                    }
+            is_latest_turn = turn_index == latest_turn_index
+            if (
+                is_latest_turn
+                and session_id in active_ids
+                and session_guard
+                and session_id in pending_ids
+            ):
+                status = "pending"
+                guard_result = {
+                    "verdict": session_guard.verdict,
+                    "mode": session_guard.mode,
+                    "risk_source": session_guard.risk_source,
+                    "failure_mode": session_guard.failure_mode,
+                    "real_world_harm": session_guard.real_world_harm,
+                }
 
             evt: dict[str, Any] = {
                 "event_id": f"evt-{event_counter:04d}",

@@ -4,7 +4,7 @@ const STATUS_PLAN = [
   'running', 'running', 'running', 'running', 'running',
   'running', 'running', 'running', 'running', 'running', 'running',
   'idle', 'idle', 'idle', 'idle',
-  'waiting', 'waiting', 'waiting',
+  'pending', 'pending', 'pending',
   'offline', 'offline',
 ];
 
@@ -172,7 +172,7 @@ function buildConversations(profile, status, agent, ordinal, startMinutesAgo) {
 
   const finalText = (
     status === 'running' ? profile.running
-      : status === 'waiting' ? profile.waiting
+      : status === 'pending' ? profile.waiting
         : status === 'error' ? profile.error
           : profile.success
   );
@@ -215,7 +215,7 @@ function buildEvent(agent, profile, status, ordinal, startMinutesAgo) {
   const duration = status === 'running' ? 420 + ordinal * 38 : 160 + ordinal * 27;
   const startTime = isoFromNow(startMinutesAgo, 0);
   const endTime = (
-    status === 'running' || status === 'waiting'
+    status === 'running' || status === 'pending'
       ? isoFromNow(startMinutesAgo, 75)
       : new Date(new Date(startTime).getTime() + duration * 1000).toISOString()
   );
@@ -246,8 +246,8 @@ function buildTimeline(status, index) {
     return index % 2 === 0 ? ['ok', 'running', 'ok'] : ['error', 'ok', 'ok'];
   }
 
-  if (status === 'waiting') {
-    return index % 2 === 0 ? ['ok', 'running', 'waiting'] : ['ok', 'error', 'waiting'];
+  if (status === 'pending') {
+    return index % 2 === 0 ? ['ok', 'running', 'pending'] : ['ok', 'error', 'pending'];
   }
 
   return index % 2 === 0 ? ['ok', 'ok', 'error'] : ['error', 'ok'];
@@ -256,7 +256,7 @@ function buildTimeline(status, index) {
 function latestOffsetByStatus(status, index) {
   if (status === 'running') return 4 + (index % 6) * 2;
   if (status === 'idle') return 18 + (index % 5) * 7;
-  if (status === 'waiting') return 7 + (index % 4) * 4;
+  if (status === 'pending') return 7 + (index % 4) * 4;
   return 220 + index * 11;
 }
 
@@ -381,11 +381,11 @@ export function buildMockGuardResults(agents = [], events = []) {
   });
 
   return agents
-    .filter((agent) => agent.status === 'waiting' || agent.status === 'running')
+    .filter((agent) => agent.status === 'pending' || agent.status === 'running')
     .slice(0, 6)
     .map((agent, index) => {
       const latest = latestByAgent.get(agent.id);
-      const unsafe = agent.status === 'waiting' || index % 3 === 1;
+      const unsafe = agent.status === 'pending' || index % 3 === 1;
       return {
         session_id: agent.id,
         mode: unsafe ? 'tool-check' : 'baseline',
@@ -431,19 +431,32 @@ export function generateJourneyEvents(agent) {
   }));
 }
 
+function normalizeTownStatus(status) {
+  if (status === 'waiting') return 'pending';
+  if (status === 'running' || status === 'idle') return 'working';
+  return status || 'offline';
+}
+
+export function normalizeTownData(data) {
+  const agents = Array.isArray(data?.agents)
+    ? data.agents.map((agent) => ({ ...agent, status: normalizeTownStatus(agent.status) }))
+    : [];
+  const events = Array.isArray(data?.events)
+    ? data.events.map((event) => ({ ...event, status: normalizeTownStatus(event.status) }))
+    : [];
+  return { agents, events };
+}
+
 export async function fetchData() {
   if (USE_AGENT_TOWN_MOCK) {
-    return generateMockData();
+    return normalizeTownData(generateMockData());
   }
   try {
     const res = await fetch('/api/trace/', { cache: 'no-store' });
     if (!res.ok) throw new Error('API error');
     const json = await res.json();
-    if (!Array.isArray(json?.agents) || json.agents.length === 0) {
-      return generateMockData();
-    }
-    return json;
+    return normalizeTownData(json);
   } catch (_) {
-    return generateMockData();
+    return { agents: [], events: [] };
   }
 }

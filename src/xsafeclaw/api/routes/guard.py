@@ -190,6 +190,12 @@ async def list_unsafe_sessions():
     return {"unsafe_session_ids": sorted(guard_service.get_unsafe_session_ids())}
 
 
+@router.get("/pending-sessions")
+async def list_pending_sessions():
+    """Return session IDs whose latest guard verdict is still unsafe."""
+    return {"pending_session_ids": sorted(guard_service.get_pending_session_ids())}
+
+
 @router.get("/status")
 async def guard_status():
     """Health check for guard model endpoints."""

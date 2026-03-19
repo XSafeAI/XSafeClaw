@@ -1,30 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CHAR_NAMES, USE_AGENT_TOWN_MOCK } from '../config/constants';
+import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK } from '../config/constants';
 import {
   buildMockAssistantReply,
-  buildMockGuardResults,
   buildMockHistory,
   generateMockData,
   MOCK_MODEL_PROVIDERS,
+  normalizeTownData,
 } from '../data/mockData';
 import ControlTab from './ControlTab';
 import CrewTab from './CrewTab';
-import ImageSwitch from './ImageSwitch';
 
 const TAB_META = [
   { id: 'crew', label: 'Agents' },
   { id: 'control', label: 'Control' },
-  { id: 'guard', label: 'Guard' },
   { id: 'tasks', label: 'Tasks' },
 ];
 
-const FILTER_IDS = ['running', 'idle', 'waiting', 'offline'];
+const FILTER_IDS = ['working', 'pending', 'offline'];
 
 const TASK_STATUS_META = {
   ok: { label: 'COMPLETE', className: 'tc-task-complete' },
   error: { label: 'FAILED', className: 'tc-task-failed' },
   running: { label: 'RUNNING', className: 'tc-task-running' },
-  waiting: { label: 'FLAGGED', className: 'tc-task-flagged' },
+  pending: { label: 'PENDING', className: 'tc-task-flagged' },
+  completed: { label: 'COMPLETED', className: 'tc-task-complete' },
+  failed: { label: 'FAILED', className: 'tc-task-failed' },
 };
 
 function makeId() {
@@ -80,6 +80,22 @@ function fmtDate(ts) {
   }
 }
 
+function fmtExactDate(ts) {
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  } catch {
+    return '';
+  }
+}
+
 function fmtRelative(ts) {
   if (!ts) return 'now';
   try {
@@ -96,8 +112,29 @@ function fmtRelative(ts) {
   }
 }
 
+function fmtTokens(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return '---';
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return `${(n / 1000000).toFixed(1)}m`;
+}
+
+function durationStr(startTs, endTs) {
+  const start = startTs ? new Date(startTs).getTime() : NaN;
+  const end = endTs ? new Date(endTs).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '---';
+  const totalSec = Math.floor((end - start) / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 function getAgentState(status) {
-  if (status === 'running') return 'working';
+  if (status === 'working' || status === 'running' || status === 'idle') return 'working';
   return status || 'offline';
 }
 
@@ -172,13 +209,13 @@ function summarizeTasks(events = []) {
   return events.reduce((summary, event) => {
     if (event.status === 'ok') summary.completed += 1;
     else if (event.status === 'error') summary.failed += 1;
-    else if (event.status === 'waiting') summary.flagged += 1;
+    else if (event.status === 'pending') summary.pending += 1;
     else summary.running += 1;
     return summary;
   }, {
     completed: 0,
     failed: 0,
-    flagged: 0,
+    pending: 0,
     running: 0,
   });
 }
@@ -195,9 +232,14 @@ function buildDraftAgent(sessionKey, modelOption) {
     pid: suffix,
     provider,
     model: modelName,
-    status: 'idle',
+    status: 'working',
     first_seen_at: new Date().toISOString(),
     channel: 'webchat',
+    dialog_turns_total: 0,
+    human_interventions_total: 0,
+    activity_heat_24h: new Array(24).fill(0),
+    working_heat_score: 0,
+    working_heat_label: 'dormant',
     draft: true,
   };
 }
@@ -211,145 +253,626 @@ function mergeAgents(traceAgents, draftAgents) {
 }
 
 function buildConsoleData(traceJson) {
-  const mock = generateMockData();
-  const agents = Array.isArray(traceJson?.agents) && traceJson.agents.length ? traceJson.agents : mock.agents;
-  const events = Array.isArray(traceJson?.events) && traceJson.events.length ? traceJson.events : mock.events;
-  return { agents, events };
+  if (USE_AGENT_TOWN_MOCK) {
+    return normalizeTownData(generateMockData());
+  }
+  return normalizeTownData(traceJson);
 }
 
-function GuardTab({
-  guardEnabled,
-  onToggleGuard,
-  guardResults,
-  unsafeSessionIds,
-  agentsById,
-  eventsByAgent,
-  eventsByAgentList,
-  charNameMap,
-  onSelectAgent,
-}) {
+function mapDashboardTaskStatus(status) {
+  if (status === 'completed') return 'completed';
+  if (status === 'error') return 'failed';
+  return 'running';
+}
+
+function buildMockDashboardEvents(events = []) {
+  return events.map((event) => ({
+    id: event.event_id,
+    session_id: event.agent_id,
+    started_at: event.start_time,
+    completed_at: event.end_time || null,
+    total_messages: event.conversations?.length || 0,
+    total_tool_calls: (event.conversations || []).reduce((count, msg) => (
+      count + (Array.isArray(msg.tool_calls) ? msg.tool_calls.length : 0)
+    ), 0),
+    total_tokens: 0,
+    status: event.status === 'ok' ? 'completed' : event.status === 'error' ? 'error' : 'pending',
+    error_message: event.status === 'error' ? pickEventSnippet(event) : null,
+  }));
+}
+
+function buildMockPendingApprovals(agents = [], events = []) {
+  const agentsById = Object.fromEntries(agents.map((agent) => [agent.id, agent]));
+  return events
+    .filter((event) => event.status === 'pending')
+    .slice(0, 4)
+    .map((event, index) => {
+      const agent = agentsById[event.agent_id];
+      return {
+        id: `mock-pending-${index}`,
+        session_key: agent?.session_key || '',
+        tool_name: event.event_type || 'tool-call',
+        guard_verdict: 'unsafe',
+        risk_source: 'Manual review required',
+        failure_mode: pickEventSnippet(event) || 'This run is waiting for a human reviewer before it can continue.',
+        real_world_harm: null,
+        created_at: Date.now() / 1000 - index * 75,
+        resolved: false,
+      };
+    });
+}
+
+function buildTaskTimeKey(sessionId, ts) {
+  if (!sessionId || !ts) return '';
+  const ms = new Date(ts).getTime();
+  return Number.isFinite(ms) ? `${sessionId}:${ms}` : `${sessionId}:${ts}`;
+}
+
+function formatTaskId(value, length = 12) {
+  return String(value || '').slice(0, length) || '---';
+}
+
+function pickUserPromptSnippet(event) {
+  const conversations = event?.conversations || [];
+  for (let i = 0; i < conversations.length; i += 1) {
+    const msg = conversations[i];
+    if (msg.role === 'user' && (msg.text || msg.content_text)) {
+      return (msg.text || msg.content_text || '').slice(0, 180);
+    }
+  }
+  return '';
+}
+
+function extractPendingContextSnippet(item) {
+  const text = String(item?.session_context || '').trim();
+  const userMark = text.indexOf('[USER]:');
+  if (userMark >= 0) {
+    const sliced = text.slice(userMark + '[USER]:'.length).trim();
+    const nextAgent = sliced.indexOf('[AGENT]:');
+    const nextEnv = sliced.indexOf('[ENVIRONMENT]:');
+    const candidates = [nextAgent, nextEnv].filter((index) => index >= 0);
+    const boundary = candidates.length ? Math.min(...candidates) : sliced.length;
+    return sliced.slice(0, boundary).trim().slice(0, 180);
+  }
+  return text.slice(0, 180);
+}
+
+function stringifyTaskValue(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildTaskDetailMessagesFromTraceEvent(event) {
+  return (event?.conversations || []).map((msg, index) => ({
+    message_id: `${event.event_id || 'trace'}-${index}`,
+    role: msg.role === 'tool' ? 'toolResult' : msg.role,
+    timestamp: msg.timestamp,
+    content_text: msg.content_text || msg.text || '',
+    tool_calls_count: Array.isArray(msg.tool_calls) ? msg.tool_calls.length : 0,
+    tool_call_ids: Array.isArray(msg.tool_calls) ? msg.tool_calls.map((tc) => tc.id || tc.tool_name || `tool-${index}`) : [],
+    tool_calls: Array.isArray(msg.tool_calls)
+      ? msg.tool_calls.map((tc, toolIndex) => ({
+          id: tc.id || `${event.event_id || 'trace'}-tool-${index}-${toolIndex}`,
+          tool_name: tc.tool_name || 'tool-call',
+          arguments: tc.arguments || null,
+        }))
+      : [],
+  }));
+}
+
+function TaskActorStrip({ charName, agentId }) {
+  const [failed, setFailed] = useState(false);
+  const spriteUrl = `${CHAR_BASE}${charName}_idle_anim_32x32.png`;
   return (
-    <div className="tc-column">
-      <div className="tc-guard-toolbar">
-        <div className="tc-guard-summary">
-          <div className="tc-kpi">
-            <span className="tc-kpi-label">Watch Mode</span>
-            <span className={`tc-kpi-value ${guardEnabled ? 'tc-kpi-live' : ''}`}>{guardEnabled ? 'ON' : 'OFF'}</span>
-          </div>
-          <div className="tc-kpi">
-            <span className="tc-kpi-label">Unsafe Agents</span>
-            <span className="tc-kpi-value">{unsafeSessionIds.length}</span>
-          </div>
-          <div className="tc-kpi">
-            <span className="tc-kpi-label">Checks Cached</span>
-            <span className="tc-kpi-value">{guardResults.length}</span>
+    <div className="tc-task-actor-strip">
+      <div className="tc-task-actor-meta">
+        <div className="tc-task-actor-label">AGENT ID</div>
+        <div className="tc-task-actor-id">{shortId(agentId || '---')}</div>
+      </div>
+      {!failed ? (
+        <div className="tc-task-actor-portrait">
+          <div className="tc-task-actor-portrait-crop">
+            <img
+              className="tc-task-actor-portrait-img"
+              src={spriteUrl}
+              alt={`${charName} portrait`}
+              draggable={false}
+              onError={() => setFailed(true)}
+            />
           </div>
         </div>
-        <ImageSwitch
-          checked={guardEnabled}
-          onClick={onToggleGuard}
-          label="Guard"
-          onText="ON"
-          offText="OFF"
-          className="tc-guard-switch"
-        />
-      </div>
-
-      <div className="tc-guard-list">
-        {guardResults.length === 0 ? (
-          <div className="tc-empty">No guard checks cached yet.</div>
-        ) : (
-          guardResults.map((result, index) => {
-            const agent = agentsById[result.session_id];
-            const latestEvent = eventsByAgent[result.session_id] || null;
-            const charName = charNameMap[result.session_id] || CHAR_NAMES[index % CHAR_NAMES.length];
-            const verdictClass = result.verdict === 'unsafe' ? 'tc-verdict-unsafe' : 'tc-verdict-safe';
-            return (
-              <button
-                key={`${result.session_id}-${result.mode}-${result.checked_at}-${index}`}
-                className="tc-guard-card"
-                onClick={() => {
-                  if (!agent) return;
-                  onSelectAgent({
-                    agent,
-                    charName,
-                    state: getAgentState(agent.status),
-                    event: latestEvent,
-                    events: eventsByAgentList[result.session_id] || [],
-                    isPending: agent.status === 'waiting',
-                  });
-                }}
-              >
-                <div className="tc-guard-head">
-                  <div className="tc-guard-name">{agent?.name || `Agent-${shortId(result.session_id)}`}</div>
-                  <div className={`tc-guard-verdict ${verdictClass}`}>{result.verdict || 'unknown'}</div>
-                </div>
-                <div className="tc-guard-meta">
-                  <span>Mode: {result.mode || 'base'}</span>
-                  <span>{result.checked_at ? fmtDate(result.checked_at * 1000) : ''}</span>
-                </div>
-                <div className="tc-guard-body">
-                  <span>{result.failure_mode || result.risk_source || 'No risk notes returned.'}</span>
-                  {result.real_world_harm ? <span>{result.real_world_harm}</span> : null}
-                </div>
-              </button>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TasksTab({ events, agentsById, eventsByAgentList, charNameMap, onSelectTask }) {
-  return (
-    <div className="tc-task-grid">
-      {events.length === 0 ? (
-        <div className="tc-empty">No tasks found in trace yet.</div>
       ) : (
-        events.map((event, index) => {
-          const statusMeta = TASK_STATUS_META[event.status] || {
-            label: String(event.status || 'UNKNOWN').toUpperCase(),
-            className: 'tc-task-running',
-          };
-          const agent = agentsById[event.agent_id];
-          const charName = charNameMap[event.agent_id] || CHAR_NAMES[index % CHAR_NAMES.length];
-          const state = getAgentState(agent?.status);
-          return (
-            <button
-              key={event.event_id}
-              className="tc-task-card"
-              onClick={() => onSelectTask({
-                agent,
-                charName,
-                state,
-                event,
-                events: eventsByAgentList[event.agent_id] || [],
-                isPending: event.status === 'waiting',
-              })}
-            >
-              <div className="tc-task-head">
-                <span className={`tc-task-badge ${statusMeta.className}`}>{statusMeta.label}</span>
-                <span className="tc-task-time">{fmtDate(event.start_time)}</span>
-              </div>
-              <div className="tc-task-title">{event.event_type || 'chat'}</div>
-              <div className="tc-task-agent">{agent?.name || event.agent_name || `Agent-${shortId(event.agent_id)}`}</div>
-              <div className="tc-task-snippet">{pickEventSnippet(event) || 'Open to inspect this run.'}</div>
-              <div className="tc-task-foot">
-                <span>{event.conversations?.length || 0} msgs</span>
-                <span>{event.duration ? `${Math.round(event.duration)}s` : 'live'}</span>
-              </div>
-            </button>
-          );
-        })
+        <div className="tc-task-actor-avatar">{charName.slice(0, 2).toUpperCase()}</div>
       )}
     </div>
   );
 }
 
+function taskDetailToneFromStatus(status) {
+  if (status === 'completed') return 'success';
+  if (status === 'failed' || status === 'error') return 'danger';
+  if (status === 'pending' || status === 'running') return 'warn';
+  return 'neutral';
+}
+
+function TaskDetailFact({
+  label,
+  value,
+  mono = false,
+  featured = false,
+  wide = false,
+  tone = 'neutral',
+}) {
+  return (
+    <div
+      className={[
+        'tc-task-detail-fact',
+        mono ? 'tc-task-detail-fact-mono' : '',
+        featured ? 'tc-task-detail-fact-featured' : '',
+        wide ? 'tc-task-detail-fact-wide' : '',
+        `tc-task-detail-fact-tone-${tone}`,
+      ].filter(Boolean).join(' ')}
+    >
+      <div className="tc-task-detail-fact-label">{label}</div>
+      <div className="tc-task-detail-fact-value">{value || '---'}</div>
+    </div>
+  );
+}
+
+function TaskDetailMessage({ msg }) {
+  const timestamp = fmtDate(msg.timestamp);
+  const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+  const isUser = msg.role === 'user';
+  const isAssistant = msg.role === 'assistant';
+  const isToolResult = msg.role === 'toolResult';
+
+  return (
+    <div className="tc-task-detail-entry">
+      {(isUser || isAssistant) && msg.content_text ? (
+        <div className={`tc-task-detail-bubble ${isUser ? 'tc-task-detail-bubble-user' : 'tc-task-detail-bubble-assistant'}`}>
+          <div className="tc-task-detail-bubble-head">
+            <span className="tc-task-detail-role">{isUser ? 'USER' : 'ASSISTANT'}</span>
+            <span className="tc-task-detail-time">{timestamp}</span>
+          </div>
+          <div className="tc-task-detail-text">{msg.content_text}</div>
+        </div>
+      ) : null}
+
+      {toolCalls.length > 0 ? toolCalls.map((toolCall) => (
+        <div key={toolCall.id} className="tc-task-detail-tool tc-task-detail-tool-call">
+          <div className="tc-task-detail-tool-head">
+            <span className="tc-task-detail-tool-tag">TOOL CALL</span>
+            <span className="tc-task-detail-tool-name">{toolCall.tool_name || 'tool-call'}</span>
+          </div>
+          {toolCall.arguments ? (
+            <pre className="tc-task-detail-tool-payload">{stringifyTaskValue(toolCall.arguments)}</pre>
+          ) : (
+            <div className="tc-task-detail-tool-empty">No call arguments captured.</div>
+          )}
+        </div>
+      )) : null}
+
+      {isToolResult ? (
+        <div className="tc-task-detail-tool tc-task-detail-tool-result">
+          <div className="tc-task-detail-tool-head">
+            <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
+            <span className="tc-task-detail-time">{timestamp}</span>
+          </div>
+          <div className="tc-task-detail-text">{msg.content_text || 'No tool result content captured.'}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TasksTab({
+  dashboardEvents,
+  pendingApprovals,
+  agentsById,
+  agentsBySessionKey,
+  traceEvents,
+  charNameMap,
+}) {
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [detailMessages, setDetailMessages] = useState([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [detailEventData, setDetailEventData] = useState(null);
+
+  const closeTaskDetail = useCallback(() => {
+    setSelectedTask(null);
+    setDetailMessages([]);
+    setDetailError('');
+    setDetailEventData(null);
+  }, []);
+
+  const unresolvedApprovals = useMemo(
+    () => pendingApprovals
+      .filter((item) => !item.resolved)
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0)),
+    [pendingApprovals]
+  );
+
+  const sortedDashboardEvents = useMemo(
+    () => [...dashboardEvents].sort((a, b) => (
+      new Date(b.started_at || 0).getTime() - new Date(a.started_at || 0).getTime()
+    )),
+    [dashboardEvents]
+  );
+
+  const groupedTasks = useMemo(() => ({
+    completed: sortedDashboardEvents.filter((event) => event.status === 'completed'),
+    failed: sortedDashboardEvents.filter((event) => event.status === 'error'),
+    running: sortedDashboardEvents.filter((event) => event.status === 'pending'),
+  }), [sortedDashboardEvents]);
+
+  const traceEventIndex = useMemo(() => {
+    const map = {};
+    traceEvents.forEach((event) => {
+      const key = buildTaskTimeKey(event.agent_id, event.start_time);
+      if (key) map[key] = event;
+    });
+    return map;
+  }, [traceEvents]);
+
+  const openPendingApproval = useCallback((item, index) => {
+    const liveAgent = agentsBySessionKey[item.session_key];
+    const charName = liveAgent
+      ? (charNameMap[liveAgent.id] || CHAR_NAMES[index % CHAR_NAMES.length])
+      : CHAR_NAMES[index % CHAR_NAMES.length];
+
+    setSelectedTask({
+      kind: 'pending',
+      item,
+      charName,
+      agentId: liveAgent?.id || item.session_key || item.id,
+      agentName: liveAgent?.name || `Agent-${shortId(liveAgent?.id || item.session_key || item.id)}`,
+      promptSnippet: extractPendingContextSnippet(item),
+    });
+    setDetailMessages([]);
+    setDetailError('');
+    setDetailEventData(null);
+  }, [agentsBySessionKey, charNameMap]);
+
+  const openDashboardTask = useCallback((task, index) => {
+    const liveAgent = agentsById[task.session_id];
+    const charName = liveAgent
+      ? (charNameMap[liveAgent.id] || CHAR_NAMES[index % CHAR_NAMES.length])
+      : CHAR_NAMES[index % CHAR_NAMES.length];
+    const traceEvent = traceEventIndex[buildTaskTimeKey(task.session_id, task.started_at)] || null;
+
+    setSelectedTask({
+      kind: 'dashboard',
+      task,
+      traceEvent,
+      charName,
+      agentId: liveAgent?.id || task.session_id,
+      agentName: liveAgent?.name || `Agent-${shortId(task.session_id)}`,
+      promptSnippet: pickUserPromptSnippet(traceEvent),
+    });
+    setDetailError('');
+    setDetailEventData(null);
+  }, [agentsById, charNameMap, traceEventIndex]);
+
+  useEffect(() => {
+    if (!selectedTask) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') closeTaskDetail();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [closeTaskDetail, selectedTask]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    if (!selectedTask || selectedTask.kind !== 'dashboard') {
+      setDetailMessages([]);
+      setDetailLoading(false);
+      setDetailEventData(null);
+      return () => {
+        disposed = true;
+      };
+    }
+
+    const fallbackMessages = buildTaskDetailMessagesFromTraceEvent(selectedTask.traceEvent);
+    if (USE_AGENT_TOWN_MOCK) {
+      setDetailMessages(fallbackMessages);
+      setDetailLoading(false);
+      setDetailEventData(null);
+      return () => {
+        disposed = true;
+      };
+    }
+
+    const loadDetail = async () => {
+      setDetailLoading(true);
+      try {
+        const response = await fetch(`/api/events/${selectedTask.task.id}`, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Task detail request failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        if (disposed) return;
+        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        setDetailEventData(payload);
+        setDetailMessages(messages.length ? messages : fallbackMessages);
+      } catch (err) {
+        console.warn('[TownConsole] task detail fetch error:', err);
+        if (disposed) return;
+        setDetailEventData(null);
+        setDetailMessages(fallbackMessages);
+        setDetailError(err instanceof Error ? err.message : 'Failed to load task detail.');
+      } finally {
+        if (!disposed) setDetailLoading(false);
+      }
+    };
+
+    loadDetail();
+    return () => {
+      disposed = true;
+    };
+  }, [selectedTask]);
+
+  const detailTask = selectedTask?.kind === 'dashboard'
+    ? (detailEventData || selectedTask.task)
+    : null;
+  const detailStatusId = mapDashboardTaskStatus(detailTask?.status || selectedTask?.task?.status);
+
+  return (
+    <div className="tc-task-layout">
+      <section className="tc-ornate-panel tc-task-lane tc-task-lane-pending">
+        <div className="tc-task-lane-head">
+          <div>
+            <div className="tc-task-lane-overline">MANUAL REVIEW</div>
+            <div className="tc-task-lane-title">Pending</div>
+          </div>
+          <div className="tc-task-lane-count tc-task-lane-count-pending">{unresolvedApprovals.length}</div>
+        </div>
+        <div className="tc-task-lane-note">
+          Guard-blocked tool calls stay here until a reviewer approves, rejects, or modifies them.
+        </div>
+        <div className="tc-task-lane-list tc-task-lane-list-pending">
+          {unresolvedApprovals.length === 0 ? (
+            <div className="tc-empty tc-task-empty-pending">No tasks are waiting on human review.</div>
+          ) : unresolvedApprovals.map((item, index) => {
+            const liveAgent = agentsBySessionKey[item.session_key];
+            const charName = liveAgent
+              ? (charNameMap[liveAgent.id] || CHAR_NAMES[index % CHAR_NAMES.length])
+              : CHAR_NAMES[index % CHAR_NAMES.length];
+            const promptSnippet = extractPendingContextSnippet(item)
+              || item.failure_mode
+              || item.risk_source
+              || 'Awaiting reviewer guidance before this step can continue.';
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`tc-task-card tc-task-card-pending-review ${selectedTask?.kind === 'pending' && selectedTask.item.id === item.id ? 'tc-task-card-selected' : ''}`}
+                onClick={() => openPendingApproval(item, index)}
+              >
+                <div className="tc-task-card-top">
+                  <div className="tc-task-card-main">
+                    <div className="tc-task-head">
+                      <span className="tc-task-badge tc-task-flagged">PENDING</span>
+                      <span className="tc-task-badge tc-task-pending-marker">HUMAN REVIEW</span>
+                    </div>
+                    <div className="tc-task-title">Task {formatTaskId(item.id)}</div>
+                    <div className="tc-task-card-meta">
+                      <div>START</div>
+                      <span>{fmtTime((item.created_at || 0) * 1000)}</span>
+                      <div>END</div>
+                      <span>---</span>
+                    </div>
+                  </div>
+                  <div className="tc-task-card-side">
+                    <div className="tc-task-exact-time">{fmtExactDate((item.created_at || 0) * 1000)}</div>
+                    <TaskActorStrip
+                      charName={charName}
+                      agentId={liveAgent?.id || item.session_key || item.id}
+                    />
+                  </div>
+                </div>
+                <div className="tc-task-snippet">{promptSnippet}</div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <div className="tc-task-main">
+        <section className="tc-ornate-panel tc-task-board">
+          <div className="tc-task-board-head">
+            <div>
+              <div className="tc-task-lane-overline">DASHBOARD STATUS</div>
+              <div className="tc-task-lane-title">Task Flow</div>
+            </div>
+            <div className="tc-task-board-summary">
+              <span>{groupedTasks.completed.length} completed</span>
+              <span>{groupedTasks.failed.length} failed</span>
+              <span>{groupedTasks.running.length} running</span>
+            </div>
+          </div>
+          <div className="tc-task-board-note">
+            Mixed task stream sorted by newest start time, with each card carrying its own status.
+          </div>
+          <div className="tc-task-board-grid">
+            {sortedDashboardEvents.length === 0 ? (
+              <div className="tc-empty tc-task-board-empty">No dashboard tasks right now.</div>
+            ) : sortedDashboardEvents.map((task, index) => {
+              const liveAgent = agentsById[task.session_id];
+              const traceEvent = traceEventIndex[buildTaskTimeKey(task.session_id, task.started_at)] || null;
+              const promptSnippet = pickUserPromptSnippet(traceEvent) || task.error_message || 'No user prompt preview captured.';
+              const charName = liveAgent
+                ? (charNameMap[liveAgent.id] || CHAR_NAMES[index % CHAR_NAMES.length])
+                : CHAR_NAMES[index % CHAR_NAMES.length];
+              const statusId = mapDashboardTaskStatus(task.status);
+              const statusMeta = TASK_STATUS_META[statusId] || TASK_STATUS_META.running;
+
+              return (
+                <button
+                  key={task.id}
+                  type="button"
+                  className={`tc-task-card ${selectedTask?.kind === 'dashboard' && selectedTask.task.id === task.id ? 'tc-task-card-selected' : ''}`}
+                  onClick={() => openDashboardTask(task, index)}
+                >
+                  <div className="tc-task-card-top">
+                    <div className="tc-task-card-main">
+                      <div className="tc-task-head">
+                        <span className={`tc-task-badge ${statusMeta.className}`}>{statusMeta.label}</span>
+                      </div>
+                      <div className="tc-task-title">Task {formatTaskId(task.id)}</div>
+                      <div className="tc-task-card-meta">
+                        <div>START</div>
+                        <span>{fmtTime(task.started_at)}</span>
+                        <div>END</div>
+                        <span>{task.completed_at ? fmtTime(task.completed_at) : '---'}</span>
+                      </div>
+                    </div>
+                    <div className="tc-task-card-side">
+                      <div className="tc-task-exact-time">{fmtExactDate(task.started_at)}</div>
+                      <TaskActorStrip
+                        charName={charName}
+                        agentId={liveAgent?.id || task.session_id}
+                      />
+                    </div>
+                  </div>
+                  <div className="tc-task-snippet">{promptSnippet}</div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+
+      {selectedTask ? (
+        <div className="tc-task-modal-backdrop" onMouseDown={closeTaskDetail}>
+          <section
+            className="tc-ornate-panel tc-task-detail tc-task-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="tc-task-modal-head">
+              <div>
+                <div className="tc-task-lane-overline">
+                  {selectedTask.kind === 'pending' ? 'PENDING APPROVAL' : 'TASK DETAIL'}
+                </div>
+                <div className="tc-task-lane-title">
+                  {selectedTask.kind === 'pending'
+                    ? `Task ${formatTaskId(selectedTask.item.id)}`
+                    : `Task ${formatTaskId(selectedTask.task.id)}`}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="tc-task-detail-close"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeTaskDetail();
+                }}
+              >
+                CLOSE
+              </button>
+            </div>
+
+            {selectedTask.kind === 'pending' ? (
+              <>
+                <div className="tc-task-detail-summary tc-task-detail-summary-flat">
+                  <TaskDetailFact label="Task ID" value={formatTaskId(selectedTask.item.id, 18)} mono featured />
+                  <TaskDetailFact label="Agent" value={selectedTask.agentName} featured />
+                  <TaskDetailFact label="Session" value={selectedTask.item.session_key || '---'} mono wide tone="info" />
+                  <TaskDetailFact label="Status" value="PENDING REVIEW" featured tone="warn" />
+                  <TaskDetailFact label="Tool" value={selectedTask.item.tool_name || 'tool-call'} tone="tool" />
+                  <TaskDetailFact label="Started At" value={fmtDate((selectedTask.item.created_at || 0) * 1000)} />
+                  <TaskDetailFact label="Completed At" value="---" />
+                  <TaskDetailFact label="Guard Verdict" value={selectedTask.item.guard_verdict || 'unsafe'} tone="danger" />
+                </div>
+
+                <div className="tc-task-detail-pending">
+                  <div className="tc-task-detail-pending-grid">
+                    <div className="tc-task-detail-tool tc-task-detail-tool-call">
+                      <div className="tc-task-detail-tool-head">
+                        <span className="tc-task-detail-tool-tag">TOOL CALL</span>
+                        <span className="tc-task-detail-tool-name">{selectedTask.item.tool_name || 'tool-call'}</span>
+                      </div>
+                      <pre className="tc-task-detail-tool-payload">{stringifyTaskValue(selectedTask.item.params || {})}</pre>
+                    </div>
+                    <div className="tc-task-detail-tool tc-task-detail-tool-result">
+                      <div className="tc-task-detail-tool-head">
+                        <span className="tc-task-detail-tool-tag">GUARD RESULT</span>
+                        <span className="tc-task-detail-tool-name">{selectedTask.item.guard_verdict || 'unsafe'}</span>
+                      </div>
+                      <div className="tc-task-detail-pending-notes">
+                        <div><strong>Risk Source:</strong> {selectedTask.item.risk_source || '---'}</div>
+                        <div><strong>Failure Mode:</strong> {selectedTask.item.failure_mode || '---'}</div>
+                        <div><strong>Real World Harm:</strong> {selectedTask.item.real_world_harm || '---'}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="tc-task-detail-context">
+                    <div className="tc-task-detail-context-title">SESSION CONTEXT</div>
+                    <pre className="tc-task-detail-context-body">{selectedTask.item.session_context || 'No session context captured for this pending approval.'}</pre>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="tc-task-detail-summary tc-task-detail-summary-flat">
+                  <TaskDetailFact label="Task ID" value={formatTaskId(detailTask?.id || selectedTask.task.id, 18)} mono featured />
+                  <TaskDetailFact label="Agent" value={selectedTask.agentName} featured />
+                  <TaskDetailFact label="Session" value={detailTask?.session_id || selectedTask.task.session_id} mono wide tone="info" />
+                  <TaskDetailFact label="User Message" value={detailTask?.user_message_id || selectedTask.task.user_message_id || '---'} mono wide />
+                  <TaskDetailFact
+                    label="Status"
+                    value={(TASK_STATUS_META[detailStatusId] || TASK_STATUS_META.running).label}
+                    featured
+                    tone={taskDetailToneFromStatus(detailStatusId)}
+                  />
+                  <TaskDetailFact label="Started At" value={fmtDate(detailTask?.started_at || selectedTask.task.started_at)} />
+                  <TaskDetailFact label="Completed At" value={(detailTask?.completed_at || selectedTask.task.completed_at) ? fmtDate(detailTask?.completed_at || selectedTask.task.completed_at) : '---'} />
+                  <TaskDetailFact label="Duration" value={durationStr(detailTask?.started_at || selectedTask.task.started_at, detailTask?.completed_at || selectedTask.task.completed_at)} />
+                  <TaskDetailFact label="Total Messages" value={String(detailTask?.total_messages ?? selectedTask.task.total_messages ?? 0)} />
+                  <TaskDetailFact label="Assistant Msgs" value={String(detailTask?.total_assistant_messages ?? '---')} />
+                  <TaskDetailFact label="Tool Result Msgs" value={String(detailTask?.total_tool_result_messages ?? '---')} />
+                  <TaskDetailFact label="Tool Calls" value={String(detailTask?.total_tool_calls ?? selectedTask.task.total_tool_calls ?? 0)} tone="tool" />
+                  <TaskDetailFact label="Input Tokens" value={fmtTokens(detailTask?.total_input_tokens)} />
+                  <TaskDetailFact label="Output Tokens" value={fmtTokens(detailTask?.total_output_tokens)} />
+                  <TaskDetailFact label="Total Tokens" value={fmtTokens(detailTask?.total_tokens ?? selectedTask.task.total_tokens)} featured tone="info" />
+                </div>
+
+                {detailTask?.error_message || selectedTask.task.error_message ? (
+                  <div className="tc-task-detail-alert">
+                    <div className="tc-task-detail-context-title">ERROR</div>
+                    <div className="tc-task-detail-alert-copy">{detailTask?.error_message || selectedTask.task.error_message}</div>
+                  </div>
+                ) : null}
+
+                <div className="tc-task-detail-stream">
+                  {detailLoading ? (
+                    <div className="tc-empty">Loading task detail…</div>
+                  ) : detailMessages.length === 0 ? (
+                    <div className="tc-empty">{detailError || 'No task detail messages found.'}</div>
+                  ) : (
+                    detailMessages.map((msg) => (
+                      <TaskDetailMessage key={msg.message_id} msg={msg} />
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function TownConsole({
-  guardEnabled,
-  onToggleGuard,
   onSelectAgent,
   mapVariants = [],
   activeMapId = '',
@@ -364,11 +887,11 @@ export default function TownConsole({
 }) {
   const [activeTab, setActiveTab] = useState('crew');
   const [traceData, setTraceData] = useState(buildConsoleData(null));
-  const [guardResults, setGuardResults] = useState([]);
-  const [unsafeSessionIds, setUnsafeSessionIds] = useState([]);
+  const [dashboardEvents, setDashboardEvents] = useState([]);
+  const [pendingApprovals, setPendingApprovals] = useState([]);
   const [modelProviders, setModelProviders] = useState([]);
   const [draftAgents, setDraftAgents] = useState([]);
-  const [selectedFilter, setSelectedFilter] = useState('running');
+  const [selectedFilter, setSelectedFilter] = useState('working');
   const [selectedIdentity, setSelectedIdentity] = useState('');
   const [messageMap, setMessageMap] = useState({});
   const [inputMap, setInputMap] = useState({});
@@ -396,49 +919,65 @@ export default function TownConsole({
     if (USE_AGENT_TOWN_MOCK) {
       const mock = buildConsoleData(null);
       setTraceData(mock);
-      setGuardResults(buildMockGuardResults(mock.agents, mock.events));
-      setUnsafeSessionIds(mock.agents.filter((agent) => agent.status === 'waiting').map((agent) => agent.id));
+      setDashboardEvents(buildMockDashboardEvents(mock.events));
+      setPendingApprovals(buildMockPendingApprovals(mock.agents, mock.events));
       setModelProviders(MOCK_MODEL_PROVIDERS);
       return;
     }
 
-    try {
-      const [traceRes, guardRes, unsafeRes, scanRes] = await Promise.all([
-        fetch('/api/trace/', { cache: 'no-store' }),
-        fetch('/api/guard/results', { cache: 'no-store' }),
-        fetch('/api/guard/unsafe-sessions', { cache: 'no-store' }),
-        fetch('/api/system/onboard-scan', { cache: 'no-store' }),
-      ]);
-
-      if (traceRes.ok) {
-        const traceJson = await traceRes.json();
+    const tracePromise = fetch('/api/trace/', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Trace request failed: ${response.status}`);
+        }
+        const traceJson = await response.json();
         setTraceData(buildConsoleData(traceJson));
-      }
+      })
+      .catch((err) => {
+        console.warn('[TownConsole] trace fetch error:', err);
+      });
 
-      if (guardRes.ok) {
-        const guardJson = await guardRes.json();
-        setGuardResults(Array.isArray(guardJson) ? guardJson : []);
-      }
+    const dashboardEventsPromise = fetch('/api/events/?limit=100', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Dashboard events request failed: ${response.status}`);
+        }
+        const eventsJson = await response.json();
+        setDashboardEvents(Array.isArray(eventsJson.events) ? eventsJson.events : []);
+      })
+      .catch((err) => {
+        console.warn('[TownConsole] dashboard events fetch error:', err);
+      });
 
-      if (unsafeRes.ok) {
-        const unsafeJson = await unsafeRes.json();
-        setUnsafeSessionIds(unsafeJson.unsafe_session_ids || []);
-      }
+    const pendingApprovalsPromise = fetch('/api/guard/pending?resolved=false', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Pending approvals request failed: ${response.status}`);
+        }
+        const pendingJson = await response.json();
+        setPendingApprovals(Array.isArray(pendingJson) ? pendingJson : []);
+      })
+      .catch((err) => {
+        console.warn('[TownConsole] pending approvals fetch error:', err);
+      });
 
-      if (scanRes.ok) {
-        const scanJson = await scanRes.json();
+    const scanPromise = fetch('/api/system/onboard-scan', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Onboard scan request failed: ${response.status}`);
+        }
+        const scanJson = await response.json();
         const providers = Array.isArray(scanJson.model_providers) && scanJson.model_providers.length
           ? scanJson.model_providers
           : MOCK_MODEL_PROVIDERS;
         setModelProviders(providers);
-      } else {
+      })
+      .catch((err) => {
+        console.warn('[TownConsole] onboard scan fetch error:', err);
         setModelProviders(MOCK_MODEL_PROVIDERS);
-      }
-    } catch (err) {
-      console.warn('[TownConsole] fetch error:', err);
-      setTraceData(buildConsoleData(null));
-      setModelProviders(MOCK_MODEL_PROVIDERS);
-    }
+      });
+
+    await Promise.allSettled([tracePromise, dashboardEventsPromise, pendingApprovalsPromise, scanPromise]);
   }, []);
 
   useEffect(() => {
@@ -482,6 +1021,15 @@ export default function TownConsole({
     });
     return map;
   }, [traceAgents]);
+
+  const traceAgentsBySessionKey = useMemo(() => {
+    const map = {};
+    combinedAgents.forEach((agent) => {
+      const sessionKey = getAgentSessionKey(agent);
+      if (sessionKey) map[sessionKey] = agent;
+    });
+    return map;
+  }, [combinedAgents]);
 
   const eventsByAgent = useMemo(() => {
     const map = {};
@@ -635,7 +1183,7 @@ export default function TownConsole({
       state: getAgentState(agent.status),
       event: eventsByAgent[agent.id] || null,
       events: eventsByAgentList[agent.id] || [],
-      isPending: agent.status === 'waiting',
+      isPending: agent.status === 'pending',
     });
   }, [charNameMap, eventsByAgent, eventsByAgentList, onSelectAgent, traceAgentsById]);
 
@@ -659,7 +1207,7 @@ export default function TownConsole({
         setDraftAgents((prev) => [draftAgent, ...prev]);
         setMessageMap((prev) => ({ ...prev, [identity]: [] }));
         setInputMap((prev) => ({ ...prev, [identity]: '' }));
-        setSelectedFilter('idle');
+        setSelectedFilter('working');
         setSelectedIdentity(identity);
         setModelPickerOpen(false);
         setModelSearch('');
@@ -690,7 +1238,7 @@ export default function TownConsole({
       setDraftAgents((prev) => [draftAgent, ...prev]);
       setMessageMap((prev) => ({ ...prev, [identity]: prev[identity] || [] }));
       setInputMap((prev) => ({ ...prev, [identity]: '' }));
-      setSelectedFilter('idle');
+      setSelectedFilter('working');
       setSelectedIdentity(identity);
       setModelPickerOpen(false);
       setModelSearch('');
@@ -957,7 +1505,6 @@ export default function TownConsole({
                   }}
                   onSendTask={handleSendTask}
                   onStopTask={handleStopTask}
-                  onInspectAgent={handleInspectAgent}
                   onPreviousAgent={() => handleSelectCurrentNeighbor(-1)}
                   onNextAgent={() => handleSelectCurrentNeighbor(1)}
                   onSelectAgent={(agent) => setSelectedIdentity(getAgentIdentity(agent))}
@@ -991,27 +1538,14 @@ export default function TownConsole({
                 />
               ) : null}
 
-              {activeTab === 'guard' ? (
-                <GuardTab
-                  guardEnabled={guardEnabled}
-                  onToggleGuard={onToggleGuard}
-                  guardResults={guardResults}
-                  unsafeSessionIds={unsafeSessionIds}
-                  agentsById={traceAgentsById}
-                  eventsByAgent={eventsByAgent}
-                  eventsByAgentList={eventsByAgentList}
-                  charNameMap={charNameMap}
-                  onSelectAgent={onSelectAgent}
-                />
-              ) : null}
-
               {activeTab === 'tasks' ? (
                 <TasksTab
-                  events={events}
+                  dashboardEvents={dashboardEvents}
+                  pendingApprovals={pendingApprovals}
                   agentsById={traceAgentsById}
-                  eventsByAgentList={eventsByAgentList}
+                  agentsBySessionKey={traceAgentsBySessionKey}
+                  traceEvents={events}
                   charNameMap={charNameMap}
-                  onSelectTask={onSelectAgent}
                 />
               ) : null}
             </div>

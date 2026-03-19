@@ -6,7 +6,7 @@ export const FH = 64;
 export const NPC_SCALE = 3.9;
 
 // ── Data source mode ──
-export const USE_AGENT_TOWN_MOCK = true;
+export const USE_AGENT_TOWN_MOCK = false;
 
 // ── Background music ──
 export const MUSIC_TRACKS = [

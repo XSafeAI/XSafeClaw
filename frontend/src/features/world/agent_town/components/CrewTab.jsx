@@ -2,9 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CHAR_BASE, CHAR_NAMES } from '../config/constants';
 
 const FILTER_META = [
-  { id: 'running', label: 'ACTIVE' },
-  { id: 'idle', label: 'IDLE' },
-  { id: 'waiting', label: 'FLAGGED' },
+  { id: 'working', label: 'WORKING' },
+  { id: 'pending', label: 'PENDING' },
   { id: 'offline', label: 'OFFLINE' },
 ];
 
@@ -119,7 +118,7 @@ function ShowcaseNavButton({ direction, onClick }) {
 }
 
 function AgentShowcase({ agentId, charName, status }) {
-  const isActive = status === 'running';
+  const isActive = status === 'working';
   const isOffline = status === 'offline';
   const [phoneFailed, setPhoneFailed] = useState(false);
   const idleUrl = `${CHAR_BASE}${charName}_idle_anim_32x32.png`;
@@ -212,6 +211,83 @@ function SummaryTile({ label, value, tone = '' }) {
       <span className="tc-summary-value">{value}</span>
       <span className="tc-summary-label">{label}</span>
     </div>
+  );
+}
+
+function DetailField({ label, value, mono = false }) {
+  return (
+    <div className="tc-stage-detail-field">
+      <div className="tc-stage-detail-label">{label}</div>
+      <div className={`tc-stage-detail-value ${mono ? 'tc-stage-detail-value-mono' : ''}`} title={String(value || '')}>
+        {value || '---'}
+      </div>
+    </div>
+  );
+}
+
+function getHeatLevel(value) {
+  const count = Number(value || 0);
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  if (count >= 5) return 4;
+  if (count >= 3) return 3;
+  if (count >= 2) return 2;
+  return 1;
+}
+
+function SessionHeatCard({ bins }) {
+  const safeBins = Array.isArray(bins) && bins.length ? bins : new Array(24).fill(0);
+  const hasHeat = safeBins.some((value) => Number(value || 0) > 0);
+  const hourMarks = [
+    { idx: 0, text: '-24H' },
+    { idx: 6, text: '-18H' },
+    { idx: 12, text: '-12H' },
+    { idx: 18, text: '-6H' },
+    { idx: 23, text: 'NOW' },
+  ];
+
+  return (
+    <section className="tc-stage-info-card tc-stage-info-card-wide">
+      <div className="tc-stage-info-card-head">
+        <div>
+          <div className="tc-stage-info-card-title">SESSION HEAT</div>
+          <div className="tc-stage-info-card-subtitle">24H WORKING WINDOW</div>
+        </div>
+        <div className="tc-stage-heat-legend tc-stage-heat-legend-head">
+          <span>Few</span>
+          <div className="tc-stage-heat-legend-swatches" aria-hidden="true">
+            <span className="tc-stage-heat-cell tc-stage-heat-cell-0" />
+            <span className="tc-stage-heat-cell tc-stage-heat-cell-1" />
+            <span className="tc-stage-heat-cell tc-stage-heat-cell-2" />
+            <span className="tc-stage-heat-cell tc-stage-heat-cell-3" />
+            <span className="tc-stage-heat-cell tc-stage-heat-cell-4" />
+          </div>
+          <span>More</span>
+        </div>
+      </div>
+
+      <div className="tc-stage-heat-grid" aria-label="Session heat over the last 24 hours">
+        {safeBins.map((value, idx) => (
+          <div
+            key={`heat-${idx}`}
+            className={`tc-stage-heat-cell tc-stage-heat-cell-${getHeatLevel(value)}`}
+            title={`${23 - idx}h ago: ${value}`}
+          />
+        ))}
+      </div>
+
+      <div className="tc-stage-heat-hours" aria-hidden="true">
+        {hourMarks.map((mark) => (
+          <span
+            key={mark.text}
+            className="tc-stage-heat-hour"
+            style={{ gridColumn: `${mark.idx + 1} / span 1` }}
+          >
+            {mark.text}
+          </span>
+        ))}
+      </div>
+      {!hasHeat ? <div className="tc-stage-heat-empty">No working events were recorded in the last 24 hours.</div> : null}
+    </section>
   );
 }
 
@@ -312,6 +388,146 @@ function ChatBubble({ msg, helpers }) {
   );
 }
 
+function mapStageTaskStatus(status) {
+  if (status === 'completed') return 'completed';
+  if (status === 'error') return 'failed';
+  return 'running';
+}
+
+function formatStageTaskId(value, length = 12) {
+  return String(value || '').slice(0, length) || '---';
+}
+
+function fmtStageTokens(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return '---';
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return `${(n / 1000000).toFixed(1)}m`;
+}
+
+function stageDurationStr(startTs, endTs) {
+  const start = startTs ? new Date(startTs).getTime() : NaN;
+  const end = endTs ? new Date(endTs).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '---';
+  const totalSec = Math.floor((end - start) / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function stringifyStageTaskValue(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildStageTaskTimeKey(sessionId, ts) {
+  if (!sessionId || !ts) return '';
+  const ms = new Date(ts).getTime();
+  return Number.isFinite(ms) ? `${sessionId}:${ms}` : `${sessionId}:${ts}`;
+}
+
+function buildStageTaskMessagesFromTraceEvent(event) {
+  return (event?.conversations || []).map((msg, index) => ({
+    message_id: `${event.event_id || 'trace'}-${index}`,
+    role: msg.role === 'tool' ? 'toolResult' : msg.role,
+    timestamp: msg.timestamp,
+    content_text: msg.content_text || msg.text || '',
+    tool_calls: Array.isArray(msg.tool_calls)
+      ? msg.tool_calls.map((tc, toolIndex) => ({
+          id: tc.id || `${event.event_id || 'trace'}-tool-${index}-${toolIndex}`,
+          tool_name: tc.tool_name || 'tool-call',
+          arguments: tc.arguments || null,
+        }))
+      : [],
+  }));
+}
+
+function stageTaskToneFromStatus(status) {
+  if (status === 'completed') return 'success';
+  if (status === 'failed' || status === 'error') return 'danger';
+  if (status === 'pending' || status === 'running') return 'warn';
+  return 'neutral';
+}
+
+function StageTaskDetailFact({
+  label,
+  value,
+  mono = false,
+  featured = false,
+  wide = false,
+  tone = 'neutral',
+}) {
+  return (
+    <div
+      className={[
+        'tc-task-detail-fact',
+        mono ? 'tc-task-detail-fact-mono' : '',
+        featured ? 'tc-task-detail-fact-featured' : '',
+        wide ? 'tc-task-detail-fact-wide' : '',
+        `tc-task-detail-fact-tone-${tone}`,
+      ].filter(Boolean).join(' ')}
+    >
+      <div className="tc-task-detail-fact-label">{label}</div>
+      <div className="tc-task-detail-fact-value">{value || '---'}</div>
+    </div>
+  );
+}
+
+function StageTaskDetailMessage({ msg, helpers }) {
+  const timestamp = helpers.fmtDate(msg.timestamp);
+  const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+  const isUser = msg.role === 'user';
+  const isAssistant = msg.role === 'assistant';
+  const isToolResult = msg.role === 'toolResult';
+
+  return (
+    <div className="tc-task-detail-entry">
+      {(isUser || isAssistant) && msg.content_text ? (
+        <div className={`tc-task-detail-bubble ${isUser ? 'tc-task-detail-bubble-user' : 'tc-task-detail-bubble-assistant'}`}>
+          <div className="tc-task-detail-bubble-head">
+            <span className="tc-task-detail-role">{isUser ? 'USER' : 'ASSISTANT'}</span>
+            <span className="tc-task-detail-time">{timestamp}</span>
+          </div>
+          <div className="tc-task-detail-text">{msg.content_text}</div>
+        </div>
+      ) : null}
+
+      {toolCalls.length > 0 ? toolCalls.map((toolCall) => (
+        <div key={toolCall.id} className="tc-task-detail-tool tc-task-detail-tool-call">
+          <div className="tc-task-detail-tool-head">
+            <span className="tc-task-detail-tool-tag">TOOL CALL</span>
+            <span className="tc-task-detail-tool-name">{toolCall.tool_name || 'tool-call'}</span>
+          </div>
+          {toolCall.arguments ? (
+            <pre className="tc-task-detail-tool-payload">{stringifyStageTaskValue(toolCall.arguments)}</pre>
+          ) : (
+            <div className="tc-task-detail-tool-empty">No call arguments captured.</div>
+          )}
+        </div>
+      )) : null}
+
+      {isToolResult ? (
+        <div className="tc-task-detail-tool tc-task-detail-tool-result">
+          <div className="tc-task-detail-tool-head">
+            <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
+            <span className="tc-task-detail-time">{timestamp}</span>
+          </div>
+          <div className="tc-task-detail-text">{msg.content_text || 'No tool result content captured.'}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function CrewTab({
   agents,
   filter,
@@ -330,7 +546,6 @@ export default function CrewTab({
   onChangeInput,
   onSendTask,
   onStopTask,
-  onInspectAgent,
   onPreviousAgent,
   onNextAgent,
   onSelectAgent,
@@ -349,6 +564,11 @@ export default function CrewTab({
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
   const chatEndRef = useRef(null);
+  const [selectedLedgerTask, setSelectedLedgerTask] = useState(null);
+  const [detailMessages, setDetailMessages] = useState([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [detailEventData, setDetailEventData] = useState(null);
   const conversationMessages = useMemo(() => activeMessages
     .filter((msg) => (
       msg.role === 'assistant'
@@ -357,16 +577,84 @@ export default function CrewTab({
       || msg.role === 'tool_call'
     ))
     .sort((a, b) => getMessageTimestampValue(a.timestamp) - getMessageTimestampValue(b.timestamp)), [activeMessages]);
+  const currentTraceEvents = useMemo(
+    () => (currentAgent ? (eventsByAgentList[currentAgent.id] || []) : []),
+    [currentAgent, eventsByAgentList],
+  );
+  const currentTraceEventIndex = useMemo(() => {
+    const map = {};
+    currentTraceEvents.forEach((event) => {
+      const key = buildStageTaskTimeKey(currentAgent?.id, event.start_time);
+      if (key) map[key] = event;
+    });
+    return map;
+  }, [currentAgent?.id, currentTraceEvents]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: 'end' });
   }, [conversationMessages, currentAgent?.id, loadingHistory, sending]);
 
+  useEffect(() => {
+    if (!selectedLedgerTask) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setSelectedLedgerTask(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedLedgerTask]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    if (!selectedLedgerTask) {
+      setDetailMessages([]);
+      setDetailLoading(false);
+      setDetailEventData(null);
+      setDetailError('');
+      return () => {
+        disposed = true;
+      };
+    }
+
+    const fallbackMessages = buildStageTaskMessagesFromTraceEvent(selectedLedgerTask.traceEvent);
+
+    const loadDetail = async () => {
+      setDetailLoading(true);
+      setDetailError('');
+      try {
+        const response = await fetch(`/api/events/${selectedLedgerTask.task.id}`, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Task detail request failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        if (disposed) return;
+        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        setDetailEventData(payload);
+        setDetailMessages(messages.length ? messages : fallbackMessages);
+      } catch (err) {
+        if (disposed) return;
+        setDetailEventData(null);
+        setDetailMessages(fallbackMessages);
+        setDetailError(err instanceof Error ? err.message : 'Failed to load task detail.');
+      } finally {
+        if (!disposed) setDetailLoading(false);
+      }
+    };
+
+    loadDetail();
+    return () => {
+      disposed = true;
+    };
+  }, [selectedLedgerTask]);
+
+  const detailTask = detailEventData || selectedLedgerTask?.task || null;
+  const detailStatusId = mapStageTaskStatus(detailTask?.status || selectedLedgerTask?.task?.status);
+
   return (
     <div className="tc-crew-layout">
       <aside className="tc-crew-sidebar">
         <section className="tc-ornate-panel tc-sidebar-section tc-summon-panel tc-summon-panel-top">
-          <BannerHeader label="NEW AGENT" />
+          <BannerHeader label="NEW AGENT" tone="light" size="long" />
           <div className="tc-panel-microcopy">Forge a new operative from the model deck.</div>
           <button type="button" className="tc-summon-toggle" onClick={onToggleModelPicker}>
             <span>{modelPickerOpen ? 'Hide Model Deck' : 'Summon From Model Deck'}</span>
@@ -462,7 +750,6 @@ export default function CrewTab({
             <section className="tc-ornate-panel tc-stage-hero">
             <div className="tc-stage-hero-main">
               <div className="tc-stage-showcase-panel">
-                <div className="tc-stage-showcase-topline">VIEW PORT</div>
                 <div className="tc-stage-showcase-frame">
                   <div className="tc-showcase-wrap">
                     <ShowcaseNavButton direction="left" onClick={onPreviousAgent} />
@@ -474,7 +761,6 @@ export default function CrewTab({
                     <ShowcaseNavButton direction="right" onClick={onNextAgent} />
                   </div>
                 </div>
-                <div className="tc-stage-showcase-floor">L/R cycle active shell</div>
               </div>
 
               <div className="tc-stage-info-panel">
@@ -492,32 +778,35 @@ export default function CrewTab({
                 </div>
 
                 <div className="tc-stage-summary-grid">
+                  <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
+                  <SummaryTile label="Pending" value={currentSummary.pending} tone="tc-summary-warn" />
                   <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
                   <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-bad" />
-                  <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
-                  <SummaryTile label="Flagged" value={currentSummary.flagged} tone="tc-summary-warn" />
                 </div>
 
-                <div className="tc-stage-kv-grid">
-                  <div>PID</div>
-                  <span>{currentAgent.pid || helpers.shortId(currentAgent.id)}</span>
-                  <div>Channel</div>
-                  <span>{currentAgent.channel || 'session'}</span>
-                  <div>Seen</div>
-                  <span>{helpers.fmtDate(currentAgent.first_seen_at)}</span>
-                  <div>Latest</div>
-                  <span>{currentEvents[0]?.start_time ? helpers.fmtDate(currentEvents[0].start_time) : 'No task yet'}</span>
-                </div>
+                <div className="tc-stage-info-cards">
+                  <section className="tc-stage-info-card tc-stage-info-card-wide">
+                    <div className="tc-stage-info-card-head">
+                      <div>
+                        <div className="tc-stage-info-card-title">IDENTITY &amp; BINDING</div>
+                        <div className="tc-stage-info-card-subtitle">identity, session, model, and review stats</div>
+                      </div>
+                    </div>
+                    <div className="tc-stage-detail-grid">
+                      <DetailField label="Agent Name" value={currentAgent.name} />
+                      <DetailField label="Agent ID" value={currentAgent.pid || helpers.shortId(currentAgent.id)} mono />
+                      <DetailField label="Session Key" value={helpers.getAgentSessionKey(currentAgent) || currentAgent.session_key || '---'} mono />
+                      <DetailField label="Channel" value={currentAgent.channel || 'session'} />
+                      <DetailField label="Provider" value={currentAgent.provider || 'unknown'} />
+                      <DetailField label="Model" value={currentAgent.model || 'model pending'} mono />
+                      <DetailField label="Dialog Turns" value={String(currentAgent.dialog_turns_total ?? currentEvents.length ?? 0)} mono />
+                      <DetailField label="Human Reviews" value={String(currentAgent.human_interventions_total ?? 0)} mono />
+                    </div>
+                  </section>
 
-                <div className="tc-stage-blurb">
-                  {helpers.pickEventSnippet(currentEvents[0]) || 'This agent is waiting for your next mission dispatch.'}
-                </div>
-
-                <div className="tc-stage-actions">
-                  <button type="button" className="tc-stage-inspect" onClick={() => onInspectAgent(currentAgent)}>
-                    Inspect Log
-                  </button>
-                  <span className="tc-stage-tip">Journey stays tucked into inspect view.</span>
+                  <SessionHeatCard
+                    bins={currentAgent.activity_heat_24h}
+                  />
                 </div>
               </div>
             </div>
@@ -533,15 +822,25 @@ export default function CrewTab({
                   ) : (
                     currentEvents.slice(0, 5).map((event) => {
                       const statusMeta = taskStatusMeta[event.status] || taskStatusMeta.running;
+                      const traceEvent = currentTraceEventIndex[buildStageTaskTimeKey(currentAgent?.id, event.start_time)] || null;
                       return (
-                        <div key={event.event_id} className={`tc-ledger-item tc-ledger-item-${event.status || 'running'}`}>
+                        <button
+                          key={event.event_id}
+                          type="button"
+                          className={`tc-ledger-item tc-ledger-item-button tc-ledger-item-${event.status || 'running'} ${selectedLedgerTask?.task?.id === event.id ? 'tc-ledger-item-selected' : ''}`}
+                          onClick={() => setSelectedLedgerTask({
+                            task: event,
+                            traceEvent,
+                            agentName: currentAgent.name,
+                          })}
+                        >
                           <div className="tc-ledger-row">
                             <span className={`tc-ledger-badge ${statusMeta.className}`}>{statusMeta.label}</span>
                             <span className="tc-ledger-time">{helpers.fmtDate(event.start_time)}</span>
                           </div>
                           <div className="tc-ledger-title">{event.event_type || 'chat'}</div>
                           <div className="tc-ledger-note">{helpers.pickEventSnippet(event) || 'Awaiting operator review.'}</div>
-                        </div>
+                        </button>
                       );
                     })
                   )}
@@ -615,6 +914,75 @@ export default function CrewTab({
           <div className="tc-empty tc-stage-empty">Select or summon an agent to open the command console.</div>
         )}
       </section>
+
+      {selectedLedgerTask ? (
+        <div className="tc-task-modal-backdrop" onMouseDown={() => setSelectedLedgerTask(null)}>
+          <section
+            className="tc-ornate-panel tc-task-detail tc-task-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="tc-task-modal-head">
+              <div>
+                <div className="tc-task-lane-overline">TASK DETAIL</div>
+                <div className="tc-task-lane-title">Task {formatStageTaskId(selectedLedgerTask.task.id)}</div>
+              </div>
+              <button
+                type="button"
+                className="tc-task-detail-close"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setSelectedLedgerTask(null);
+                }}
+              >
+                CLOSE
+              </button>
+            </div>
+
+            <div className="tc-task-detail-summary tc-task-detail-summary-flat">
+              <StageTaskDetailFact label="Task ID" value={formatStageTaskId(detailTask?.id || selectedLedgerTask.task.id, 18)} mono featured />
+              <StageTaskDetailFact label="Agent" value={selectedLedgerTask.agentName} featured />
+              <StageTaskDetailFact label="Session" value={detailTask?.session_id || selectedLedgerTask.task.session_id} mono wide tone="info" />
+              <StageTaskDetailFact label="User Message" value={detailTask?.user_message_id || selectedLedgerTask.task.user_message_id || '---'} mono wide />
+              <StageTaskDetailFact
+                label="Status"
+                value={(taskStatusMeta[detailStatusId] || taskStatusMeta.running).label}
+                featured
+                tone={stageTaskToneFromStatus(detailStatusId)}
+              />
+              <StageTaskDetailFact label="Started At" value={helpers.fmtDate(detailTask?.started_at || selectedLedgerTask.task.started_at)} />
+              <StageTaskDetailFact label="Completed At" value={(detailTask?.completed_at || selectedLedgerTask.task.completed_at) ? helpers.fmtDate(detailTask?.completed_at || selectedLedgerTask.task.completed_at) : '---'} />
+              <StageTaskDetailFact label="Duration" value={stageDurationStr(detailTask?.started_at || selectedLedgerTask.task.started_at, detailTask?.completed_at || selectedLedgerTask.task.completed_at)} />
+              <StageTaskDetailFact label="Total Messages" value={String(detailTask?.total_messages ?? selectedLedgerTask.task.total_messages ?? 0)} />
+              <StageTaskDetailFact label="Assistant Msgs" value={String(detailTask?.total_assistant_messages ?? '---')} />
+              <StageTaskDetailFact label="Tool Result Msgs" value={String(detailTask?.total_tool_result_messages ?? '---')} />
+              <StageTaskDetailFact label="Tool Calls" value={String(detailTask?.total_tool_calls ?? selectedLedgerTask.task.total_tool_calls ?? 0)} tone="tool" />
+              <StageTaskDetailFact label="Input Tokens" value={fmtStageTokens(detailTask?.total_input_tokens)} />
+              <StageTaskDetailFact label="Output Tokens" value={fmtStageTokens(detailTask?.total_output_tokens)} />
+              <StageTaskDetailFact label="Total Tokens" value={fmtStageTokens(detailTask?.total_tokens ?? selectedLedgerTask.task.total_tokens)} featured tone="info" />
+            </div>
+
+            {detailTask?.error_message || selectedLedgerTask.task.error_message ? (
+              <div className="tc-task-detail-alert">
+                <div className="tc-task-detail-context-title">ERROR</div>
+                <div className="tc-task-detail-alert-copy">{detailTask?.error_message || selectedLedgerTask.task.error_message}</div>
+              </div>
+            ) : null}
+
+            <div className="tc-task-detail-stream">
+              {detailLoading ? (
+                <div className="tc-empty">Loading task detail…</div>
+              ) : detailMessages.length === 0 ? (
+                <div className="tc-empty">{detailError || 'No task detail messages found.'}</div>
+              ) : (
+                detailMessages.map((msg) => (
+                  <StageTaskDetailMessage key={msg.message_id} msg={msg} helpers={helpers} />
+                ))
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

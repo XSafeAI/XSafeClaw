@@ -255,11 +255,188 @@ export default class GameEngine {
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
     this._meetingCooldowns.clear();
+    this._renderNpcScene(agents);
 
+    // Start game loop
+    this._startLoop();
+    if (this.guardEnabled) this._deployGuards(this._guardToken);
+  }
+
+  _isPendingStatus(status) {
+    return status === 'pending' || status === 'waiting';
+  }
+
+  _isRunningStatus(status) {
+    return status === 'working' || status === 'running' || status === 'idle';
+  }
+
+  _isIdleStatus(status) {
+    return status === 'idle';
+  }
+
+  _allowWalkingMeetings() {
+    return true;
+  }
+
+  _setIdleActivitySprite(npc, forceRefresh = false) {
+    if (!npc?.sprite || !npc?.frames) return;
+    const roll = forceRefresh ? Math.random() : (npc._idleActivityRoll ?? Math.random());
+    npc._idleActivityRoll = Math.random();
+    npc._curDir = 'idle';
+    if (roll < 0.28 && npc.frames.phone.length) {
+      npc.sprite.textures = npc.frames.phone;
+    } else if (roll < 0.56 && npc.frames.reading.length) {
+      npc.sprite.textures = npc.frames.reading;
+    } else {
+      npc.sprite.textures = npc.frames.idle;
+    }
+    npc.sprite.play();
+  }
+
+  _setWorkingPauseSprite(npc, forceRefresh = false) {
+    if (!npc?.sprite || !npc?.frames) return;
+    const roll = forceRefresh ? Math.random() : (npc._workingPauseRoll ?? Math.random());
+    npc._workingPauseRoll = Math.random();
+    npc._curDir = 'idle';
+    if (roll < 0.16 && npc.frames.phone.length) {
+      npc.sprite.textures = npc.frames.phone;
+    } else if (roll < 0.32 && npc.frames.reading.length) {
+      npc.sprite.textures = npc.frames.reading;
+    } else {
+      npc.sprite.textures = npc.frames.idle;
+    }
+    npc.sprite.play();
+  }
+
+  _queueRunningPath(npc) {
+    if (!npc || !this.pathfinder) return false;
+    const curTile = this.pathfinder.pixelToTile(npc.container.x, npc.container.y);
+    if (!this.pathfinder.isWalkable(curTile.x, curTile.y)) {
+      const near = this.pathfinder.getRandomWalkable();
+      if (near) {
+        const np = this.pathfinder.tileToPixel(near.x, near.y);
+        npc.container.x = np.x;
+        npc.container.y = np.y;
+      }
+      npc.idleTimer = 0.25;
+      return false;
+    }
+
+    const minDist = npc._failedPaths > 3 ? 2 : 6;
+    const dest = this.pathfinder.getRandomWalkableFar(curTile.x, curTile.y, minDist);
+    if (!dest) {
+      npc.idleTimer = 0.4 + Math.random() * 0.5;
+      return false;
+    }
+
+    const path = this.pathfinder.findPath(curTile.x, curTile.y, dest.x, dest.y);
+    if (!path || path.length <= 1) {
+      npc._failedPaths++;
+      npc.idleTimer = 0.4 + Math.random() * 0.5;
+      return false;
+    }
+
+    npc.path = path;
+    npc.pathIdx = 1;
+    npc.aiState = 'walking';
+    npc._failedPaths = 0;
+    npc._stuckFrames = 0;
+    this._setNpcDir(npc);
+    return true;
+  }
+
+  _updateStationary(npc, delta) {
+    npc.activityTimer = (npc.activityTimer ?? (1.2 + Math.random() * 1.6)) - (delta / 60);
+    if (npc.activityTimer <= 0) {
+      this._setIdleActivitySprite(npc, true);
+      npc.activityTimer = 2.8 + Math.random() * 4.5;
+    }
+  }
+
+  _resumeNpcBehavior(npc, afterMeeting = false) {
+    if (!npc) return;
+    npc.meetingTimer = 0;
+    npc.meetingPartner = null;
+    npc.path = null;
+    npc.pathIdx = 0;
+    npc._stuckFrames = 0;
+    npc._curDir = 'idle';
+
+    if (npc._pendingFrozen || npc._guardFrozen) {
+      npc.aiState = 'frozen';
+      npc.sprite.textures = npc.frames.idle;
+      npc.sprite.play();
+      return;
+    }
+
+    if (npc.mode === 'pathfind') {
+      npc.aiState = 'idle';
+      npc.idleTimer = afterMeeting ? (0.08 + Math.random() * 0.15) : (0.3 + Math.random() * 0.5);
+      npc.sprite.textures = npc.frames.idle;
+      npc.sprite.play();
+      return;
+    }
+
+    if (npc.mode === 'patrol') {
+      npc.aiState = 'patrol';
+      npc.movingDown = Math.random() > 0.5;
+      npc.sprite.textures = npc.movingDown ? npc.frames.front : npc.frames.back;
+      npc.sprite.play();
+      return;
+    }
+
+    if (npc.mode === 'stationary') {
+      npc.aiState = 'stationary';
+      npc.activityTimer = afterMeeting ? 0.2 : 0.1;
+      this._setIdleActivitySprite(npc, true);
+    }
+  }
+
+  _canStartMeeting(a, b) {
+    if (!a || !b || a === b) return false;
+    if (a.mode === 'pending' || b.mode === 'pending') return false;
+    if (a._dragActive || b._dragActive || a._guardFrozen || b._guardFrozen || a._pendingFrozen || b._pendingFrozen) {
+      return false;
+    }
+    if (a.aiState === 'meeting' || b.aiState === 'meeting') return false;
+    if (this._isMeetingPairCoolingDown(a, b)) return false;
+
+    const aRunning = a.behavior === 'running';
+    const bRunning = b.behavior === 'running';
+    if (!aRunning && !bRunning) return false;
+
+    const aReady = aRunning ? (a.mode === 'pathfind' ? a.aiState === 'walking' : true) : a.aiState === 'stationary';
+    const bReady = bRunning ? (b.mode === 'pathfind' ? b.aiState === 'walking' : true) : b.aiState === 'stationary';
+    return aReady && bReady;
+  }
+
+  _updateMeeting(npc, delta) {
+    npc.meetingTimer -= delta / 60;
+    if (npc.meetingTimer > 0) return;
+
+    const partner = npc.meetingPartner;
+    this._setMeetingPairCooldown(npc, partner);
+    this._removeBubble(npc);
+
+    if (partner && partner.meetingPartner === npc) {
+      partner.meetingPartner = null;
+      this._removeBubble(partner);
+      if (partner.aiState === 'meeting') {
+        this._resumeNpcBehavior(partner, true);
+      }
+    }
+
+    this._resumeNpcBehavior(npc, true);
+  }
+
+  _renderNpcScene(agents = []) {
+    const activeAgents = (agents || []).filter((agent) => (
+      this._isRunningStatus(agent?.status)
+    ));
     const maxSceneAgents = this.pathfinder
-      ? Math.min(agents.length, Math.max(CHAR_NAMES.length, 1))
-      : WALK_ZONES.length;
-    const sceneAgents = agents.slice(0, maxSceneAgents);
+      ? Math.min(activeAgents.length, Math.max(CHAR_NAMES.length, 1))
+      : Math.min(activeAgents.length, WALK_ZONES.length);
+    const sceneAgents = activeAgents.slice(0, maxSceneAgents);
 
     for (let i = 0; i < sceneAgents.length; i++) {
       const npc = this._createNPC(sceneAgents[i], i);
@@ -267,12 +444,22 @@ export default class GameEngine {
       this.npcs.push(npc);
     }
 
-    // Pending NPC (Edward)
-    this.pendingNpc = this._createPendingNPC();
+    this.pendingNpc = (agents || []).some((agent) => this._isPendingStatus(agent?.status))
+      ? this._createPendingNPC()
+      : null;
+  }
 
-    // Start game loop
-    this._startLoop();
-    if (this.guardEnabled) this._deployGuards(this._guardToken);
+  _clearNpcScene() {
+    for (const npc of this.npcs) {
+      this._removeBubble?.(npc);
+      npc?.container?.destroy({ children: true });
+    }
+    this.npcs = [];
+
+    if (this.pendingNpc?.container) {
+      this.pendingNpc.container.destroy({ children: true });
+    }
+    this.pendingNpc = null;
   }
 
   // ─── NPC Creation ─────────────────────────────────────────────
@@ -374,11 +561,7 @@ export default class GameEngine {
       this._setMeetingPairCooldown(npc, partner);
       partner.meetingPartner = null;
       if (partner.aiState === 'meeting') {
-        partner.aiState = 'idle';
-        partner.idleTimer = 0.6 + Math.random() * 1.2;
-        partner._curDir = 'idle';
-        partner.sprite.textures = partner.frames.idle;
-        partner.sprite.play();
+        this._resumeNpcBehavior(partner, true);
       }
       this._removeBubble(partner);
     }
@@ -521,7 +704,7 @@ export default class GameEngine {
   }
 
   _canNpcStandAt(npc, x, y) {
-    if (!this.pathfinder || npc?.mode !== 'pathfind') return true;
+    if (!this.pathfinder || (npc?.mode !== 'pathfind' && npc?.mode !== 'stationary')) return true;
     const tile = this.pathfinder.pixelToTile(x, y);
     return this.pathfinder.isWalkable(tile.x, tile.y);
   }
@@ -641,7 +824,7 @@ export default class GameEngine {
 
   _resolveNpcDropPosition(npc, x, y) {
     const clamped = this._clampDropPoint(x, y);
-    if (this.pathfinder && npc.mode === 'pathfind') {
+    if (this.pathfinder && (npc.mode === 'pathfind' || npc.mode === 'stationary')) {
       let tile = this.pathfinder.pixelToTile(clamped.x, clamped.y);
       if (!this.pathfinder.isWalkable(tile.x, tile.y)) {
         tile = this._findNearestWalkableTile(tile.x, tile.y);
@@ -670,7 +853,7 @@ export default class GameEngine {
     if (npc.mode === 'pathfind') {
       npc.homeTile = drop.tile || this.pathfinder.pixelToTile(drop.x, drop.y);
       npc.aiState = (npc._pendingFrozen || npc._guardFrozen) ? 'frozen' : 'idle';
-      npc.idleTimer = 0.35 + Math.random() * 0.8;
+      npc.idleTimer = 0.08 + Math.random() * 0.15;
       npc._curDir = 'idle';
       npc.sprite.textures = npc.frames.idle;
       npc.sprite.play();
@@ -695,6 +878,13 @@ export default class GameEngine {
       return;
     }
 
+    if (npc.mode === 'stationary') {
+      npc.aiState = 'stationary';
+      npc.activityTimer = 0.1;
+      this._setIdleActivitySprite(npc, true);
+      return;
+    }
+
     npc.sprite.textures = npc.frames?.idle?.length ? npc.frames.idle : npc.sprite.textures;
     npc.sprite.play?.();
   }
@@ -702,7 +892,7 @@ export default class GameEngine {
   _isPendingApproval(agent) {
     if (!agent) return false;
     const latest = this._agentsById.get(agent.id) || agent;
-    return latest.status === 'waiting' || this._waitingAgents.has(agent.id);
+    return this._isPendingStatus(latest.status) || this._waitingAgents.has(agent.id);
   }
 
   _ensureIssueVisuals(npc) {
@@ -741,10 +931,7 @@ export default class GameEngine {
         this._setMeetingPairCooldown(npc, partner);
         partner.meetingPartner = null;
         if (partner.aiState === 'meeting') {
-          partner.aiState = 'idle';
-          partner.idleTimer = 0.6 + Math.random() * 1.2;
-          partner.sprite.textures = partner.frames.idle;
-          partner.sprite.play();
+          this._resumeNpcBehavior(partner, true);
         }
         this._removeBubble(partner);
       }
@@ -789,6 +976,7 @@ export default class GameEngine {
     const charName = CHAR_NAMES[idx % CHAR_NAMES.length];
     const frames   = this.spriteLoader.charFrames[charName];
     if (!frames || !frames.front.length) return null;
+    const isRunner = this._isRunningStatus(agent?.status);
 
     const container = new PIXI.Container();
 
@@ -895,10 +1083,12 @@ export default class GameEngine {
         agent, container, sprite, frames, charName, emoteSprite,
         goldOutlines: _goldOutlines, hasIssue,
         _originalHasIssue: hasIssue, _guardFrozen: false, _pendingFrozen: hasPendingApproval,
-        mode: 'pathfind',
+        mode: isRunner ? 'pathfind' : 'stationary',
+        behavior: isRunner ? 'running' : 'idle',
         speed: 0.45 + Math.random() * 0.25,
-        aiState: hasPendingApproval ? 'frozen' : 'idle', _curDir: 'idle',
-        idleTimer: 2 + Math.random() * 3,
+        aiState: hasPendingApproval ? 'frozen' : (isRunner ? 'idle' : 'stationary'), _curDir: 'idle',
+        idleTimer: isRunner ? (0.08 + Math.random() * 0.15) : 0,
+        activityTimer: isRunner ? 0 : (0.1 + Math.random() * 0.4),
         path: null, pathIdx: 0,
         homeTile: this.pathfinder.pixelToTile(startPx.x, startPx.y),
         _failedPaths: 0, _stuckFrames: 0,
@@ -908,6 +1098,8 @@ export default class GameEngine {
       if (hasPendingApproval) {
         npcObj.sprite.textures = npcObj.frames.idle;
         npcObj.sprite.play();
+      } else if (!isRunner) {
+        this._setIdleActivitySprite(npcObj, true);
       }
     } else {
       // Static patrol mode
@@ -922,14 +1114,19 @@ export default class GameEngine {
         agent, container, sprite, frames, charName, emoteSprite,
         goldOutlines: _goldOutlines, hasIssue,
         _originalHasIssue: hasIssue, _guardFrozen: false, _pendingFrozen: hasPendingApproval,
-        mode: 'patrol',
+        mode: isRunner ? 'patrol' : 'stationary',
+        behavior: isRunner ? 'running' : 'idle',
         speed: 0.32 + Math.random() * 0.38,
         movingDown,
         zone, xBase: zone.x + xOffset,
+        aiState: isRunner ? 'patrol' : 'stationary',
+        activityTimer: isRunner ? 0 : (0.1 + Math.random() * 0.4),
       };
       if (hasPendingApproval) {
         npcObj.sprite.textures = npcObj.frames.idle;
         npcObj.sprite.play();
+      } else if (!isRunner) {
+        this._setIdleActivitySprite(npcObj, true);
       }
     }
 
@@ -1005,9 +1202,9 @@ export default class GameEngine {
       const gp = container.getGlobalPosition();
       const rect = this.app.view.getBoundingClientRect();
       this.onNpcHover?.({
-        agent: { name: 'Agent-Edward', id: 'pending-edward', status: 'waiting',
+        agent: { name: 'Agent-Edward', id: 'pending-edward', status: 'pending',
                  provider: 'OpenAI', model: 'gpt-4', pid: '—' },
-        charName, state: 'waiting',
+        charName, state: 'pending',
         snippet: 'Waiting for permission: execute_shell_command',
         event: { event_type: 'permission_request', duration: 120 },
         isPending: true,
@@ -1085,14 +1282,13 @@ export default class GameEngine {
   _startLoop() {
     this.app.ticker.add((delta) => {
       // ── Meeting detection ──
-      if (this.pathfinder) {
+      if (this._allowWalkingMeetings()) {
         for (let i = 0; i < this.npcs.length; i++) {
           const a = this.npcs[i];
-          if (!a || a.aiState !== 'walking') continue;
+          if (!a) continue;
           for (let j = i + 1; j < this.npcs.length; j++) {
             const b = this.npcs[j];
-            if (!b || b.aiState !== 'walking') continue;
-            if (this._isMeetingPairCoolingDown(a, b)) continue;
+            if (!b || !this._canStartMeeting(a, b)) continue;
             const dx = a.container.x - b.container.x;
             const dy = a.container.y - b.container.y;
             if (Math.sqrt(dx * dx + dy * dy) < this._getNpcMeetingTriggerDistance(a, b)) {
@@ -1112,12 +1308,16 @@ export default class GameEngine {
           if (npc.bubble.alpha >= 1) npc._bubbleFadeIn = false;
         }
 
-        if (npc._dragActive || npc._guardFrozen || npc._pendingFrozen) {
+        if (npc.aiState === 'meeting') {
+          this._updateMeeting(npc, delta);
+        } else if (npc._dragActive || npc._guardFrozen || npc._pendingFrozen) {
           // Frozen by guard — stay in place
         } else if (npc.mode === 'patrol') {
           this._updatePatrol(npc, delta);
         } else if (npc.mode === 'pathfind' && this.pathfinder) {
           this._updatePathfind(npc, delta);
+        } else if (npc.mode === 'stationary') {
+          this._updateStationary(npc, delta);
         }
       }
 
@@ -1155,6 +1355,10 @@ export default class GameEngine {
 
   _startMeeting(a, b) {
     if (this._isMeetingPairCoolingDown(a, b)) return;
+    a.path = null;
+    b.path = null;
+    a.pathIdx = 0;
+    b.pathIdx = 0;
     a.aiState = 'meeting'; b.aiState = 'meeting';
     a.meetingTimer = MEETING_TIME; b.meetingTimer = MEETING_TIME;
     a.meetingPartner = b; b.meetingPartner = a;
@@ -1203,49 +1407,17 @@ export default class GameEngine {
       case 'idle':
         npc.idleTimer -= delta / 60;
         if (npc.idleTimer <= 0) {
-          const curTile = this.pathfinder.pixelToTile(npc.container.x, npc.container.y);
-          if (!this.pathfinder.isWalkable(curTile.x, curTile.y)) {
-            const near = this.pathfinder.getRandomWalkable();
-            if (near) {
-              const np = this.pathfinder.tileToPixel(near.x, near.y);
-              npc.container.x = np.x; npc.container.y = np.y;
-            }
-            npc.idleTimer = 0.5;
-            break;
-          }
-
-          const minDist = npc._failedPaths > 3 ? 2 : 6;
-          const dest = this.pathfinder.getRandomWalkableFar(curTile.x, curTile.y, minDist);
-          if (dest) {
-            const path = this.pathfinder.findPath(curTile.x, curTile.y, dest.x, dest.y);
-            if (path && path.length > 1) {
-              npc.path = path; npc.pathIdx = 1;
-              npc.aiState = 'walking'; npc._failedPaths = 0;
-              npc._stuckFrames = 0;
-              this._setNpcDir(npc);
-            } else {
-              npc._failedPaths++;
-              npc.idleTimer = 1 + Math.random() * 2;  // wait longer before retry
-            }
-          }
+          this._queueRunningPath(npc);
         }
         break;
 
       case 'walking': {
         if (!npc.path || npc.pathIdx >= npc.path.length) {
           npc.aiState = 'idle';
-          npc.idleTimer = 3 + Math.random() * 4;
+          npc.idleTimer = 0.06 + Math.random() * 0.12;
           npc._curDir = 'idle'; npc._failedPaths = 0;
           npc._stuckFrames = 0;
-          const r = Math.random();
-          if (r < 0.3 && npc.frames.phone.length) {
-            npc.sprite.textures = npc.frames.phone;
-          } else if (r < 0.5 && npc.frames.reading.length) {
-            npc.sprite.textures = npc.frames.reading;
-          } else {
-            npc.sprite.textures = npc.frames.idle;
-          }
-          npc.sprite.play();
+          this._setWorkingPauseSprite(npc, true);
           break;
         }
 
@@ -1276,12 +1448,10 @@ export default class GameEngine {
         if (npc._stuckFrames > 300) {
           npc.path = null;
           npc.aiState = 'idle';
-          npc.idleTimer = 1 + Math.random() * 2;
+          npc.idleTimer = 0.12 + Math.random() * 0.2;
           npc._stuckFrames = 0;
           npc._failedPaths++;
-          npc._curDir = 'idle';
-          npc.sprite.textures = npc.frames.idle;
-          npc.sprite.play();
+          this._setWorkingPauseSprite(npc, true);
           break;
         }
 
@@ -1300,10 +1470,9 @@ export default class GameEngine {
         if (npc.meetingTimer <= 0) {
           this._setMeetingPairCooldown(npc, npc.meetingPartner);
           this._removeBubble(npc);
-          npc.aiState = 'idle'; npc.idleTimer = 1 + Math.random() * 2;
+          npc.aiState = 'idle'; npc.idleTimer = 0.12 + Math.random() * 0.3;
           npc._curDir = 'idle'; npc._failedPaths = 0;
-          npc.sprite.textures = npc.frames.idle;
-          npc.sprite.play();
+          this._setWorkingPauseSprite(npc, true);
           npc.meetingPartner = null;
         }
         break;
@@ -1537,7 +1706,7 @@ export default class GameEngine {
     if (!agent) return false;
     if (this._guardUnsafeIds.has(agent.id)) return true;
     const latest = this._agentsById.get(agent.id) || agent;
-    return latest.status === 'waiting' || latest.status === 'error' || this._waitingAgents.has(agent.id);
+    return this._isPendingStatus(latest.status) || latest.status === 'error' || this._waitingAgents.has(agent.id);
   }
 
   _deployGuards(token) {
@@ -1719,14 +1888,14 @@ export default class GameEngine {
       if (!agentId) continue;
       if (!this._eventsByAgent.has(agentId)) this._eventsByAgent.set(agentId, []);
       this._eventsByAgent.get(agentId).push(evt);
-      if (evt.status === 'waiting') this._waitingAgents.add(agentId);
+      if (this._isPendingStatus(evt.status)) this._waitingAgents.add(agentId);
     }
   }
 
   _getAgentState(agent) {
     if (!agent) return 'offline';
-    if (agent.status === 'running') return 'working';
-    if (agent.status === 'idle')    return 'idle';
+    if (agent.status === 'working' || agent.status === 'running' || agent.status === 'idle') return 'working';
+    if (this._isPendingStatus(agent.status)) return 'pending';
     return 'offline';
   }
 
@@ -1752,7 +1921,11 @@ export default class GameEngine {
     this._events = events;
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
+    this._meetingCooldowns.clear();
+    this._clearNpcScene();
+    this._renderNpcScene(agents);
     this._syncPendingNpcStates();
+    if (this.guardEnabled) this._deployGuards(this._guardToken);
   }
 
   /** Clean up PixiJS resources. */

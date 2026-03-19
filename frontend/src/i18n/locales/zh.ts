@@ -47,7 +47,7 @@ export const zh: Translations = {
   home: {
     title: 'XSafeClaw',
     subtitle: '守护您的 Claw 安全。',
-    agentTown: 'Agent 小镇',
+    agentTown: 'Agent 办公室',
     agentTownDesc: '在一个地方管理和观察所有 AI Agent。',
     agentDashboard: 'Agent 仪表盘',
     agentDashboardDesc: '用于监控和管理 AI Agent 的仪表盘。',
@@ -57,7 +57,7 @@ export const zh: Translations = {
     title: '安全监控',
     subtitle: '实时监控 Agent 对话、任务和工具调用活动。',
     tabs: {
-      town: '小镇',
+      town: '办公室',
       agents: 'Agent',
       activities: '活动',
       skills: '技能',
@@ -147,7 +147,7 @@ export const zh: Translations = {
       sessionTrajectory: '会话轨迹',
       resolved: '已处理 ({n})',
     },
-    town: '小镇视图 — 即将推出',
+    town: '办公室视图 — 即将推出',
   },
 
   chat: {
