@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-ro
 import { useI18n } from './i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Layout from './components/Layout';
-import Home from './pages/Home';
 import Monitor from './pages/Monitor';
 import World from './pages/World';
 import Assets from './pages/Assets';
@@ -26,7 +25,6 @@ const queryClient = new QueryClient({
 type CheckState = 'pending' | 'setup' | 'configure' | 'ok';
 
 const EXEMPT_PATHS = ['/setup', '/configure'];
-const HOME_ENTRY_PATHS = ['/', '/home'];
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
@@ -53,9 +51,6 @@ function AppRoutes() {
           }
         } else {
           setCheckState('ok');
-          if (HOME_ENTRY_PATHS.includes(currentPath)) {
-            navigate('/home', { replace: true });
-          }
         }
       } catch {
         setCheckState('ok');
@@ -86,7 +81,6 @@ function AppRoutes() {
     <Routes>
       <Route path="/setup" element={<Setup />} />
       <Route path="/configure" element={<Configure />} />
-      <Route path="/home" element={<Home />} />
       <Route path="/world" element={<World />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Monitor />} />

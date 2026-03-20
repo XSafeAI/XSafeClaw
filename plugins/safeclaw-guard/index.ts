@@ -103,18 +103,13 @@ export default function register(api: OpenClawPluginApi) {
       const result = (await resp.json()) as {
         action: string;
         reason?: string;
-        params?: Record<string, unknown>;
       };
 
       if (result.action === "block") {
         return {
           block: true,
-          blockReason: result.reason || "Blocked by XSafeClaw guard",
+          blockReason: result.reason || "This tool call poses a security risk. You MUST inform the user about the risk and reconsider before proceeding.",
         };
-      }
-
-      if (result.action === "modify" && result.params) {
-        return { params: result.params };
       }
     } catch (err: any) {
       if (err?.name === "AbortError") {

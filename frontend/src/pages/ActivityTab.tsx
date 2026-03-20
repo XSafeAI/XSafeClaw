@@ -132,7 +132,7 @@ function RoleBadge({ role }: { role: string }) {
     user: 'bg-blue-500/15 text-blue-400 border-blue-500/25',
     assistant: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
     toolResult: 'bg-amber-500/15 text-amber-400 border-amber-500/25',
-    system: 'bg-purple-500/15 text-purple-400 border-purple-500/25',
+    system: 'bg-blue-500/15 text-blue-400 border-blue-500/25',
   };
   const icons: Record<string, typeof User> = { user: User, assistant: Bot, toolResult: Terminal };
   const Icon = icons[role] || Hash;
@@ -279,7 +279,7 @@ function ChatDetail({ s }: { s: SessionRow }) {
                         <span className="text-text-secondary truncate">{truncate(m.content_text, 60)}</span>
                       ) : null}
                       {m.tool_calls.map(tc => (
-                        <span key={tc.id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/20 flex-shrink-0">
+                        <span key={tc.id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-blue-500/15 text-blue-400 border border-blue-500/20 flex-shrink-0">
                           <Wrench className="w-2.5 h-2.5" />{tc.tool_name}({tc.arguments ? truncate(JSON.stringify(tc.arguments).replace(/^\{|\}$/g, '').replace(/"/g, ''), 50) : ''})
                         </span>
                       ))}
@@ -570,7 +570,7 @@ function TaskDetail({ ev }: { ev: EventRow }) {
                         <span className="text-text-secondary truncate">{truncate(tm.content_text, 60)}</span>
                       ) : null}
                       {tm.tool_calls.map(tc => (
-                        <span key={tc.id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/20 flex-shrink-0">
+                        <span key={tc.id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-blue-500/15 text-blue-400 border border-blue-500/20 flex-shrink-0">
                           <Wrench className="w-2.5 h-2.5" />{tc.tool_name}({tc.arguments ? truncate(JSON.stringify(tc.arguments).replace(/^\{|\}$/g, '').replace(/"/g, ''), 50) : ''})
                         </span>
                       ))}
@@ -900,7 +900,7 @@ export default function ActivityTab() {
                           <TD>{fmtDate(s.last_activity_at)}</TD>
                           <TD>
                             {s.current_model_name
-                              ? <span className="text-[11px] bg-purple-500/10 text-purple-400 px-1.5 py-0.5 rounded-md">{s.current_model_name}</span>
+                              ? <span className="text-[11px] bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded-md">{s.current_model_name}</span>
                               : <span className="text-text-muted">—</span>}
                           </TD>
                           <TD>{s.total_runs}</TD>

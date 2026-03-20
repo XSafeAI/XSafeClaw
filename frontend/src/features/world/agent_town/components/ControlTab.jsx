@@ -69,7 +69,7 @@ export default function ControlTab({
         </div>
 
         <div className="tc-control-description">
-          `Map_V1.tmj` now drives all three world skins. The switch below changes the rendered layer and
+          `Map_opensource.tmj` now drives all three world skins. The switch below changes the rendered layer and
           its matching collision grid so the town keeps the same navigation chain while swapping theme.
         </div>
 

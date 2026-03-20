@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, ScanSearch, MessageSquare, Sun, Moon, Languages } from 'lucide-react';
+import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages } from 'lucide-react';
 import { useI18n } from '../i18n';
 
 function useTheme() {
@@ -26,13 +26,12 @@ export default function Layout() {
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,       desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
-    { name: t.layout.safetyRehearsal, href: '/safety-rehearsal',  icon: ScanSearch,     desc: t.layout.descRehearsal },
   ];
 
   return (
     <div className="flex min-h-screen">
       {/* ===== Sidebar ===== */}
-      <aside className="w-56 flex-shrink-0 bg-surface-1 border-r border-border flex flex-col">
+      <aside className="w-56 flex-shrink-0 bg-sidebar border-r border-border flex flex-col">
         {/* Logo */}
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
           <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />

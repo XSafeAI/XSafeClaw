@@ -318,7 +318,7 @@ function getMessageTimestampValue(value) {
 
 function ToolCallBubble({ msg, helpers }) {
   const argsPreview = previewChatValue(msg.args || msg.content || '');
-  const resultPreview = previewChatValue(msg.result);
+  const resultPreview = msg.result_pending ? 'Running...' : previewChatValue(msg.result);
   const toolState = msg.result_pending
     ? 'TOOL RUNNING'
     : msg.is_error
@@ -337,12 +337,24 @@ function ToolCallBubble({ msg, helpers }) {
         </div>
         <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
       </div>
-      {argsPreview ? <div className="console-dialog-code console-dialog-code-args">{argsPreview}</div> : null}
-      {msg.result_pending ? (
-        <div className="console-dialog-code console-dialog-code-result">Running...</div>
-      ) : resultPreview ? (
-        <div className={`console-dialog-code console-dialog-code-result ${msg.is_error ? 'console-dialog-code-error' : ''}`}>{resultPreview}</div>
-      ) : null}
+      <div className="console-dialog-tool-card">
+        {argsPreview ? (
+          <div className="console-dialog-tool-section console-dialog-tool-section-call">
+            <div className="console-dialog-tool-section-head">
+              <span className="console-dialog-tool-section-tag">TOOL CALL</span>
+            </div>
+            <div className="console-dialog-code console-dialog-code-args">{argsPreview}</div>
+          </div>
+        ) : null}
+        {resultPreview ? (
+          <div className="console-dialog-tool-section console-dialog-tool-section-result">
+            <div className="console-dialog-tool-section-head">
+              <span className="console-dialog-tool-section-tag">TOOL RESULT</span>
+            </div>
+            <div className={`console-dialog-code console-dialog-code-result ${msg.is_error ? 'console-dialog-code-error' : ''}`}>{resultPreview}</div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -444,20 +456,90 @@ function buildStageTaskTimeKey(sessionId, ts) {
   return Number.isFinite(ms) ? `${sessionId}:${ms}` : `${sessionId}:${ts}`;
 }
 
-function buildStageTaskMessagesFromTraceEvent(event) {
-  return (event?.conversations || []).map((msg, index) => ({
-    message_id: `${event.event_id || 'trace'}-${index}`,
-    role: msg.role === 'tool' ? 'toolResult' : msg.role,
-    timestamp: msg.timestamp,
-    content_text: msg.content_text || msg.text || '',
-    tool_calls: Array.isArray(msg.tool_calls)
+function normalizeStageTaskMessages(messages = [], idPrefix = 'trace') {
+  const normalized = [];
+
+  const tryAttachToolResult = (text, isError) => {
+    for (let i = normalized.length - 1; i >= 0; i -= 1) {
+      const prev = normalized[i];
+      if (prev?.role !== 'tool_call') continue;
+      if (!prev.tool_result) {
+        prev.tool_result = text;
+        prev.is_error = prev.is_error || isError;
+        return true;
+      }
+      if (String(prev.tool_result) === String(text)) {
+        return true;
+      }
+      return false;
+    }
+    return false;
+  };
+
+  messages.forEach((msg, index) => {
+    if (!msg) return;
+    const role = msg.role === 'tool' ? 'toolResult' : msg.role;
+    const contentText = msg.content_text || msg.text || msg.content || '';
+
+    if ((role === 'user' || role === 'assistant' || role === 'error') && String(contentText).trim()) {
+      normalized.push({
+        message_id: msg.message_id || msg.id || `${idPrefix}-${index}`,
+        role,
+        timestamp: msg.timestamp,
+        content_text: contentText,
+      });
+    }
+
+    const toolCalls = Array.isArray(msg.tool_calls)
       ? msg.tool_calls.map((tc, toolIndex) => ({
-          id: tc.id || `${event.event_id || 'trace'}-tool-${index}-${toolIndex}`,
+          id: tc.id || `${idPrefix}-tool-${index}-${toolIndex}`,
           tool_name: tc.tool_name || 'tool-call',
           arguments: tc.arguments || null,
         }))
-      : [],
-  }));
+      : role === 'tool_call'
+        ? [{
+            id: msg.tool_id || msg.id || `${idPrefix}-tool-${index}`,
+            tool_name: msg.tool_name || 'tool-call',
+            arguments: msg.args ?? msg.arguments ?? null,
+            result: msg.result,
+            is_error: Boolean(msg.is_error),
+            result_pending: Boolean(msg.result_pending),
+          }]
+        : [];
+
+    toolCalls.forEach((toolCall, toolIndex) => {
+      normalized.push({
+        message_id: toolCall.id || `${idPrefix}-tool-${index}-${toolIndex}`,
+        role: 'tool_call',
+        timestamp: msg.timestamp,
+        tool_name: toolCall.tool_name || 'tool-call',
+        tool_arguments: toolCall.arguments ?? null,
+        tool_result: toolCall.result ?? '',
+        is_error: Boolean(toolCall.is_error),
+        result_pending: Boolean(toolCall.result_pending),
+      });
+    });
+
+    if (role === 'toolResult' && String(contentText).trim()) {
+      if (tryAttachToolResult(contentText, Boolean(msg.is_error))) return;
+      normalized.push({
+        message_id: msg.message_id || msg.id || `${idPrefix}-tool-result-${index}`,
+        role: 'tool_call',
+        timestamp: msg.timestamp,
+        tool_name: msg.tool_name || 'tool-call',
+        tool_arguments: null,
+        tool_result: contentText,
+        is_error: Boolean(msg.is_error),
+        result_pending: false,
+      });
+    }
+  });
+
+  return normalized;
+}
+
+function buildStageTaskMessagesFromTraceEvent(event) {
+  return normalizeStageTaskMessages(event?.conversations || [], event?.event_id || 'trace');
 }
 
 function stageTaskToneFromStatus(status) {
@@ -493,10 +575,11 @@ function StageTaskDetailFact({
 
 function StageTaskDetailMessage({ msg, helpers }) {
   const timestamp = helpers.fmtDate(msg.timestamp);
-  const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
   const isUser = msg.role === 'user';
   const isAssistant = msg.role === 'assistant';
-  const isToolResult = msg.role === 'toolResult';
+  const isTool = msg.role === 'tool_call';
+  const hasToolCall = msg.tool_arguments !== null && msg.tool_arguments !== undefined && msg.tool_arguments !== '';
+  const hasToolResult = msg.result_pending || (msg.tool_result !== null && msg.tool_result !== undefined && msg.tool_result !== '');
 
   return (
     <div className="tc-task-detail-entry">
@@ -510,27 +593,29 @@ function StageTaskDetailMessage({ msg, helpers }) {
         </div>
       ) : null}
 
-      {toolCalls.length > 0 ? toolCalls.map((toolCall) => (
-        <div key={toolCall.id} className="tc-task-detail-tool tc-task-detail-tool-call">
+      {isTool ? (
+        <div className={`tc-task-detail-tool ${msg.is_error ? 'tc-task-detail-tool-result' : 'tc-task-detail-tool-call'}`}>
           <div className="tc-task-detail-tool-head">
-            <span className="tc-task-detail-tool-tag">TOOL CALL</span>
-            <span className="tc-task-detail-tool-name">{toolCall.tool_name || 'tool-call'}</span>
-          </div>
-          {toolCall.arguments ? (
-            <pre className="tc-task-detail-tool-payload">{stringifyStageTaskValue(toolCall.arguments)}</pre>
-          ) : (
-            <div className="tc-task-detail-tool-empty">No call arguments captured.</div>
-          )}
-        </div>
-      )) : null}
-
-      {isToolResult ? (
-        <div className="tc-task-detail-tool tc-task-detail-tool-result">
-          <div className="tc-task-detail-tool-head">
-            <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
+            <span className="tc-task-detail-tool-tag">{msg.result_pending ? 'TOOL RUNNING' : msg.is_error ? 'TOOL ERROR' : 'TOOL'}</span>
+            <span className="tc-task-detail-tool-name">{msg.tool_name || 'tool-call'}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
-          <div className="tc-task-detail-text">{msg.content_text || 'No tool result content captured.'}</div>
+          {hasToolCall ? (
+            <>
+              <div className="tc-task-detail-tool-head">
+                <span className="tc-task-detail-tool-tag">TOOL CALL</span>
+              </div>
+              <pre className="tc-task-detail-tool-payload">{stringifyStageTaskValue(msg.tool_arguments)}</pre>
+            </>
+          ) : null}
+          {hasToolResult ? (
+            <>
+              <div className="tc-task-detail-tool-head">
+                <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
+              </div>
+              <pre className="tc-task-detail-tool-payload">{msg.result_pending ? 'Running...' : stringifyStageTaskValue(msg.tool_result)}</pre>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -643,7 +728,7 @@ export default function CrewTab({
         }
         const payload = await response.json();
         if (disposed) return;
-        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        const messages = normalizeStageTaskMessages(Array.isArray(payload.messages) ? payload.messages : [], selectedLedgerTask.task.id);
         setDetailEventData(payload);
         setDetailMessages(messages.length ? messages : fallbackMessages);
       } catch (err) {
@@ -816,25 +901,7 @@ export default function CrewTab({
                         </button>
                       </div>
                     </div>
-                  </div>
-                  <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
-                    {(currentAgent.status || 'offline').toUpperCase()}
-                  </div>
-                </div>
-
-                <div className="tc-stage-summary-grid">
-                  <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
-                  <SummaryTile label="Pending" value={currentSummary.pending} tone="tc-summary-warn" />
-                  <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
-                  <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-bad" />
-                </div>
-
-                <div className="tc-stage-info-cards">
-                  <section className="tc-stage-info-card tc-stage-info-card-wide">
-                    <div className="tc-stage-info-card-head">
-                      <div className="tc-stage-info-card-title">IDENTITY &amp; BINDING</div>
-                    </div>
-                    <div className="tc-stage-meta-strip">
+                    <div className="tc-stage-meta-strip tc-stage-meta-strip-top">
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">Provider</span>
                         <span className="tc-stage-meta-pill-value">{currentAgent.provider || 'unknown'}</span>
@@ -852,12 +919,22 @@ export default function CrewTab({
                         <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{String(currentAgent.human_interventions_total ?? 0)}</span>
                       </div>
                     </div>
-                  </section>
-
-                  <SessionHeatCard
-                    bins={currentAgent.activity_heat_24h}
-                  />
+                  </div>
+                  <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
+                    {(currentAgent.status || 'offline').toUpperCase()}
+                  </div>
                 </div>
+
+                <div className="tc-stage-summary-grid">
+                  <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
+                  <SummaryTile label="Pending" value={currentSummary.pending} tone="tc-summary-warn" />
+                  <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
+                  <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-bad" />
+                </div>
+
+                <SessionHeatCard
+                  bins={currentAgent.activity_heat_24h}
+                />
               </div>
             </div>
           </section>
@@ -872,10 +949,11 @@ export default function CrewTab({
                   ) : (
                     currentEvents.slice(0, 5).map((event) => {
                       const statusMeta = taskStatusMeta[event.status] || taskStatusMeta.running;
-                      const traceEvent = currentTraceEventIndex[buildStageTaskTimeKey(currentAgent?.id, event.start_time)] || null;
+                      const traceEvent = currentTraceEventIndex[buildStageTaskTimeKey(currentAgent?.id, event.started_at)] || null;
+                      const snippet = helpers.pickEventSnippet(traceEvent) || event.error_message || 'Awaiting operator review.';
                       return (
                         <button
-                          key={event.event_id}
+                          key={event.id}
                           type="button"
                           className={`tc-ledger-item tc-ledger-item-button tc-ledger-item-${event.status || 'running'} ${selectedLedgerTask?.task?.id === event.id ? 'tc-ledger-item-selected' : ''}`}
                           onClick={() => setSelectedLedgerTask({
@@ -886,10 +964,10 @@ export default function CrewTab({
                         >
                           <div className="tc-ledger-row">
                             <span className={`tc-ledger-badge ${statusMeta.className}`}>{statusMeta.label}</span>
-                            <span className="tc-ledger-time">{helpers.fmtDate(event.start_time)}</span>
+                            <span className="tc-ledger-time">{helpers.fmtDate(event.started_at)}</span>
                           </div>
-                          <div className="tc-ledger-title">{event.event_type || 'chat'}</div>
-                          <div className="tc-ledger-note">{helpers.pickEventSnippet(event) || 'Awaiting operator review.'}</div>
+                          <div className="tc-ledger-title">{traceEvent?.event_type || 'chat'}</div>
+                          <div className="tc-ledger-note">{snippet}</div>
                         </button>
                       );
                     })

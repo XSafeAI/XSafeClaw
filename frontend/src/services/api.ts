@@ -208,14 +208,10 @@ export const guardAPI = {
       resolved: boolean;
       resolution: string;
       resolved_at: number;
-      modified_params: Record<string, any> | null;
     }[]>('/guard/pending', { params: resolved !== undefined ? { resolved } : {} }),
 
-  resolve: (pendingId: string, resolution: string, modifiedParams?: Record<string, any>) =>
-    api.post(`/guard/pending/${pendingId}/resolve`, {
-      resolution,
-      modified_params: modifiedParams ?? null,
-    }),
+  resolve: (pendingId: string, resolution: string) =>
+    api.post(`/guard/pending/${pendingId}/resolve`, { resolution }),
 
   status: () => api.get('/guard/status'),
 

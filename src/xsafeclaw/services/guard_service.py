@@ -13,7 +13,7 @@ Also provides **real-time tool-call guard** via the ``check_tool_call``
 API.  When the guard model deems a tool call *unsafe*, the call is held
 in a pending-approval queue.  The OpenClaw ``before_tool_call`` plugin
 long-polls the ``/guard/tool-check`` endpoint until a human resolves the
-pending item (approve / reject / modify params).
+pending item (approve / reject).
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ import json
 import re
 import time
 import uuid
+
+GUARD_REJECTION_MARKER = "rejected by the safety reviewer"
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -588,9 +590,8 @@ class PendingApproval:
     real_world_harm: str | None = None
     created_at: float = 0.0
     resolved: bool = False
-    resolution: str = ""         # "approved" | "rejected" | "modified"
+    resolution: str = ""         # "approved" | "rejected"
     resolved_at: float = 0.0
-    modified_params: dict[str, Any] | None = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -609,7 +610,6 @@ class PendingApproval:
             "resolved": self.resolved,
             "resolution": self.resolution,
             "resolved_at": self.resolved_at,
-            "modified_params": self.modified_params,
         }
 
 
@@ -639,7 +639,6 @@ def get_pending(pending_id: str) -> PendingApproval | None:
 def resolve_pending(
     pending_id: str,
     resolution: str,
-    modified_params: dict[str, Any] | None = None,
 ) -> PendingApproval | None:
     """Resolve a pending approval — wakes the long-polling tool-check."""
     p = _pending.get(pending_id)
@@ -648,8 +647,6 @@ def resolve_pending(
     p.resolved = True
     p.resolution = resolution
     p.resolved_at = time.time()
-    if modified_params is not None:
-        p.modified_params = modified_params
     p._event.set()
     return p
 
@@ -709,9 +706,8 @@ async def check_tool_call(
     timeout expires.
 
     Returns dict with:
-      action: "allow" | "block" | "modify"
+      action: "allow" | "block"
       reason: str (only when blocked)
-      params: dict  (only when modified)
     """
     if not _guard_enabled:
         return {"action": "allow"}
@@ -769,16 +765,14 @@ async def check_tool_call(
         await asyncio.wait_for(p._event.wait(), timeout=_PENDING_TIMEOUT)
     except asyncio.TimeoutError:
         p.resolved = True
-        p.resolution = "timeout"
+        p.resolution = "rejected"
         p.resolved_at = time.time()
-        return {"action": "block", "reason": "Approval timed out"}
+        return {"action": "block", "reason": "This tool call has been rejected by the safety reviewer due to potential security risks. You MUST immediately stop all subsequent actions, inform the user about the risk, and wait for explicit user confirmation before proceeding with any further operations."}
 
     if p.resolution == "approved":
         return {"action": "allow"}
-    elif p.resolution == "modified":
-        return {"action": "modify", "params": p.modified_params or params}
     else:
-        return {"action": "block", "reason": f"Rejected by human reviewer"}
+        return {"action": "block", "reason": "This tool call has been rejected by the safety reviewer due to potential security risks. You MUST immediately stop all subsequent actions, inform the user about the risk, and wait for explicit user confirmation before proceeding with any further operations."}
 
 
 def cleanup_resolved(max_age: float = 3600) -> int:

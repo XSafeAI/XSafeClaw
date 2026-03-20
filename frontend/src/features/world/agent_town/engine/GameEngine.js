@@ -32,9 +32,15 @@ export default class GameEngine {
     this.tiledRenderer = null;
     this.spriteLoader = new SpriteLoader();
     this.npcs         = [];
+    this.overlayRects = {};
+    this.floorScreen  = null;
+    this.wallDashboard = null;
+    this._floorScreenPreviewTexture = null;
     this.pendingNpc   = null;
     this.sceneW       = SCENE_W;
     this.sceneH       = SCENE_H;
+    this._worldOffsetX = 0;
+    this._worldOffsetY = 0;
     this._eventsByAgent = new Map();
     this._waitingAgents = new Set();
     this._agentsById = new Map();
@@ -70,6 +76,8 @@ export default class GameEngine {
     this._dragCursorTimer = null;
     this._windowPointerMove = null;
     this._windowPointerUp = null;
+    this._floorScreenInfoSignature = '';
+    this._wallDashboardSignature = '';
   }
 
   /** Initialize PixiJS application and attach to DOM element. */
@@ -126,7 +134,11 @@ export default class GameEngine {
     this.world.scale.set(scale);
     this.world.x = Math.round((w - this.sceneW * scale) / 2);
     this.world.y = Math.round((h - this.sceneH * scale) / 2);
-    this.onLayoutChange?.({ sceneW: this.sceneW, sceneH: this.sceneH });
+    this.onLayoutChange?.({
+      sceneW: this.sceneW,
+      sceneH: this.sceneH,
+      overlayRects: this.overlayRects,
+    });
   }
 
   /** Load sprites + map. onProgress(0-1, label). */
@@ -154,13 +166,59 @@ export default class GameEngine {
           renderMode: this.mapConfig?.renderMode,
         });
         await this.tiledRenderer.loadTilesets(TILED_BASE_PATH, mapUrl);
+        this._floorScreenPreviewTexture = null;
+        const screenPreviewAsset = this.mapConfig?.screenPreviewImage || this.mapConfig?.previewImage || '';
+        if (screenPreviewAsset) {
+          try {
+            this._floorScreenPreviewTexture = await PIXI.Assets.load(screenPreviewAsset);
+            this._floorScreenPreviewTexture.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
+          } catch (_) {
+            this._floorScreenPreviewTexture = null;
+          }
+        }
 
         const contentBounds = this.tiledRenderer.getContentBounds();
+        const screenBounds = this.mapConfig?.screenLayerName
+          ? this.tiledRenderer.getNamedLayerPixelBounds(this.mapConfig.screenLayerName)
+          : null;
+        const dashboardRegions = this.mapConfig?.dashboardLayerName
+          ? this.tiledRenderer.getNamedLayerPixelRegions(this.mapConfig.dashboardLayerName)
+          : [];
+        const showBounds = this.mapConfig?.showLayerName
+          ? this.tiledRenderer.getNamedLayerPixelBounds(this.mapConfig.showLayerName)
+          : null;
 
         this.sceneW = contentBounds.pixelW;
         this.sceneH = contentBounds.pixelH;
         this._worldOffsetX = -contentBounds.pixelX;
         this._worldOffsetY = -contentBounds.pixelY;
+        this.overlayRects = {
+          ...(screenBounds ? {
+            screen: {
+              x: screenBounds.pixelX - contentBounds.pixelX,
+              y: screenBounds.pixelY - contentBounds.pixelY,
+              w: screenBounds.pixelW,
+              h: screenBounds.pixelH,
+            },
+          } : {}),
+          ...(dashboardRegions.length ? {
+            dashboardPanels: dashboardRegions.map((region) => ({
+              x: region.pixelX - contentBounds.pixelX,
+              y: region.pixelY - contentBounds.pixelY,
+              w: region.pixelW,
+              h: region.pixelH,
+              tileCount: region.tileCount,
+            })),
+          } : {}),
+          ...(showBounds ? {
+            show: {
+              x: showBounds.pixelX - contentBounds.pixelX,
+              y: showBounds.pixelY - contentBounds.pixelY,
+              w: showBounds.pixelW,
+              h: showBounds.pixelH,
+            },
+          } : {}),
+        };
 
         const mapContainer = this.tiledRenderer.render();
         this.world.addChild(mapContainer);
@@ -177,6 +235,8 @@ export default class GameEngine {
         this.guardLayer.y = this._worldOffsetY;
         this.guardFxLayer.x = this._worldOffsetX;
         this.guardFxLayer.y = this._worldOffsetY;
+        this._createFloorScreenOverlay(this.overlayRects.screen || null);
+        this._createWallDashboardOverlay(this.overlayRects.dashboardPanels || []);
 
         console.log(
           `Map loaded: ${this.tiledRenderer.mapW}×${this.tiledRenderer.mapH} tiles, ` +
@@ -190,6 +250,8 @@ export default class GameEngine {
 
     // Fallback: static image
     if (!this.tiledRenderer) {
+      this._destroyFloorScreenOverlay();
+      this._destroyWallDashboardOverlay();
       try {
         const bgTex = await PIXI.Assets.load(SCENE_IMAGE_URL);
         bgTex.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
@@ -207,6 +269,1438 @@ export default class GameEngine {
     await this._loadGuardAssets();
     this._resize();
     onProgress?.(1, 'Ready');
+  }
+
+  getMapScreenTelemetry() {
+    const offsetX = this._worldOffsetX || 0;
+    const offsetY = this._worldOffsetY || 0;
+    const agentSummary = this._summarizeFloorScreenAgents();
+    const taskSummary = this._summarizeFloorScreenTasks();
+    const npcMarkers = this.npcs
+      .filter((npc) => npc?.container && Number.isFinite(npc.container.x) && Number.isFinite(npc.container.y))
+      .map((npc, index) => ({
+        ...(npc.agent?.id ? {
+          _rawStatus: String((this._agentsById.get(npc.agent.id) || npc.agent || {}).status || '').toLowerCase(),
+        } : {}),
+        id: npc.agent?.id || npc.charName || `npc-${index}`,
+        x: npc.container.x + offsetX,
+        y: npc.container.y + offsetY,
+        kind: (() => {
+          const latest = this._agentsById.get(npc.agent?.id) || npc.agent || {};
+          const rawStatus = String(latest.status || '').toLowerCase();
+          return rawStatus === 'idle' ? 'idle' : 'active';
+        })(),
+      }));
+
+    const pendingMarkers = this.pendingNpc?.container
+      && Number.isFinite(this.pendingNpc.container.x)
+      && Number.isFinite(this.pendingNpc.container.y)
+      ? [{
+          id: 'pending-review',
+          x: this.pendingNpc.container.x + offsetX,
+          y: this.pendingNpc.container.y + offsetY,
+          kind: 'pending',
+        }]
+      : [];
+
+    return {
+      sceneW: this.sceneW,
+      sceneH: this.sceneH,
+      agentCount: agentSummary.total,
+      workingCount: agentSummary.working,
+      pendingCount: agentSummary.pending,
+      offlineCount: agentSummary.offline,
+      taskSummary,
+      markers: [...npcMarkers, ...pendingMarkers],
+    };
+  }
+
+  _destroyFloorScreenOverlay() {
+    this._floorScreenInfoSignature = '';
+    const container = this.floorScreen?.container;
+    if (container) {
+      container.parent?.removeChild(container);
+      container.destroy({ children: true });
+    }
+    this.floorScreen = null;
+  }
+
+  _destroyWallDashboardOverlay() {
+    this._wallDashboardSignature = '';
+    const container = this.wallDashboard?.container;
+    if (container) {
+      container.parent?.removeChild(container);
+      container.destroy({ children: true });
+    }
+    this.wallDashboard = null;
+  }
+
+  _summarizeFloorScreenAgents() {
+    return (this._agents || []).reduce((summary, agent) => {
+      if (!agent) return summary;
+      summary.total += 1;
+      if (this._isPendingApproval(agent)) {
+        summary.pending += 1;
+      } else if (this._isRunningStatus(agent.status)) {
+        summary.working += 1;
+      } else {
+        summary.offline += 1;
+      }
+      return summary;
+    }, {
+      total: 0,
+      working: 0,
+      pending: 0,
+      offline: 0,
+    });
+  }
+
+  _summarizeFloorScreenTasks() {
+    return (this._events || []).reduce((summary, event) => {
+      const status = String(event?.status || '').toLowerCase();
+      if (status === 'ok' || status === 'completed') summary.completed += 1;
+      else if (status === 'error' || status === 'failed') summary.failed += 1;
+      else if (status === 'pending' || status === 'waiting' || status === 'warning') summary.pending += 1;
+      else summary.running += 1;
+      return summary;
+    }, {
+      running: 0,
+      pending: 0,
+      completed: 0,
+      failed: 0,
+    });
+  }
+
+  _getDashboardStatusMeta(agent) {
+    const latest = this._agentsById.get(agent?.id) || agent || {};
+    if (agent && this._isPendingApproval(agent)) {
+      return { id: 'pending', label: 'PENDING', fill: 0xff6677, glow: 0xffc1cb };
+    }
+    if (this._isRunningStatus(latest.status)) {
+      return { id: 'live', label: 'LIVE', fill: 0x86ecff, glow: 0xd9fbff };
+    }
+    return { id: 'idle', label: 'IDLE', fill: 0xc7d6df, glow: 0xf4f8fb };
+  }
+
+  _truncateDashboardText(value, maxLength = 56) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    return text.length > maxLength
+      ? `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`
+      : text;
+  }
+
+  _formatDashboardTime(value) {
+    if (!value) return '--:--';
+    try {
+      return new Date(value).toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+    } catch {
+      return '--:--';
+    }
+  }
+
+  _shortDashboardAgentId(value, maxLength = 10) {
+    const raw = String(value || '')
+      .replace(/^agent:main:/, '')
+      .replace(/^chat-/, '')
+      .trim();
+    if (!raw) return 'AGENT';
+    if (raw.length <= maxLength) return raw.toUpperCase();
+    return `${raw.slice(0, 4)}-${raw.slice(-4)}`.toUpperCase();
+  }
+
+  _getDashboardSafeRect(
+    rect,
+    {
+      leftRatio = 0.09,
+      rightRatio = 0.09,
+      topRatio = 0.16,
+      bottomRatio = 0.22,
+      minLeft = 18,
+      minRight = 18,
+      minTop = 16,
+      minBottom = 18,
+    } = {}
+  ) {
+    const insetLeft = Math.max(minLeft, Math.round(rect.w * leftRatio));
+    const insetRight = Math.max(minRight, Math.round(rect.w * rightRatio));
+    const insetTop = Math.max(minTop, Math.round(rect.h * topRatio));
+    const insetBottom = Math.max(minBottom, Math.round(rect.h * bottomRatio));
+    return {
+      x: rect.x + insetLeft,
+      y: rect.y + insetTop,
+      w: Math.max(96, rect.w - insetLeft - insetRight),
+      h: Math.max(72, rect.h - insetTop - insetBottom),
+    };
+  }
+
+  _getDashboardAgentEntries() {
+    const priority = { pending: 3, live: 2, idle: 1 };
+
+    return (this._agents || [])
+      .map((agent, index) => {
+        const latest = this._agentsById.get(agent?.id) || agent || {};
+        const latestEvent = this._getLatestEvent(agent) || null;
+        const statusMeta = this._getDashboardStatusMeta(agent);
+        const liveNpc = this.npcs.find((npc) => npc?.agent?.id === agent?.id);
+        const charName = liveNpc?.charName || CHAR_NAMES[index % Math.max(1, CHAR_NAMES.length)];
+        const agentId = agent?.id || `agent-${index}`;
+
+        return {
+          id: agentId,
+          idLabel: this._shortDashboardAgentId(agentId),
+          charName,
+          statusMeta,
+          lastActiveAt: latestEvent?.start_time || latest.first_seen_at || '',
+        };
+      })
+      .sort((a, b) => {
+        const priorityDiff = (priority[b.statusMeta.id] || 0) - (priority[a.statusMeta.id] || 0);
+        if (priorityDiff) return priorityDiff;
+        return new Date(b.lastActiveAt || 0).getTime() - new Date(a.lastActiveAt || 0).getTime();
+      });
+  }
+
+  _getDashboard24hActivity(nowMs = Date.now()) {
+    const hourMs = 60 * 60 * 1000;
+    const buckets = Array.from({ length: 24 }, (_, index) => ({
+      index,
+      running: 0,
+      pending: 0,
+      completed: 0,
+      failed: 0,
+      total: 0,
+    }));
+    const totals = {
+      running: 0,
+      pending: 0,
+      completed: 0,
+      failed: 0,
+    };
+
+    for (const event of this._events || []) {
+      const timeValue = event?.start_time || event?.created_at || event?.updated_at || event?.end_time;
+      const timeMs = timeValue ? new Date(timeValue).getTime() : NaN;
+      if (!Number.isFinite(timeMs)) continue;
+
+      const diffHours = Math.floor((nowMs - timeMs) / hourMs);
+      if (diffHours < 0 || diffHours >= 24) continue;
+
+      const bucketIndex = 23 - diffHours;
+      const status = String(event?.status || '').toLowerCase();
+      const key = (status === 'pending' || status === 'waiting' || status === 'warning')
+        ? 'pending'
+        : (status === 'ok' || status === 'completed')
+          ? 'completed'
+          : (status === 'error' || status === 'failed')
+            ? 'failed'
+            : 'running';
+
+      buckets[bucketIndex][key] += 1;
+      buckets[bucketIndex].total += 1;
+      totals[key] += 1;
+    }
+
+    return {
+      buckets,
+      totals,
+      maxTotal: Math.max(1, ...buckets.map((bucket) => bucket.total)),
+    };
+  }
+
+  _drawSmoothDashboardCurve(graphics, points, baselineY, closePath = false) {
+    if (!points.length) return;
+
+    const first = points[0];
+    if (closePath) {
+      graphics.moveTo(first.x, baselineY);
+      graphics.lineTo(first.x, first.y);
+    } else {
+      graphics.moveTo(first.x, first.y);
+    }
+
+    if (points.length === 1) {
+      if (closePath) {
+        graphics.lineTo(first.x, baselineY);
+        graphics.lineTo(first.x, baselineY);
+      }
+      return;
+    }
+
+    for (let index = 1; index < points.length - 1; index += 1) {
+      const current = points[index];
+      const next = points[index + 1];
+      const midX = (current.x + next.x) / 2;
+      const midY = (current.y + next.y) / 2;
+      graphics.quadraticCurveTo(current.x, current.y, midX, midY);
+    }
+
+    const prev = points[points.length - 2];
+    const last = points[points.length - 1];
+    graphics.quadraticCurveTo(prev.x, prev.y, last.x, last.y);
+
+    if (closePath) {
+      graphics.lineTo(last.x, baselineY);
+      graphics.lineTo(first.x, baselineY);
+    }
+  }
+
+  _createWallDashboardOverlay(panelRects = []) {
+    this._destroyWallDashboardOverlay();
+    if (!this.world || !Array.isArray(panelRects) || panelRects.length < 2) return;
+
+    const sortedPanels = [...panelRects].sort((a, b) => a.x - b.x);
+    const leftRect = this._getDashboardSafeRect(sortedPanels[0], {
+      leftRatio: 0.06,
+      rightRatio: 0.06,
+      topRatio: 0.18,
+      bottomRatio: 0.2,
+      minLeft: 14,
+      minRight: 14,
+      minTop: 18,
+      minBottom: 20,
+    });
+    const rightRect = this._getDashboardSafeRect(sortedPanels[1], {
+      leftRatio: 0.045,
+      rightRatio: 0.045,
+      topRatio: 0.15,
+      bottomRatio: 0.17,
+      minLeft: 16,
+      minRight: 16,
+      minTop: 14,
+      minBottom: 16,
+    });
+    const container = new PIXI.Container();
+    container.zIndex = 44;
+    container.sortableChildren = true;
+    container.eventMode = 'none';
+
+    const createPanelShell = (rect, railFill = 0x6acfff) => {
+      const root = new PIXI.Container();
+      root.x = rect.x;
+      root.y = rect.y;
+      root.eventMode = 'none';
+
+      const surface = new PIXI.Graphics();
+      surface.beginFill(0x03070a, 0.78);
+      surface.drawRect(0, 0, rect.w, rect.h);
+      surface.endFill();
+      root.addChild(surface);
+
+      const gloss = new PIXI.Graphics();
+      gloss.beginFill(0xffffff, 0.025);
+      gloss.drawRect(0, 0, rect.w, Math.max(10, Math.round(rect.h * 0.12)));
+      gloss.endFill();
+      root.addChild(gloss);
+
+      const rail = new PIXI.Graphics();
+      rail.beginFill(railFill, 0.72);
+      rail.drawRect(0, 0, rect.w, 1.5);
+      rail.endFill();
+      root.addChild(rail);
+
+      const footerRail = new PIXI.Graphics();
+      footerRail.beginFill(railFill, 0.16);
+      footerRail.drawRect(0, rect.h - 1.5, rect.w, 1.5);
+      footerRail.endFill();
+      root.addChild(footerRail);
+
+      const scanlines = new PIXI.Graphics();
+      scanlines.beginFill(0xffffff, 0.014);
+      for (let y = 4; y < rect.h; y += 6) {
+        scanlines.drawRect(0, y, rect.w, 1);
+      }
+      scanlines.endFill();
+      root.addChild(scanlines);
+
+      const frame = new PIXI.Graphics();
+      frame.lineStyle(1, 0xcfefff, 0.06);
+      frame.drawRect(0.5, 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+      const cornerW = Math.max(18, Math.round(rect.w * 0.16));
+      const cornerH = Math.max(10, Math.round(rect.h * 0.14));
+      frame.moveTo(8, 8);
+      frame.lineTo(8 + cornerW, 8);
+      frame.moveTo(8, 8);
+      frame.lineTo(8, 8 + cornerH);
+      frame.moveTo(rect.w - 8, 8);
+      frame.lineTo(rect.w - 8 - cornerW, 8);
+      frame.moveTo(rect.w - 8, 8);
+      frame.lineTo(rect.w - 8, 8 + cornerH);
+      frame.moveTo(8, rect.h - 8);
+      frame.lineTo(8 + cornerW, rect.h - 8);
+      frame.moveTo(8, rect.h - 8);
+      frame.lineTo(8, rect.h - 8 - cornerH);
+      frame.moveTo(rect.w - 8, rect.h - 8);
+      frame.lineTo(rect.w - 8 - cornerW, rect.h - 8);
+      frame.moveTo(rect.w - 8, rect.h - 8);
+      frame.lineTo(rect.w - 8, rect.h - 8 - cornerH);
+      root.addChild(frame);
+
+      const modules = new PIXI.Graphics();
+      modules.beginFill(railFill, 0.14);
+      modules.drawRect(12, 10, Math.max(18, Math.round(rect.w * 0.16)), 3);
+      modules.drawRect(12, 16, Math.max(10, Math.round(rect.w * 0.07)), 2);
+      modules.drawRect(rect.w - Math.max(18, Math.round(rect.w * 0.15)) - 12, 10, Math.max(18, Math.round(rect.w * 0.15)), 3);
+      modules.drawRect(rect.w - Math.max(12, Math.round(rect.w * 0.08)) - 12, rect.h - 14, Math.max(12, Math.round(rect.w * 0.08)), 2);
+      modules.endFill();
+      root.addChild(modules);
+
+      container.addChild(root);
+      return root;
+    };
+
+    const leftRoot = createPanelShell(leftRect, 0x86ecff);
+    const rightRoot = createPanelShell(rightRect, 0xff9f6e);
+
+    const leftStatusBg = new PIXI.Graphics();
+    leftRoot.addChild(leftStatusBg);
+
+    const leftStatusText = new PIXI.Text('IDLE', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: 10,
+      fill: 0xeef8ff,
+      letterSpacing: 0.6,
+    }));
+    leftStatusText.roundPixels = true;
+    leftRoot.addChild(leftStatusText);
+
+    const avatarAreaW = Math.max(108, Math.round(leftRect.w * 0.46));
+    const avatarBaseY = leftRect.h - 6;
+    const avatarGlow = new PIXI.Graphics();
+    avatarGlow.beginFill(0x86ecff, 0.12);
+    avatarGlow.drawEllipse(Math.round(avatarAreaW * 0.5), avatarBaseY - 2, Math.round(avatarAreaW * 0.28), 8);
+    avatarGlow.endFill();
+    leftRoot.addChild(avatarGlow);
+
+    const defaultFrames = this.spriteLoader.charFrames[CHAR_NAMES[0]]?.idle || [PIXI.Texture.WHITE];
+    const avatar = new PIXI.AnimatedSprite(defaultFrames.length ? defaultFrames : [PIXI.Texture.WHITE]);
+    avatar.anchor.set(0.5, 1);
+    avatar.x = Math.round(avatarAreaW * 0.5);
+    avatar.y = avatarBaseY;
+    avatar.scale.set(Math.max(1.9, Math.min(2.45, (leftRect.h * 0.9) / FH)));
+    avatar.animationSpeed = 0.09;
+    avatar.play();
+    leftRoot.addChild(avatar);
+
+    const textX = avatarAreaW + 10;
+    const textW = Math.max(110, leftRect.w - textX - 10);
+
+    const leftId = new PIXI.Text('ID // AGENT', new PIXI.TextStyle({
+      fontFamily: 'Arial, sans-serif',
+      fontSize: 17,
+      fill: 0xf7fbff,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+      wordWrap: true,
+      breakWords: true,
+      wordWrapWidth: textW,
+    }));
+    leftId.x = textX;
+    leftId.y = 46;
+    leftId.roundPixels = true;
+    leftRoot.addChild(leftId);
+
+    const rightHeader = new PIXI.Text('TASK ACTIVITY', new PIXI.TextStyle({
+      fontFamily: 'Arial, sans-serif',
+      fontSize: 18,
+      fill: 0xf5fbff,
+      fontWeight: '700',
+      letterSpacing: 1.1,
+    }));
+    rightHeader.x = 14;
+    rightHeader.y = 14;
+    rightHeader.roundPixels = true;
+    rightRoot.addChild(rightHeader);
+
+    const rightSub = new PIXI.Text('ALL TASKS · LAST 24H', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: 8,
+      fill: 0x90d4e7,
+      letterSpacing: 0.45,
+    }));
+    rightSub.x = 14;
+    rightSub.y = 36;
+    rightSub.roundPixels = true;
+    rightRoot.addChild(rightSub);
+
+    const chartRect = {
+      x: 12,
+      y: 58,
+      w: Math.max(208, rightRect.w - 24),
+      h: Math.max(72, rightRect.h - 72),
+    };
+
+    const chartShell = new PIXI.Graphics();
+    chartShell.beginFill(0x040b0f, 0.42);
+    chartShell.drawRect(chartRect.x, chartRect.y, chartRect.w, chartRect.h);
+    chartShell.endFill();
+    chartShell.lineStyle(1, 0xcfefff, 0.06);
+    chartShell.drawRect(chartRect.x + 0.5, chartRect.y + 0.5, Math.max(0, chartRect.w - 1), Math.max(0, chartRect.h - 1));
+    chartShell.beginFill(0x86ecff, 0.1);
+    chartShell.drawRect(chartRect.x + 10, chartRect.y + 10, Math.max(12, Math.round(chartRect.w * 0.12)), 3);
+    chartShell.drawRect(chartRect.x + 10, chartRect.y + 16, Math.max(8, Math.round(chartRect.w * 0.06)), 2);
+    chartShell.endFill();
+    rightRoot.addChild(chartShell);
+
+    const chartGrid = new PIXI.Graphics();
+    chartGrid.x = chartRect.x;
+    chartGrid.y = chartRect.y;
+    rightRoot.addChild(chartGrid);
+
+    const chartBars = new PIXI.Graphics();
+    chartBars.x = chartRect.x;
+    chartBars.y = chartRect.y;
+    rightRoot.addChild(chartBars);
+
+    const chartLine = new PIXI.Graphics();
+    chartLine.x = chartRect.x;
+    chartLine.y = chartRect.y;
+    rightRoot.addChild(chartLine);
+
+    const emptyText = new PIXI.Text('Awaiting task signal', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: 10,
+      fill: 0xb6c8d6,
+      letterSpacing: 0.5,
+    }));
+    emptyText.anchor.set(0.5);
+    emptyText.x = chartRect.x + chartRect.w / 2;
+    emptyText.y = chartRect.y + chartRect.h / 2;
+    emptyText.roundPixels = true;
+    rightRoot.addChild(emptyText);
+
+    this.wallDashboard = {
+      container,
+      rotationMs: 4200,
+      left: {
+        rect: leftRect,
+        statusBg: leftStatusBg,
+        statusText: leftStatusText,
+        avatar,
+        avatarBaseY,
+        idText: leftId,
+        currentAgentId: '',
+      },
+      right: {
+        chartRect,
+        chartGrid,
+        chartBars,
+        chartLine,
+        emptyText,
+      },
+    };
+
+    this.world.addChild(container);
+    this._syncWallDashboardOverlay(performance.now());
+  }
+
+  _syncWallDashboardOverlay(now = performance.now()) {
+    if (!this.wallDashboard) return;
+
+    const dashboard = this.wallDashboard;
+    const left = dashboard.left;
+    const right = dashboard.right;
+    const agentEntries = this._getDashboardAgentEntries();
+    const rotationIndex = agentEntries.length
+      ? Math.floor(now / (dashboard.rotationMs || 4200)) % agentEntries.length
+      : 0;
+    const featured = agentEntries[rotationIndex] || null;
+    const activity = this._getDashboard24hActivity(Date.now());
+    const activitySignature = JSON.stringify({
+      buckets: activity.buckets.map((bucket) => [bucket.running, bucket.pending, bucket.completed, bucket.failed]),
+      totals: activity.totals,
+    });
+
+    if (featured) {
+      if (left.currentAgentId !== featured.id) {
+        const charFrames = this.spriteLoader.charFrames[featured.charName] || {};
+        const textures = featured.statusMeta.id === 'live'
+          ? (charFrames.front?.length ? charFrames.front : (charFrames.idle || []))
+          : (charFrames.idle?.length ? charFrames.idle : (charFrames.front || []));
+        if (textures.length) {
+          left.avatar.textures = textures;
+          left.avatar.animationSpeed = featured.statusMeta.id === 'live' ? 0.13 : 0.08;
+          left.avatar.play();
+        }
+        left.currentAgentId = featured.id;
+      }
+
+      left.idText.text = `ID // ${featured.idLabel}`;
+      left.statusText.text = featured.statusMeta.label;
+      left.avatar.alpha = featured.statusMeta.id === 'idle' ? 0.72 : 0.96;
+      left.statusText.style.fill = featured.statusMeta.glow;
+
+      left.statusBg.clear();
+      const chipX = left.idText.x;
+      const chipY = left.idText.y + left.idText.height + 12;
+      const chipW = left.statusText.width + 26;
+      const chipH = left.statusText.height + 12;
+      left.statusBg.beginFill(0x071016, 0.5);
+      left.statusBg.drawRect(chipX, chipY, chipW, chipH);
+      left.statusBg.endFill();
+      left.statusBg.beginFill(featured.statusMeta.fill, 0.92);
+      left.statusBg.drawRect(chipX, chipY, 5, chipH);
+      left.statusBg.endFill();
+      left.statusBg.lineStyle(1, featured.statusMeta.fill, 0.22);
+      left.statusBg.drawRect(chipX + 0.5, chipY + 0.5, Math.max(0, chipW - 1), Math.max(0, chipH - 1));
+      left.statusText.x = chipX + 14;
+      left.statusText.y = chipY + 6;
+    } else {
+      left.idText.text = 'ID // AGENT';
+      left.statusText.text = 'IDLE';
+      left.avatar.alpha = 0.3;
+      left.statusText.style.fill = 0xf1f6fa;
+      left.statusBg.clear();
+      const chipX = left.idText.x;
+      const chipY = left.idText.y + left.idText.height + 12;
+      const chipW = left.statusText.width + 26;
+      const chipH = left.statusText.height + 12;
+      left.statusBg.beginFill(0x071016, 0.5);
+      left.statusBg.drawRect(chipX, chipY, chipW, chipH);
+      left.statusBg.endFill();
+      left.statusBg.beginFill(0xc7d6df, 0.92);
+      left.statusBg.drawRect(chipX, chipY, 5, chipH);
+      left.statusBg.endFill();
+      left.statusBg.lineStyle(1, 0xc7d6df, 0.22);
+      left.statusBg.drawRect(chipX + 0.5, chipY + 0.5, Math.max(0, chipW - 1), Math.max(0, chipH - 1));
+      left.statusText.x = chipX + 14;
+      left.statusText.y = chipY + 6;
+    }
+
+    left.avatar.y = left.avatarBaseY + Math.sin(now / 420) * 1.8;
+
+    if (activitySignature !== this._wallDashboardSignature) {
+      this._wallDashboardSignature = activitySignature;
+
+      right.chartGrid.clear();
+      right.chartGrid.lineStyle(1, 0xcfefff, 0.05);
+      for (let row = 0; row <= 2; row += 1) {
+        const y = Math.round((right.chartRect.h / 2) * row);
+        right.chartGrid.moveTo(0, y);
+        right.chartGrid.lineTo(right.chartRect.w, y);
+      }
+      right.chartGrid.lineStyle(1, 0x86ecff, 0.035);
+      for (let col = 0; col <= 4; col += 1) {
+        const x = Math.round((right.chartRect.w / 4) * col);
+        right.chartGrid.moveTo(x, 0);
+        right.chartGrid.lineTo(x, right.chartRect.h);
+      }
+
+      right.chartBars.clear();
+      right.chartLine.clear();
+
+      const slotW = right.chartRect.w / 24;
+      const maxBarH = right.chartRect.h - 12;
+      const totalPoints = [];
+      const total24h = Object.values(activity.totals).reduce((sum, value) => sum + value, 0);
+      right.emptyText.visible = total24h === 0;
+
+      activity.buckets.forEach((bucket, index) => {
+        const x = index * slotW + slotW / 2;
+        const totalHeight = bucket.total
+          ? Math.max(4, (bucket.total / activity.maxTotal) * maxBarH)
+          : 0;
+        const pointY = right.chartRect.h - totalHeight;
+        totalPoints.push({ x, y: pointY });
+      });
+
+      if (totalPoints.length) {
+        right.chartBars.lineStyle(7, 0x6fd8ff, 0.13);
+        this._drawSmoothDashboardCurve(right.chartBars, totalPoints, right.chartRect.h, false);
+
+        right.chartLine.lineStyle(3.2, 0xeeffff, 0.94);
+        this._drawSmoothDashboardCurve(right.chartLine, totalPoints, right.chartRect.h, false);
+
+        const latestPoint = totalPoints[totalPoints.length - 1];
+        right.chartLine.beginFill(0xffffff, 0.95);
+        right.chartLine.drawCircle(latestPoint.x, latestPoint.y, 4.2);
+        right.chartLine.endFill();
+      }
+    }
+  }
+
+  _createFloorScreenOverlay(rect) {
+    this._destroyFloorScreenOverlay();
+    if (!rect?.w || !rect?.h || !this.world) return;
+
+    const width = rect.w;
+    const height = rect.h;
+    const padX = Math.round(width * 0.03);
+    const padY = Math.round(height * 0.09);
+    const gap = Math.round(width * 0.018);
+    const infoWidth = Math.max(404, Math.round(width * 0.325));
+    const mapWidth = Math.max(320, width - padX * 2 - infoWidth - gap);
+    const mapHeight = Math.max(160, height - padY * 2);
+    const infoX = padX + mapWidth + gap;
+    const infoY = padY;
+    const heroHeight = Math.max(196, Math.round(mapHeight * 0.28));
+    const sectionGap = Math.max(10, Math.round(mapHeight * 0.02));
+    const agentPanelHeight = Math.max(150, Math.round(mapHeight * 0.19));
+    const taskPanelHeight = Math.max(192, mapHeight - heroHeight - agentPanelHeight - sectionGap * 2);
+    const innerPadX = Math.round(infoWidth * 0.06);
+    const innerPadY = Math.round(heroHeight * 0.12);
+
+    const container = new PIXI.Container();
+    container.x = rect.x;
+    container.y = rect.y;
+    container.zIndex = 36;
+    container.sortableChildren = true;
+    container.eventMode = 'none';
+
+    const basePanel = new PIXI.Graphics();
+    basePanel.beginFill(0x010203, 0.035);
+    basePanel.drawRect(0, 0, width, height);
+    basePanel.endFill();
+    container.addChild(basePanel);
+
+    const globalWash = new PIXI.Graphics();
+    globalWash.beginFill(0x86ddff, 0.012);
+    globalWash.drawRect(0, 0, width, Math.round(height * 0.18));
+    globalWash.endFill();
+    container.addChild(globalWash);
+
+    const shellTopRail = new PIXI.Graphics();
+    shellTopRail.beginFill(0x071016, 0.04);
+    shellTopRail.drawRect(0, 0, width, Math.round(height * 0.06));
+    shellTopRail.endFill();
+    container.addChild(shellTopRail);
+
+    const shellBottomRail = new PIXI.Graphics();
+    shellBottomRail.beginFill(0x050b10, 0.026);
+    shellBottomRail.drawRect(0, height - Math.round(height * 0.04), width, Math.round(height * 0.04));
+    shellBottomRail.endFill();
+    container.addChild(shellBottomRail);
+
+    const shellFrame = new PIXI.Graphics();
+    shellFrame.lineStyle(1, 0xcfefff, 0.028);
+    shellFrame.drawRect(0, 0, width, height);
+    shellFrame.moveTo(Math.round(width * 0.018), Math.round(height * 0.038));
+    shellFrame.lineTo(Math.round(width * 0.085), Math.round(height * 0.038));
+    shellFrame.moveTo(Math.round(width * 0.915), Math.round(height * 0.038));
+    shellFrame.lineTo(Math.round(width * 0.982), Math.round(height * 0.038));
+    shellFrame.moveTo(Math.round(width * 0.018), Math.round(height * 0.962));
+    shellFrame.lineTo(Math.round(width * 0.085), Math.round(height * 0.962));
+    shellFrame.moveTo(Math.round(width * 0.915), Math.round(height * 0.962));
+    shellFrame.lineTo(Math.round(width * 0.982), Math.round(height * 0.962));
+    container.addChild(shellFrame);
+
+    const shellHeaderModules = new PIXI.Graphics();
+    shellHeaderModules.beginFill(0x9de5ff, 0.035);
+    shellHeaderModules.drawRect(Math.round(width * 0.026), Math.round(height * 0.024), Math.round(width * 0.042), 4);
+    shellHeaderModules.drawRect(Math.round(width * 0.074), Math.round(height * 0.024), Math.round(width * 0.018), 4);
+    shellHeaderModules.drawRect(Math.round(width * 0.934), Math.round(height * 0.024), Math.round(width * 0.028), 4);
+    shellHeaderModules.drawRect(Math.round(width * 0.966), Math.round(height * 0.024), Math.round(width * 0.012), 4);
+    shellHeaderModules.endFill();
+    container.addChild(shellHeaderModules);
+
+    const separator = new PIXI.Graphics();
+    separator.beginFill(0x9de5ff, 0.016);
+    separator.drawRect(infoX - Math.max(4, Math.round(gap * 0.28)), infoY, 1, mapHeight);
+    separator.endFill();
+    container.addChild(separator);
+
+    const mapViewport = new PIXI.Container();
+    mapViewport.x = padX;
+    mapViewport.y = padY;
+    mapViewport.eventMode = 'none';
+    container.addChild(mapViewport);
+
+    const mapMask = new PIXI.Graphics();
+    mapMask.beginFill(0xffffff, 1);
+    mapMask.drawRect(padX, padY, mapWidth, mapHeight);
+    mapMask.endFill();
+    container.addChild(mapMask);
+    mapViewport.mask = mapMask;
+
+    const mapBackdrop = new PIXI.Graphics();
+    mapBackdrop.beginFill(0x010203, 0.018);
+    mapBackdrop.drawRect(0, 0, mapWidth, mapHeight);
+    mapBackdrop.endFill();
+    mapViewport.addChild(mapBackdrop);
+
+    const previewTexture = this._floorScreenPreviewTexture
+      || this.tiledRenderer?._findWholeImageTileset?.()?.texture
+      || (this.mapConfig?.imageAsset ? PIXI.Texture.from(this.mapConfig.imageAsset) : null);
+
+    let mapSprite = null;
+    let previewRect = { x: 0, y: 0, w: mapWidth, h: mapHeight };
+    if (previewTexture) {
+      mapSprite = new PIXI.Sprite(previewTexture);
+      const texW = previewTexture.width || previewTexture.baseTexture?.width || 1;
+      const texH = previewTexture.height || previewTexture.baseTexture?.height || 1;
+      const previewScale = Math.min(mapWidth / texW, mapHeight / texH);
+      mapSprite.scale.set(previewScale);
+      mapSprite.x = Math.round((mapWidth - texW * previewScale) / 2);
+      mapSprite.y = Math.round((mapHeight - texH * previewScale) / 2);
+      previewRect = {
+        x: mapSprite.x,
+        y: mapSprite.y,
+        w: texW * previewScale,
+        h: texH * previewScale,
+      };
+      mapSprite.alpha = 0.58;
+      mapSprite.tint = 0xffffff;
+      mapViewport.addChild(mapSprite);
+    }
+
+    const mapShade = new PIXI.Graphics();
+    mapShade.beginFill(0x020406, 0.08);
+    mapShade.drawRect(0, 0, mapWidth, mapHeight);
+    mapShade.endFill();
+    mapViewport.addChild(mapShade);
+
+    const mapGloss = new PIXI.Graphics();
+    mapGloss.beginFill(0x9de5ff, 0.028);
+    mapGloss.drawRect(0, 0, mapWidth, Math.round(mapHeight * 0.16));
+    mapGloss.endFill();
+    mapViewport.addChild(mapGloss);
+
+    const mapFrame = new PIXI.Graphics();
+    mapFrame.lineStyle(1, 0xcfefff, 0.055);
+    mapFrame.drawRect(0, 0, mapWidth, mapHeight);
+    mapFrame.moveTo(Math.round(mapWidth * 0.025), Math.round(mapHeight * 0.028));
+    mapFrame.lineTo(Math.round(mapWidth * 0.14), Math.round(mapHeight * 0.028));
+    mapFrame.moveTo(Math.round(mapWidth * 0.025), Math.round(mapHeight * 0.052));
+    mapFrame.lineTo(Math.round(mapWidth * 0.1), Math.round(mapHeight * 0.052));
+    mapFrame.moveTo(Math.round(mapWidth * 0.86), Math.round(mapHeight * 0.948));
+    mapFrame.lineTo(Math.round(mapWidth * 0.975), Math.round(mapHeight * 0.948));
+    mapFrame.moveTo(Math.round(mapWidth * 0.9), Math.round(mapHeight * 0.924));
+    mapFrame.lineTo(Math.round(mapWidth * 0.975), Math.round(mapHeight * 0.924));
+    mapViewport.addChild(mapFrame);
+
+    const mapMicroBoxes = new PIXI.Graphics();
+    mapMicroBoxes.beginFill(0x9de5ff, 0.05);
+    mapMicroBoxes.drawRect(Math.round(mapWidth * 0.028), Math.round(mapHeight * 0.082), Math.round(mapWidth * 0.05), 4);
+    mapMicroBoxes.drawRect(Math.round(mapWidth * 0.085), Math.round(mapHeight * 0.082), Math.round(mapWidth * 0.022), 4);
+    mapMicroBoxes.drawRect(Math.round(mapWidth * 0.915), Math.round(mapHeight * 0.06), Math.round(mapWidth * 0.04), 4);
+    mapMicroBoxes.endFill();
+    mapViewport.addChild(mapMicroBoxes);
+
+    const gridOverlay = new PIXI.Graphics();
+    gridOverlay.lineStyle(1, 0x8ee5ff, 0.07);
+    const gridStep = Math.max(48, Math.round(mapHeight / 10));
+    for (let x = 0; x <= mapWidth; x += gridStep) {
+      gridOverlay.moveTo(x, 0);
+      gridOverlay.lineTo(x, mapHeight);
+    }
+    for (let y = 0; y <= mapHeight; y += gridStep) {
+      gridOverlay.moveTo(0, y);
+      gridOverlay.lineTo(mapWidth, y);
+    }
+    mapViewport.addChild(gridOverlay);
+
+    const scanlineOverlay = new PIXI.Graphics();
+    for (let y = 0; y < mapHeight; y += 10) {
+      scanlineOverlay.beginFill(0xb6ecff, 0.008);
+      scanlineOverlay.drawRect(0, y, mapWidth, 1);
+      scanlineOverlay.endFill();
+    }
+    mapViewport.addChild(scanlineOverlay);
+
+    const sweepWidth = Math.max(48, Math.round(mapWidth * 0.1));
+    const sweep = new PIXI.Graphics();
+    sweep.beginFill(0x8ef9ff, 0.065);
+    sweep.drawPolygon([0, 0, sweepWidth, 0, sweepWidth - Math.round(sweepWidth * 0.24), mapHeight, -Math.round(sweepWidth * 0.24), mapHeight]);
+    sweep.endFill();
+    sweep.blendMode = PIXI.BLEND_MODES.ADD;
+    mapViewport.addChild(sweep);
+
+    const markerLayer = new PIXI.Container();
+    markerLayer.eventMode = 'none';
+    mapViewport.addChild(markerLayer);
+
+    const infoShell = new PIXI.Graphics();
+    infoShell.beginFill(0x020609, 0.05);
+    infoShell.drawRect(infoX, infoY, infoWidth, mapHeight);
+    infoShell.endFill();
+    infoShell.lineStyle(1, 0xcfefff, 0.032);
+    infoShell.drawRect(infoX, infoY, infoWidth, mapHeight);
+    infoShell.moveTo(infoX + Math.round(infoWidth * 0.04), infoY + heroHeight + Math.round(sectionGap * 0.5));
+    infoShell.lineTo(infoX + Math.round(infoWidth * 0.96), infoY + heroHeight + Math.round(sectionGap * 0.5));
+    infoShell.moveTo(infoX + Math.round(infoWidth * 0.04), infoY + heroHeight + agentPanelHeight + Math.round(sectionGap * 1.5));
+    infoShell.lineTo(infoX + Math.round(infoWidth * 0.96), infoY + heroHeight + agentPanelHeight + Math.round(sectionGap * 1.5));
+    container.addChild(infoShell);
+
+    const infoShellWash = new PIXI.Graphics();
+    infoShellWash.beginFill(0x8edfff, 0.014);
+    infoShellWash.drawRect(infoX, infoY, infoWidth, Math.round(mapHeight * 0.12));
+    infoShellWash.endFill();
+    container.addChild(infoShellWash);
+
+    const infoShellRail = new PIXI.Graphics();
+    infoShellRail.beginFill(0x9de5ff, 0.032);
+    infoShellRail.drawRect(infoX, infoY + Math.round(mapHeight * 0.045), 2, Math.round(mapHeight * 0.18));
+    infoShellRail.endFill();
+    container.addChild(infoShellRail);
+
+    const infoShellModules = new PIXI.Graphics();
+    infoShellModules.beginFill(0x9de5ff, 0.038);
+    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.74), infoY + Math.round(mapHeight * 0.024), Math.round(infoWidth * 0.04), 4);
+    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.788), infoY + Math.round(mapHeight * 0.024), Math.round(infoWidth * 0.024), 4);
+    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.818), infoY + Math.round(mapHeight * 0.024), Math.round(infoWidth * 0.062), 4);
+    infoShellModules.endFill();
+    container.addChild(infoShellModules);
+
+    const labelStyle = {
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(12, Math.round(height * 0.016)),
+      fill: 0xaecddd,
+      letterSpacing: 1.2,
+    };
+    const panelTitleStyle = {
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(15, Math.round(height * 0.02)),
+      fill: 0xe9f8ff,
+      letterSpacing: 1,
+    };
+    const rowLabelStyle = {
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(15, Math.round(height * 0.021)),
+      fill: 0xd8effa,
+      letterSpacing: 0.9,
+    };
+    const rowValueStyle = {
+      fontFamily: 'Arial, sans-serif',
+      fontSize: Math.max(54, Math.round(height * 0.082)),
+      fill: 0xfbfeff,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+    };
+    const welcomeLeadStyle = {
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(13, Math.round(height * 0.018)),
+      fill: 0x8edfff,
+      letterSpacing: 1.5,
+    };
+    const welcomeTitleStyle = {
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(34, Math.round(height * 0.045)),
+      fill: 0xf4fbff,
+      letterSpacing: 1.1,
+    };
+    const heroSubStyle = {
+      fontFamily: 'Arial, sans-serif',
+      fontSize: Math.max(20, Math.round(height * 0.028)),
+      fill: 0xb9deef,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+    };
+
+    const infoLayer = new PIXI.Container();
+    infoLayer.x = infoX;
+    infoLayer.y = infoY;
+    infoLayer.eventMode = 'none';
+    container.addChild(infoLayer);
+
+    const heroPanel = new PIXI.Container();
+    heroPanel.eventMode = 'none';
+    infoLayer.addChild(heroPanel);
+
+    const heroBg = new PIXI.Graphics();
+    heroBg.beginFill(0x020507, 0.026);
+    heroBg.drawRect(0, 0, infoWidth, heroHeight);
+    heroBg.endFill();
+    heroPanel.addChild(heroBg);
+
+    const heroCoolOverlay = new PIXI.Graphics();
+    heroCoolOverlay.beginFill(0x8edfff, 0.01);
+    heroCoolOverlay.drawRect(0, 0, infoWidth, Math.round(heroHeight * 0.22));
+    heroCoolOverlay.endFill();
+    heroPanel.addChild(heroCoolOverlay);
+
+    const heroWarnOverlay = new PIXI.Graphics();
+    heroWarnOverlay.beginFill(0xff5a66, 0.028);
+    heroWarnOverlay.drawRect(0, 0, infoWidth, heroHeight);
+    heroWarnOverlay.endFill();
+    heroWarnOverlay.alpha = 0;
+    heroPanel.addChild(heroWarnOverlay);
+
+    const heroFrame = new PIXI.Graphics();
+    heroFrame.lineStyle(1, 0xcfefff, 0.024);
+    heroFrame.drawRect(0, 0, infoWidth, heroHeight);
+    heroFrame.moveTo(Math.round(infoWidth * 0.03), Math.round(heroHeight * 0.11));
+    heroFrame.lineTo(Math.round(infoWidth * 0.11), Math.round(heroHeight * 0.11));
+    heroFrame.moveTo(Math.round(infoWidth * 0.82), Math.round(heroHeight * 0.11));
+    heroFrame.lineTo(Math.round(infoWidth * 0.97), Math.round(heroHeight * 0.11));
+    heroFrame.moveTo(Math.round(infoWidth * 0.89), Math.round(heroHeight * 0.88));
+    heroFrame.lineTo(Math.round(infoWidth * 0.97), Math.round(heroHeight * 0.88));
+    heroPanel.addChild(heroFrame);
+
+    const heroMicroBoxes = new PIXI.Graphics();
+    heroMicroBoxes.beginFill(0x9de5ff, 0.022);
+    heroMicroBoxes.drawRect(Math.round(infoWidth * 0.79), Math.round(heroHeight * 0.08), Math.round(infoWidth * 0.034), 4);
+    heroMicroBoxes.drawRect(Math.round(infoWidth * 0.832), Math.round(heroHeight * 0.08), Math.round(infoWidth * 0.022), 4);
+    heroMicroBoxes.drawRect(Math.round(infoWidth * 0.862), Math.round(heroHeight * 0.08), Math.round(infoWidth * 0.058), 4);
+    heroMicroBoxes.endFill();
+    heroPanel.addChild(heroMicroBoxes);
+
+    const heroLabel = new PIXI.Text('TACTICAL FLOOR DISPLAY', new PIXI.TextStyle(labelStyle));
+    heroLabel.x = innerPadX;
+    heroLabel.y = innerPadY;
+    heroLabel.alpha = 0.84;
+    heroLabel.roundPixels = true;
+    heroPanel.addChild(heroLabel);
+
+    const welcomeGroup = new PIXI.Container();
+    welcomeGroup.x = innerPadX;
+    welcomeGroup.y = heroLabel.y + heroLabel.height + Math.round(heroHeight * 0.13);
+    heroPanel.addChild(welcomeGroup);
+
+    const welcomeLead = new PIXI.Text('WELCOME TO', new PIXI.TextStyle(welcomeLeadStyle));
+    welcomeLead.roundPixels = true;
+    welcomeGroup.addChild(welcomeLead);
+
+    const welcomeTitle = new PIXI.Text('AGENT TOWN', new PIXI.TextStyle(welcomeTitleStyle));
+    welcomeTitle.y = welcomeLead.height + Math.round(heroHeight * 0.055);
+    welcomeTitle.roundPixels = true;
+    welcomeGroup.addChild(welcomeTitle);
+
+    const welcomeSub = new PIXI.Text('Monitoring grid online', new PIXI.TextStyle(heroSubStyle));
+    welcomeSub.y = welcomeTitle.y + welcomeTitle.height + Math.round(heroHeight * 0.08);
+    welcomeSub.roundPixels = true;
+    welcomeGroup.addChild(welcomeSub);
+
+    const welcomeDecoLeft = new PIXI.Graphics();
+    welcomeDecoLeft.lineStyle(2, 0x8edfff, 0.42);
+    welcomeDecoLeft.moveTo(0, 0);
+    welcomeDecoLeft.lineTo(Math.round(infoWidth * 0.16), 0);
+    welcomeDecoLeft.moveTo(Math.round(infoWidth * 0.02), 12);
+    welcomeDecoLeft.lineTo(Math.round(infoWidth * 0.12), 12);
+    welcomeDecoLeft.x = 0;
+    welcomeDecoLeft.y = welcomeSub.y + welcomeSub.height + Math.round(heroHeight * 0.08);
+    welcomeGroup.addChild(welcomeDecoLeft);
+
+    const welcomeDecoRight = new PIXI.Graphics();
+    welcomeDecoRight.beginFill(0x8edfff, 0.28);
+    welcomeDecoRight.drawRect(0, 0, Math.round(infoWidth * 0.022), Math.round(heroHeight * 0.015));
+    welcomeDecoRight.drawRect(Math.round(infoWidth * 0.034), 0, Math.round(infoWidth * 0.035), Math.round(heroHeight * 0.015));
+    welcomeDecoRight.drawRect(Math.round(infoWidth * 0.081), 0, Math.round(infoWidth * 0.015), Math.round(heroHeight * 0.015));
+    welcomeDecoRight.endFill();
+    const welcomeDecoRightBaseX = Math.round(infoWidth * 0.22);
+    welcomeDecoRight.x = welcomeDecoRightBaseX;
+    welcomeDecoRight.y = welcomeDecoLeft.y - Math.round(heroHeight * 0.004);
+    welcomeGroup.addChild(welcomeDecoRight);
+
+    const warningGroup = new PIXI.Container();
+    warningGroup.x = innerPadX;
+    warningGroup.y = heroLabel.y + heroLabel.height + Math.round(heroHeight * 0.11);
+    warningGroup.visible = false;
+    heroPanel.addChild(warningGroup);
+
+    const warningTriangle = new PIXI.Container();
+    warningTriangle.x = Math.round(infoWidth * 0.06);
+    warningTriangle.y = Math.round(heroHeight * 0.12);
+    warningGroup.addChild(warningTriangle);
+
+    const warningTriangleShape = new PIXI.Graphics();
+    warningTriangleShape.beginFill(0xff5a66, 0.98);
+    warningTriangleShape.drawPolygon([0, 0, 34, 58, -34, 58]);
+    warningTriangleShape.endFill();
+    warningTriangle.addChild(warningTriangleShape);
+
+    const warningBang = new PIXI.Text('!', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(24, Math.round(height * 0.028)),
+      fill: 0x1a0506,
+      letterSpacing: 1,
+    }));
+    warningBang.anchor.set(0.5, 0.1);
+    warningBang.x = 0;
+    warningBang.y = 10;
+    warningBang.roundPixels = true;
+    warningTriangle.addChild(warningBang);
+
+    const warningLead = new PIXI.Text('WARNING', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(16, Math.round(height * 0.022)),
+      fill: 0xffaab1,
+      letterSpacing: 1.2,
+    }));
+    warningLead.x = Math.round(infoWidth * 0.17);
+    warningLead.y = 0;
+    warningLead.roundPixels = true;
+    warningGroup.addChild(warningLead);
+
+    const warningTitle = new PIXI.Text('PRIORITY REVIEW', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(25, Math.round(height * 0.033)),
+      fill: 0xfff2f3,
+      letterSpacing: 1,
+    }));
+    warningTitle.x = warningLead.x;
+    warningTitle.y = warningLead.height + Math.round(heroHeight * 0.05);
+    warningTitle.roundPixels = true;
+    warningGroup.addChild(warningTitle);
+
+    const warningSub = new PIXI.Text('Handle pending events first', new PIXI.TextStyle({
+      ...heroSubStyle,
+      fill: 0xffcfd3,
+    }));
+    warningSub.x = warningLead.x;
+    warningSub.y = warningTitle.y + warningTitle.height + Math.round(heroHeight * 0.06);
+    warningSub.roundPixels = true;
+    warningGroup.addChild(warningSub);
+
+    const warningCount = new PIXI.Text('00 pending agents', new PIXI.TextStyle({
+      fontFamily: 'Press Start 2P, monospace',
+      fontSize: Math.max(15, Math.round(height * 0.019)),
+      fill: 0xff8089,
+      letterSpacing: 0.9,
+    }));
+    warningCount.x = warningLead.x;
+    warningCount.y = warningSub.y + warningSub.height + Math.round(heroHeight * 0.02);
+    warningCount.roundPixels = true;
+    warningGroup.addChild(warningCount);
+
+    const createDashboardPanel = ({ x, y, panelWidth, panelHeight, title, metrics, columns = 2 }) => {
+      const panel = new PIXI.Container();
+      panel.x = x;
+      panel.y = y;
+      panel.eventMode = 'none';
+      infoLayer.addChild(panel);
+
+      const bg = new PIXI.Graphics();
+      bg.beginFill(0x020507, 0.018);
+      bg.drawRect(0, 0, panelWidth, panelHeight);
+      bg.endFill();
+      panel.addChild(bg);
+
+      const wash = new PIXI.Graphics();
+      wash.beginFill(0x8edfff, 0.006);
+      wash.drawRect(0, 0, panelWidth, Math.round(panelHeight * 0.16));
+      wash.endFill();
+      panel.addChild(wash);
+
+      const frame = new PIXI.Graphics();
+      frame.lineStyle(1, 0xcfefff, 0.014);
+      frame.drawRect(0, 0, panelWidth, panelHeight);
+      frame.moveTo(Math.round(panelWidth * 0.03), Math.round(panelHeight * 0.14));
+      frame.lineTo(Math.round(panelWidth * 0.12), Math.round(panelHeight * 0.14));
+      frame.moveTo(Math.round(panelWidth * 0.88), Math.round(panelHeight * 0.14));
+      frame.lineTo(Math.round(panelWidth * 0.97), Math.round(panelHeight * 0.14));
+      panel.addChild(frame);
+
+      const headerBoxes = new PIXI.Graphics();
+      headerBoxes.beginFill(0x9de5ff, 0.018);
+      headerBoxes.drawRect(panelWidth - innerPadX - 76, Math.round(panelHeight * 0.14), 18, 4);
+      headerBoxes.drawRect(panelWidth - innerPadX - 52, Math.round(panelHeight * 0.14), 10, 4);
+      headerBoxes.drawRect(panelWidth - innerPadX - 36, Math.round(panelHeight * 0.14), 28, 4);
+      headerBoxes.endFill();
+      panel.addChild(headerBoxes);
+
+      const titleNode = new PIXI.Text(title, new PIXI.TextStyle(panelTitleStyle));
+      titleNode.x = innerPadX;
+      titleNode.y = Math.round(panelHeight * 0.12);
+      titleNode.alpha = 0.96;
+      titleNode.roundPixels = true;
+      panel.addChild(titleNode);
+
+      const tileTop = titleNode.y + titleNode.height + Math.round(panelHeight * 0.14);
+      const tileGapX = Math.max(10, Math.round(panelWidth * 0.028));
+      const tileGapY = Math.max(8, Math.round(panelHeight * 0.06));
+      const rowCount = Math.max(1, Math.ceil(metrics.length / columns));
+      const tileWidth = Math.floor((panelWidth - innerPadX * 2 - tileGapX * (columns - 1)) / columns);
+      const tileHeight = Math.floor((panelHeight - tileTop - Math.round(panelHeight * 0.1) - tileGapY * (rowCount - 1)) / rowCount);
+      const metricNodes = {};
+
+      metrics.forEach((metric, index) => {
+        const col = index % columns;
+        const row = Math.floor(index / columns);
+        const tile = new PIXI.Container();
+        tile.x = innerPadX + col * (tileWidth + tileGapX);
+        tile.y = tileTop + row * (tileHeight + tileGapY);
+        panel.addChild(tile);
+
+        const tileBg = new PIXI.Graphics();
+        tileBg.beginFill(0x081018, 0.05);
+        tileBg.drawRect(0, 0, tileWidth, tileHeight);
+        tileBg.endFill();
+        tile.addChild(tileBg);
+
+        const tileFrame = new PIXI.Graphics();
+        tileFrame.lineStyle(1, 0xcfefff, 0.012);
+        tileFrame.drawRect(0, 0, tileWidth, tileHeight);
+        tile.addChild(tileFrame);
+
+        const tileBar = new PIXI.Graphics();
+        tileBar.beginFill(metric.fill, 0.92);
+        tileBar.drawRect(0, 0, tileWidth, 3);
+        tileBar.endFill();
+        tile.addChild(tileBar);
+
+        const tileWash = new PIXI.Graphics();
+        tileWash.beginFill(metric.fill, 0.014);
+        tileWash.drawRect(0, 0, tileWidth, Math.round(tileHeight * 0.2));
+        tileWash.endFill();
+        tile.addChild(tileWash);
+
+        const label = new PIXI.Text(metric.label, new PIXI.TextStyle({
+          ...rowLabelStyle,
+          fill: metric.labelFill || rowLabelStyle.fill,
+        }));
+        label.x = Math.round(tileWidth * 0.08);
+        label.y = Math.round(tileHeight * 0.12);
+        label.roundPixels = true;
+        tile.addChild(label);
+
+        const value = new PIXI.Text('00', new PIXI.TextStyle({
+          ...rowValueStyle,
+          fill: metric.fill,
+        }));
+        value.x = Math.round(tileWidth * 0.08);
+        value.y = label.y + label.height + Math.round(tileHeight * 0.08);
+        value.roundPixels = true;
+        tile.addChild(value);
+
+        metricNodes[metric.key] = { tile, tileBg, tileBar, label, value };
+      });
+
+      return { panel, titleNode, metricNodes };
+    };
+
+    const agentPanel = createDashboardPanel({
+      x: 0,
+      y: heroHeight + sectionGap,
+      panelWidth: infoWidth,
+      panelHeight: agentPanelHeight,
+      title: 'AGENT DASHBOARD',
+      columns: 3,
+      metrics: [
+        { key: 'working', label: 'WORKING', fill: 0x97f5ff },
+        { key: 'pending', label: 'PENDING', fill: 0xff5664 },
+        { key: 'total', label: 'TOTAL', fill: 0xc8d4dc },
+      ],
+    });
+
+    const taskPanel = createDashboardPanel({
+      x: 0,
+      y: heroHeight + sectionGap * 2 + agentPanelHeight,
+      panelWidth: infoWidth,
+      panelHeight: taskPanelHeight,
+      title: 'TASK DASHBOARD',
+      columns: 2,
+      metrics: [
+        { key: 'running', label: 'RUNNING', fill: 0x97f5ff },
+        { key: 'pending', label: 'PENDING', fill: 0xff5664 },
+        { key: 'completed', label: 'COMPLETED', fill: 0x99f2bf },
+        { key: 'failed', label: 'FAILED', fill: 0xffb382 },
+      ],
+    });
+
+    const markerPool = Array.from({ length: 40 }, () => {
+      const markerGroup = new PIXI.Container();
+      markerGroup.visible = false;
+      markerGroup.eventMode = 'none';
+
+      const glow = new PIXI.Graphics();
+      const brackets = new PIXI.Graphics();
+      const dot = new PIXI.Graphics();
+
+      markerGroup.addChild(glow);
+      markerGroup.addChild(brackets);
+      markerGroup.addChild(dot);
+      markerLayer.addChild(markerGroup);
+
+      return { markerGroup, glow, brackets, dot };
+    });
+
+    this.floorScreen = {
+      container,
+      markerPool,
+      mapWidth,
+      mapHeight,
+      sweep,
+      sweepWidth,
+      hero: {
+        heroCoolOverlay,
+        heroWarnOverlay,
+        welcomeGroup,
+        welcomeLead,
+        welcomeTitle,
+        welcomeTitleBaseY: welcomeTitle.y,
+        welcomeSub,
+        welcomeDecoLeft,
+        welcomeDecoLeftBaseX: welcomeDecoLeft.x,
+        welcomeDecoRight,
+        welcomeDecoRightBaseX,
+        warningGroup,
+        warningTriangle,
+        warningBang,
+        warningSub,
+        warningCount,
+      },
+      panels: {
+        agent: agentPanel,
+        task: taskPanel,
+      },
+      previewRect,
+    };
+
+    this.world.addChild(container);
+    this._syncFloorScreenOverlay(performance.now());
+  }
+
+  _syncFloorScreenOverlay(now = performance.now()) {
+    if (!this.floorScreen) return;
+
+    const telemetry = this.getMapScreenTelemetry();
+    const formatCount = (value) => String(value ?? 0).padStart(2, '0');
+    const priority = { pending: 3, active: 2, idle: 1 };
+    const markers = telemetry.markers
+      .slice()
+      .sort((a, b) => (priority[b.kind] || 0) - (priority[a.kind] || 0))
+      .slice(0, this.floorScreen.markerPool.length);
+
+    const ambientPulse = Math.sin(now / 260) * 0.12 + 0.88;
+    const pendingPulse = Math.sin(now / 180) * 0.16 + 0.94;
+
+    for (let index = 0; index < this.floorScreen.markerPool.length; index++) {
+      const markerNode = this.floorScreen.markerPool[index];
+      const marker = markers[index];
+      if (!marker) {
+        markerNode.markerGroup.visible = false;
+        continue;
+      }
+
+      const previewRect = this.floorScreen.previewRect || {
+        x: 0,
+        y: 0,
+        w: this.floorScreen.mapWidth,
+        h: this.floorScreen.mapHeight,
+      };
+      const markerInset = marker.kind === 'pending' ? 18 : 8;
+      const rawX = previewRect.x + (marker.x / Math.max(1, telemetry.sceneW)) * previewRect.w;
+      const rawY = previewRect.y + (marker.y / Math.max(1, telemetry.sceneH)) * previewRect.h;
+      const x = Math.min(
+        previewRect.x + previewRect.w - markerInset,
+        Math.max(previewRect.x + markerInset, rawX)
+      );
+      const y = Math.min(
+        previewRect.y + previewRect.h - markerInset,
+        Math.max(previewRect.y + markerInset, rawY)
+      );
+      markerNode.markerGroup.visible = true;
+      markerNode.markerGroup.x = x;
+      markerNode.markerGroup.y = y;
+
+      markerNode.glow.clear();
+      markerNode.dot.clear();
+      markerNode.brackets.clear();
+
+      if (marker.kind === 'pending') {
+        const bracketRadius = 17 * pendingPulse;
+        markerNode.glow.beginFill(0xff5664, 0.18);
+        markerNode.glow.drawCircle(0, 0, 18 * pendingPulse);
+        markerNode.glow.endFill();
+
+        markerNode.dot.beginFill(0xff5d68, 1);
+        markerNode.dot.drawCircle(0, 0, 6);
+        markerNode.dot.endFill();
+
+        markerNode.brackets.lineStyle(2, 0xffd6d9, 0.95);
+        const arm = 6;
+        markerNode.brackets.moveTo(-bracketRadius, -bracketRadius + arm);
+        markerNode.brackets.lineTo(-bracketRadius, -bracketRadius);
+        markerNode.brackets.lineTo(-bracketRadius + arm, -bracketRadius);
+        markerNode.brackets.moveTo(bracketRadius - arm, -bracketRadius);
+        markerNode.brackets.lineTo(bracketRadius, -bracketRadius);
+        markerNode.brackets.lineTo(bracketRadius, -bracketRadius + arm);
+        markerNode.brackets.moveTo(-bracketRadius, bracketRadius - arm);
+        markerNode.brackets.lineTo(-bracketRadius, bracketRadius);
+        markerNode.brackets.lineTo(-bracketRadius + arm, bracketRadius);
+        markerNode.brackets.moveTo(bracketRadius - arm, bracketRadius);
+        markerNode.brackets.lineTo(bracketRadius, bracketRadius);
+        markerNode.brackets.lineTo(bracketRadius, bracketRadius - arm);
+
+        markerNode.markerGroup.alpha = 0.92 + Math.sin(now / 160 + index) * 0.08;
+        markerNode.markerGroup.scale.set(1 + Math.sin(now / 180 + index) * 0.035);
+      } else {
+        const isActive = marker.kind === 'active';
+        const color = isActive ? 0x95f4ff : 0xddeff8;
+        const size = isActive ? 5.5 : 4.5;
+        const glowAlpha = isActive ? 0.12 : 0.08;
+
+        markerNode.glow.beginFill(color, glowAlpha);
+        markerNode.glow.drawCircle(0, 0, size * 2.3 * ambientPulse);
+        markerNode.glow.endFill();
+
+        markerNode.dot.beginFill(color, isActive ? 0.95 : 0.76);
+        markerNode.dot.drawCircle(0, 0, size);
+        markerNode.dot.endFill();
+
+        markerNode.markerGroup.alpha = isActive ? 0.92 : 0.68;
+        markerNode.markerGroup.scale.set(1);
+      }
+    }
+
+    const sweepTravel = this.floorScreen.mapWidth + this.floorScreen.sweepWidth * 1.4;
+    this.floorScreen.sweep.x = ((now * 0.18) % sweepTravel) - this.floorScreen.sweepWidth;
+    this.floorScreen.sweep.alpha = 0.08 + Math.sin(now / 420) * 0.02;
+
+    const hasPendingAlert = (telemetry.pendingCount || 0) > 0;
+    const taskSummary = telemetry.taskSummary || {
+      running: 0,
+      pending: 0,
+      completed: 0,
+      failed: 0,
+    };
+    const signature = JSON.stringify({
+      working: telemetry.workingCount || 0,
+      pending: telemetry.pendingCount || 0,
+      offline: telemetry.offlineCount || 0,
+      taskSummary,
+      hasPendingAlert,
+    });
+
+    if (signature !== this._floorScreenInfoSignature) {
+      this._floorScreenInfoSignature = signature;
+
+      this.floorScreen.panels.agent.metricNodes.working.value.text = formatCount(telemetry.workingCount);
+      this.floorScreen.panels.agent.metricNodes.pending.value.text = formatCount(telemetry.pendingCount);
+      this.floorScreen.panels.agent.metricNodes.total.value.text = formatCount(telemetry.agentCount);
+
+      this.floorScreen.panels.task.metricNodes.running.value.text = formatCount(taskSummary.running);
+      this.floorScreen.panels.task.metricNodes.pending.value.text = formatCount(taskSummary.pending);
+      this.floorScreen.panels.task.metricNodes.completed.value.text = formatCount(taskSummary.completed);
+      this.floorScreen.panels.task.metricNodes.failed.value.text = formatCount(taskSummary.failed);
+
+      this.floorScreen.hero.warningSub.text = hasPendingAlert
+        ? 'Handle pending events first'
+        : this.floorScreen.hero.warningSub.text;
+      this.floorScreen.hero.warningCount.text = `${formatCount(telemetry.pendingCount)} PENDING`;
+      this.floorScreen.hero.welcomeSub.text = taskSummary.running > 0
+        ? `${formatCount(taskSummary.running)} tasks active on the grid`
+        : 'No pending approvals on the floor';
+    }
+
+    this.floorScreen.hero.heroCoolOverlay.alpha = hasPendingAlert
+      ? 0.012
+      : 0.03 + Math.sin(now / 920) * 0.01;
+    this.floorScreen.hero.heroWarnOverlay.alpha = hasPendingAlert
+      ? 0.04 + Math.sin(now / 180) * 0.02
+      : 0;
+    this.floorScreen.hero.welcomeGroup.visible = !hasPendingAlert;
+    this.floorScreen.hero.warningGroup.visible = hasPendingAlert;
+
+    if (hasPendingAlert) {
+      this.floorScreen.hero.warningTriangle.scale.set(pendingPulse);
+      this.floorScreen.hero.warningTriangle.alpha = 0.88 + Math.sin(now / 140) * 0.12;
+      this.floorScreen.hero.warningBang.alpha = 0.9 + Math.sin(now / 180) * 0.08;
+      this.floorScreen.hero.warningCount.alpha = 0.84 + Math.sin(now / 220) * 0.12;
+    } else {
+      this.floorScreen.hero.welcomeLead.alpha = 0.74 + Math.sin(now / 800) * 0.12;
+      this.floorScreen.hero.welcomeTitle.alpha = 0.92 + Math.sin(now / 620) * 0.08;
+      this.floorScreen.hero.welcomeTitle.y = this.floorScreen.hero.welcomeTitleBaseY + Math.sin(now / 700) * 2;
+      this.floorScreen.hero.welcomeSub.alpha = 0.72 + Math.sin(now / 760) * 0.08;
+      this.floorScreen.hero.welcomeDecoLeft.alpha = 0.34 + Math.sin(now / 540) * 0.16;
+      this.floorScreen.hero.welcomeDecoRight.alpha = 0.28 + Math.sin(now / 480) * 0.18;
+      this.floorScreen.hero.welcomeDecoLeft.x = this.floorScreen.hero.welcomeDecoLeftBaseX + Math.sin(now / 520) * 6;
+      this.floorScreen.hero.welcomeDecoRight.x = this.floorScreen.hero.welcomeDecoRightBaseX + Math.sin(now / 660) * 8;
+    }
   }
 
   async _loadGuardAssets() {
@@ -447,6 +1941,37 @@ export default class GameEngine {
     this.pendingNpc = (agents || []).some((agent) => this._isPendingStatus(agent?.status))
       ? this._createPendingNPC()
       : null;
+  }
+
+  _getSceneAgentIds(agents = []) {
+    return (agents || [])
+      .filter((agent) => this._isRunningStatus(agent?.status))
+      .map((agent) => agent.id)
+      .filter(Boolean);
+  }
+
+  _shouldRebuildScene(agents = []) {
+    const nextIds = this._getSceneAgentIds(agents);
+    const currentIds = this.npcs.map((npc) => npc?.agent?.id).filter(Boolean);
+    if (nextIds.length !== currentIds.length) return true;
+    for (let i = 0; i < nextIds.length; i += 1) {
+      if (nextIds[i] !== currentIds[i]) return true;
+    }
+
+    const hasPendingNpc = (agents || []).some((agent) => this._isPendingStatus(agent?.status));
+    if (Boolean(this.pendingNpc) !== hasPendingNpc) return true;
+    return false;
+  }
+
+  _refreshNpcDataInPlace(agents = [], events = []) {
+    const nextById = new Map((agents || []).map((agent) => [agent.id, agent]));
+    this.npcs.forEach((npc) => {
+      if (!npc?.agent?.id) return;
+      const nextAgent = nextById.get(npc.agent.id);
+      if (!nextAgent) return;
+      npc.agent = nextAgent;
+    });
+    this._syncPendingNpcStates();
   }
 
   _clearNpcScene() {
@@ -977,6 +2502,7 @@ export default class GameEngine {
     const frames   = this.spriteLoader.charFrames[charName];
     if (!frames || !frames.front.length) return null;
     const isRunner = this._isRunningStatus(agent?.status);
+    const state = this._getAgentState(agent);
 
     const container = new PIXI.Container();
 
@@ -997,10 +2523,9 @@ export default class GameEngine {
     container.addChild(sprite);
 
     // Name tag
-    const state    = this._getAgentState(agent);
-    const dotColor = state === 'working' ? 0x22c55e : state === 'idle' ? 0x6d63ff : 0xbbb5a8;
+    const nameTagColor = 0xd7b37a;
     const nameTag  = new PIXI.Text(agent.name.replace(/^Agent-/, '').substring(0, 10), {
-      fontFamily: 'Press Start 2P', fontSize: 4, fill: dotColor, align: 'center',
+      fontFamily: 'Press Start 2P', fontSize: 20, fill: nameTagColor, align: 'center', stroke: 0x120d1c, strokeThickness: 2,
     });
     nameTag.anchor.set(0.5, 1);
     nameTag.y = -FH * NPC_SCALE - 2;
@@ -1350,6 +2875,8 @@ export default class GameEngine {
 
       // Guard units
       this._updateGuards(delta);
+      this._syncFloorScreenOverlay(performance.now());
+      this._syncWallDashboardOverlay(performance.now());
     });
   }
 
@@ -1922,9 +3449,13 @@ export default class GameEngine {
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
     this._meetingCooldowns.clear();
-    this._clearNpcScene();
-    this._renderNpcScene(agents);
-    this._syncPendingNpcStates();
+    if (this._shouldRebuildScene(agents)) {
+      this._clearNpcScene();
+      this._renderNpcScene(agents);
+      this._syncPendingNpcStates();
+    } else {
+      this._refreshNpcDataInPlace(agents, events);
+    }
     if (this.guardEnabled) this._deployGuards(this._guardToken);
   }
 
@@ -1940,6 +3471,8 @@ export default class GameEngine {
     }
     this._dragContext = null;
     this._clearGuardsImmediate();
+    this._destroyFloorScreenOverlay();
+    this._destroyWallDashboardOverlay();
     this._resizeObs?.disconnect();
     this.app?.destroy(true, { children: true, texture: false, baseTexture: false });
     this.app = null;

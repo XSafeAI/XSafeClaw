@@ -1076,7 +1076,7 @@ export default function Configure() {
               <p className="text-lg font-bold text-text-primary">{form.mode === 'remote' ? t.configure.remoteComplete : t.configure.configComplete}</p>
               <p className="text-[13px] text-text-secondary mt-2">{form.mode === 'remote' ? t.configure.remoteCompleteDesc : t.configure.configCompleteDesc}</p>
             </div>
-            <button onClick={() => window.location.replace('/home')}
+            <button onClick={() => window.location.replace('/monitor')}
               className="flex items-center gap-2 px-8 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
               <Settings2 className="w-4 h-4" /> {t.configure.enterDashboard} <ChevronRight className="w-4 h-4" />
             </button>

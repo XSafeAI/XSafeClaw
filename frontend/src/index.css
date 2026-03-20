@@ -15,45 +15,51 @@
   --color-accent:         var(--accent);
   --color-accent-dim:     var(--accent-dim);
   --color-accent-glow:    var(--accent-glow);
-  --color-success:        #34d399;
-  --color-warning:        #fbbf24;
-  --color-danger:         #f87171;
-  --color-info:           #60a5fa;
+  --color-success:        #34c759;
+  --color-warning:        #ff9500;
+  --color-danger:         #f54a45;
+  --color-info:           #3370ff;
   --color-text-primary:   var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-muted:     var(--text-muted);
+  --color-text-dim:       var(--text-dim);
+  --color-sidebar:        var(--sidebar);
 }
 
 /* ── Dark theme (default) ──────────────────────────────────── */
 :root {
-  --surface-0:      #0c0a1a;
-  --surface-1:      #13112a;
-  --surface-2:      #1a1735;
-  --surface-3:      #211e40;
-  --border:         #2a2650;
-  --border-active:  #4a3f8f;
-  --accent:         #7c5cfc;
-  --accent-dim:     #5b3fd9;
-  --accent-glow:    rgba(124, 92, 252, 0.15);
-  --text-primary:   #e8e5f0;
-  --text-secondary: #9890b8;
-  --text-muted:     #5e5680;
+  --surface-0:      #1a1a1e;
+  --surface-1:      #222226;
+  --surface-2:      #2c2c31;
+  --surface-3:      #37373c;
+  --border:         #3b3b40;
+  --border-active:  #3370ff;
+  --accent:         #3370ff;
+  --accent-dim:     #245bdb;
+  --accent-glow:    rgba(51, 112, 255, 0.15);
+  --text-primary:   #e8e8ec;
+  --text-secondary: #8f9298;
+  --text-muted:     #5a5c63;
+  --text-dim:       #44464d;
+  --sidebar:        #1c1d2b;
 }
 
 /* ── Light theme ───────────────────────────────────────────── */
 [data-theme="light"] {
-  --surface-0:      #f5f4fb;
-  --surface-1:      #eceaf7;
-  --surface-2:      #e1def2;
-  --surface-3:      #d5d1eb;
-  --border:         #c4bfe0;
-  --border-active:  #7c5cfc;
-  --accent:         #7c5cfc;
-  --accent-dim:     #5b3fd9;
-  --accent-glow:    rgba(124, 92, 252, 0.12);
-  --text-primary:   #17112e;
-  --text-secondary: #3d3268;
-  --text-muted:     #7b74a0;
+  --surface-0:      #ffffff;
+  --surface-1:      #f5f6f8;
+  --surface-2:      #eef0f3;
+  --surface-3:      #e4e6ea;
+  --border:         #dee0e3;
+  --border-active:  #3370ff;
+  --accent:         #3370ff;
+  --accent-dim:     #245bdb;
+  --accent-glow:    rgba(51, 112, 255, 0.10);
+  --text-primary:   #1f2329;
+  --text-secondary: #646a73;
+  --text-muted:     #8f959e;
+  --text-dim:       #b0b5bd;
+  --sidebar:        #e4e8f4;
 }
 
 /* ── Base ──────────────────────────────────────────────────── */

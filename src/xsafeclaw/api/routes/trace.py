@@ -24,6 +24,7 @@ from ...database import get_db
 from ...models import Message, Session, ToolCall
 from ...models.event import Event
 from ...services import guard_service
+from ...services.guard_service import GUARD_REJECTION_MARKER
 
 router = APIRouter()
 
@@ -368,6 +369,7 @@ async def get_trace(
             conversations: list[dict[str, Any]] = []
             tool_names: set[str] = set()
             has_error = False
+            has_guard_rejection = False
 
             for msg in turn:
                 role = "tool" if msg.role == "toolResult" else msg.role
@@ -390,14 +392,19 @@ async def get_trace(
                 for tc in msg_tool_calls:
                     tool_names.add(tc.tool_name)
                     if tc.is_error:
-                        has_error = True
+                        if tc.result_text and GUARD_REJECTION_MARKER in tc.result_text.lower():
+                            has_guard_rejection = True
+                        else:
+                            has_error = True
 
             event_type = ", ".join(sorted(tool_names)) if tool_names else "chat"
 
             if has_error:
                 status = "error"
+            elif has_guard_rejection:
+                status = "fail"
             elif end_time and end_time != start_time:
-                status = "ok"
+                status = "completed"
             else:
                 status = "running"
 

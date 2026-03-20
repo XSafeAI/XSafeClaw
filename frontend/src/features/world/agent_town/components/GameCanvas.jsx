@@ -9,6 +9,7 @@ import { fetchData } from '../data/mockData';
 export default function GameCanvas({
   onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, guardEnabled = false,
   onLayoutChange,
+  onScreenTelemetryChange,
   mapConfig,
 }) {
   const containerRef = useRef(null);
@@ -19,10 +20,10 @@ export default function GameCanvas({
 
   // Keep callbacks in refs so the engine always has the latest copies
   const cbRef = useRef({
-    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange,
+    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange, onScreenTelemetryChange,
   });
   cbRef.current = {
-    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange,
+    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange, onScreenTelemetryChange,
   };
 
   useEffect(() => {
@@ -30,6 +31,7 @@ export default function GameCanvas({
     let aborted = false;
     let refreshTimer = null;
     let hideLoadingTimer = null;
+    let telemetryTimer = null;
     const engine = new GameEngine({ mapConfig });
     engineRef.current = engine;
 
@@ -57,12 +59,22 @@ export default function GameCanvas({
 
         engine.populateNPCs(data.agents || [], data.events || []);
 
+        const pushTelemetry = () => {
+          if (aborted || !cbRef.current.onScreenTelemetryChange) return;
+          cbRef.current.onScreenTelemetryChange(engine.getMapScreenTelemetry?.() || null);
+        };
+        if (cbRef.current.onScreenTelemetryChange) {
+          pushTelemetry();
+          telemetryTimer = setInterval(pushTelemetry, 180);
+        }
+
         // Keep scene data fresh without rebuilding the Pixi world.
         refreshTimer = setInterval(async () => {
           try {
             const nextData = await fetchData();
             if (!aborted) {
               engine.updateData(nextData.agents || [], nextData.events || []);
+              pushTelemetry();
             }
           } catch (_) {}
         }, 30000);
@@ -83,7 +95,9 @@ export default function GameCanvas({
     return () => {
       aborted = true;
       if (refreshTimer) clearInterval(refreshTimer);
+      if (telemetryTimer) clearInterval(telemetryTimer);
       if (hideLoadingTimer) clearTimeout(hideLoadingTimer);
+      cbRef.current.onScreenTelemetryChange?.(null);
       engine.destroy();
       engineRef.current = null;
       cbRef.current.onCursorStateChange?.('normal');

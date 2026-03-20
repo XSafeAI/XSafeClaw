@@ -104,6 +104,26 @@ function CardHeader({ icon: Icon, title, badge, action }: { icon: typeof Shield;
   );
 }
 
+/* ==================== LocalStorage helpers ==================== */
+const CACHE_KEYS = {
+  fileScanId: 'xsafeclaw:fileScanId',
+  fileScanResult: 'xsafeclaw:fileScanResult',
+  fileScanProgress: 'xsafeclaw:fileScanProgress',
+  fileScanPath: 'xsafeclaw:fileScanPath',
+  softScanId: 'xsafeclaw:softScanId',
+  softScanResult: 'xsafeclaw:softScanResult',
+};
+
+function cacheSet(key: string, value: any) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+}
+function cacheGet<T>(key: string): T | null {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+function cacheDel(key: string) {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+}
+
 /* ==================== Main Page ==================== */
 export default function Assets() {
   const { t } = useI18n();
@@ -134,20 +154,23 @@ export default function Assets() {
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [hwLoading, setHwLoading] = useState(false);
 
-  /* --- File Scan --- */
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  /* --- File Scan (restore from cache) --- */
+  const [scanResult, setScanResult] = useState<ScanResult | null>(() => cacheGet(CACHE_KEYS.fileScanResult));
   const [scanning, setScanning] = useState(false);
-  const [scanPath, setScanPath] = useState('');
+  const [scanPath, setScanPath] = useState(() => cacheGet<string>(CACHE_KEYS.fileScanPath) ?? '');
   const [expandedLevels, setExpandedLevels] = useState<Set<number>>(new Set());
-  const [scanProgress, setScanProgress] = useState<{ scanned: number; ignored: number }>({ scanned: 0, ignored: 0 });
+  const [scanProgress, setScanProgress] = useState<{ scanned: number; ignored: number }>(
+    () => cacheGet(CACHE_KEYS.fileScanProgress) ?? { scanned: 0, ignored: 0 },
+  );
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fileScanIdRef = useRef<string | null>(cacheGet(CACHE_KEYS.fileScanId));
 
-  /* --- Software Scan --- */
-  const [softwareList, setSoftwareList] = useState<SoftwareItem[]>([]);
+  /* --- Software Scan (restore from cache) --- */
+  const [softwareList, setSoftwareList] = useState<SoftwareItem[]>(() => cacheGet(CACHE_KEYS.softScanResult) ?? []);
   const [softScanning, setSoftScanning] = useState(false);
   const [softSearch, setSoftSearch] = useState('');
   const [softSource, setSoftSource] = useState('');
-  const [, setSoftScanId] = useState<string | null>(null);
+  const softScanIdRef = useRef<string | null>(cacheGet(CACHE_KEYS.softScanId));
   const softPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /* --- Safety Check --- */
@@ -156,13 +179,90 @@ export default function Assets() {
   const [safetyChecking, setSafetyChecking] = useState(false);
   const [safetyHistory, setSafetyHistory] = useState<SafetyResult[]>([]);
 
-  // Cleanup on unmount
+  /* --- Resume in-flight scans on mount --- */
+  const stopFilePolling = useCallback(() => {
+    if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+    setScanning(false);
+    cacheDel(CACHE_KEYS.fileScanId);
+    fileScanIdRef.current = null;
+  }, []);
+
+  const startFilePolling = useCallback((scanId: string) => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    setScanning(true);
+    let failCount = 0;
+    pollingRef.current = setInterval(async () => {
+      try {
+        const prog = await assetsAPI.scanProgress(scanId);
+        failCount = 0;
+        const progress = { scanned: prog.data.scanned_count, ignored: prog.data.ignored_count };
+        setScanProgress(progress);
+        cacheSet(CACHE_KEYS.fileScanProgress, progress);
+        if (prog.data.status === 'completed' && prog.data.result) {
+          clearInterval(pollingRef.current!); pollingRef.current = null;
+          const result = prog.data.result as ScanResult;
+          setScanResult(result); setScanning(false);
+          cacheSet(CACHE_KEYS.fileScanResult, result);
+          cacheDel(CACHE_KEYS.fileScanId);
+          fileScanIdRef.current = null;
+        } else if (prog.data.status === 'failed') {
+          stopFilePolling();
+        }
+      } catch (err: any) {
+        failCount++;
+        if (err?.response?.status === 404 || failCount >= 5) {
+          stopFilePolling();
+        }
+      }
+    }, 800);
+  }, [stopFilePolling]);
+
+  const stopSoftPolling = useCallback(() => {
+    if (softPollRef.current) { clearInterval(softPollRef.current); softPollRef.current = null; }
+    setSoftScanning(false);
+    cacheDel(CACHE_KEYS.softScanId);
+    softScanIdRef.current = null;
+  }, []);
+
+  const startSoftPolling = useCallback((scanId: string) => {
+    if (softPollRef.current) clearInterval(softPollRef.current);
+    setSoftScanning(true);
+    let failCount = 0;
+    softPollRef.current = setInterval(async () => {
+      try {
+        const prog = await assetsAPI.softwareScanProgress(scanId);
+        failCount = 0;
+        if (prog.data.status === 'completed' && prog.data.result) {
+          clearInterval(softPollRef.current!); softPollRef.current = null;
+          const list = prog.data.result.software_list;
+          setSoftwareList(list); setSoftScanning(false);
+          cacheSet(CACHE_KEYS.softScanResult, list);
+          cacheDel(CACHE_KEYS.softScanId);
+          softScanIdRef.current = null;
+        } else if (prog.data.status === 'failed') {
+          stopSoftPolling();
+        }
+      } catch (err: any) {
+        failCount++;
+        if (err?.response?.status === 404 || failCount >= 5) {
+          stopSoftPolling();
+        }
+      }
+    }, 1000);
+  }, [stopSoftPolling]);
+
   useEffect(() => {
+    if (fileScanIdRef.current && !pollingRef.current) {
+      startFilePolling(fileScanIdRef.current);
+    }
+    if (softScanIdRef.current && !softPollRef.current) {
+      startSoftPolling(softScanIdRef.current);
+    }
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
       if (softPollRef.current) clearInterval(softPollRef.current);
     };
-  }, []);
+  }, [startFilePolling, startSoftPolling]);
 
   const toggleLevel = useCallback((level: number) => {
     setExpandedLevels(prev => { const n = new Set(prev); n.has(level) ? n.delete(level) : n.add(level); return n; });
@@ -178,47 +278,29 @@ export default function Assets() {
 
   /* --- File Scan --- */
   const runScan = useCallback(async () => {
-    setScanning(true); setScanProgress({ scanned: 0, ignored: 0 }); setScanResult(null);
+    setScanProgress({ scanned: 0, ignored: 0 }); setScanResult(null);
+    cacheDel(CACHE_KEYS.fileScanResult);
+    cacheSet(CACHE_KEYS.fileScanPath, scanPath);
     try {
       const startRes = await assetsAPI.startScan({ path: scanPath || undefined, scan_system_root: !scanPath });
       const scanId = startRes.data.scan_id;
-      pollingRef.current = setInterval(async () => {
-        try {
-          const prog = await assetsAPI.scanProgress(scanId);
-          setScanProgress({ scanned: prog.data.scanned_count, ignored: prog.data.ignored_count });
-          if (prog.data.status === 'completed' && prog.data.result) {
-            clearInterval(pollingRef.current!); pollingRef.current = null;
-            setScanResult(prog.data.result as ScanResult); setScanning(false);
-          } else if (prog.data.status === 'failed') {
-            clearInterval(pollingRef.current!); pollingRef.current = null;
-            alert(prog.data.error || 'Scan failed'); setScanning(false);
-          }
-        } catch { /* keep polling */ }
-      }, 800);
+      fileScanIdRef.current = scanId;
+      cacheSet(CACHE_KEYS.fileScanId, scanId);
+      startFilePolling(scanId);
     } catch (err: any) { alert(err.response?.data?.detail || 'Scan failed'); setScanning(false); }
-  }, [scanPath]);
+  }, [scanPath, startFilePolling]);
 
   /* --- Software Scan --- */
   const runSoftwareScan = useCallback(async () => {
-    setSoftScanning(true); setSoftwareList([]);
+    setSoftwareList([]); cacheDel(CACHE_KEYS.softScanResult);
     try {
       const res = await assetsAPI.startSoftwareScan();
       const id = res.data.scan_id;
-      setSoftScanId(id);
-      softPollRef.current = setInterval(async () => {
-        try {
-          const prog = await assetsAPI.softwareScanProgress(id);
-          if (prog.data.status === 'completed' && prog.data.result) {
-            clearInterval(softPollRef.current!); softPollRef.current = null;
-            setSoftwareList(prog.data.result.software_list); setSoftScanning(false);
-          } else if (prog.data.status === 'failed') {
-            clearInterval(softPollRef.current!); softPollRef.current = null;
-            alert(prog.data.error || 'Software scan failed'); setSoftScanning(false);
-          }
-        } catch { /* keep polling */ }
-      }, 1000);
+      softScanIdRef.current = id;
+      cacheSet(CACHE_KEYS.softScanId, id);
+      startSoftPolling(id);
     } catch (err: any) { alert(err.response?.data?.detail || 'Failed'); setSoftScanning(false); }
-  }, []);
+  }, [startSoftPolling]);
 
   /* --- Safety Check --- */
   const runSafetyCheck = useCallback(async () => {
@@ -299,11 +381,15 @@ export default function Assets() {
                       <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center">
                         <Loader2 className="w-5 h-5 text-accent animate-spin" />
                       </div>
-                      <div><p className="text-sm font-semibold text-text-primary">{t.assets.fileScan.inProgress}</p>
+                      <div className="flex-1"><p className="text-sm font-semibold text-text-primary">{t.assets.fileScan.inProgress}</p>
                         <p className="text-[11px] text-text-muted">{t.assets.fileScan.classifying}</p></div>
+                      <button onClick={stopFilePolling}
+                        className="px-3 py-1.5 bg-red-500/15 text-red-400 border border-red-500/30 rounded-lg text-[12px] font-medium hover:bg-red-500/25 transition-all flex items-center gap-1.5">
+                        <X className="w-3.5 h-3.5" />{t.common.stop}
+                      </button>
                     </div>
                     <div className="w-full bg-surface-0 rounded-full h-2 overflow-hidden mb-4">
-                      <div className="h-full rounded-full bg-gradient-to-r from-accent via-purple-400 to-accent bg-[length:200%_100%] animate-[shimmer_1.5s_linear_infinite]" />
+                      <div className="h-full rounded-full bg-gradient-to-r from-accent via-blue-400 to-accent bg-[length:200%_100%] animate-[shimmer_1.5s_linear_infinite]" />
                     </div>
                     <div className="flex items-center gap-6">
                       <div className="flex items-center gap-2">
@@ -454,7 +540,7 @@ export default function Assets() {
                   <p className="text-sm font-semibold text-text-primary mb-1">{t.assets.software.scanningTitle}</p>
                   <p className="text-[12px] text-text-muted">{t.assets.software.scanningDesc}</p>
                   <div className="w-48 bg-surface-0 rounded-full h-1.5 overflow-hidden mt-4">
-                    <div className="h-full rounded-full bg-gradient-to-r from-accent via-purple-400 to-accent bg-[length:200%_100%] animate-[shimmer_1.5s_linear_infinite]" />
+                    <div className="h-full rounded-full bg-gradient-to-r from-accent via-blue-400 to-accent bg-[length:200%_100%] animate-[shimmer_1.5s_linear_infinite]" />
                   </div>
                 </div>
               </Card>

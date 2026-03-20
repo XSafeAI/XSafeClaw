@@ -1370,6 +1370,10 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.tc-stage-meta-strip-top {
+  margin-top: 4px;
+}
+
 .tc-stage-identity-chip,
 .tc-stage-meta-pill {
   min-width: 0;
@@ -1575,11 +1579,13 @@
   background: rgba(255, 224, 177, 0.12);
 }
 
-.tc-ledger-item-ok::before {
+.tc-ledger-item-ok::before,
+.tc-ledger-item-completed::before {
   background: rgba(165, 240, 179, 0.72);
 }
 
-.tc-ledger-item-error::before {
+.tc-ledger-item-error::before,
+.tc-ledger-item-failed::before {
   background: rgba(255, 178, 168, 0.8);
 }
 
@@ -1765,6 +1771,57 @@
   justify-content: space-between;
 }
 
+.console-dialog-tool-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.console-dialog-tool-section {
+  border: 1px solid rgba(156, 126, 255, 0.18);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(118, 88, 219, 0.12), rgba(118, 88, 219, 0.04)),
+    rgba(22, 17, 35, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.03);
+  overflow: hidden;
+}
+
+.console-dialog-tool-section-result {
+  border-color: rgba(129, 214, 159, 0.16);
+  background:
+    linear-gradient(180deg, rgba(72, 161, 111, 0.14), rgba(72, 161, 111, 0.04)),
+    rgba(18, 27, 23, 0.4);
+}
+
+.console-dialog-tool-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 0;
+}
+
+.console-dialog-tool-section-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--px-font);
+  font-size: 6px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #e7dbff;
+  background: rgba(105, 86, 185, 0.18);
+  border: 1px solid rgba(156, 126, 255, 0.2);
+}
+
+.console-dialog-tool-section-result .console-dialog-tool-section-tag {
+  color: #dcffe8;
+  background: rgba(96, 179, 125, 0.16);
+  border-color: rgba(129, 214, 159, 0.2);
+}
+
 .console-dialog-tag {
   display: inline-flex;
   align-items: center;
@@ -1882,6 +1939,7 @@
 .console-dialog-code {
   max-height: 180px;
   overflow-y: auto;
+  margin: 8px 10px 10px;
 }
 
 .console-dialog-code-args {

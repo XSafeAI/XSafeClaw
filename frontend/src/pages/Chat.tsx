@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
-  Settings2, Brain, Cpu, Shield, Check, Pencil, AlertTriangle,
+  Settings2, Brain, Cpu, Shield, Check, AlertTriangle,
 } from 'lucide-react';
 import { chatAPI, guardAPI } from '../services/api';
 import { useI18n } from '../i18n';
@@ -124,10 +124,10 @@ function ToolCallBubble({ msg }: { msg: ChatMessage }) {
           onClick={() => setExpanded(e => !e)}
           className="w-full flex items-center gap-2.5 px-4 py-2.5 hover:bg-surface-2/50 transition-colors text-left"
         >
-          <div className="w-5 h-5 rounded-md bg-purple-500/15 flex items-center justify-center flex-shrink-0">
-            <Wrench className="w-3 h-3 text-purple-400" />
+          <div className="w-5 h-5 rounded-md bg-blue-500/15 flex items-center justify-center flex-shrink-0">
+            <Wrench className="w-3 h-3 text-blue-400" />
           </div>
-          <span className="text-[12px] font-semibold text-purple-400 flex-shrink-0">{msg.tool_name || 'tool'}</span>
+          <span className="text-[12px] font-semibold text-blue-400 flex-shrink-0">{msg.tool_name || 'tool'}</span>
           <span className="text-[11px] font-mono text-text-muted truncate flex-1">
             {msg.args ? formatValue(msg.args).replace(/\n/g,' ').slice(0, 60) : ''}
           </span>
@@ -278,8 +278,6 @@ export default function Chat() {
     created_at: number;
   }[]>([]);
   const [gpResolving, setGpResolving] = useState<string | null>(null);
-  const [gpEditingId, setGpEditingId] = useState<string | null>(null);
-  const [gpEditParams, setGpEditParams] = useState('');
   const [gpExpandedId, setGpExpandedId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -376,26 +374,13 @@ export default function Chat() {
     guardAPI.getEnabled().then(r => setGuardOn(r.data.enabled)).catch(() => {});
   }, []);
 
-  const handleGpResolve = async (id: string, resolution: string, modifiedParams?: Record<string, any>) => {
+  const handleGpResolve = async (id: string, resolution: string) => {
     setGpResolving(id);
     try {
-      await guardAPI.resolve(id, resolution, modifiedParams);
+      await guardAPI.resolve(id, resolution);
       setGuardPending(prev => prev.filter(p => p.id !== id));
     } catch (e) { console.error('resolve failed', e); }
-    finally { setGpResolving(null); setGpEditingId(null); }
-  };
-
-  const handleGpModify = (id: string) => {
-    if (gpEditingId === id) {
-      try {
-        const parsed = JSON.parse(gpEditParams);
-        handleGpResolve(id, 'modified', parsed);
-      } catch { alert(t.common.invalidJson); }
-    } else {
-      const item = guardPending.find(i => i.id === id);
-      setGpEditingId(id);
-      setGpEditParams(JSON.stringify(item?.params ?? {}, null, 2));
-    }
+    finally { setGpResolving(null); }
   };
 
   const toggleGuard = async () => {
@@ -1149,10 +1134,6 @@ export default function Chat() {
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/25 transition-colors disabled:opacity-50">
                             {gpResolving === gp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} {t.common.approve}
                           </button>
-                          <button onClick={() => handleGpModify(gp.id)} disabled={gpResolving === gp.id}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50">
-                            <Pencil className="w-3.5 h-3.5" /> {gpEditingId === gp.id ? t.common.save : t.common.modify}
-                          </button>
                           <button onClick={() => handleGpResolve(gp.id, 'rejected')} disabled={gpResolving === gp.id}
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50">
                             <X className="w-3.5 h-3.5" /> {t.common.reject}
@@ -1168,14 +1149,6 @@ export default function Chat() {
                           <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
                             {JSON.stringify(gp.params, null, 2)}
                           </pre>
-                        )}
-                        {gpEditingId === gp.id && (
-                          <div className="mt-3">
-                            <label className="text-xs text-text-muted font-semibold mb-1 block">{t.common.editParamsJson}</label>
-                            <textarea value={gpEditParams} onChange={e => setGpEditParams(e.target.value)} rows={6}
-                              className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent resize-y" />
-                            <button onClick={() => setGpEditingId(null)} className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors">{t.common.cancelEditing}</button>
-                          </div>
                         )}
                       </div>
                     </div>

@@ -1671,6 +1671,57 @@ body.agent-town-page-cursor.cursor-grab-full *,
   justify-content: space-between;
 }
 
+.agent-dialog-tool-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.agent-dialog-tool-section {
+  border: 1px solid rgba(156, 126, 255, 0.18);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(118, 88, 219, 0.12), rgba(118, 88, 219, 0.04)),
+    rgba(22, 17, 35, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.03);
+  overflow: hidden;
+}
+
+.agent-dialog-tool-section-result {
+  border-color: rgba(129, 214, 159, 0.16);
+  background:
+    linear-gradient(180deg, rgba(72, 161, 111, 0.14), rgba(72, 161, 111, 0.04)),
+    rgba(18, 27, 23, 0.4);
+}
+
+.agent-dialog-tool-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 0;
+}
+
+.agent-dialog-tool-section-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--px-font);
+  font-size: 6px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #e7dbff;
+  background: rgba(105, 86, 185, 0.18);
+  border: 1px solid rgba(156, 126, 255, 0.2);
+}
+
+.agent-dialog-tool-section-result .agent-dialog-tool-section-tag {
+  color: #dcffe8;
+  background: rgba(96, 179, 125, 0.16);
+  border-color: rgba(129, 214, 159, 0.2);
+}
+
 .agent-dialog-tag {
   display: inline-flex;
   align-items: center;
@@ -1809,6 +1860,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 .agent-dialog-code {
   max-height: 180px;
   overflow-y: auto;
+  margin: 8px 10px 10px;
 }
 
 .agent-dialog-code-args {

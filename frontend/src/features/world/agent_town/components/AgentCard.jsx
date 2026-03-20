@@ -151,33 +151,90 @@ function normalizeHistoryMessage(msg) {
   return null;
 }
 
-function normalizeConversationMessage(msg, index) {
-  if (!msg) return null;
-  const timestamp = msg.timestamp ? new Date(msg.timestamp) : new Date();
-  const text = msg.text || msg.content_text || '';
+function normalizeConversationMessages(messages = []) {
+  const normalized = [];
 
-  if (msg.role === 'user' || msg.role === 'assistant') {
-    if (!text.trim()) return null;
-    return {
-      id: msg.id || `event-msg-${index}`,
-      role: msg.role,
-      content: text,
-      timestamp,
-    };
-  }
-
-  if (!text.trim()) return null;
-  return {
-    id: msg.id || `event-tool-${index}`,
-    role: 'tool_call',
-    content: '',
-    timestamp,
-    tool_name: msg.role === 'toolResult' ? 'tool-result' : 'tool-call',
-    args: text,
-    result: msg.role === 'toolResult' ? text : undefined,
-    is_error: Boolean(msg.is_error),
-    result_pending: false,
+  const tryAttachToolResult = (text, isError) => {
+    for (let i = normalized.length - 1; i >= 0; i -= 1) {
+      const prev = normalized[i];
+      if (prev?.role !== 'tool_call') continue;
+      if (!prev.result) {
+        prev.result = text;
+        prev.is_error = prev.is_error || isError;
+        return true;
+      }
+      if (String(prev.result) === String(text)) {
+        return true;
+      }
+      return false;
+    }
+    return false;
   };
+
+  messages.forEach((msg, index) => {
+    if (!msg) return;
+    const timestamp = msg.timestamp ? new Date(msg.timestamp) : new Date();
+    const role = msg.role === 'tool' ? 'toolResult' : msg.role;
+    const text = msg.text || msg.content_text || '';
+
+    if ((role === 'user' || role === 'assistant') && text.trim()) {
+      normalized.push({
+        id: msg.id || `event-msg-${index}`,
+        role,
+        content: text,
+        timestamp,
+      });
+    }
+
+    const toolCalls = Array.isArray(msg.tool_calls)
+      ? msg.tool_calls.map((tc, toolIndex) => ({
+          id: tc.id || `event-tool-${index}-${toolIndex}`,
+          tool_name: tc.tool_name || 'tool-call',
+          arguments: tc.arguments || null,
+        }))
+      : role === 'tool_call'
+        ? [{
+            id: msg.tool_id || msg.id || `event-tool-${index}`,
+            tool_name: msg.tool_name || 'tool-call',
+            arguments: msg.args ?? msg.arguments ?? null,
+            result: msg.result,
+            is_error: Boolean(msg.is_error),
+            result_pending: Boolean(msg.result_pending),
+          }]
+        : [];
+
+    toolCalls.forEach((toolCall, toolIndex) => {
+      normalized.push({
+        id: toolCall.id || `event-tool-${index}-${toolIndex}`,
+        role: 'tool_call',
+        content: '',
+        timestamp,
+        tool_id: toolCall.id,
+        tool_name: toolCall.tool_name || 'tool-call',
+        args: toolCall.arguments ?? null,
+        result: toolCall.result,
+        is_error: Boolean(toolCall.is_error),
+        result_pending: Boolean(toolCall.result_pending),
+      });
+    });
+
+    if (role === 'toolResult' && text.trim()) {
+      if (tryAttachToolResult(text, Boolean(msg.is_error))) return;
+      normalized.push({
+        id: msg.id || `event-tool-result-${index}`,
+        role: 'tool_call',
+        content: '',
+        timestamp,
+        tool_name: msg.tool_name || 'tool-call',
+        args: '',
+        result: text,
+        is_error: Boolean(msg.is_error),
+        result_pending: false,
+      });
+    }
+  });
+
+  return normalized;
 }
 
 function previewValue(value, limit = 180) {
@@ -196,7 +253,7 @@ function previewValue(value, limit = 180) {
 
 function AgentDialogToolMessage({ msg }) {
   const argsPreview = previewValue(msg.args || msg.content || '', Number.POSITIVE_INFINITY);
-  const resultPreview = previewValue(msg.result, Number.POSITIVE_INFINITY);
+  const resultPreview = msg.result_pending ? 'Running...' : previewValue(msg.result, Number.POSITIVE_INFINITY);
   const toolState = msg.result_pending
     ? 'TOOL RUNNING'
     : msg.is_error
@@ -221,18 +278,28 @@ function AgentDialogToolMessage({ msg }) {
         </div>
         <span className="agent-dialog-time">{fmtTime(msg.timestamp)}</span>
       </div>
-      {argsPreview ? (
-        <div className="agent-dialog-code agent-dialog-code-args">
-          {argsPreview}
-        </div>
-      ) : null}
-      {msg.result_pending ? (
-        <div className="agent-dialog-code agent-dialog-code-result">Running...</div>
-      ) : resultPreview ? (
-        <div className={`agent-dialog-code agent-dialog-code-result ${msg.is_error ? 'agent-dialog-code-error' : ''}`}>
-          {resultPreview}
-        </div>
-      ) : null}
+      <div className="agent-dialog-tool-card">
+        {argsPreview ? (
+          <div className="agent-dialog-tool-section agent-dialog-tool-section-call">
+            <div className="agent-dialog-tool-section-head">
+              <span className="agent-dialog-tool-section-tag">TOOL CALL</span>
+            </div>
+            <div className="agent-dialog-code agent-dialog-code-args">
+              {argsPreview}
+            </div>
+          </div>
+        ) : null}
+        {resultPreview ? (
+          <div className="agent-dialog-tool-section agent-dialog-tool-section-result">
+            <div className="agent-dialog-tool-section-head">
+              <span className="agent-dialog-tool-section-tag">TOOL RESULT</span>
+            </div>
+            <div className={`agent-dialog-code agent-dialog-code-result ${msg.is_error ? 'agent-dialog-code-error' : ''}`}>
+              {resultPreview}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -318,7 +385,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
   );
   const latestEvent = event || boundEvents[0] || null;
   const fallbackMessages = useMemo(
-    () => (latestEvent?.conversations || []).map(normalizeConversationMessage).filter(Boolean),
+    () => normalizeConversationMessages(latestEvent?.conversations || []),
     [latestEvent],
   );
   const displayMessages = messages.length ? messages : fallbackMessages;

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db_context
 from ..models import Event, Message, Session
+from .guard_service import GUARD_REJECTION_MARKER
 
 
 class EventSyncService:
@@ -79,8 +80,9 @@ class EventSyncService:
                     "total_input_tokens": 0,
                     "total_output_tokens": 0,
                     "total_tokens": 0,
-                    "status": "pending",
+                    "status": "running",
                     "error_message": None,
+                    "_has_guard_rejection": False,
                 }
             elif current_event:
                 # Add message to current event
@@ -109,10 +111,15 @@ class EventSyncService:
                         current_event["status"] = "error"
                         current_event["error_message"] = msg.error_message
                     elif msg.stop_reason == "stop":
-                        current_event["status"] = "completed"
+                        if current_event["_has_guard_rejection"]:
+                            current_event["status"] = "fail"
+                        else:
+                            current_event["status"] = "completed"
 
                 elif msg.role == "toolResult":
                     current_event["total_tool_result_messages"] += 1
+                    if msg.content_text and GUARD_REJECTION_MARKER in msg.content_text.lower():
+                        current_event["_has_guard_rejection"] = True
 
         # Don't forget the last event
         if current_event:

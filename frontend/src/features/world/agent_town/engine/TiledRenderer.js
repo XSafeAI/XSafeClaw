@@ -48,14 +48,52 @@ export default class TiledRenderer {
     return this.options.renderMode === 'whole-image';
   }
 
+  _getFlatLayers() {
+    if (this._flatLayers) return this._flatLayers;
+
+    const out = [];
+    const walk = (layers, groupPath = [], inheritedVisible = true) => {
+      for (const layer of layers || []) {
+        const currentVisible = inheritedVisible && layer.visible !== false;
+        const flatLayer = {
+          ...layer,
+          __groupPath: groupPath,
+          __effectiveVisible: currentVisible,
+        };
+        out.push(flatLayer);
+
+        if (layer.type === 'group') {
+          walk(layer.layers || [], [...groupPath, layer.name || ''], currentVisible);
+        }
+      }
+    };
+
+    walk(this.data.layers || []);
+    this._flatLayers = out;
+    return out;
+  }
+
+  _getTileLayers() {
+    return this._getFlatLayers().filter((layer) => layer.type === 'tilelayer');
+  }
+
+  _getObjectLayers() {
+    return this._getFlatLayers().filter((layer) => layer.type === 'objectgroup');
+  }
+
+  _layerHasTiles(layer) {
+    return Array.isArray(layer?.data) && layer.data.some((gid) => gid !== 0);
+  }
+
   _getRelevantContentLayers() {
     const requestedVisualLayerName = this._getRequestedVisualLayerName();
     const requestedCollisionLayerName = this._getRequestedCollisionLayerName();
 
-    return this.data.layers.filter((layer) => {
-      if (layer.type !== 'tilelayer') return false;
+    return this._getTileLayers().filter((layer) => {
       const layerName = this._normalizeLayerName(layer.name);
-      if (requestedVisualLayerName && layerName === requestedVisualLayerName) return true;
+      if (requestedVisualLayerName && layerName === requestedVisualLayerName) {
+        return layer.__effectiveVisible;
+      }
       if (requestedCollisionLayerName && layerName === requestedCollisionLayerName) return true;
       return false;
     });
@@ -80,6 +118,102 @@ export default class TiledRenderer {
 
     if (bottom < top || right < left) return null;
     return { top, bottom, left, right };
+  }
+
+  getNamedLayerPixelBounds(layerName) {
+    const targetName = this._normalizeLayerName(layerName);
+    if (!targetName) return null;
+
+    const layer = this._getTileLayers().find(
+      (entry) => this._normalizeLayerName(entry.name) === targetName
+    );
+    if (!layer) return null;
+
+    const bounds = this._getLayerBounds(layer);
+    if (!bounds) return null;
+
+    return {
+      ...bounds,
+      pixelX: bounds.left * this.tileW,
+      pixelY: bounds.top * this.tileH,
+      pixelW: (bounds.right - bounds.left + 1) * this.tileW,
+      pixelH: (bounds.bottom - bounds.top + 1) * this.tileH,
+    };
+  }
+
+  getNamedLayerPixelRegions(layerName) {
+    const targetName = this._normalizeLayerName(layerName);
+    if (!targetName) return [];
+
+    const layer = this._getTileLayers().find(
+      (entry) => this._normalizeLayerName(entry.name) === targetName
+    );
+    if (!layer || !Array.isArray(layer.data) || !layer.width || !layer.height) return [];
+
+    const visited = new Set();
+    const keyOf = (x, y) => `${x},${y}`;
+    const regions = [];
+
+    for (let y = 0; y < layer.height; y += 1) {
+      for (let x = 0; x < layer.width; x += 1) {
+        const index = y * layer.width + x;
+        if (!layer.data[index]) continue;
+
+        const startKey = keyOf(x, y);
+        if (visited.has(startKey)) continue;
+
+        let left = x;
+        let right = x;
+        let top = y;
+        let bottom = y;
+        let tileCount = 0;
+        const queue = [[x, y]];
+        visited.add(startKey);
+
+        while (queue.length) {
+          const [cx, cy] = queue.shift();
+          tileCount += 1;
+          if (cx < left) left = cx;
+          if (cx > right) right = cx;
+          if (cy < top) top = cy;
+          if (cy > bottom) bottom = cy;
+
+          const neighbors = [
+            [cx + 1, cy],
+            [cx - 1, cy],
+            [cx, cy + 1],
+            [cx, cy - 1],
+          ];
+
+          for (const [nx, ny] of neighbors) {
+            if (nx < 0 || ny < 0 || nx >= layer.width || ny >= layer.height) continue;
+            const nextIndex = ny * layer.width + nx;
+            if (!layer.data[nextIndex]) continue;
+            const nextKey = keyOf(nx, ny);
+            if (visited.has(nextKey)) continue;
+            visited.add(nextKey);
+            queue.push([nx, ny]);
+          }
+        }
+
+        regions.push({
+          left,
+          right,
+          top,
+          bottom,
+          tileCount,
+          pixelX: left * this.tileW,
+          pixelY: top * this.tileH,
+          pixelW: (right - left + 1) * this.tileW,
+          pixelH: (bottom - top + 1) * this.tileH,
+        });
+      }
+    }
+
+    return regions.sort((a, b) => {
+      if (a.pixelX !== b.pixelX) return a.pixelX - b.pixelX;
+      return a.pixelY - b.pixelY;
+    });
   }
 
   getContentBounds() {
@@ -145,6 +279,70 @@ export default class TiledRenderer {
     sprite.zIndex = 0;
     sprite.eventMode = 'none';
     this.container.addChild(sprite);
+
+    const requestedVisualLayerName = this._getRequestedVisualLayerName();
+    let overlayZIndex = 1;
+    for (const layer of this._getTileLayers()) {
+      if (!layer.__effectiveVisible) continue;
+      if (this._isCollisionLayerName(layer.name)) continue;
+      if (!this._layerHasTiles(layer)) continue;
+      if (
+        requestedVisualLayerName &&
+        this._normalizeLayerName(layer.name) === requestedVisualLayerName
+      ) {
+        continue;
+      }
+
+      const layerContainer = new PIXI.Container();
+      layerContainer.zIndex = overlayZIndex++;
+      layerContainer.eventMode = 'none';
+
+      for (let y = 0; y < layer.height; y++) {
+        for (let x = 0; x < layer.width; x++) {
+          const gid = layer.data[y * layer.width + x];
+          if (gid === 0) continue;
+          const resolved = this._resolve(gid);
+          if (!resolved) continue;
+
+          const rect = new PIXI.Rectangle(
+            resolved.col * resolved.ts.tilewidth,
+            resolved.row * resolved.ts.tileheight,
+            resolved.ts.tilewidth,
+            resolved.ts.tileheight
+          );
+          const tex = new PIXI.Texture(resolved.ts.texture.baseTexture, rect);
+          const tileSprite = new PIXI.Sprite(tex);
+
+          if (resolved.flipD) {
+            tileSprite.anchor.set(0.5);
+            tileSprite.x = x * this.tileW + this.tileW / 2;
+            tileSprite.y = y * this.tileH + this.tileH / 2;
+
+            if (resolved.flipH && resolved.flipV) {
+              tileSprite.rotation = Math.PI / 2;
+              tileSprite.scale.x = -1;
+            } else if (resolved.flipH) {
+              tileSprite.rotation = Math.PI / 2;
+            } else if (resolved.flipV) {
+              tileSprite.rotation = -Math.PI / 2;
+            } else {
+              tileSprite.rotation = Math.PI / 2;
+              tileSprite.scale.y = -1;
+            }
+          } else {
+            tileSprite.x = x * this.tileW;
+            tileSprite.y = y * this.tileH;
+            if (resolved.flipH) { tileSprite.scale.x = -1; tileSprite.x += this.tileW; }
+            if (resolved.flipV) { tileSprite.scale.y = -1; tileSprite.y += this.tileH; }
+          }
+
+          layerContainer.addChild(tileSprite);
+        }
+      }
+
+      this.container.addChild(layerContainer);
+    }
+
     return this.container;
   }
 
@@ -229,15 +427,16 @@ export default class TiledRenderer {
 
     let zIdx = 0;
     const requestedVisualLayerName = this._getRequestedVisualLayerName();
+    const tileLayers = this._getTileLayers();
     const hasRequestedVisualLayer = requestedVisualLayerName
-      ? this.data.layers.some((layer) => (
-          layer.type === 'tilelayer' &&
+      ? tileLayers.some((layer) => (
+          layer.__effectiveVisible &&
           this._normalizeLayerName(layer.name) === requestedVisualLayerName
         ))
       : false;
 
-    for (const layer of this.data.layers) {
-      if (layer.type !== 'tilelayer' || layer.visible === false) continue;
+    for (const layer of tileLayers) {
+      if (!layer.__effectiveVisible) continue;
       if (this._isCollisionLayerName(layer.name)) continue;
       if (hasRequestedVisualLayer && this._normalizeLayerName(layer.name) !== requestedVisualLayerName) continue;
 
@@ -296,14 +495,17 @@ export default class TiledRenderer {
     const requestedCollisionLayerName = this._normalizeLayerName(
       layerName || this.options.collisionLayerName
     );
-    const layer = this.data.layers.find((l) => {
-      if (l.type !== 'tilelayer') return false;
-      const normalizedName = this._normalizeLayerName(l.name);
+    const layer = this._getTileLayers().find((entry) => {
+      const normalizedName = this._normalizeLayerName(entry.name);
       if (requestedCollisionLayerName) return normalizedName === requestedCollisionLayerName;
       return this._isCollisionLayerName(normalizedName);
     });
     if (!layer) {
       console.warn('TiledRenderer: no collision layer found — all tiles walkable.');
+      return Array.from({ length: this.mapH }, () => Array(this.mapW).fill(0));
+    }
+    if (!this._layerHasTiles(layer)) {
+      console.warn('TiledRenderer: collision layer is empty — all tiles walkable.');
       return Array.from({ length: this.mapH }, () => Array(this.mapW).fill(0));
     }
     const grid = [];
@@ -318,9 +520,8 @@ export default class TiledRenderer {
 
   /** Extract workstation / spawn-point objects. */
   getWorkstations() {
-    const layer = this.data.layers.find(l =>
-      l.type === 'objectgroup' &&
-      ['workstations', 'spawns', 'npc_spawns'].includes(l.name.toLowerCase())
+    const layer = this._getObjectLayers().find((entry) =>
+      ['workstations', 'spawns', 'npc_spawns'].includes(String(entry.name || '').toLowerCase())
     );
     if (!layer) return [];
     return layer.objects.map(obj => ({
@@ -340,6 +541,16 @@ export default class TiledRenderer {
    */
   buildBoundedGrid(layerName) {
     const grid = this.getCollisionGrid(layerName);
+    const hasBlockedTiles = grid.some((row) => row.some((cell) => cell === 1));
+    if (!hasBlockedTiles) {
+      return {
+        grid,
+        rTop: 0,
+        rBot: Math.max(0, grid.length - 1),
+        cLeft: 0,
+        cRight: Math.max(0, grid[0]?.length - 1 || 0),
+      };
+    }
 
     let rTop = 0, rBot = grid.length - 1;
     while (rTop < grid.length && grid[rTop].every(c => c === 0)) rTop++;

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  ShieldAlert, Check, X, Pencil, Loader2, RefreshCw,
+  ShieldAlert, Check, X, Loader2, RefreshCw,
   Clock, AlertTriangle, CheckCircle2, XCircle, Timer,
   ChevronDown, ChevronRight,
 } from 'lucide-react';
@@ -19,7 +19,6 @@ interface PendingItem {
   resolved: boolean;
   resolution: string;
   resolved_at: number;
-  modified_params: Record<string, any> | null;
 }
 
 const POLL_INTERVAL = 3000;
@@ -29,8 +28,6 @@ export default function Approvals() {
   const [loading, setLoading] = useState(true);
   const [showResolved, setShowResolved] = useState(false);
   const [resolving, setResolving] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editParams, setEditParams] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const fetchItems = useCallback(async () => {
@@ -50,31 +47,15 @@ export default function Approvals() {
     return () => clearInterval(timer);
   }, [fetchItems]);
 
-  const handleResolve = async (id: string, resolution: string, modifiedParams?: Record<string, any>) => {
+  const handleResolve = async (id: string, resolution: string) => {
     setResolving(id);
     try {
-      await guardAPI.resolve(id, resolution, modifiedParams);
+      await guardAPI.resolve(id, resolution);
       await fetchItems();
     } catch (e: any) {
       console.error('resolve failed', e);
     } finally {
       setResolving(null);
-      setEditingId(null);
-    }
-  };
-
-  const handleModify = (id: string) => {
-    if (editingId === id) {
-      try {
-        const parsed = JSON.parse(editParams);
-        handleResolve(id, 'modified', parsed);
-      } catch {
-        alert('Invalid JSON');
-      }
-    } else {
-      const item = items.find(i => i.id === id);
-      setEditingId(id);
-      setEditParams(JSON.stringify(item?.params ?? {}, null, 2));
     }
   };
 
@@ -91,7 +72,6 @@ export default function Approvals() {
   const resolutionIcon = (r: string) => {
     if (r === 'approved') return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />;
     if (r === 'rejected') return <XCircle className="w-3.5 h-3.5 text-red-400" />;
-    if (r === 'modified') return <Pencil className="w-3.5 h-3.5 text-amber-400" />;
     if (r === 'timeout') return <Timer className="w-3.5 h-3.5 text-text-muted" />;
     return null;
   };
@@ -165,14 +145,6 @@ export default function Approvals() {
                 Approve
               </button>
               <button
-                onClick={() => handleModify(item.id)}
-                disabled={resolving === item.id}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50"
-              >
-                <Pencil className="w-3.5 h-3.5" />
-                {editingId === item.id ? 'Save' : 'Modify'}
-              </button>
-              <button
                 onClick={() => handleResolve(item.id, 'rejected')}
                 disabled={resolving === item.id}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50"
@@ -196,23 +168,6 @@ export default function Approvals() {
               <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
                 {JSON.stringify(item.params, null, 2)}
               </pre>
-            )}
-            {editingId === item.id && (
-              <div className="mt-3">
-                <label className="text-xs text-text-muted font-semibold mb-1 block">Edit parameters (JSON):</label>
-                <textarea
-                  value={editParams}
-                  onChange={e => setEditParams(e.target.value)}
-                  rows={6}
-                  className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent resize-y"
-                />
-                <button
-                  onClick={() => setEditingId(null)}
-                  className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors"
-                >
-                  Cancel editing
-                </button>
-              </div>
             )}
           </div>
         </div>

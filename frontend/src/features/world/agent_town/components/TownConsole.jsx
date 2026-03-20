@@ -207,7 +207,7 @@ function normalizeHistoryMessage(msg) {
 
 function summarizeTasks(events = []) {
   return events.reduce((summary, event) => {
-    if (event.status === 'ok') summary.completed += 1;
+    if (event.status === 'ok' || event.status === 'completed') summary.completed += 1;
     else if (event.status === 'error') summary.failed += 1;
     else if (event.status === 'pending') summary.pending += 1;
     else summary.running += 1;
@@ -347,22 +347,90 @@ function stringifyTaskValue(value) {
   }
 }
 
-function buildTaskDetailMessagesFromTraceEvent(event) {
-  return (event?.conversations || []).map((msg, index) => ({
-    message_id: `${event.event_id || 'trace'}-${index}`,
-    role: msg.role === 'tool' ? 'toolResult' : msg.role,
-    timestamp: msg.timestamp,
-    content_text: msg.content_text || msg.text || '',
-    tool_calls_count: Array.isArray(msg.tool_calls) ? msg.tool_calls.length : 0,
-    tool_call_ids: Array.isArray(msg.tool_calls) ? msg.tool_calls.map((tc) => tc.id || tc.tool_name || `tool-${index}`) : [],
-    tool_calls: Array.isArray(msg.tool_calls)
+function normalizeTaskDetailMessages(messages = [], idPrefix = 'trace') {
+  const normalized = [];
+
+  const tryAttachToolResult = (text, isError) => {
+    for (let i = normalized.length - 1; i >= 0; i -= 1) {
+      const prev = normalized[i];
+      if (prev?.role !== 'tool_call') continue;
+      if (!prev.tool_result) {
+        prev.tool_result = text;
+        prev.is_error = prev.is_error || isError;
+        return true;
+      }
+      if (String(prev.tool_result) === String(text)) {
+        return true;
+      }
+      return false;
+    }
+    return false;
+  };
+
+  messages.forEach((msg, index) => {
+    if (!msg) return;
+    const role = msg.role === 'tool' ? 'toolResult' : msg.role;
+    const contentText = msg.content_text || msg.text || msg.content || '';
+
+    if ((role === 'user' || role === 'assistant' || role === 'error') && String(contentText).trim()) {
+      normalized.push({
+        message_id: msg.message_id || msg.id || `${idPrefix}-${index}`,
+        role,
+        timestamp: msg.timestamp,
+        content_text: contentText,
+      });
+    }
+
+    const toolCalls = Array.isArray(msg.tool_calls)
       ? msg.tool_calls.map((tc, toolIndex) => ({
-          id: tc.id || `${event.event_id || 'trace'}-tool-${index}-${toolIndex}`,
+          id: tc.id || `${idPrefix}-tool-${index}-${toolIndex}`,
           tool_name: tc.tool_name || 'tool-call',
           arguments: tc.arguments || null,
         }))
-      : [],
-  }));
+      : role === 'tool_call'
+        ? [{
+            id: msg.tool_id || msg.id || `${idPrefix}-tool-${index}`,
+            tool_name: msg.tool_name || 'tool-call',
+            arguments: msg.args ?? msg.arguments ?? null,
+            result: msg.result,
+            is_error: Boolean(msg.is_error),
+            result_pending: Boolean(msg.result_pending),
+          }]
+        : [];
+
+    toolCalls.forEach((toolCall, toolIndex) => {
+      normalized.push({
+        message_id: toolCall.id || `${idPrefix}-tool-${index}-${toolIndex}`,
+        role: 'tool_call',
+        timestamp: msg.timestamp,
+        tool_name: toolCall.tool_name || 'tool-call',
+        tool_arguments: toolCall.arguments ?? null,
+        tool_result: toolCall.result ?? '',
+        is_error: Boolean(toolCall.is_error),
+        result_pending: Boolean(toolCall.result_pending),
+      });
+    });
+
+    if (role === 'toolResult' && String(contentText).trim()) {
+      if (tryAttachToolResult(contentText, Boolean(msg.is_error))) return;
+      normalized.push({
+        message_id: msg.message_id || msg.id || `${idPrefix}-tool-result-${index}`,
+        role: 'tool_call',
+        timestamp: msg.timestamp,
+        tool_name: msg.tool_name || 'tool-call',
+        tool_arguments: null,
+        tool_result: contentText,
+        is_error: Boolean(msg.is_error),
+        result_pending: false,
+      });
+    }
+  });
+
+  return normalized;
+}
+
+function buildTaskDetailMessagesFromTraceEvent(event) {
+  return normalizeTaskDetailMessages(event?.conversations || [], event?.event_id || 'trace');
 }
 
 function TaskActorStrip({ charName, agentId }) {
@@ -426,10 +494,11 @@ function TaskDetailFact({
 
 function TaskDetailMessage({ msg }) {
   const timestamp = fmtDate(msg.timestamp);
-  const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
   const isUser = msg.role === 'user';
   const isAssistant = msg.role === 'assistant';
-  const isToolResult = msg.role === 'toolResult';
+  const isTool = msg.role === 'tool_call';
+  const hasToolCall = msg.tool_arguments !== null && msg.tool_arguments !== undefined && msg.tool_arguments !== '';
+  const hasToolResult = msg.result_pending || (msg.tool_result !== null && msg.tool_result !== undefined && msg.tool_result !== '');
 
   return (
     <div className="tc-task-detail-entry">
@@ -443,27 +512,29 @@ function TaskDetailMessage({ msg }) {
         </div>
       ) : null}
 
-      {toolCalls.length > 0 ? toolCalls.map((toolCall) => (
-        <div key={toolCall.id} className="tc-task-detail-tool tc-task-detail-tool-call">
+      {isTool ? (
+        <div className={`tc-task-detail-tool ${msg.is_error ? 'tc-task-detail-tool-result' : 'tc-task-detail-tool-call'}`}>
           <div className="tc-task-detail-tool-head">
-            <span className="tc-task-detail-tool-tag">TOOL CALL</span>
-            <span className="tc-task-detail-tool-name">{toolCall.tool_name || 'tool-call'}</span>
-          </div>
-          {toolCall.arguments ? (
-            <pre className="tc-task-detail-tool-payload">{stringifyTaskValue(toolCall.arguments)}</pre>
-          ) : (
-            <div className="tc-task-detail-tool-empty">No call arguments captured.</div>
-          )}
-        </div>
-      )) : null}
-
-      {isToolResult ? (
-        <div className="tc-task-detail-tool tc-task-detail-tool-result">
-          <div className="tc-task-detail-tool-head">
-            <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
+            <span className="tc-task-detail-tool-tag">{msg.result_pending ? 'TOOL RUNNING' : msg.is_error ? 'TOOL ERROR' : 'TOOL'}</span>
+            <span className="tc-task-detail-tool-name">{msg.tool_name || 'tool-call'}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
-          <div className="tc-task-detail-text">{msg.content_text || 'No tool result content captured.'}</div>
+          {hasToolCall ? (
+            <>
+              <div className="tc-task-detail-tool-head">
+                <span className="tc-task-detail-tool-tag">TOOL CALL</span>
+              </div>
+              <pre className="tc-task-detail-tool-payload">{stringifyTaskValue(msg.tool_arguments)}</pre>
+            </>
+          ) : null}
+          {hasToolResult ? (
+            <>
+              <div className="tc-task-detail-tool-head">
+                <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
+              </div>
+              <pre className="tc-task-detail-tool-payload">{msg.result_pending ? 'Running...' : stringifyTaskValue(msg.tool_result)}</pre>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -599,7 +670,7 @@ function TasksTab({
         }
         const payload = await response.json();
         if (disposed) return;
-        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        const messages = normalizeTaskDetailMessages(Array.isArray(payload.messages) ? payload.messages : [], selectedTask.task.id);
         setDetailEventData(payload);
         setDetailMessages(messages.length ? messages : fallbackMessages);
       } catch (err) {
@@ -1053,6 +1124,18 @@ export default function TownConsole({
     return map;
   }, [events]);
 
+  const dashboardEventsByAgentList = useMemo(() => {
+    const map = {};
+    dashboardEvents.forEach((event) => {
+      if (!map[event.session_id]) map[event.session_id] = [];
+      map[event.session_id].push(event);
+    });
+    Object.values(map).forEach((list) => {
+      list.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
+    });
+    return map;
+  }, [dashboardEvents]);
+
   const countsByFilter = useMemo(() => FILTER_IDS.reduce((counts, id) => {
     counts[id] = combinedAgents.filter((agent) => agent.status === id).length;
     return counts;
@@ -1082,6 +1165,7 @@ export default function TownConsole({
   const currentIdentity = currentAgent ? getAgentIdentity(currentAgent) : '';
   const currentSessionKey = currentAgent ? getAgentSessionKey(currentAgent) : '';
   const currentEvents = currentAgent ? (eventsByAgentList[currentAgent.id] || []) : [];
+  const currentDashboardEvents = currentAgent ? (dashboardEventsByAgentList[currentAgent.id] || []) : [];
   const currentMessages = useMemo(() => {
     if (!currentIdentity) return [];
     const stored = messageMap[currentIdentity] || [];
@@ -1090,7 +1174,7 @@ export default function TownConsole({
     return stored;
   }, [currentAgent, currentEvents, currentIdentity, messageMap]);
   const currentInput = currentIdentity ? (inputMap[currentIdentity] || '') : '';
-  const currentSummary = summarizeTasks(currentEvents);
+  const currentSummary = summarizeTasks(currentDashboardEvents);
 
   const allModels = useMemo(() => {
     const flat = [];
@@ -1492,7 +1576,7 @@ export default function TownConsole({
                   charNameMap={charNameMap}
                   currentAgent={currentAgent}
                   currentSummary={currentSummary}
-                  currentEvents={currentEvents}
+                  currentEvents={currentDashboardEvents}
                   eventsByAgentList={eventsByAgentList}
                   eventsByAgent={eventsByAgent}
                   activeMessages={currentMessages}

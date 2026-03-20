@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Activity, MessageSquare, Wrench, Clock,
   User, Bot, Terminal,
   RefreshCw, Zap, Users, ListChecks, ShieldCheck, Puzzle,
   Plus, Minus, Maximize2, X, Filter,
-  Check, Pencil, Loader2, AlertTriangle,
+  Check, Loader2, AlertTriangle,
   CheckCircle2, XCircle, Timer,
   ChevronDown, ChevronRight,
   ShieldAlert, ScanLine, Shield,
@@ -158,7 +158,7 @@ function MessageBubble({ msg }: { msg: EventMessage }) {
             <span className={`text-xs font-semibold ${config.color}`}>{config.label}</span>
             <span className="text-[10px] text-text-muted">{formatDate(msg.timestamp)}</span>
             {msg.tool_calls_count > 0 && (
-              <span className="text-[10px] bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded-full">
+              <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded-full">
                 {msg.tool_calls_count} tool call{msg.tool_calls_count > 1 ? 's' : ''}
               </span>
             )}
@@ -177,9 +177,9 @@ function MessageBubble({ msg }: { msg: EventMessage }) {
           {toolCalls.length > 0 && (
             <div className="mt-2 space-y-1.5">
               {toolCalls.map(tc => (
-                <div key={tc.id} className="rounded-md border border-purple-500/20 bg-purple-500/5 p-2">
+                <div key={tc.id} className="rounded-md border border-blue-500/20 bg-blue-500/5 p-2">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/25">
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-blue-500/15 text-blue-400 border border-blue-500/25">
                       <Wrench className="w-2.5 h-2.5" /> {tc.tool_name}
                     </span>
                     <code className="text-[10px] font-mono text-text-muted">{tc.id}</code>
@@ -527,7 +527,7 @@ function SkillsPanel() {
                       <span key={c} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">cfg: {c}</span>
                     ))}
                     {skill.missing.os?.filter(Boolean).map((o: string) => (
-                      <span key={o} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">os: {o}</span>
+                      <span key={o} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">os: {o}</span>
                     ))}
                   </div>
                 )}
@@ -731,7 +731,7 @@ function MemoryPanel() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-[13px] font-semibold text-text-primary">{file.name}</p>
-                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${file.category === 'memory' ? 'bg-blue-500/15 text-blue-400' : 'bg-purple-500/15 text-purple-400'}`}>
+                        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${file.category === 'memory' ? 'bg-blue-500/15 text-blue-400' : 'bg-blue-500/15 text-blue-400'}`}>
                           {file.category}
                         </span>
                         <ScanBadge status={file.scanStatus} riskType={file.scanRiskType} details={file.scanDetails} />
@@ -785,7 +785,7 @@ function MemoryPanel() {
 }
 
 /* ============ Tab Config ============ */
-const MONITOR_TAB_IDS = ['world', 'agent', 'activity', 'skills', 'memory', 'approval'] as const;
+const MONITOR_TAB_IDS = ['agent', 'activity', 'skills', 'memory', 'approval'] as const;
 type MonitorTabId = (typeof MONITOR_TAB_IDS)[number];
 
 /* ============ Pending Approvals Panel ============ */
@@ -804,7 +804,6 @@ interface PendingItem {
   resolved: boolean;
   resolution: string;
   resolved_at: number;
-  modified_params: Record<string, any> | null;
 }
 
 function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void }) {
@@ -813,8 +812,6 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
   const [loading, setLoading] = useState(true);
   const [showResolved, setShowResolved] = useState(false);
   const [resolving, setResolving] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editParams, setEditParams] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const fetchItems = useCallback(async () => {
@@ -837,29 +834,15 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
 
   useEffect(() => { onCountChange?.(pending.length); }, [pending.length, onCountChange]);
 
-  const handleResolve = async (id: string, resolution: string, modifiedParams?: Record<string, any>) => {
+  const handleResolve = async (id: string, resolution: string) => {
     setResolving(id);
     try {
-      await guardAPI.resolve(id, resolution, modifiedParams);
+      await guardAPI.resolve(id, resolution);
       await fetchItems();
     } catch (e: any) {
       console.error('resolve failed', e);
     } finally {
       setResolving(null);
-      setEditingId(null);
-    }
-  };
-
-  const handleModify = (id: string) => {
-    if (editingId === id) {
-      try {
-        const parsed = JSON.parse(editParams);
-        handleResolve(id, 'modified', parsed);
-      } catch { alert('Invalid JSON'); }
-    } else {
-      const item = items.find(i => i.id === id);
-      setEditingId(id);
-      setEditParams(JSON.stringify(item?.params ?? {}, null, 2));
     }
   };
 
@@ -873,7 +856,6 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
   const resolutionIcon = (r: string) => {
     if (r === 'approved') return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />;
     if (r === 'rejected') return <XCircle className="w-3.5 h-3.5 text-red-400" />;
-    if (r === 'modified') return <Pencil className="w-3.5 h-3.5 text-amber-400" />;
     if (r === 'timeout') return <Timer className="w-3.5 h-3.5 text-text-muted" />;
     return null;
   };
@@ -951,14 +933,6 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
                 {t.common.approve}
               </button>
               <button
-                onClick={() => handleModify(item.id)}
-                disabled={resolving === item.id}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-400 text-xs font-semibold hover:bg-amber-500/25 transition-colors disabled:opacity-50"
-              >
-                <Pencil className="w-3.5 h-3.5" />
-                {editingId === item.id ? t.common.save : t.common.modify}
-              </button>
-              <button
                 onClick={() => handleResolve(item.id, 'rejected')}
                 disabled={resolving === item.id}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50"
@@ -991,23 +965,6 @@ function ApprovalPanel({ onCountChange }: { onCountChange?: (n: number) => void 
               <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
                 {JSON.stringify(item.params, null, 2)}
               </pre>
-            )}
-            {editingId === item.id && (
-              <div className="mt-3">
-                <label className="text-xs text-text-muted font-semibold mb-1 block">{t.common.editParamsJson}</label>
-                <textarea
-                  value={editParams}
-                  onChange={e => setEditParams(e.target.value)}
-                  rows={6}
-                  className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent resize-y"
-                />
-                <button
-                  onClick={() => setEditingId(null)}
-                  className="mt-2 text-xs text-text-muted hover:text-text-primary transition-colors"
-                >
-                  {t.common.cancelEditing}
-                </button>
-              </div>
             )}
           </div>
         </div>
@@ -1082,7 +1039,7 @@ function DashboardPanel({ data }: { data: any }) {
       label: t.monitor.dashboard.messages,
       value: messages.total ?? 0,
       sub: t.monitor.dashboard.userAssistant.replace('{u}', String(messages.user ?? 0)).replace('{a}', String(messages.assistant ?? 0)),
-      accent: 'text-violet-400',
+      accent: 'text-blue-400',
     },
     {
       icon: Wrench,
@@ -1095,7 +1052,7 @@ function DashboardPanel({ data }: { data: any }) {
       label: t.monitor.dashboard.tokens,
       value: formatTokens(tokens.total ?? 0),
       sub: tokens.total ? `↓${formatTokens(tokens.input)} ↑${formatTokens(tokens.output)}` : 'N/A',
-      accent: 'text-cyan-400',
+      accent: 'text-blue-400',
     },
     {
       icon: DollarSign,
@@ -1143,6 +1100,7 @@ function DashboardPanel({ data }: { data: any }) {
 /* ============ Main Page ============ */
 export default function Monitor() {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as MonitorTabId | null) ?? 'agent';
   const [activeTab, setActiveTab] = useState<MonitorTabId>(
@@ -1327,7 +1285,6 @@ export default function Monitor() {
   const LABEL_W = 152;
 
   const monitorTabs: { id: MonitorTabId; name: string; icon: typeof Activity }[] = [
-    { id: 'world',    name: t.monitor.tabs.town,      icon: Activity },
     { id: 'agent',    name: t.monitor.tabs.agents,     icon: Users },
     { id: 'activity', name: t.monitor.tabs.activities, icon: ListChecks },
     { id: 'skills',   name: t.monitor.tabs.skills,     icon: Puzzle },
@@ -1341,22 +1298,31 @@ export default function Monitor() {
     all: t.monitor.agents.all,
   };
 
-  const tabCounts: Record<MonitorTabId, number> = { world: 0, agent: stats.sessions, activity: stats.events, skills: 0, memory: 0, approval: pendingCount };
+  const tabCounts: Record<MonitorTabId, number> = { agent: stats.sessions, activity: stats.events, skills: 0, memory: 0, approval: pendingCount };
 
   return (
     <div className="min-h-screen">
       {/* ===== Header ===== */}
       <div className="border-b border-border">
-        <div className="px-8 py-6">
-          <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold text-text-primary">{t.monitor.title}</h1>
-            <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
-              {t.common.active}
-            </span>
+        <div className="px-8 py-6 flex items-start justify-between">
+          <div>
+            <div className="flex items-center gap-4">
+              <h1 className="text-xl font-bold text-text-primary">{t.monitor.title}</h1>
+              <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
+                {t.common.active}
+              </span>
+            </div>
+            <p className="text-[13px] text-text-muted mt-2">
+              {t.monitor.subtitle}
+            </p>
           </div>
-          <p className="text-[13px] text-text-muted mt-2">
-            {t.monitor.subtitle}
-          </p>
+          <button
+            onClick={() => navigate('/world')}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent/10 border border-accent/30 text-accent text-[13px] font-semibold hover:bg-accent/20 hover:border-accent/50 transition-all"
+          >
+            <Activity className="w-4 h-4" />
+            {t.monitor.agentOffice}
+          </button>
         </div>
         <div className="px-8 flex items-center gap-1">
           {monitorTabs.map(tab => {
@@ -1386,14 +1352,6 @@ export default function Monitor() {
 
       {/* ===== Content ===== */}
       <div className="p-6">
-
-        {/* ========== Tab: World ========== */}
-        {activeTab === 'world' && (
-          <div className="flex flex-col items-center justify-center h-[60vh] gap-4 text-text-muted select-none">
-            <Activity className="w-12 h-12 opacity-20" />
-            <p className="text-sm opacity-40">{t.monitor.town}</p>
-          </div>
-        )}
 
         {/* ========== Tab: Agent — Timeline ========== */}
         {activeTab === 'agent' && (

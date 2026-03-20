@@ -220,9 +220,8 @@ class ToolCheckRequest(BaseModel):
 
 
 class ToolCheckResponse(BaseModel):
-    action: str               # "allow" | "block" | "modify"
+    action: str               # "allow" | "block"
     reason: str | None = None
-    params: dict | None = None
 
 
 @router.post("/tool-check", response_model=ToolCheckResponse)
@@ -255,7 +254,6 @@ class PendingApprovalResponse(BaseModel):
     resolved: bool = False
     resolution: str = ""
     resolved_at: float = 0.0
-    modified_params: dict | None = None
 
 
 @router.get("/pending", response_model=list[PendingApprovalResponse])
@@ -268,17 +266,15 @@ async def list_pending(resolved: bool | None = Query(None)):
 
 
 class ResolveRequest(BaseModel):
-    resolution: str             # "approved" | "rejected" | "modified"
-    modified_params: dict | None = None
+    resolution: str             # "approved" | "rejected"
 
 
 @router.post("/pending/{pending_id}/resolve", response_model=PendingApprovalResponse)
 async def resolve_pending(pending_id: str, body: ResolveRequest):
-    """Resolve a pending approval — approve, reject, or modify params."""
+    """Resolve a pending approval — approve or reject."""
     p = guard_service.resolve_pending(
         pending_id=pending_id,
         resolution=body.resolution,
-        modified_params=body.modified_params,
     )
     if not p:
         raise HTTPException(404, f"Pending item {pending_id} not found or already resolved")
