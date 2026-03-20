@@ -602,12 +602,12 @@ export default function Assets() {
 
         {/* ========== Safety Check Tab ========== */}
         {activeTab === 'safety' && (
-          <div className="grid grid-cols-12 gap-6">
+          <div className="grid grid-cols-2 gap-6">
             {/* Left: input */}
-            <div className="col-span-6 space-y-5">
-              <Card>
+            <div className="flex flex-col gap-5">
+              <Card className="flex-1 flex flex-col">
                 <CardHeader icon={ShieldCheck} title={t.assets.safety.title} />
-                <div className="p-5 space-y-4">
+                <div className="p-5 space-y-4 flex-1 flex flex-col">
                   <p className="text-[12px] text-text-muted">
                     {t.assets.safety.desc}
                   </p>
@@ -638,7 +638,7 @@ export default function Assets() {
                   </div>
 
                   <button onClick={runSafetyCheck} disabled={safetyChecking || !safetyPath.trim()}
-                    className="w-full px-5 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-lg shadow-accent/20">
+                    className="w-full mt-auto px-5 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-lg shadow-accent/20">
                     {safetyChecking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
                     {safetyChecking ? t.assets.safety.checking : t.assets.safety.checkSafety}
                   </button>
@@ -688,13 +688,13 @@ export default function Assets() {
             </div>
 
             {/* Right: history */}
-            <div className="col-span-6">
-              <Card>
+            <div className="flex flex-col">
+              <Card className="flex-1 flex flex-col">
                 <CardHeader icon={ShieldCheck} title={t.assets.safety.historyTitle} badge={
                   <span className="text-[11px] text-text-muted bg-surface-2 px-2 py-0.5 rounded-full">{safetyHistory.length}</span>
                 } />
                 {safetyHistory.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-20 text-center">
+                  <div className="flex-1 flex flex-col items-center justify-center py-20 text-center">
                     <div className="w-14 h-14 rounded-2xl bg-surface-2 flex items-center justify-center mb-4"><Lock className="w-7 h-7 text-text-muted" /></div>
                     <p className="text-sm font-medium text-text-secondary mb-1">{t.assets.safety.noChecks}</p>
                     <p className="text-[12px] text-text-muted max-w-xs">{t.assets.safety.noChecksDesc}</p>

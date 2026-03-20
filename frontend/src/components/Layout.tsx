@@ -31,7 +31,7 @@ export default function Layout() {
   return (
     <div className="flex min-h-screen">
       {/* ===== Sidebar ===== */}
-      <aside className="w-56 flex-shrink-0 bg-sidebar border-r border-border flex flex-col">
+      <aside className="w-56 flex-shrink-0 bg-sidebar border-r border-border flex flex-col h-screen sticky top-0">
         {/* Logo */}
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
           <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />
@@ -47,7 +47,7 @@ export default function Layout() {
         </div>
 
         {/* Nav Items */}
-        <nav className="flex-1 px-3 space-y-0.5">
+        <nav className="flex-1 overflow-y-auto px-3 space-y-0.5">
           {navigation.map((item) => {
             const Icon = item.icon;
             const isActive = location.pathname === item.href || (item.href === '/monitor' && location.pathname === '/');

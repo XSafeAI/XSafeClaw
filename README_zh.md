@@ -83,13 +83,13 @@ XSafeClaw 的安全守卫通过双层防御保护用户：
 ### 方式 A：从 GitHub 安装（推荐）
 
 ```bash
-pip install git+https://github.com/dyf-2316/XSafeClaw.git
+pip install git+https://github.com/XSafeAI/XSafeClaw.git
 ```
 
 ### 方式 B：克隆后本地安装
 
 ```bash
-git clone https://github.com/dyf-2316/XSafeClaw.git
+git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw
 pip install .
 ```
@@ -97,7 +97,7 @@ pip install .
 ### 方式 C：开发模式安装
 
 ```bash
-git clone https://github.com/dyf-2316/XSafeClaw.git
+git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw
 pip install -e ".[dev]"
 ```
@@ -280,7 +280,7 @@ XSafeClaw/
 ### 1. 克隆并安装后端
 
 ```bash
-git clone https://github.com/dyf-2316/XSafeClaw.git
+git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw
 
 uv venv

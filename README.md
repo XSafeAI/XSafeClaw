@@ -83,13 +83,13 @@ Each interaction round (Event) follows this lifecycle:
 ### Option A: Install from GitHub (recommended)
 
 ```bash
-pip install git+https://github.com/dyf-2316/XSafeClaw.git
+pip install git+https://github.com/XSafeAI/XSafeClaw.git
 ```
 
 ### Option B: Clone and install locally
 
 ```bash
-git clone https://github.com/dyf-2316/XSafeClaw.git
+git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw
 pip install .
 ```
@@ -97,7 +97,7 @@ pip install .
 ### Option C: Development install
 
 ```bash
-git clone https://github.com/dyf-2316/XSafeClaw.git
+git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw
 pip install -e ".[dev]"
 ```
@@ -280,7 +280,7 @@ XSafeClaw/
 ### 1. Clone & Install Backend
 
 ```bash
-git clone https://github.com/dyf-2316/XSafeClaw.git
+git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw
 
 uv venv
