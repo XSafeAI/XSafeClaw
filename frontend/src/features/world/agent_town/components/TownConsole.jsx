@@ -222,7 +222,7 @@ function summarizeTasks(events = []) {
 
 function buildDraftAgent(sessionKey, modelOption) {
   const modelRef = modelOption?.id || 'unknown/model';
-  const provider = modelOption?.providerId || modelRef.split('/')[0] || 'unknown';
+  const provider = modelOption?.provider || modelRef.split('/')[0] || 'unknown';
   const modelName = modelOption?.name || modelRef.split('/').slice(1).join('/') || modelRef;
   const suffix = shortId(normalizeSessionIdentity(sessionKey)).toUpperCase();
   return {
@@ -960,7 +960,8 @@ export default function TownConsole({
   const [traceData, setTraceData] = useState(buildConsoleData(null));
   const [dashboardEvents, setDashboardEvents] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState([]);
-  const [modelProviders, setModelProviders] = useState([]);
+  const [availableModels, setAvailableModels] = useState([]);
+  const [defaultModel, setDefaultModel] = useState('');
   const [draftAgents, setDraftAgents] = useState([]);
   const [selectedFilter, setSelectedFilter] = useState('working');
   const [selectedIdentity, setSelectedIdentity] = useState('');
@@ -992,7 +993,10 @@ export default function TownConsole({
       setTraceData(mock);
       setDashboardEvents(buildMockDashboardEvents(mock.events));
       setPendingApprovals(buildMockPendingApprovals(mock.agents, mock.events));
-      setModelProviders(MOCK_MODEL_PROVIDERS);
+      setAvailableModels(MOCK_MODEL_PROVIDERS.flatMap((p) =>
+        (p.models || []).map((m) => ({ id: m.id, name: m.name || m.id, provider: p.name || p.id, reasoning: Boolean(m.reasoning) }))
+      ));
+      setDefaultModel(MOCK_MODEL_PROVIDERS[0]?.models?.[0]?.id || '');
       return;
     }
 
@@ -1032,23 +1036,20 @@ export default function TownConsole({
         console.warn('[TownConsole] pending approvals fetch error:', err);
       });
 
-    const scanPromise = fetch('/api/system/onboard-scan', { cache: 'no-store' })
+    const modelsPromise = fetch('/api/chat/available-models', { cache: 'no-store' })
       .then(async (response) => {
         if (!response.ok) {
-          throw new Error(`Onboard scan request failed: ${response.status}`);
+          throw new Error(`Available models request failed: ${response.status}`);
         }
-        const scanJson = await response.json();
-        const providers = Array.isArray(scanJson.model_providers) && scanJson.model_providers.length
-          ? scanJson.model_providers
-          : MOCK_MODEL_PROVIDERS;
-        setModelProviders(providers);
+        const json = await response.json();
+        setAvailableModels(Array.isArray(json.models) ? json.models : []);
+        if (json.default_model) setDefaultModel(json.default_model);
       })
       .catch((err) => {
-        console.warn('[TownConsole] onboard scan fetch error:', err);
-        setModelProviders(MOCK_MODEL_PROVIDERS);
+        console.warn('[TownConsole] available-models fetch error:', err);
       });
 
-    await Promise.allSettled([tracePromise, dashboardEventsPromise, pendingApprovalsPromise, scanPromise]);
+    await Promise.allSettled([tracePromise, dashboardEventsPromise, pendingApprovalsPromise, modelsPromise]);
   }, []);
 
   useEffect(() => {
@@ -1177,27 +1178,19 @@ export default function TownConsole({
   const currentSummary = summarizeTasks(currentDashboardEvents);
 
   const allModels = useMemo(() => {
-    const flat = [];
-    modelProviders.forEach((provider) => {
-      (provider.models || []).forEach((model) => {
-        flat.push({
-          id: model.id,
-          name: model.name || model.id,
-          providerId: provider.id,
-          providerName: provider.name || provider.id,
-          reasoning: Boolean(model.reasoning),
-          contextWindow: model.contextWindow || 0,
-        });
-      });
-    });
-    return flat;
-  }, [modelProviders]);
+    return availableModels.map((model) => ({
+      id: model.id,
+      name: model.name || model.id,
+      provider: model.provider || '',
+      reasoning: Boolean(model.reasoning),
+    }));
+  }, [availableModels]);
 
   const filteredModels = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
     if (!needle) return allModels;
     return allModels.filter((model) => {
-      const haystack = `${model.name} ${model.id} ${model.providerName}`.toLowerCase();
+      const haystack = `${model.name} ${model.id} ${model.provider}`.toLowerCase();
       return haystack.includes(needle);
     });
   }, [allModels, modelSearch]);
@@ -1284,7 +1277,7 @@ export default function TownConsole({
         const draftAgent = {
           ...buildDraftAgent(sessionKey, modelOption),
           mock: true,
-          channel: modelOption?.providerId === 'google' ? 'discord' : 'webchat',
+          channel: modelOption?.provider === 'Google' ? 'discord' : 'webchat',
         };
         const identity = getAgentIdentity(draftAgent);
 
@@ -1299,15 +1292,10 @@ export default function TownConsole({
         return;
       }
 
-      const providerOverride = pendingModelId.includes('/') ? pendingModelId.split('/')[0] : '';
       const res = await fetch('/api/chat/start-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model_override: pendingModelId,
-          provider_override: providerOverride,
-          label: modelOption?.name || pendingModelId,
-        }),
+        body: JSON.stringify({}),
       });
 
       if (!res.ok) {
@@ -1316,6 +1304,18 @@ export default function TownConsole({
 
       const json = await res.json();
       const sessionKey = json.session_key;
+
+      if (pendingModelId) {
+        try {
+          await fetch('/api/chat/patch-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_key: sessionKey, model: pendingModelId }),
+          });
+        } catch (err) {
+          console.warn('[TownConsole] patch-session model error:', err);
+        }
+      }
       const draftAgent = buildDraftAgent(sessionKey, modelOption);
       const identity = getAgentIdentity(draftAgent);
 

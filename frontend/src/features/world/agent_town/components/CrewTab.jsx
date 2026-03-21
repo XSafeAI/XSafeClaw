@@ -793,11 +793,8 @@ export default function CrewTab({
                       <span className="tc-model-option-name">{model.name}</span>
                       <span className="tc-model-option-meta">{model.id}</span>
                       <span className="tc-model-option-foot">
-                        <span className="tc-model-option-provider">{model.providerName}</span>
+                        <span className="tc-model-option-provider">{model.provider}</span>
                         <span className="tc-model-option-badge">{model.reasoning ? 'REASON' : 'STD'}</span>
-                        {model.contextWindow ? (
-                          <span className="tc-model-option-badge">{Math.round(model.contextWindow / 1000)}K CTX</span>
-                        ) : null}
                       </span>
                     </button>
                   ))
