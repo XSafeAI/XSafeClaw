@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Activity, MessageSquare, Wrench, Clock,
   User, Bot, Terminal,
@@ -1317,7 +1317,8 @@ export default function Monitor() {
             </p>
           </div>
           <button
-            onClick={() => navigate('/world')}
+            type="button"
+            onClick={() => navigate('/agent-town')}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent/10 border border-accent/30 text-accent text-[13px] font-semibold hover:bg-accent/20 hover:border-accent/50 transition-all"
           >
             <Activity className="w-4 h-4" />

@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -7,6 +8,13 @@ export default defineConfig({
   build: {
     outDir: '../src/xsafeclaw/static',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        agentTown: resolve(__dirname, 'agent-town.html'),
+        agentValley: resolve(__dirname, 'agent-valley.html'),
+      },
+    },
   },
   server: {
     port: 3000,

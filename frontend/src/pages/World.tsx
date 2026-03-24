@@ -2,7 +2,8 @@ import { useEffect } from 'react';
 
 export default function World() {
   useEffect(() => {
-    window.location.replace('/agent-town.html');
+    const { search, hash } = window.location;
+    window.location.replace(`/agent-town.html${search}${hash}`);
   }, []);
 
   return null;

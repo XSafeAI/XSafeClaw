@@ -50,7 +50,7 @@ export const en = {
   home: {
     title: 'XSafeClaw',
     subtitle: 'Keeping Your Claw Safe',
-    agentTown: 'Agent Office',
+    agentTown: 'Agent Valley',
     agentTownDesc: 'Manage and observe all your AI agents in one place',
     agentDashboard: 'Agent Dashboard',
     agentDashboardDesc: 'A dashboard to monitor and manage your AI agents',
@@ -59,7 +59,7 @@ export const en = {
   monitor: {
     title: 'Claw Monitor',
     subtitle: 'Real-time monitoring of agent chats, tasks, and tool call activities',
-    agentOffice: 'Agent Office',
+    agentOffice: 'Agent Valley',
     tabs: {
       agents: 'Agents',
       activities: 'Activities',

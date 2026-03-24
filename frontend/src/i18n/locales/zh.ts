@@ -44,7 +44,7 @@ export const zh: Translations = {
   home: {
     title: 'XSafeClaw',
     subtitle: '守护您的 Claw 安全',
-    agentTown: '智能体办公室',
+    agentTown: '智能体小镇',
     agentTownDesc: '在一个地方管理和观察所有智能体',
     agentDashboard: '智能体仪表盘',
     agentDashboardDesc: '用于监控和管理智能体的仪表盘',
@@ -53,7 +53,7 @@ export const zh: Translations = {
   monitor: {
     title: '安全监控',
     subtitle: '实时监控智能体对话、任务和工具调用活动',
-    agentOffice: '智能体办公室',
+    agentOffice: '智能体小镇',
     tabs: {
       agents: '智能体',
       activities: '活动',

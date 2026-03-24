@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
-import { useI18n } from './i18n';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Layout from './components/Layout';
 import Monitor from './pages/Monitor';
@@ -11,6 +10,7 @@ import Chat from './pages/Chat';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
 import { systemAPI } from './services/api';
+import IntroScreen from './components/IntroScreen';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,16 +23,30 @@ const queryClient = new QueryClient({
 });
 
 type CheckState = 'pending' | 'setup' | 'configure' | 'ok';
+type IntroState = 'playing' | 'exiting' | 'done';
 
 const EXEMPT_PATHS = ['/setup', '/configure'];
+const INTRO_MIN_DURATION_MS = 6200;
+const INTRO_EXIT_DURATION_MS = 960;
+const STATUS_FALLBACK_MS = 3200;
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
+  const [introReady, setIntroReady] = useState(false);
+  const [introState, setIntroState] = useState<IntroState>('playing');
   const navigate = useNavigate();
   const location = useLocation();
-  const { t } = useI18n();
 
   useEffect(() => {
+    const timer = window.setTimeout(() => setIntroReady(true), INTRO_MIN_DURATION_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const fallbackTimer = window.setTimeout(() => {
+      setCheckState((current) => (current === 'pending' ? 'ok' : current));
+    }, STATUS_FALLBACK_MS);
+
     (async () => {
       try {
         const res = await systemAPI.status();
@@ -54,42 +68,51 @@ function AppRoutes() {
         }
       } catch {
         setCheckState('ok');
+      } finally {
+        window.clearTimeout(fallbackTimer);
       }
     })();
+
+    return () => window.clearTimeout(fallbackTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Guard: redirect if state doesn't match page
   useEffect(() => {
     if (EXEMPT_PATHS.includes(location.pathname)) return;
     if (checkState === 'setup') navigate('/setup', { replace: true });
     else if (checkState === 'configure') navigate('/configure', { replace: true });
   }, [checkState, location.pathname, navigate]);
 
-  if (checkState === 'pending') {
-    return (
-      <div className="min-h-screen bg-surface-0 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <img src="/logo.png" alt="XSafeClaw" className="w-14 h-14 rounded-xl animate-pulse" />
-          <p className="text-text-muted text-sm">{t.common.startingApp}</p>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (introState !== 'playing') return;
+    if (!introReady) return;
+
+    setIntroState('exiting');
+    const timer = window.setTimeout(() => setIntroState('done'), INTRO_EXIT_DURATION_MS);
+    return () => window.clearTimeout(timer);
+  }, [introReady, introState]);
 
   return (
-    <Routes>
-      <Route path="/setup" element={<Setup />} />
-      <Route path="/configure" element={<Configure />} />
-      <Route path="/world" element={<World />} />
-      <Route element={<Layout />}>
-        <Route path="/" element={<Monitor />} />
-        <Route path="/monitor" element={<Monitor />} />
-        <Route path="/assets" element={<Assets />} />
-        <Route path="/safety-rehearsal" element={<RiskScanner />} />
-        <Route path="/chat" element={<Chat />} />
-      </Route>
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/setup" element={<Setup />} />
+        <Route path="/configure" element={<Configure />} />
+        <Route path="/agent-town" element={<World />} />
+        <Route path="/agent-valley" element={<World />} />
+        <Route path="/world" element={<World />} />
+        <Route element={<Layout />}>
+          <Route path="/" element={<Navigate to="/agent-town" replace />} />
+          <Route path="/monitor" element={<Monitor />} />
+          <Route path="/assets" element={<Assets />} />
+          <Route path="/safety-rehearsal" element={<RiskScanner />} />
+          <Route path="/chat" element={<Chat />} />
+        </Route>
+      </Routes>
+
+      {introState !== 'done' && (
+        <IntroScreen exiting={introState === 'exiting'} />
+      )}
+    </>
   );
 }
 

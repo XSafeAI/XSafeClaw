@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver as Observer
 
 
 class SessionFileEventHandler(FileSystemEventHandler):
