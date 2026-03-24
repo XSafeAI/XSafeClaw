@@ -228,7 +228,7 @@ export const systemAPI = {
       openclaw_version: string | null;
       daemon_running: boolean;
       openclaw_path: string | null;
-    }>('/system/status'),
+    }>("/system/status", { timeout: 2500 }),
 
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',

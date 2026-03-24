@@ -18,6 +18,36 @@ const GUARD_PORTAL_SCALE = 4.2;
 const GUARD_BODY_SCALE = 3.6;
 const GUARD_SHADOW_SCALE = 3.3;
 const ISSUE_MARKER_SCALE = Math.max(2.8, NPC_SCALE * 0.92);
+const SHOW_EASTER_EGG_BUBBLE_MS = 3200;
+const SHOW_EASTER_EGG_DOUBLE_TAP_MS = 320;
+/** Same strip as pathfinding NPCs when moving right (`frames.right`); third frame = standing pose. */
+const SHOW_NPC_RIGHT_STAND_FRAME = 2;
+/** Readable monospace for dashboard metadata (subtitle, time axis); must match loaded webfont. */
+const DASHBOARD_CODE_FONT_FAMILY = 'JetBrains Mono, Consolas, Menlo, monospace';
+
+/** Google Fonts CSS may still be loading when the engine starts; wait so @font-face exists before fonts.load(). */
+async function waitForGoogleFontsStylesheet(timeoutMs = 2500) {
+  const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).filter((l) =>
+    /fonts\.googleapis\.com/.test(l.href)
+  );
+  if (!links.length) return;
+
+  const waitOne = (link) =>
+    new Promise((resolve) => {
+      if (link.sheet) {
+        resolve();
+        return;
+      }
+      const done = () => resolve();
+      link.addEventListener('load', done, { once: true });
+      link.addEventListener('error', done, { once: true });
+    });
+
+  await Promise.race([
+    Promise.all(links.map(waitOne)),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
 
 /**
  * The core game engine — manages PixiJS app, map, NPCs, and game loop.
@@ -35,7 +65,9 @@ export default class GameEngine {
     this.overlayRects = {};
     this.floorScreen  = null;
     this.wallDashboard = null;
+    this.showEasterEgg = null;
     this._floorScreenPreviewTexture = null;
+    this._showEasterEggHideTimer = null;
     this.pendingNpc   = null;
     this.sceneW       = SCENE_W;
     this.sceneH       = SCENE_H;
@@ -147,8 +179,20 @@ export default class GameEngine {
     onProgress?.(0, 'Loading sprites...');
     await this.spriteLoader.load((p) => onProgress?.(p * 0.5, 'Loading sprites...'));
 
-    // 2. Wait for pixel font
+    // 2. Wait for UI fonts (pixel + dashboard code style)
+    await waitForGoogleFontsStylesheet();
     try { await document.fonts.load('8px "Press Start 2P"'); } catch (_) {}
+    try {
+      await document.fonts.load('400 12px "JetBrains Mono"');
+      await document.fonts.load('500 14px "JetBrains Mono"');
+      await document.fonts.load('500 15px "JetBrains Mono"');
+      await document.fonts.load('500 16px "JetBrains Mono"');
+      await document.fonts.load('500 18px "JetBrains Mono"');
+      await document.fonts.load('600 14px "JetBrains Mono"');
+    } catch (_) {}
+    try {
+      await document.fonts.ready;
+    } catch (_) {}
 
     // 3. Load map
     onProgress?.(0.5, 'Loading map...');
@@ -176,7 +220,6 @@ export default class GameEngine {
             this._floorScreenPreviewTexture = null;
           }
         }
-
         const contentBounds = this.tiledRenderer.getContentBounds();
         const screenBounds = this.mapConfig?.screenLayerName
           ? this.tiledRenderer.getNamedLayerPixelBounds(this.mapConfig.screenLayerName)
@@ -237,6 +280,7 @@ export default class GameEngine {
         this.guardFxLayer.y = this._worldOffsetY;
         this._createFloorScreenOverlay(this.overlayRects.screen || null);
         this._createWallDashboardOverlay(this.overlayRects.dashboardPanels || []);
+        this._createShowEasterEggOverlay(this.overlayRects.show || null);
 
         console.log(
           `Map loaded: ${this.tiledRenderer.mapW}×${this.tiledRenderer.mapH} tiles, ` +
@@ -252,6 +296,7 @@ export default class GameEngine {
     if (!this.tiledRenderer) {
       this._destroyFloorScreenOverlay();
       this._destroyWallDashboardOverlay();
+      this._destroyShowEasterEggOverlay();
       try {
         const bgTex = await PIXI.Assets.load(SCENE_IMAGE_URL);
         bgTex.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
@@ -335,6 +380,246 @@ export default class GameEngine {
     this.wallDashboard = null;
   }
 
+  _destroyShowEasterEggOverlay() {
+    if (this._showEasterEggHideTimer) {
+      clearTimeout(this._showEasterEggHideTimer);
+      this._showEasterEggHideTimer = null;
+    }
+    const container = this.showEasterEgg?.container;
+    if (container) {
+      container.parent?.removeChild(container);
+      container.destroy({ children: true });
+    }
+    this.showEasterEgg = null;
+  }
+
+  /**
+   * Character for the map "npc" show layer: optional `mapConfig.showNpcCharName`,
+   * else first on-field NPC (same roster as `_createNPC`), else first CHAR_NAMES with a valid right-run strip.
+   */
+  _resolveShowNpcCharName() {
+    const pinned = this.mapConfig?.showNpcCharName;
+    if (typeof pinned === 'string' && pinned.length) {
+      const fr = this.spriteLoader.charFrames[pinned]?.right;
+      if (fr?.length > SHOW_NPC_RIGHT_STAND_FRAME) return pinned;
+    }
+    const firstNpc = this.npcs?.find((n) => n?.charName);
+    if (firstNpc?.charName) {
+      const fr = this.spriteLoader.charFrames[firstNpc.charName]?.right;
+      if (fr?.length > SHOW_NPC_RIGHT_STAND_FRAME) return firstNpc.charName;
+    }
+    const fallback = CHAR_NAMES.find((n) => {
+      const fr = this.spriteLoader.charFrames[n]?.right;
+      return fr?.length > SHOW_NPC_RIGHT_STAND_FRAME;
+    });
+    return fallback || CHAR_NAMES[0];
+  }
+
+  /** After NPC roster changes, swap to the same character sheet + standing frame as walking right (run strip frame 3). */
+  _syncShowNpcSpriteFromScene() {
+    if (!this.showEasterEgg?.sprite) return;
+    const charName = this._resolveShowNpcCharName();
+    const frames = this.spriteLoader.charFrames[charName];
+    const tex = frames?.right?.[SHOW_NPC_RIGHT_STAND_FRAME];
+    if (!tex) return;
+    if (this.showEasterEgg.charName === charName && this.showEasterEgg.sprite.texture === tex) return;
+    this.showEasterEgg.charName = charName;
+    this.showEasterEgg.sprite.texture = tex;
+    const sprite = this.showEasterEgg.sprite;
+    const root = sprite.parent;
+    if (root) {
+      root.hitArea = new PIXI.Rectangle(
+        sprite.x - 8,
+        sprite.y - sprite.height - 8,
+        sprite.width + 16,
+        sprite.height + 16,
+      );
+    }
+    const sw = sprite.width;
+    const g = this.showEasterEgg.shadow;
+    if (g) {
+      g.clear();
+      g.beginFill(0x000000, 0.16);
+      g.drawEllipse(
+        Math.round(sprite.x + sw * 0.52),
+        this.showEasterEgg.spriteBaseY - 2,
+        Math.max(18, Math.round(sw * 0.34)),
+        Math.max(5, Math.round(sw * 0.12)),
+      );
+      g.endFill();
+    }
+  }
+
+  _createShowEasterEggOverlay(rect) {
+    this._destroyShowEasterEggOverlay();
+    const message = String(this.mapConfig?.showEasterEggMessage || '').trim();
+    if (!rect?.w || !rect?.h || !this.world) return;
+
+    const charName = this._resolveShowNpcCharName();
+    const frames = this.spriteLoader.charFrames[charName];
+    const standTex = frames?.right?.[SHOW_NPC_RIGHT_STAND_FRAME];
+    if (!standTex) return;
+
+    const width = rect.w;
+    const height = rect.h;
+    const container = new PIXI.Container();
+    container.x = rect.x;
+    container.y = rect.y;
+    container.zIndex = 38;
+    container.sortableChildren = true;
+    container.eventMode = 'passive';
+
+    const root = new PIXI.Container();
+    root.eventMode = 'static';
+    root.cursor = 'pointer';
+    container.addChild(root);
+
+    const maxImageW = Math.max(76, Math.round(width * 0.23));
+    const maxImageH = Math.max(92, Math.round(height * 0.78));
+    const scale = Math.max(0.48, Math.min(maxImageW / FW, maxImageH / FH, NPC_SCALE));
+    const spriteX = Math.max(8, Math.round(width * 0.04));
+    const spriteBaseY = height - Math.max(8, Math.round(height * 0.08));
+
+    const shadow = new PIXI.Graphics();
+    shadow.beginFill(0x000000, 0.16);
+    shadow.drawEllipse(
+      Math.round(spriteX + FW * scale * 0.52),
+      spriteBaseY - 2,
+      Math.max(18, Math.round(FW * scale * 0.34)),
+      Math.max(5, Math.round(FW * scale * 0.12)),
+    );
+    shadow.endFill();
+    root.addChild(shadow);
+
+    const sprite = new PIXI.Sprite(standTex);
+    sprite.anchor.set(0, 1);
+    sprite.x = spriteX;
+    sprite.y = spriteBaseY;
+    sprite.scale.set(scale);
+    sprite.roundPixels = true;
+    root.addChild(sprite);
+
+    root.hitArea = new PIXI.Rectangle(
+      sprite.x - 8,
+      sprite.y - sprite.height - 8,
+      sprite.width + 16,
+      sprite.height + 16,
+    );
+
+    let bubble = null;
+    let bubbleBaseY = 0;
+    if (message) {
+      const bubbleFontSize = Math.max(10, Math.min(12, Math.round(height * 0.065)));
+      const bubbleText = new PIXI.Text(message, new PIXI.TextStyle({
+        fontFamily: 'Press Start 2P, monospace',
+        fontSize: bubbleFontSize,
+        fill: 0x3a3020,
+        wordWrap: true,
+        wordWrapWidth: Math.max(180, Math.min(280, Math.round(width * 0.48))),
+        lineHeight: bubbleFontSize + 7,
+      }));
+      bubbleText.roundPixels = true;
+
+      const bubblePadX = 16;
+      const bubblePadY = 14;
+      const bubbleW = Math.max(204, Math.ceil(bubbleText.width + bubblePadX * 2));
+      const bubbleH = Math.max(68, Math.ceil(bubbleText.height + bubblePadY * 2));
+      bubble = new PIXI.Container();
+      bubble.visible = false;
+      bubble.alpha = 0;
+      bubble.eventMode = 'none';
+
+      const bubbleShadow = new PIXI.Graphics();
+      bubbleShadow.beginFill(0x000000, 0.12);
+      bubbleShadow.drawRoundedRect(4, 6, bubbleW, bubbleH, 12);
+      bubbleShadow.endFill();
+      bubble.addChild(bubbleShadow);
+
+      const bubbleBg = new PIXI.Graphics();
+      bubbleBg.beginFill(0xfffbf2, 0.96);
+      bubbleBg.lineStyle(2, 0xb2773f, 0.34);
+      bubbleBg.drawRoundedRect(0, 0, bubbleW, bubbleH, 12);
+      bubbleBg.endFill();
+      bubbleBg.beginFill(0xfffbf2, 0.96);
+      bubbleBg.moveTo(24, bubbleH);
+      bubbleBg.lineTo(12, bubbleH + 12);
+      bubbleBg.lineTo(42, bubbleH);
+      bubbleBg.endFill();
+      bubble.addChild(bubbleBg);
+
+      bubbleText.x = bubblePadX;
+      bubbleText.y = bubblePadY;
+      bubble.addChild(bubbleText);
+
+      const bubbleBaseX = Math.min(
+        Math.max(10, width - bubbleW - 10),
+        Math.round(sprite.x + sprite.width + 16),
+      );
+      bubbleBaseY = Math.max(
+        6,
+        Math.round(sprite.y - sprite.height - bubbleH + 18),
+      );
+      bubble.x = bubbleBaseX;
+      bubble.y = bubbleBaseY;
+      root.addChild(bubble);
+
+      let lastTapAt = 0;
+      root.on('pointertap', () => {
+        const now = performance.now();
+        if (now - lastTapAt <= SHOW_EASTER_EGG_DOUBLE_TAP_MS) {
+          lastTapAt = 0;
+          this._triggerShowEasterEggMessage();
+          return;
+        }
+        lastTapAt = now;
+      });
+    }
+
+    this.showEasterEgg = {
+      container,
+      sprite,
+      spriteBaseY,
+      shadow,
+      shadowBaseAlpha: 0.16,
+      bubble,
+      bubbleBaseY,
+      charName,
+    };
+
+    this.world.addChild(container);
+    this._syncShowEasterEggOverlay(performance.now());
+  }
+
+  _triggerShowEasterEggMessage() {
+    if (!this.showEasterEgg?.bubble) return;
+    if (this._showEasterEggHideTimer) clearTimeout(this._showEasterEggHideTimer);
+
+    this.showEasterEgg.bubble.visible = true;
+    this.showEasterEgg.bubble.alpha = 1;
+    this.showEasterEgg.bubble.y = this.showEasterEgg.bubbleBaseY;
+
+    this._showEasterEggHideTimer = window.setTimeout(() => {
+      this._showEasterEggHideTimer = null;
+      if (!this.showEasterEgg?.bubble) return;
+      this.showEasterEgg.bubble.visible = false;
+      this.showEasterEgg.bubble.alpha = 0;
+      this.showEasterEgg.bubble.y = this.showEasterEgg.bubbleBaseY;
+    }, SHOW_EASTER_EGG_BUBBLE_MS);
+  }
+
+  _syncShowEasterEggOverlay(now = performance.now()) {
+    if (!this.showEasterEgg) return;
+
+    const floatOffset = Math.sin(now / 520) * 1.8;
+    this.showEasterEgg.sprite.y = this.showEasterEgg.spriteBaseY + floatOffset;
+    this.showEasterEgg.shadow.alpha = this.showEasterEgg.shadowBaseAlpha + Math.sin(now / 620) * 0.02;
+
+    if (this.showEasterEgg.bubble?.visible) {
+      this.showEasterEgg.bubble.y = this.showEasterEgg.bubbleBaseY + Math.sin(now / 460) * 1.2;
+      this.showEasterEgg.bubble.alpha = 0.94 + Math.sin(now / 180) * 0.05;
+    }
+  }
+
   _summarizeFloorScreenAgents() {
     return (this._agents || []).reduce((summary, agent) => {
       if (!agent) return summary;
@@ -374,12 +659,42 @@ export default class GameEngine {
   _getDashboardStatusMeta(agent) {
     const latest = this._agentsById.get(agent?.id) || agent || {};
     if (agent && this._isPendingApproval(agent)) {
-      return { id: 'pending', label: 'PENDING', fill: 0xff6677, glow: 0xffc1cb };
+      return {
+        id: 'pending',
+        label: 'PENDING',
+        fill: 0xffd37a,
+        glow: 0xffd37a,
+        textFill: 0xffd37a,
+        bgFill: 0xd19321,
+        bgAlpha: 0.18,
+        borderFill: 0xffd37a,
+        borderAlpha: 0.14,
+      };
     }
     if (this._isRunningStatus(latest.status)) {
-      return { id: 'live', label: 'LIVE', fill: 0x86ecff, glow: 0xd9fbff };
+      return {
+        id: 'working',
+        label: 'WORKING',
+        fill: 0x8cb4ff,
+        glow: 0x8cb4ff,
+        textFill: 0x8cb4ff,
+        bgFill: 0x2c7fff,
+        bgAlpha: 0.18,
+        borderFill: 0x8cb4ff,
+        borderAlpha: 0.16,
+      };
     }
-    return { id: 'idle', label: 'IDLE', fill: 0xc7d6df, glow: 0xf4f8fb };
+    return {
+      id: 'offline',
+      label: 'OFFLINE',
+      fill: 0x9eb4c8,
+      glow: 0x6aa6ff,
+      textFill: 0xa8bdd8,
+      bgFill: 0x6aa6ff,
+      bgAlpha: 0.08,
+      borderFill: 0xb8dcff,
+      borderAlpha: 0.12,
+    };
   }
 
   _truncateDashboardText(value, maxLength = 56) {
@@ -413,6 +728,25 @@ export default class GameEngine {
     return `${raw.slice(0, 4)}-${raw.slice(-4)}`.toUpperCase();
   }
 
+  _pickDashboardShowcaseMode(seed) {
+    let hash = 0;
+    const text = String(seed || '');
+    for (let i = 0; i < text.length; i += 1) {
+      hash = (hash * 31 + text.charCodeAt(i)) % 9973;
+    }
+    return hash % 3 === 0 ? 'phone' : 'run';
+  }
+
+  _getAgentCharNameMap(agents = this._agents || []) {
+    const map = {};
+    const totalChars = Math.max(1, CHAR_NAMES.length);
+    (agents || []).forEach((agent, index) => {
+      if (!agent?.id) return;
+      map[agent.id] = CHAR_NAMES[index % totalChars];
+    });
+    return map;
+  }
+
   _getDashboardSafeRect(
     rect,
     {
@@ -439,21 +773,21 @@ export default class GameEngine {
   }
 
   _getDashboardAgentEntries() {
-    const priority = { pending: 3, live: 2, idle: 1 };
+    const priority = { pending: 3, working: 2, offline: 1 };
+    const charNameMap = this._getAgentCharNameMap(this._agents || []);
 
     return (this._agents || [])
       .map((agent, index) => {
         const latest = this._agentsById.get(agent?.id) || agent || {};
         const latestEvent = this._getLatestEvent(agent) || null;
         const statusMeta = this._getDashboardStatusMeta(agent);
-        const liveNpc = this.npcs.find((npc) => npc?.agent?.id === agent?.id);
-        const charName = liveNpc?.charName || CHAR_NAMES[index % Math.max(1, CHAR_NAMES.length)];
         const agentId = agent?.id || `agent-${index}`;
 
         return {
           id: agentId,
-          idLabel: this._shortDashboardAgentId(agentId),
-          charName,
+          name: latest.name || agent?.name || `Agent ${index + 1}`,
+          idLabel: this._shortDashboardAgentId(latest?.session_key || latest?.id || agentId, 18),
+          charName: charNameMap[agentId] || CHAR_NAMES[index % Math.max(1, CHAR_NAMES.length)],
           statusMeta,
           lastActiveAt: latestEvent?.start_time || latest.first_seen_at || '',
         };
@@ -567,11 +901,11 @@ export default class GameEngine {
     const rightRect = this._getDashboardSafeRect(sortedPanels[1], {
       leftRatio: 0.045,
       rightRatio: 0.045,
-      topRatio: 0.15,
+      topRatio: 0.05,
       bottomRatio: 0.17,
       minLeft: 16,
       minRight: 16,
-      minTop: 14,
+      minTop: 4,
       minBottom: 16,
     });
     const container = new PIXI.Container();
@@ -579,38 +913,71 @@ export default class GameEngine {
     container.sortableChildren = true;
     container.eventMode = 'none';
 
-    const createPanelShell = (rect, railFill = 0x6acfff) => {
+    const dashboardPalette = {
+      shadow: 0x01060a,
+      bgOuter: 0x08131a,
+      bgInner: 0x0d1b23,
+      border: 0x3a5f82,
+      accent: 0x6aa6ff,
+      accentAlt: 0x5e94e8,
+      text: 0xe0efff,
+      mutedText: 0xa0b8d8,
+      chartGlow: 0x4ca8ff,
+      chartLine: 0xc5e4ff,
+      offlineTint: 0xa3b0c0,
+    };
+
+    const createPanelShell = (rect, accentFill = dashboardPalette.accent) => {
       const root = new PIXI.Container();
       root.x = rect.x;
       root.y = rect.y;
       root.eventMode = 'none';
 
-      const surface = new PIXI.Graphics();
-      surface.beginFill(0x03070a, 0.78);
-      surface.drawRect(0, 0, rect.w, rect.h);
-      surface.endFill();
-      root.addChild(surface);
+      const shadow = new PIXI.Graphics();
+      shadow.beginFill(dashboardPalette.shadow, 0.26);
+      shadow.drawRect(4, 6, rect.w, rect.h);
+      shadow.endFill();
+      root.addChild(shadow);
 
-      const gloss = new PIXI.Graphics();
-      gloss.beginFill(0xffffff, 0.025);
-      gloss.drawRect(0, 0, rect.w, Math.max(10, Math.round(rect.h * 0.12)));
-      gloss.endFill();
-      root.addChild(gloss);
+      const board = new PIXI.Graphics();
+      board.beginFill(dashboardPalette.bgOuter, 0.94);
+      board.drawRect(0, 0, rect.w, rect.h);
+      board.endFill();
+      board.beginFill(dashboardPalette.bgInner, 0.97);
+      board.drawRect(5, 5, Math.max(0, rect.w - 10), Math.max(0, rect.h - 10));
+      board.endFill();
+      board.beginFill(accentFill, 0.05);
+      board.drawRect(0, 0, rect.w, Math.max(18, Math.round(rect.h * 0.16)));
+      board.endFill();
+      root.addChild(board);
 
       const rail = new PIXI.Graphics();
-      rail.beginFill(railFill, 0.72);
-      rail.drawRect(0, 0, rect.w, 1.5);
+      rail.beginFill(accentFill, 0.28);
+      rail.drawRect(0, 0, rect.w, 2);
       rail.endFill();
       root.addChild(rail);
 
       const footerRail = new PIXI.Graphics();
-      footerRail.beginFill(railFill, 0.16);
-      footerRail.drawRect(0, rect.h - 1.5, rect.w, 1.5);
+      footerRail.beginFill(accentFill, 0.14);
+      footerRail.drawRect(0, rect.h - 2, rect.w, 2);
       footerRail.endFill();
       root.addChild(footerRail);
 
+      const pixelGrid = new PIXI.Graphics();
+      pixelGrid.lineStyle(1, accentFill, 0.04);
+      const gridStep = Math.max(18, Math.round(Math.min(rect.w, rect.h) * 0.16));
+      for (let x = 10; x < rect.w; x += gridStep) {
+        pixelGrid.moveTo(x, 8);
+        pixelGrid.lineTo(x, rect.h - 8);
+      }
+      for (let y = 10; y < rect.h; y += gridStep) {
+        pixelGrid.moveTo(8, y);
+        pixelGrid.lineTo(rect.w - 8, y);
+      }
+      root.addChild(pixelGrid);
+
       const scanlines = new PIXI.Graphics();
-      scanlines.beginFill(0xffffff, 0.014);
+      scanlines.beginFill(accentFill, 0.018);
       for (let y = 4; y < rect.h; y += 6) {
         scanlines.drawRect(0, y, rect.w, 1);
       }
@@ -618,8 +985,9 @@ export default class GameEngine {
       root.addChild(scanlines);
 
       const frame = new PIXI.Graphics();
-      frame.lineStyle(1, 0xcfefff, 0.06);
+      frame.lineStyle(1, dashboardPalette.border, 0.22);
       frame.drawRect(0.5, 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
+      frame.lineStyle(1, accentFill, 0.18);
       const cornerW = Math.max(18, Math.round(rect.w * 0.16));
       const cornerH = Math.max(10, Math.round(rect.h * 0.14));
       frame.moveTo(8, 8);
@@ -641,37 +1009,46 @@ export default class GameEngine {
       root.addChild(frame);
 
       const modules = new PIXI.Graphics();
-      modules.beginFill(railFill, 0.14);
-      modules.drawRect(12, 10, Math.max(18, Math.round(rect.w * 0.16)), 3);
+      modules.beginFill(accentFill, 0.24);
+      modules.drawRect(12, 10, Math.max(18, Math.round(rect.w * 0.16)), 4);
       modules.drawRect(12, 16, Math.max(10, Math.round(rect.w * 0.07)), 2);
-      modules.drawRect(rect.w - Math.max(18, Math.round(rect.w * 0.15)) - 12, 10, Math.max(18, Math.round(rect.w * 0.15)), 3);
+      modules.drawRect(rect.w - Math.max(18, Math.round(rect.w * 0.15)) - 12, 10, Math.max(18, Math.round(rect.w * 0.15)), 4);
       modules.drawRect(rect.w - Math.max(12, Math.round(rect.w * 0.08)) - 12, rect.h - 14, Math.max(12, Math.round(rect.w * 0.08)), 2);
       modules.endFill();
       root.addChild(modules);
+
+      const pixels = new PIXI.Graphics();
+      pixels.beginFill(accentFill, 0.16);
+      pixels.drawRect(12, rect.h - 16, 3, 3);
+      pixels.drawRect(17, rect.h - 16, 3, 3);
+      pixels.drawRect(rect.w - 20, 14, 3, 3);
+      pixels.drawRect(rect.w - 15, 14, 3, 3);
+      pixels.endFill();
+      root.addChild(pixels);
 
       container.addChild(root);
       return root;
     };
 
-    const leftRoot = createPanelShell(leftRect, 0x86ecff);
-    const rightRoot = createPanelShell(rightRect, 0xff9f6e);
+    const leftRoot = createPanelShell(leftRect, dashboardPalette.accent);
+    const rightRoot = createPanelShell(rightRect, dashboardPalette.accentAlt);
 
     const leftStatusBg = new PIXI.Graphics();
     leftRoot.addChild(leftStatusBg);
 
-    const leftStatusText = new PIXI.Text('IDLE', new PIXI.TextStyle({
+    const leftStatusText = new PIXI.Text('OFFLINE', new PIXI.TextStyle({
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: 10,
-      fill: 0xeef8ff,
-      letterSpacing: 0.6,
+      fontSize: 13,
+      fill: dashboardPalette.mutedText,
+      letterSpacing: 0.7,
     }));
     leftStatusText.roundPixels = true;
     leftRoot.addChild(leftStatusText);
 
     const avatarAreaW = Math.max(108, Math.round(leftRect.w * 0.46));
-    const avatarBaseY = leftRect.h - 6;
+    const avatarBaseY = leftRect.h - 16;
     const avatarGlow = new PIXI.Graphics();
-    avatarGlow.beginFill(0x86ecff, 0.12);
+    avatarGlow.beginFill(dashboardPalette.accent, 0.12);
     avatarGlow.drawEllipse(Math.round(avatarAreaW * 0.5), avatarBaseY - 2, Math.round(avatarAreaW * 0.28), 8);
     avatarGlow.endFill();
     leftRoot.addChild(avatarGlow);
@@ -689,10 +1066,10 @@ export default class GameEngine {
     const textX = avatarAreaW + 10;
     const textW = Math.max(110, leftRect.w - textX - 10);
 
-    const leftId = new PIXI.Text('ID // AGENT', new PIXI.TextStyle({
+    const leftId = new PIXI.Text('AGENT', new PIXI.TextStyle({
       fontFamily: 'Arial, sans-serif',
-      fontSize: 17,
-      fill: 0xf7fbff,
+      fontSize: 18,
+      fill: dashboardPalette.text,
       fontWeight: '700',
       letterSpacing: 0.8,
       wordWrap: true,
@@ -700,47 +1077,47 @@ export default class GameEngine {
       wordWrapWidth: textW,
     }));
     leftId.x = textX;
-    leftId.y = 46;
+    leftId.y = 40;
     leftId.roundPixels = true;
     leftRoot.addChild(leftId);
 
     const rightHeader = new PIXI.Text('TASK ACTIVITY', new PIXI.TextStyle({
       fontFamily: 'Arial, sans-serif',
-      fontSize: 18,
-      fill: 0xf5fbff,
+      fontSize: 26,
+      fill: dashboardPalette.text,
       fontWeight: '700',
       letterSpacing: 1.1,
     }));
     rightHeader.x = 14;
-    rightHeader.y = 14;
+    rightHeader.y = 6;
     rightHeader.roundPixels = true;
     rightRoot.addChild(rightHeader);
 
     const rightSub = new PIXI.Text('ALL TASKS · LAST 24H', new PIXI.TextStyle({
-      fontFamily: 'Press Start 2P, monospace',
-      fontSize: 8,
-      fill: 0x90d4e7,
-      letterSpacing: 0.45,
+      fontFamily: DASHBOARD_CODE_FONT_FAMILY,
+      fontSize: 15,
+      fontWeight: '500',
+      fill: dashboardPalette.mutedText,
+      letterSpacing: 0.32,
     }));
     rightSub.x = 14;
-    rightSub.y = 36;
+    rightSub.y = 40;
     rightSub.roundPixels = true;
     rightRoot.addChild(rightSub);
 
+    const chartTop = 54;
+    const axisBottomReserve = 30;
     const chartRect = {
       x: 12,
-      y: 58,
+      y: chartTop,
       w: Math.max(208, rightRect.w - 24),
-      h: Math.max(72, rightRect.h - 72),
+      h: Math.max(48, rightRect.h - chartTop - axisBottomReserve),
     };
 
     const chartShell = new PIXI.Graphics();
-    chartShell.beginFill(0x040b0f, 0.42);
-    chartShell.drawRect(chartRect.x, chartRect.y, chartRect.w, chartRect.h);
-    chartShell.endFill();
-    chartShell.lineStyle(1, 0xcfefff, 0.06);
+    chartShell.lineStyle(1, dashboardPalette.border, 0.24);
     chartShell.drawRect(chartRect.x + 0.5, chartRect.y + 0.5, Math.max(0, chartRect.w - 1), Math.max(0, chartRect.h - 1));
-    chartShell.beginFill(0x86ecff, 0.1);
+    chartShell.beginFill(dashboardPalette.accent, 0.12);
     chartShell.drawRect(chartRect.x + 10, chartRect.y + 10, Math.max(12, Math.round(chartRect.w * 0.12)), 3);
     chartShell.drawRect(chartRect.x + 10, chartRect.y + 16, Math.max(8, Math.round(chartRect.w * 0.06)), 2);
     chartShell.endFill();
@@ -761,11 +1138,41 @@ export default class GameEngine {
     chartLine.y = chartRect.y;
     rightRoot.addChild(chartLine);
 
+    const axisTickStyle = new PIXI.Graphics();
+    axisTickStyle.x = chartRect.x;
+    axisTickStyle.y = chartRect.y + chartRect.h;
+    rightRoot.addChild(axisTickStyle);
+
+    const axisLabelStyle = new PIXI.TextStyle({
+      fontFamily: DASHBOARD_CODE_FONT_FAMILY,
+      fontSize: 15,
+      fontWeight: '500',
+      fill: dashboardPalette.mutedText,
+      letterSpacing: 0.22,
+    });
+    const axisLabelDefs = [
+      { label: '24H', position: 0, anchorX: 0 },
+      { label: '18H', position: 0.25, anchorX: 0.5 },
+      { label: '12H', position: 0.5, anchorX: 0.5 },
+      { label: '6H', position: 0.75, anchorX: 0.5 },
+      { label: 'NOW', position: 1, anchorX: 1 },
+    ];
+    const axisLabels = axisLabelDefs.map(({ label, position, anchorX }) => {
+      const node = new PIXI.Text(label, axisLabelStyle);
+      node.anchor.set(anchorX, 0);
+      node.x = chartRect.x + chartRect.w * position;
+      node.y = chartRect.y + chartRect.h + 12;
+      node.roundPixels = true;
+      rightRoot.addChild(node);
+      return node;
+    });
+
     const emptyText = new PIXI.Text('Awaiting task signal', new PIXI.TextStyle({
-      fontFamily: 'Press Start 2P, monospace',
-      fontSize: 10,
-      fill: 0xb6c8d6,
-      letterSpacing: 0.5,
+      fontFamily: DASHBOARD_CODE_FONT_FAMILY,
+      fontSize: 18,
+      fontWeight: '500',
+      fill: dashboardPalette.mutedText,
+      letterSpacing: 0.28,
     }));
     emptyText.anchor.set(0.5);
     emptyText.x = chartRect.x + chartRect.w / 2;
@@ -775,6 +1182,7 @@ export default class GameEngine {
 
     this.wallDashboard = {
       container,
+      palette: dashboardPalette,
       rotationMs: 4200,
       left: {
         rect: leftRect,
@@ -784,12 +1192,15 @@ export default class GameEngine {
         avatarBaseY,
         idText: leftId,
         currentAgentId: '',
+        currentAvatarKey: '',
       },
       right: {
         chartRect,
         chartGrid,
         chartBars,
         chartLine,
+        axisTickStyle,
+        axisLabels,
         emptyText,
       },
     };
@@ -802,6 +1213,7 @@ export default class GameEngine {
     if (!this.wallDashboard) return;
 
     const dashboard = this.wallDashboard;
+    const palette = dashboard.palette || {};
     const left = dashboard.left;
     const right = dashboard.right;
     const agentEntries = this._getDashboardAgentEntries();
@@ -816,59 +1228,65 @@ export default class GameEngine {
     });
 
     if (featured) {
-      if (left.currentAgentId !== featured.id) {
+      const showcaseMode = featured.statusMeta.id === 'working'
+        ? this._pickDashboardShowcaseMode(`${featured.id}-${featured.charName}`)
+        : 'idle';
+      const avatarKey = `${featured.id}:${featured.charName}:${featured.statusMeta.id}:${showcaseMode}`;
+      if (left.currentAvatarKey !== avatarKey) {
         const charFrames = this.spriteLoader.charFrames[featured.charName] || {};
-        const textures = featured.statusMeta.id === 'live'
-          ? (charFrames.front?.length ? charFrames.front : (charFrames.idle || []))
+        const textures = featured.statusMeta.id === 'working'
+          ? (
+            showcaseMode === 'phone' && charFrames.phone?.length
+              ? charFrames.phone
+              : (charFrames.front?.length ? charFrames.front : (charFrames.idle || []))
+          )
           : (charFrames.idle?.length ? charFrames.idle : (charFrames.front || []));
         if (textures.length) {
           left.avatar.textures = textures;
-          left.avatar.animationSpeed = featured.statusMeta.id === 'live' ? 0.13 : 0.08;
+          left.avatar.animationSpeed = featured.statusMeta.id === 'working'
+            ? (showcaseMode === 'phone' ? 0.11 : 0.13)
+            : 0.08;
           left.avatar.play();
         }
         left.currentAgentId = featured.id;
+        left.currentAvatarKey = avatarKey;
       }
 
-      left.idText.text = `ID // ${featured.idLabel}`;
+      left.idText.text = featured.name || 'AGENT';
       left.statusText.text = featured.statusMeta.label;
-      left.avatar.alpha = featured.statusMeta.id === 'idle' ? 0.72 : 0.96;
-      left.statusText.style.fill = featured.statusMeta.glow;
+      left.avatar.alpha = featured.statusMeta.id === 'offline' ? 0.52 : 0.96;
+      left.avatar.tint = featured.statusMeta.id === 'offline' ? (palette.offlineTint || 0xbdb5ab) : 0xffffff;
+      left.statusText.style.fill = featured.statusMeta.textFill;
 
       left.statusBg.clear();
       const chipX = left.idText.x;
       const chipY = left.idText.y + left.idText.height + 12;
-      const chipW = left.statusText.width + 26;
-      const chipH = left.statusText.height + 12;
-      left.statusBg.beginFill(0x071016, 0.5);
-      left.statusBg.drawRect(chipX, chipY, chipW, chipH);
+      const chipW = left.statusText.width + 30;
+      const chipH = left.statusText.height + 14;
+      left.statusBg.beginFill(featured.statusMeta.bgFill, featured.statusMeta.bgAlpha);
+      left.statusBg.lineStyle(1, featured.statusMeta.borderFill, featured.statusMeta.borderAlpha);
+      left.statusBg.drawRoundedRect(chipX, chipY, chipW, chipH, Math.round(chipH / 2));
       left.statusBg.endFill();
-      left.statusBg.beginFill(featured.statusMeta.fill, 0.92);
-      left.statusBg.drawRect(chipX, chipY, 5, chipH);
-      left.statusBg.endFill();
-      left.statusBg.lineStyle(1, featured.statusMeta.fill, 0.22);
-      left.statusBg.drawRect(chipX + 0.5, chipY + 0.5, Math.max(0, chipW - 1), Math.max(0, chipH - 1));
-      left.statusText.x = chipX + 14;
-      left.statusText.y = chipY + 6;
+      left.statusText.x = chipX + 16;
+      left.statusText.y = chipY + 7;
     } else {
-      left.idText.text = 'ID // AGENT';
-      left.statusText.text = 'IDLE';
+      left.idText.text = 'AGENT';
+      left.statusText.text = 'OFFLINE';
       left.avatar.alpha = 0.3;
-      left.statusText.style.fill = 0xf1f6fa;
+      left.avatar.tint = palette.offlineTint || 0xbdb5ab;
+      left.statusText.style.fill = palette.mutedText || 0xcabfb3;
       left.statusBg.clear();
       const chipX = left.idText.x;
       const chipY = left.idText.y + left.idText.height + 12;
-      const chipW = left.statusText.width + 26;
-      const chipH = left.statusText.height + 12;
-      left.statusBg.beginFill(0x071016, 0.5);
-      left.statusBg.drawRect(chipX, chipY, chipW, chipH);
+      const chipW = left.statusText.width + 30;
+      const chipH = left.statusText.height + 14;
+      left.statusBg.beginFill(palette.accent || 0xffffff, 0.08);
+      left.statusBg.lineStyle(1, palette.accent || 0xffffff, 0.12);
+      left.statusBg.drawRoundedRect(chipX, chipY, chipW, chipH, Math.round(chipH / 2));
       left.statusBg.endFill();
-      left.statusBg.beginFill(0xc7d6df, 0.92);
-      left.statusBg.drawRect(chipX, chipY, 5, chipH);
-      left.statusBg.endFill();
-      left.statusBg.lineStyle(1, 0xc7d6df, 0.22);
-      left.statusBg.drawRect(chipX + 0.5, chipY + 0.5, Math.max(0, chipW - 1), Math.max(0, chipH - 1));
-      left.statusText.x = chipX + 14;
-      left.statusText.y = chipY + 6;
+      left.statusText.x = chipX + 16;
+      left.statusText.y = chipY + 7;
+      left.currentAvatarKey = '';
     }
 
     left.avatar.y = left.avatarBaseY + Math.sin(now / 420) * 1.8;
@@ -877,18 +1295,26 @@ export default class GameEngine {
       this._wallDashboardSignature = activitySignature;
 
       right.chartGrid.clear();
-      right.chartGrid.lineStyle(1, 0xcfefff, 0.05);
+      right.chartGrid.lineStyle(1, palette.border || 0x7f6b56, 0.24);
       for (let row = 0; row <= 2; row += 1) {
         const y = Math.round((right.chartRect.h / 2) * row);
         right.chartGrid.moveTo(0, y);
         right.chartGrid.lineTo(right.chartRect.w, y);
       }
-      right.chartGrid.lineStyle(1, 0x86ecff, 0.035);
+      right.chartGrid.lineStyle(1, palette.accent || 0xb2773f, 0.08);
       for (let col = 0; col <= 4; col += 1) {
         const x = Math.round((right.chartRect.w / 4) * col);
         right.chartGrid.moveTo(x, 0);
         right.chartGrid.lineTo(x, right.chartRect.h);
       }
+
+      right.axisTickStyle.clear();
+      right.axisTickStyle.lineStyle(1, palette.accent || 0xb2773f, 0.26);
+      [0, 0.25, 0.5, 0.75, 1].forEach((position) => {
+        const x = Math.round(right.chartRect.w * position);
+        right.axisTickStyle.moveTo(x, 0);
+        right.axisTickStyle.lineTo(x, 5);
+      });
 
       right.chartBars.clear();
       right.chartLine.clear();
@@ -909,15 +1335,15 @@ export default class GameEngine {
       });
 
       if (totalPoints.length) {
-        right.chartBars.lineStyle(7, 0x6fd8ff, 0.13);
+        right.chartBars.lineStyle(8, palette.chartGlow || 0xe8c860, 0.22);
         this._drawSmoothDashboardCurve(right.chartBars, totalPoints, right.chartRect.h, false);
 
-        right.chartLine.lineStyle(3.2, 0xeeffff, 0.94);
+        right.chartLine.lineStyle(3.4, palette.chartLine || 0x5b3706, 0.98);
         this._drawSmoothDashboardCurve(right.chartLine, totalPoints, right.chartRect.h, false);
 
         const latestPoint = totalPoints[totalPoints.length - 1];
-        right.chartLine.beginFill(0xffffff, 0.95);
-        right.chartLine.drawCircle(latestPoint.x, latestPoint.y, 4.2);
+        right.chartLine.beginFill(palette.accent || 0xb2773f, 0.98);
+        right.chartLine.drawCircle(latestPoint.x, latestPoint.y, 4.8);
         right.chartLine.endFill();
       }
     }
@@ -936,11 +1362,13 @@ export default class GameEngine {
     const mapWidth = Math.max(320, width - padX * 2 - infoWidth - gap);
     const mapHeight = Math.max(160, height - padY * 2);
     const infoX = padX + mapWidth + gap;
-    const infoY = padY;
+    const infoUp = Math.max(18, Math.round(height * 0.029));
+    const infoY = padY - infoUp;
+    const infoHeight = mapHeight + infoUp;
     const heroHeight = Math.max(196, Math.round(mapHeight * 0.28));
     const sectionGap = Math.max(10, Math.round(mapHeight * 0.02));
     const agentPanelHeight = Math.max(150, Math.round(mapHeight * 0.19));
-    const taskPanelHeight = Math.max(192, mapHeight - heroHeight - agentPanelHeight - sectionGap * 2);
+    const taskPanelHeight = Math.max(192, infoHeight - heroHeight - agentPanelHeight - sectionGap * 2);
     const innerPadX = Math.round(infoWidth * 0.06);
     const innerPadY = Math.round(heroHeight * 0.12);
 
@@ -999,7 +1427,7 @@ export default class GameEngine {
 
     const separator = new PIXI.Graphics();
     separator.beginFill(0x9de5ff, 0.016);
-    separator.drawRect(infoX - Math.max(4, Math.round(gap * 0.28)), infoY, 1, mapHeight);
+    separator.drawRect(infoX - Math.max(4, Math.round(gap * 0.28)), infoY, 1, infoHeight);
     separator.endFill();
     container.addChild(separator);
 
@@ -1115,10 +1543,10 @@ export default class GameEngine {
 
     const infoShell = new PIXI.Graphics();
     infoShell.beginFill(0x020609, 0.05);
-    infoShell.drawRect(infoX, infoY, infoWidth, mapHeight);
+    infoShell.drawRect(infoX, infoY, infoWidth, infoHeight);
     infoShell.endFill();
     infoShell.lineStyle(1, 0xcfefff, 0.032);
-    infoShell.drawRect(infoX, infoY, infoWidth, mapHeight);
+    infoShell.drawRect(infoX, infoY, infoWidth, infoHeight);
     infoShell.moveTo(infoX + Math.round(infoWidth * 0.04), infoY + heroHeight + Math.round(sectionGap * 0.5));
     infoShell.lineTo(infoX + Math.round(infoWidth * 0.96), infoY + heroHeight + Math.round(sectionGap * 0.5));
     infoShell.moveTo(infoX + Math.round(infoWidth * 0.04), infoY + heroHeight + agentPanelHeight + Math.round(sectionGap * 1.5));
@@ -1127,21 +1555,21 @@ export default class GameEngine {
 
     const infoShellWash = new PIXI.Graphics();
     infoShellWash.beginFill(0x8edfff, 0.014);
-    infoShellWash.drawRect(infoX, infoY, infoWidth, Math.round(mapHeight * 0.12));
+    infoShellWash.drawRect(infoX, infoY, infoWidth, Math.round(infoHeight * 0.12));
     infoShellWash.endFill();
     container.addChild(infoShellWash);
 
     const infoShellRail = new PIXI.Graphics();
     infoShellRail.beginFill(0x9de5ff, 0.032);
-    infoShellRail.drawRect(infoX, infoY + Math.round(mapHeight * 0.045), 2, Math.round(mapHeight * 0.18));
+    infoShellRail.drawRect(infoX, infoY + Math.round(infoHeight * 0.045), 2, Math.round(infoHeight * 0.18));
     infoShellRail.endFill();
     container.addChild(infoShellRail);
 
     const infoShellModules = new PIXI.Graphics();
     infoShellModules.beginFill(0x9de5ff, 0.038);
-    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.74), infoY + Math.round(mapHeight * 0.024), Math.round(infoWidth * 0.04), 4);
-    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.788), infoY + Math.round(mapHeight * 0.024), Math.round(infoWidth * 0.024), 4);
-    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.818), infoY + Math.round(mapHeight * 0.024), Math.round(infoWidth * 0.062), 4);
+    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.74), infoY + Math.round(infoHeight * 0.024), Math.round(infoWidth * 0.04), 4);
+    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.788), infoY + Math.round(infoHeight * 0.024), Math.round(infoWidth * 0.024), 4);
+    infoShellModules.drawRect(infoX + Math.round(infoWidth * 0.818), infoY + Math.round(infoHeight * 0.024), Math.round(infoWidth * 0.062), 4);
     infoShellModules.endFill();
     container.addChild(infoShellModules);
 
@@ -1296,22 +1724,50 @@ export default class GameEngine {
     warningTriangle.y = Math.round(heroHeight * 0.12);
     warningGroup.addChild(warningTriangle);
 
+    const warningTriangleSide = Math.max(58, Math.round(infoWidth * 0.125));
+    const warningTriangleWidth = warningTriangleSide;
+    const warningTriangleHeight = Math.round((warningTriangleSide * Math.sqrt(3)) / 2);
+    const warningTextX = warningTriangle.x + Math.round(warningTriangleWidth * 0.54) + Math.round(infoWidth * 0.05);
+
     const warningTriangleShape = new PIXI.Graphics();
+    warningTriangleShape.lineStyle(2, 0xffc4ca, 0.18);
     warningTriangleShape.beginFill(0xff5a66, 0.98);
-    warningTriangleShape.drawPolygon([0, 0, 34, 58, -34, 58]);
+    warningTriangleShape.drawPolygon([
+      0, 0,
+      Math.round(warningTriangleWidth / 2), warningTriangleHeight,
+      -Math.round(warningTriangleWidth / 2), warningTriangleHeight,
+    ]);
     warningTriangleShape.endFill();
     warningTriangle.addChild(warningTriangleShape);
 
-    const warningBang = new PIXI.Text('!', new PIXI.TextStyle({
-      fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(24, Math.round(height * 0.028)),
-      fill: 0x1a0506,
-      letterSpacing: 1,
-    }));
-    warningBang.anchor.set(0.5, 0.1);
+    const warningBang = new PIXI.Container();
+    const warningBangColor = 0x260507;
+    const bangStemW = Math.max(8, Math.round(warningTriangleWidth * 0.115));
+    const bangStemH = Math.max(22, Math.round(warningTriangleHeight * 0.38));
+    const bangTopY = Math.max(9, Math.round(warningTriangleHeight * 0.18));
+    const bangGap = Math.max(4, Math.round(warningTriangleHeight * 0.055));
+    const bangDotR = Math.max(4, Math.round(warningTriangleWidth * 0.08));
+
+    const bangStem = new PIXI.Graphics();
+    bangStem.beginFill(warningBangColor, 0.98);
+    bangStem.drawRoundedRect(
+      -Math.round(bangStemW / 2),
+      bangTopY,
+      bangStemW,
+      bangStemH,
+      Math.max(3, Math.round(bangStemW / 2)),
+    );
+    bangStem.endFill();
+    warningBang.addChild(bangStem);
+
+    const bangDot = new PIXI.Graphics();
+    bangDot.beginFill(warningBangColor, 0.98);
+    bangDot.drawCircle(0, bangTopY + bangStemH + bangGap + bangDotR, bangDotR);
+    bangDot.endFill();
+    warningBang.addChild(bangDot);
+
     warningBang.x = 0;
-    warningBang.y = 10;
-    warningBang.roundPixels = true;
+    warningBang.y = 0;
     warningTriangle.addChild(warningBang);
 
     const warningLead = new PIXI.Text('WARNING', new PIXI.TextStyle({
@@ -1320,7 +1776,7 @@ export default class GameEngine {
       fill: 0xffaab1,
       letterSpacing: 1.2,
     }));
-    warningLead.x = Math.round(infoWidth * 0.17);
+    warningLead.x = warningTextX;
     warningLead.y = 0;
     warningLead.roundPixels = true;
     warningGroup.addChild(warningLead);
@@ -1410,9 +1866,10 @@ export default class GameEngine {
       metrics.forEach((metric, index) => {
         const col = index % columns;
         const row = Math.floor(index / columns);
+        const tileYOffset = typeof metric.tileOffsetY === 'number' ? metric.tileOffsetY : 0;
         const tile = new PIXI.Container();
         tile.x = innerPadX + col * (tileWidth + tileGapX);
-        tile.y = tileTop + row * (tileHeight + tileGapY);
+        tile.y = tileTop + row * (tileHeight + tileGapY) + tileYOffset;
         panel.addChild(tile);
 
         const tileBg = new PIXI.Graphics();
@@ -1426,33 +1883,38 @@ export default class GameEngine {
         tileFrame.drawRect(0, 0, tileWidth, tileHeight);
         tile.addChild(tileFrame);
 
-        const tileBar = new PIXI.Graphics();
-        tileBar.beginFill(metric.fill, 0.92);
-        tileBar.drawRect(0, 0, tileWidth, 3);
-        tileBar.endFill();
-        tile.addChild(tileBar);
-
-        const tileWash = new PIXI.Graphics();
-        tileWash.beginFill(metric.fill, 0.014);
-        tileWash.drawRect(0, 0, tileWidth, Math.round(tileHeight * 0.2));
-        tileWash.endFill();
-        tile.addChild(tileWash);
-
+        const labelPadTop = Math.round(tileHeight * 0.06);
         const label = new PIXI.Text(metric.label, new PIXI.TextStyle({
           ...rowLabelStyle,
           fill: metric.labelFill || rowLabelStyle.fill,
         }));
         label.x = Math.round(tileWidth * 0.08);
-        label.y = Math.round(tileHeight * 0.12);
+        label.y = labelPadTop;
         label.roundPixels = true;
         tile.addChild(label);
 
+        const barGap = Math.max(8, Math.round(tileHeight * 0.08));
+        const tileBar = new PIXI.Graphics();
+        tileBar.beginFill(metric.fill, 0.92);
+        tileBar.drawRect(0, 0, tileWidth, 3);
+        tileBar.endFill();
+        tileBar.x = 0;
+        tileBar.y = label.y + label.height + barGap;
+        tile.addChild(tileBar);
+
+        const tileWash = new PIXI.Graphics();
+        tileWash.beginFill(metric.fill, 0.014);
+        tileWash.drawRect(0, tileBar.y + 3, tileWidth, Math.round(tileHeight * 0.18));
+        tileWash.endFill();
+        tile.addChild(tileWash);
+
+        const valueGap = Math.max(10, Math.round(tileHeight * 0.06));
         const value = new PIXI.Text('00', new PIXI.TextStyle({
           ...rowValueStyle,
           fill: metric.fill,
         }));
         value.x = Math.round(tileWidth * 0.08);
-        value.y = label.y + label.height + Math.round(tileHeight * 0.08);
+        value.y = tileBar.y + 3 + valueGap;
         value.roundPixels = true;
         tile.addChild(value);
 
@@ -1484,10 +1946,10 @@ export default class GameEngine {
       title: 'TASK DASHBOARD',
       columns: 2,
       metrics: [
-        { key: 'running', label: 'RUNNING', fill: 0x97f5ff },
-        { key: 'pending', label: 'PENDING', fill: 0xff5664 },
-        { key: 'completed', label: 'COMPLETED', fill: 0x99f2bf },
-        { key: 'failed', label: 'FAILED', fill: 0xffb382 },
+        { key: 'running', label: 'RUNNING', fill: 0x97f5ff, tileOffsetY: -16 },
+        { key: 'pending', label: 'PENDING', fill: 0xff5664, tileOffsetY: -16 },
+        { key: 'completed', label: 'COMPLETED', fill: 0x99f2bf, tileOffsetY: 16  },
+        { key: 'failed', label: 'FAILED', fill: 0xffb382, tileOffsetY: 16  },
       ],
     });
 
@@ -1750,6 +2212,7 @@ export default class GameEngine {
     this._indexEvents(events);
     this._meetingCooldowns.clear();
     this._renderNpcScene(agents);
+    this._syncShowNpcSpriteFromScene();
 
     // Start game loop
     this._startLoop();
@@ -1927,13 +2390,14 @@ export default class GameEngine {
     const activeAgents = (agents || []).filter((agent) => (
       this._isRunningStatus(agent?.status)
     ));
+    const charNameMap = this._getAgentCharNameMap(agents);
     const maxSceneAgents = this.pathfinder
       ? Math.min(activeAgents.length, Math.max(CHAR_NAMES.length, 1))
       : Math.min(activeAgents.length, WALK_ZONES.length);
     const sceneAgents = activeAgents.slice(0, maxSceneAgents);
 
     for (let i = 0; i < sceneAgents.length; i++) {
-      const npc = this._createNPC(sceneAgents[i], i);
+      const npc = this._createNPC(sceneAgents[i], i, charNameMap);
       if (!npc) continue;
       this.npcs.push(npc);
     }
@@ -2497,8 +2961,8 @@ export default class GameEngine {
     }
   }
 
-  _createNPC(agent, idx) {
-    const charName = CHAR_NAMES[idx % CHAR_NAMES.length];
+  _createNPC(agent, idx, charNameMap = null) {
+    const charName = charNameMap?.[agent?.id] || CHAR_NAMES[idx % CHAR_NAMES.length];
     const frames   = this.spriteLoader.charFrames[charName];
     if (!frames || !frames.front.length) return null;
     const isRunner = this._isRunningStatus(agent?.status);
@@ -2877,6 +3341,7 @@ export default class GameEngine {
       this._updateGuards(delta);
       this._syncFloorScreenOverlay(performance.now());
       this._syncWallDashboardOverlay(performance.now());
+      this._syncShowEasterEggOverlay(performance.now());
     });
   }
 
@@ -3453,6 +3918,7 @@ export default class GameEngine {
       this._clearNpcScene();
       this._renderNpcScene(agents);
       this._syncPendingNpcStates();
+      this._syncShowNpcSpriteFromScene();
     } else {
       this._refreshNpcDataInPlace(agents, events);
     }
@@ -3473,6 +3939,7 @@ export default class GameEngine {
     this._clearGuardsImmediate();
     this._destroyFloorScreenOverlay();
     this._destroyWallDashboardOverlay();
+    this._destroyShowEasterEggOverlay();
     this._resizeObs?.disconnect();
     this.app?.destroy(true, { children: true, texture: false, baseTexture: false });
     this.app = null;

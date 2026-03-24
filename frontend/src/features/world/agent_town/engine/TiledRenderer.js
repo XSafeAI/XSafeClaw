@@ -81,6 +81,35 @@ export default class TiledRenderer {
     return this._getFlatLayers().filter((layer) => layer.type === 'objectgroup');
   }
 
+  _layerIsUngrouped(layer) {
+    return !Array.isArray(layer?.__groupPath) || layer.__groupPath.length === 0;
+  }
+
+  _layerIsInRequestedVisualGroup(layer) {
+    const requestedVisualLayerName = this._getRequestedVisualLayerName();
+    if (!requestedVisualLayerName) return true;
+    if (this._layerIsUngrouped(layer)) return true;
+    return layer.__groupPath.some(
+      (groupName) => this._normalizeLayerName(groupName) === requestedVisualLayerName
+    );
+  }
+
+  _getScopedTileLayers() {
+    if (this._scopedTileLayers) return this._scopedTileLayers;
+    const tileLayers = this._getTileLayers();
+    const scopedLayers = tileLayers.filter((layer) => this._layerIsInRequestedVisualGroup(layer));
+    this._scopedTileLayers = scopedLayers.length ? scopedLayers : tileLayers;
+    return this._scopedTileLayers;
+  }
+
+  _getScopedObjectLayers() {
+    if (this._scopedObjectLayers) return this._scopedObjectLayers;
+    const objectLayers = this._getObjectLayers();
+    const scopedLayers = objectLayers.filter((layer) => this._layerIsInRequestedVisualGroup(layer));
+    this._scopedObjectLayers = scopedLayers.length ? scopedLayers : objectLayers;
+    return this._scopedObjectLayers;
+  }
+
   _layerHasTiles(layer) {
     return Array.isArray(layer?.data) && layer.data.some((gid) => gid !== 0);
   }
@@ -89,7 +118,7 @@ export default class TiledRenderer {
     const requestedVisualLayerName = this._getRequestedVisualLayerName();
     const requestedCollisionLayerName = this._getRequestedCollisionLayerName();
 
-    return this._getTileLayers().filter((layer) => {
+    return this._getScopedTileLayers().filter((layer) => {
       const layerName = this._normalizeLayerName(layer.name);
       if (requestedVisualLayerName && layerName === requestedVisualLayerName) {
         return layer.__effectiveVisible;
@@ -124,7 +153,7 @@ export default class TiledRenderer {
     const targetName = this._normalizeLayerName(layerName);
     if (!targetName) return null;
 
-    const layer = this._getTileLayers().find(
+    const layer = this._getScopedTileLayers().find(
       (entry) => this._normalizeLayerName(entry.name) === targetName
     );
     if (!layer) return null;
@@ -145,7 +174,7 @@ export default class TiledRenderer {
     const targetName = this._normalizeLayerName(layerName);
     if (!targetName) return [];
 
-    const layer = this._getTileLayers().find(
+    const layer = this._getScopedTileLayers().find(
       (entry) => this._normalizeLayerName(entry.name) === targetName
     );
     if (!layer || !Array.isArray(layer.data) || !layer.width || !layer.height) return [];
@@ -282,7 +311,7 @@ export default class TiledRenderer {
 
     const requestedVisualLayerName = this._getRequestedVisualLayerName();
     let overlayZIndex = 1;
-    for (const layer of this._getTileLayers()) {
+    for (const layer of this._getScopedTileLayers()) {
       if (!layer.__effectiveVisible) continue;
       if (this._isCollisionLayerName(layer.name)) continue;
       if (!this._layerHasTiles(layer)) continue;
@@ -427,7 +456,7 @@ export default class TiledRenderer {
 
     let zIdx = 0;
     const requestedVisualLayerName = this._getRequestedVisualLayerName();
-    const tileLayers = this._getTileLayers();
+    const tileLayers = this._getScopedTileLayers();
     const hasRequestedVisualLayer = requestedVisualLayerName
       ? tileLayers.some((layer) => (
           layer.__effectiveVisible &&
@@ -495,7 +524,7 @@ export default class TiledRenderer {
     const requestedCollisionLayerName = this._normalizeLayerName(
       layerName || this.options.collisionLayerName
     );
-    const layer = this._getTileLayers().find((entry) => {
+    const layer = this._getScopedTileLayers().find((entry) => {
       const normalizedName = this._normalizeLayerName(entry.name);
       if (requestedCollisionLayerName) return normalizedName === requestedCollisionLayerName;
       return this._isCollisionLayerName(normalizedName);
@@ -520,7 +549,7 @@ export default class TiledRenderer {
 
   /** Extract workstation / spawn-point objects. */
   getWorkstations() {
-    const layer = this._getObjectLayers().find((entry) =>
+    const layer = this._getScopedObjectLayers().find((entry) =>
       ['workstations', 'spawns', 'npc_spawns'].includes(String(entry.name || '').toLowerCase())
     );
     if (!layer) return [];
