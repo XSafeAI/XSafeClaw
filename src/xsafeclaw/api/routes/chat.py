@@ -504,9 +504,6 @@ async def transcribe_clean(request: TranscribeCleanRequest):
             model=request.model or None,
             thinking_level=request.thinking_level,
         )
-        print(f'request.text: {request.text}')
-        print(f'request.text: {request.text}')
-        print(f'request.text: {request.text}')
 
         prompt = (
             "You are a professional Speech-to-Text (STT) Post-Processor. Your goal is to rewrite raw, fragmented transcripts into clean, coherent, and natural text.\n\n"
