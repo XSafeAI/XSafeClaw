@@ -3,10 +3,17 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
-  Settings2, Brain, Cpu, Shield, Check, AlertTriangle,
+  Settings2, Brain, Cpu, Shield, Check, AlertTriangle, Mic, MicOff,
 } from 'lucide-react';
-import { chatAPI, guardAPI } from '../services/api';
+import { chatAPI, guardAPI, voiceAPI } from '../services/api';
 import { useI18n } from '../i18n';
+
+declare global {
+  interface Window {
+    webkitSpeechRecognition?: any;
+    SpeechRecognition?: any;
+  }
+}
 
 /* ==================== Types ==================== */
 interface PendingImage {
@@ -257,6 +264,9 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null); // key being loaded
   const [isComposing, setIsComposing] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceProcessing, setVoiceProcessing] = useState(false);
 
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -283,11 +293,18 @@ export default function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const speechRecRef = useRef<any>(null);
+  const voiceListeningRef = useRef(false);
+  const rawTranscriptRef = useRef('');
+  const shouldFinalizeRef = useRef(false);
+  const voiceModelRef = useRef<string | null>(null);
+  const voiceThinkingLevelRef = useRef<string | null>(null);
+  const voiceLangTriedRef = useRef<'zh-CN' | 'zh' | 'en-US' | null>(null);
   const inFlightRef = useRef(false);
   const composingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
 
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
 
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024; // 5 MB per image
@@ -734,6 +751,130 @@ export default function Chat() {
       inFlightRef.current = false;
     }
   };
+
+  const stopVoice = useCallback(() => {
+    try {
+      const rec = speechRecRef.current;
+      if (rec) rec.stop();
+    } catch {
+      // ignore
+    } finally {
+      voiceListeningRef.current = false;
+      setVoiceListening(false);
+    }
+  }, []);
+
+  const startVoice = useCallback(() => {
+    const Rec = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!Rec) return;
+
+    // Capture session style for transcript cleaning at start time.
+    voiceModelRef.current = selectedModel ? selectedModel : null;
+    voiceThinkingLevelRef.current = thinkingLevel ? thinkingLevel : null;
+    rawTranscriptRef.current = '';
+    shouldFinalizeRef.current = true;
+
+    if (!speechRecRef.current) {
+      const rec = new Rec();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = locale === 'zh' ? 'zh-CN' : 'en-US';
+      voiceLangTriedRef.current = rec.lang;
+
+      rec.onresult = (event: any) => {
+        let finalText = '';
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const r = event.results[i];
+          const text = r?.[0]?.transcript ?? '';
+          if (r?.isFinal) finalText += text;
+        }
+        finalText = finalText.trim();
+        if (!finalText) return;
+        rawTranscriptRef.current = rawTranscriptRef.current
+          ? `${rawTranscriptRef.current} ${finalText}`
+          : finalText;
+      };
+
+      rec.onerror = () => {
+        // Some browsers accept 'zh' but not 'zh-CN'.
+        if (locale === 'zh' && voiceLangTriedRef.current === 'zh-CN') {
+          try {
+            voiceLangTriedRef.current = 'zh';
+            rec.lang = 'zh';
+            speechRecRef.current = rec;
+            rec.start();
+            voiceListeningRef.current = true;
+            setVoiceListening(true);
+            return;
+          } catch {
+            // fall through to stopVoice()
+          }
+        }
+        shouldFinalizeRef.current = false;
+        stopVoice();
+      };
+
+      rec.onend = () => {
+        voiceListeningRef.current = false;
+        setVoiceListening(false);
+
+        if (!shouldFinalizeRef.current) return;
+        shouldFinalizeRef.current = false;
+
+        const raw = rawTranscriptRef.current.trim();
+        rawTranscriptRef.current = '';
+        if (!raw) return;
+
+        (async () => {
+          try {
+            setVoiceProcessing(true);
+            const res = await voiceAPI.transcribeClean({
+              text: raw,
+              model: voiceModelRef.current,
+              thinking_level: voiceThinkingLevelRef.current,
+            });
+            const cleaned = res.data.cleaned_text?.trim();
+            if (cleaned) setInput(cleaned);
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          } catch {
+            // Fallback to raw transcript if cleaning fails.
+            setInput(raw);
+            setTimeout(() => textareaRef.current?.focus(), 0);
+          } finally {
+            setVoiceProcessing(false);
+          }
+        })();
+      };
+
+      speechRecRef.current = rec;
+    }
+
+    try {
+      speechRecRef.current.start();
+      voiceListeningRef.current = true;
+      setVoiceListening(true);
+    } catch {
+      // start() may throw if already started
+    }
+  }, [stopVoice, selectedModel, thinkingLevel, voiceAPI, locale]);
+
+  const toggleVoice = useCallback(() => {
+    if (!voiceSupported) return;
+    if (voiceProcessing) return;
+    if (voiceListeningRef.current) stopVoice();
+    else startVoice();
+  }, [startVoice, stopVoice, voiceSupported, voiceProcessing]);
+
+  useEffect(() => {
+    const Rec = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    setVoiceSupported(Boolean(Rec));
+  }, []);
+
+  useEffect(() => {
+    if (sending && voiceListeningRef.current) stopVoice();
+  }, [sending, stopVoice]);
+
+  useEffect(() => () => stopVoice(), [stopVoice]);
 
   const handleQuickModelSwitch = async () => {
     if (!activeKey || patchingSession) return;
@@ -1223,6 +1364,26 @@ export default function Chat() {
                   >
                     <ImagePlus className="w-4 h-4" />
                   </button>
+                  <button
+                    onClick={toggleVoice}
+                    disabled={sending || !voiceSupported || voiceProcessing}
+                    title={
+                      !voiceSupported
+                        ? t.chat.voiceUnsupported
+                        : voiceListening
+                          ? t.chat.stopVoiceInput
+                          : t.chat.startVoiceInput
+                    }
+                    className={`w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg transition-all ${
+                      !voiceSupported
+                        ? 'text-text-muted/40 cursor-not-allowed'
+                        : voiceListening
+                          ? 'text-accent bg-accent/15 hover:bg-accent/20'
+                          : 'text-text-muted hover:text-text-primary hover:bg-surface-2'
+                    } ${(sending || voiceProcessing) ? 'opacity-30 cursor-not-allowed' : ''}`}
+                  >
+                    {voiceListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                  </button>
                   <textarea
                     ref={textareaRef}
                     value={input}
@@ -1239,14 +1400,14 @@ export default function Chat() {
                     }}
                     placeholder={sending ? t.chat.waitingResponse : t.chat.placeholder}
                     rows={1}
-                    disabled={sending}
+                    disabled={sending || voiceProcessing}
                     autoFocus
                     className="flex-1 resize-none bg-transparent text-[13px] text-text-primary placeholder-text-muted focus:outline-none leading-relaxed disabled:opacity-60"
                     style={{ maxHeight: '160px' }}
                   />
                   <button
                     onClick={handleSend}
-                    disabled={(!input.trim() && pendingImages.length === 0) || sending}
+                    disabled={(!input.trim() && pendingImages.length === 0) || sending || voiceProcessing}
                     className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg bg-accent text-white hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm shadow-accent/20"
                   >
                     {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}

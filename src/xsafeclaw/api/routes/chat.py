@@ -342,6 +342,22 @@ class SendMessageResponse(BaseModel):
     stop_reason: str | None = None
 
 
+# --------------- Voice transcript post-processing ---------------
+class TranscribeCleanRequest(BaseModel):
+    """
+    Raw speech-to-text transcript (may contain filler words).
+    We then use the configured OpenClaw model to rewrite it into clean text.
+    """
+    text: str = Field(..., description="Raw transcription text")
+    model: str | None = Field(None, description="Optional model override (provider/model)")
+    thinking_level: str | None = Field(None, description="off / minimal / low / medium / high / xhigh")
+
+
+class TranscribeCleanResponse(BaseModel):
+    raw_text: str
+    cleaned_text: str
+
+
 # --------------- Endpoints ---------------
 
 @router.post("/start-session", response_model=StartSessionResponse)
@@ -468,6 +484,60 @@ async def send_message_stream(request: SendMessageRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+@router.post("/transcribe-clean", response_model=TranscribeCleanResponse)
+async def transcribe_clean(request: TranscribeCleanRequest):
+    """
+    Rewrite raw transcript into clean natural text.
+
+    We do NOT store any user message into the main chat session; instead, this
+    uses a temporary OpenClaw gateway session for post-processing only.
+    """
+    session_key = f"voice-{uuid.uuid4().hex[:12]}"
+    client = await _get_or_create_client(session_key)
+
+    try:
+        # Keep same model/thinking style if the client requested it.
+        await client.patch_session(
+            session_key,
+            model=request.model or None,
+            thinking_level=request.thinking_level,
+        )
+        print(f'request.text: {request.text}')
+        print(f'request.text: {request.text}')
+        print(f'request.text: {request.text}')
+
+        prompt = (
+            "You are a professional Speech-to-Text (STT) Post-Processor. Your goal is to rewrite raw, fragmented transcripts into clean, coherent, and natural text.\n\n"
+            "### STRICT EDITING RULES:\n"
+            "1. **REMOVE ALL FILLER WORDS**: Eliminate all hesitations and vocal crutches. \n"
+            "   - Examples (English): um, uh, er, ah, like, you know, so, basically, actually.\n"
+            "   - Examples (Chinese): 嗯, 啊, 呃, 那个, 就是, 其实, 然后, 吧, 嘛, 呢, 这个这个.\n"
+            "2. **ELIMINATE STUTTERS & REPETITIONS**: Remove redundant phrases caused by stuttering or thinking-on-the-fly.\n"
+            "   - **Rule**: If a phrase repeats like 'I want, I want, I want you to...', rewrite it as 'I want you to...'.\n"
+            "   - Collapse consecutive identical words or short phrases into a single instance.\n"
+            "3. **SEMANTIC CLARITY**: Combine fragmented thoughts into logical, fluent sentences. Fix punctuation and capitalization.\n"
+            "4. **NO TRANSLATION**: Keep the output in the same language as the input. Do not translate.\n"
+            "5. **ZERO EXTRA OUTPUT**: Output ONLY the cleaned transcript. No quotes, no 'Here is the result', no explanations.\n\n"
+            f"Raw Transcript:\n{request.text}"
+        )
+
+        result = await client.send_chat(
+            session_key=session_key,
+            message=prompt,
+            timeout_ms=60_000,
+        )
+
+        cleaned = (result.get("response_text") or "").strip()
+        return TranscribeCleanResponse(raw_text=request.text, cleaned_text=cleaned)
+    finally:
+        # Cleanup temporary session.
+        _gateway_sessions.pop(session_key, None)
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 @router.get("/history")

@@ -180,6 +180,16 @@ export const chatAPI = {
     }>('/chat/available-models'),
 };
 
+// Voice / speech-to-text helpers
+export const voiceAPI = {
+  /**
+   * Clean up raw speech-to-text transcript using the configured OpenClaw model.
+   * Frontend still needs to produce raw transcript (e.g. via Web Speech API).
+   */
+  transcribeClean: (data: { text: string; model?: string | null; thinking_level?: string | null }) =>
+    api.post<{ raw_text: string; cleaned_text: string }>('/chat/transcribe-clean', data),
+};
+
 // Statistics API
 export const statsAPI = {
   overview: () =>
