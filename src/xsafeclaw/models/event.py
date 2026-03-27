@@ -92,7 +92,7 @@ class Event(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(20),
         default="completed",
-        comment="Event status: running, pending (guard hold), completed, fail (guard rejected), error",
+        comment="Event status: running, pending (guard hold), completed, failed (guard rejected), error",
     )
 
     error_message: Mapped[str | None] = mapped_column(

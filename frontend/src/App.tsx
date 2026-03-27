@@ -101,7 +101,7 @@ function AppRoutes() {
         <Route path="/agent-valley" element={<World />} />
         <Route path="/world" element={<World />} />
         <Route element={<Layout />}>
-          <Route path="/" element={<Navigate to="/agent-town" replace />} />
+          <Route path="/" element={<Navigate to="/agent-valley" replace />} />
           <Route path="/monitor" element={<Monitor />} />
           <Route path="/assets" element={<Assets />} />
           <Route path="/safety-rehearsal" element={<RiskScanner />} />

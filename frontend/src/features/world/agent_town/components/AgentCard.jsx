@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { guardAPI } from '../../../../services/api';
 import { CHAR_BASE, USE_AGENT_TOWN_MOCK } from '../config/constants';
 import { buildMockAssistantReply, buildMockHistory } from '../data/mockData';
 
@@ -13,16 +14,12 @@ function shortId(value) {
   return String(value || '').slice(0, 8).toUpperCase();
 }
 
-const EVENT_STATUS_META = {
-  ok: { label: 'COMPLETE', className: 'tc-task-complete' },
-  completed: { label: 'COMPLETE', className: 'tc-task-complete' },
-  error: { label: 'FAILED', className: 'tc-task-failed' },
-  failed: { label: 'FAILED', className: 'tc-task-failed' },
-  running: { label: 'RUNNING', className: 'tc-task-running' },
-  pending: { label: 'PENDING', className: 'tc-task-flagged' },
-  waiting: { label: 'PENDING', className: 'tc-task-flagged' },
-  warning: { label: 'PENDING', className: 'tc-task-flagged' },
-};
+function fmtTokens(n) {
+  if (!n || n <= 0) return '0';
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return `${(n / 1000000).toFixed(1)}m`;
+}
 
 function fmtDur(s) {
   if (!s && s !== 0) return '–';
@@ -254,52 +251,44 @@ function previewValue(value, limit = 180) {
 function AgentDialogToolMessage({ msg }) {
   const argsPreview = previewValue(msg.args || msg.content || '', Number.POSITIVE_INFINITY);
   const resultPreview = msg.result_pending ? 'Running...' : previewValue(msg.result, Number.POSITIVE_INFINITY);
-  const toolState = msg.result_pending
-    ? 'TOOL RUNNING'
+  const metaTag = msg.result_pending
+    ? 'RUNNING'
     : msg.is_error
-      ? 'TOOL ERROR'
-      : resultPreview
-        ? 'TOOL RESULT'
-        : 'TOOL CALL';
-  const stateClass = msg.result_pending
+      ? 'ERROR'
+      : 'TOOL';
+  const metaClass = msg.result_pending
     ? 'agent-dialog-tag-tool-running'
     : msg.is_error
       ? 'agent-dialog-tag-tool-error'
-      : resultPreview
-        ? 'agent-dialog-tag-tool-result'
-        : 'agent-dialog-tag-tool';
+      : 'agent-dialog-tag-tool';
 
   return (
     <div className="agent-dialog-item agent-dialog-item-tool">
       <div className="agent-dialog-meta">
         <div className="agent-dialog-meta-main">
-          <span className={`agent-dialog-tag ${stateClass}`}>{toolState}</span>
+          <span className={`agent-dialog-tag ${metaClass}`}>{metaTag}</span>
           <span className="agent-dialog-tool-name">{msg.tool_name || 'unknown'}</span>
         </div>
         <span className="agent-dialog-time">{fmtTime(msg.timestamp)}</span>
       </div>
-      <div className="agent-dialog-tool-card">
-        {argsPreview ? (
-          <div className="agent-dialog-tool-section agent-dialog-tool-section-call">
-            <div className="agent-dialog-tool-section-head">
-              <span className="agent-dialog-tool-section-tag">TOOL CALL</span>
+      {(argsPreview || resultPreview) ? (
+        <div className="agent-dialog-tool-payload">
+          {argsPreview ? (
+            <div className="agent-dialog-tool-row agent-dialog-tool-row-call">
+              <span className="agent-dialog-tool-row-label">Call</span>
+              <div className="agent-dialog-code agent-dialog-code-args">{argsPreview}</div>
             </div>
-            <div className="agent-dialog-code agent-dialog-code-args">
-              {argsPreview}
+          ) : null}
+          {resultPreview ? (
+            <div className="agent-dialog-tool-row agent-dialog-tool-row-result">
+              <span className="agent-dialog-tool-row-label">Result</span>
+              <div className={`agent-dialog-code agent-dialog-code-result ${msg.is_error ? 'agent-dialog-code-error' : ''}`}>
+                {resultPreview}
+              </div>
             </div>
-          </div>
-        ) : null}
-        {resultPreview ? (
-          <div className="agent-dialog-tool-section agent-dialog-tool-section-result">
-            <div className="agent-dialog-tool-section-head">
-              <span className="agent-dialog-tool-section-tag">TOOL RESULT</span>
-            </div>
-            <div className={`agent-dialog-code agent-dialog-code-result ${msg.is_error ? 'agent-dialog-code-error' : ''}`}>
-              {resultPreview}
-            </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -354,10 +343,37 @@ function AgentDialogMessage({ msg }) {
   );
 }
 
+function getEffectiveRisk(item) {
+  if (item.risk_source || item.failure_mode || item.real_world_harm) {
+    return { risk_source: item.risk_source, failure_mode: item.failure_mode, real_world_harm: item.real_world_harm };
+  }
+  if (!item.guard_raw) return null;
+  const lines = item.guard_raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  let rs = null, fm = null, rwh = null;
+  const desc = [];
+  for (const line of lines) {
+    const bare = line.replace(/^[-*•]+\s*/, '').replace(/\*\*/g, '');
+    const lc = bare.toLowerCase();
+    if (lc === 'unsafe' || lc === 'safe') continue;
+    if (lc.startsWith('risk source:') || lc.startsWith('risk_source:')) {
+      rs = bare.substring(bare.indexOf(':') + 1).trim();
+    } else if (lc.startsWith('failure mode:') || lc.startsWith('failure_mode:')) {
+      fm = bare.substring(bare.indexOf(':') + 1).trim();
+    } else if (/^real[_\s-]*world[_\s]*harm:/i.test(lc)) {
+      rwh = bare.substring(bare.indexOf(':') + 1).trim();
+    } else if (bare) {
+      desc.push(bare);
+    }
+  }
+  if (rs || fm || rwh) return { risk_source: rs, failure_mode: fm, real_world_harm: rwh };
+  const fallback = desc.join(' ').substring(0, 300);
+  return fallback ? { risk_source: null, failure_mode: fallback, real_world_harm: null } : null;
+}
+
 export default function AgentCard({ data, onClose, onJourney }) {
   if (!data) return null;
 
-  const { agent, charName, state, event, events = [], isPending } = data;
+  const { agent, charName, state, event, events = [], isPending, totalTokens = 0 } = data;
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -368,6 +384,9 @@ export default function AgentCard({ data, onClose, onJourney }) {
   const streamControllerRef = useRef(null);
   const stopRequestedRef = useRef(false);
   const sessionKey = agent?.session_key || '';
+  const [guardPending, setGuardPending] = useState([]);
+  const [gpResolving, setGpResolving] = useState(null);
+  const [gpExpandedId, setGpExpandedId] = useState(null);
   const spriteUrl = `${CHAR_BASE}${charName}_idle_anim_32x32.png`;
 
   const stateDot = state === 'working'
@@ -378,7 +397,6 @@ export default function AgentCard({ data, onClose, onJourney }) {
         ? 'dot-pending'
         : 'dot-offline';
 
-  const stateLabel = state === 'working' ? 'RUNNING' : String(state || 'offline').toUpperCase();
   const boundEvents = useMemo(
     () => (Array.isArray(events) && events.length ? events : event ? [event] : []),
     [event, events],
@@ -393,9 +411,9 @@ export default function AgentCard({ data, onClose, onJourney }) {
     ? 'Streaming reply'
     : loadingHistory
       ? 'Syncing history'
-      : sessionKey
-        ? 'Ready for next step'
-        : 'Awaiting session bind';
+      : null;
+
+  const latestTaskStatus = latestEvent?.status || null;
 
   const threadSummary = useMemo(() => displayMessages.reduce((summary, msg) => {
     if (msg.role === 'user') summary.user += 1;
@@ -407,7 +425,6 @@ export default function AgentCard({ data, onClose, onJourney }) {
     assistant: 0,
     tool: 0,
   }), [displayMessages]);
-  const latestStatusMeta = EVENT_STATUS_META[latestEvent?.status] || EVENT_STATUS_META.running;
 
   const loadHistory = useCallback(async () => {
     setMessages([]);
@@ -447,6 +464,78 @@ export default function AgentCard({ data, onClose, onJourney }) {
   useEffect(() => {
     loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    if (!sessionKey || USE_AGENT_TOWN_MOCK) {
+      setGuardPending([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { data } = await guardAPI.pending(false);
+        if (cancelled) return;
+        const forSession = (data || []).filter(
+          (p) => p.session_key === sessionKey || (p.session_key && p.session_key.endsWith(sessionKey)),
+        );
+        setGuardPending(
+          forSession.map((p) => ({
+            id: p.id,
+            tool_name: p.tool_name,
+            params: p.params ?? {},
+            guard_verdict: p.guard_verdict ?? 'unsafe',
+            guard_raw: p.guard_raw ?? '',
+            session_context: p.session_context ?? '',
+            risk_source: p.risk_source ?? null,
+            failure_mode: p.failure_mode ?? null,
+            real_world_harm: p.real_world_harm ?? null,
+            created_at: p.created_at ?? 0,
+          })),
+        );
+      } catch {
+        if (!cancelled) setGuardPending([]);
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [sessionKey]);
+
+  const handleGuardResolve = useCallback(
+    async (pendingId, resolution) => {
+      if (!pendingId || USE_AGENT_TOWN_MOCK) return;
+      setGpResolving(pendingId);
+      try {
+        await guardAPI.resolve(pendingId, resolution);
+        const { data } = await guardAPI.pending(false);
+        const forSession = (data || []).filter(
+          (p) => p.session_key === sessionKey || (p.session_key && p.session_key.endsWith(sessionKey)),
+        );
+        setGuardPending(
+          forSession.map((p) => ({
+            id: p.id,
+            tool_name: p.tool_name,
+            params: p.params ?? {},
+            guard_verdict: p.guard_verdict ?? 'unsafe',
+            guard_raw: p.guard_raw ?? '',
+            session_context: p.session_context ?? '',
+            risk_source: p.risk_source ?? null,
+            failure_mode: p.failure_mode ?? null,
+            real_world_harm: p.real_world_harm ?? null,
+            created_at: p.created_at ?? 0,
+          })),
+        );
+      } catch (err) {
+        console.warn('[AgentCard] guard resolve error:', err);
+      } finally {
+        setGpResolving(null);
+      }
+    },
+    [sessionKey],
+  );
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -671,11 +760,18 @@ export default function AgentCard({ data, onClose, onJourney }) {
                     {String(agent.provider || 'unknown')} · {String(agent.model || 'model pending')}
                   </div>
                   <div className="agent-card-summary-inline">
-                    <span className={`tc-ledger-badge ${latestStatusMeta.className}`}>{latestStatusMeta.label}</span>
-                    <div className={`tc-stage-status-chip tc-status-${agent.status || 'offline'}`}>
-                      {stateLabel}
-                    </div>
-                    <span className="agent-card-thread-chip">{threadStateLabel}</span>
+                    {latestTaskStatus ? (
+                      <span className={`agent-card-task-status agent-card-task-status-${latestTaskStatus}`}>
+                        {latestTaskStatus.toUpperCase()}
+                      </span>
+                    ) : null}
+                    <span className="agent-card-thread-chip">{sessionKey || 'No session'}</span>
+                    <span className="agent-card-thread-chip">{displayMessages.length} MSG</span>
+                    <span className="agent-card-thread-chip">{threadSummary.tool} TOOL</span>
+                    <span className="agent-card-thread-chip">{boundEvents.length} RUNS</span>
+                    <span className="agent-card-thread-chip">{fmtTokens(totalTokens)} TKN</span>
+                    <span className="agent-card-thread-chip">{fmtDate(latestEvent?.start_time || agent.first_seen_at) || 'just now'}</span>
+                    {threadStateLabel ? <span className="agent-card-thread-chip">{threadStateLabel}</span> : null}
                   </div>
                 </div>
               </div>
@@ -688,17 +784,82 @@ export default function AgentCard({ data, onClose, onJourney }) {
                 View Work Journey
               </button>
             </div>
-
-            <div className="agent-card-summary-meta">
-              <span className="agent-card-thread-chip">{sessionKey || 'No session key'}</span>
-              <span className="agent-card-thread-chip">{displayMessages.length} MSG</span>
-              <span className="agent-card-thread-chip">{threadSummary.tool} TOOL</span>
-              <span className="agent-card-thread-chip">{boundEvents.length} RUNS</span>
-              <div className="agent-card-summary-status">
-                <span className="agent-card-thread-chip">{fmtDate(latestEvent?.start_time || agent.first_seen_at) || 'just now'}</span>
-              </div>
-            </div>
           </section>
+
+          {guardPending.length > 0 ? (
+            <section className="tc-ornate-panel agent-card-guard-panel" aria-label="Guard pending approvals">
+              <div className="agent-card-guard-strip-head">
+                <div className="agent-dialog-overline">Guard</div>
+                <h3 className="agent-dialog-title agent-card-guard-title">Review required</h3>
+                <p className="agent-card-guard-hint">
+                  Tool calls are paused until you approve or reject — same as Monitor.
+                </p>
+              </div>
+              <div className="agent-card-guard-list">
+                {guardPending.map((gp) => (
+                  <div key={gp.id} className="agent-card-guard-card">
+                    <div className="agent-card-guard-card-top">
+                      <div className="agent-card-guard-card-main">
+                        <div className="agent-card-guard-card-headline">
+                          <span className="agent-card-guard-tool">{gp.tool_name}</span>
+                          <span className="agent-card-guard-verdict-pill">{gp.guard_verdict}</span>
+                        </div>
+                        {(() => {
+                          const eff = getEffectiveRisk(gp);
+                          if (!eff) return null;
+                          return (
+                            <div className="agent-card-guard-tags">
+                              {eff.risk_source ? <span className="agent-card-guard-tag agent-card-guard-tag-risk">{eff.risk_source}</span> : null}
+                              {eff.failure_mode ? <span className="agent-card-guard-tag agent-card-guard-tag-failure">{eff.failure_mode}</span> : null}
+                              {eff.real_world_harm ? <span className="agent-card-guard-tag agent-card-guard-tag-harm">{eff.real_world_harm}</span> : null}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                      <div className="agent-card-guard-card-actions">
+                        <button
+                          type="button"
+                          className="agent-card-guard-btn agent-card-guard-btn-approve"
+                          disabled={gpResolving === gp.id}
+                          onClick={() => handleGuardResolve(gp.id, 'approved')}
+                        >
+                          {gpResolving === gp.id ? '…' : 'Approve'}
+                        </button>
+                        <button
+                          type="button"
+                          className="agent-card-guard-btn agent-card-guard-btn-reject"
+                          disabled={gpResolving === gp.id}
+                          onClick={() => handleGuardResolve(gp.id, 'rejected')}
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                    {gp.session_context ? (
+                      <div className="agent-card-guard-trajectory">
+                        <div className="agent-card-guard-trajectory-label">Session trajectory</div>
+                        <pre className="agent-card-guard-trajectory-body">{gp.session_context}</pre>
+                      </div>
+                    ) : null}
+                    <div className="agent-card-guard-params">
+                      <button
+                        type="button"
+                        className="agent-card-guard-params-toggle"
+                        onClick={() => setGpExpandedId(gpExpandedId === gp.id ? null : gp.id)}
+                      >
+                        {gpExpandedId === gp.id ? '▼' : '▶'} Parameters
+                      </button>
+                      {gpExpandedId === gp.id ? (
+                        <pre className="agent-card-guard-params-pre">
+                          {JSON.stringify(gp.params, null, 2)}
+                        </pre>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <section className="agent-dialog-panel">
             <div className="agent-dialog-head">

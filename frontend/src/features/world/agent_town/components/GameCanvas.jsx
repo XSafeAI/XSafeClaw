@@ -11,10 +11,12 @@ export default function GameCanvas({
   onLayoutChange,
   onScreenTelemetryChange,
   mapConfig,
+  refreshTrigger = 0,
 }) {
-  const containerRef = useRef(null);
-  const loadingRef   = useRef(null);
-  const engineRef    = useRef(null);
+  const containerRef  = useRef(null);
+  const loadingRef    = useRef(null);
+  const engineRef     = useRef(null);
+  const refreshFnRef  = useRef(null);
   const [progress, setProgress]   = useState(0);
   const [loadText, setLoadText]   = useState('Loading assets...');
 
@@ -68,8 +70,7 @@ export default function GameCanvas({
           telemetryTimer = setInterval(pushTelemetry, 180);
         }
 
-        // Keep scene data fresh without rebuilding the Pixi world.
-        refreshTimer = setInterval(async () => {
+        const doRefresh = async () => {
           try {
             const nextData = await fetchData();
             if (!aborted) {
@@ -77,12 +78,14 @@ export default function GameCanvas({
               pushTelemetry();
             }
           } catch (_) {}
-        }, 30000);
+        };
+        refreshFnRef.current = doRefresh;
+
+        refreshTimer = setInterval(doRefresh, 15000);
       } catch (err) {
         console.error('[GameCanvas] init error:', err);
       }
 
-      // Hide loading screen via direct DOM manipulation (reliable)
       if (!aborted && loadingRef.current) {
         loadingRef.current.style.opacity = '0';
         loadingRef.current.style.pointerEvents = 'none';
@@ -94,6 +97,7 @@ export default function GameCanvas({
 
     return () => {
       aborted = true;
+      refreshFnRef.current = null;
       if (refreshTimer) clearInterval(refreshTimer);
       if (telemetryTimer) clearInterval(telemetryTimer);
       if (hideLoadingTimer) clearTimeout(hideLoadingTimer);
@@ -105,6 +109,10 @@ export default function GameCanvas({
   }, [mapConfig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (refreshTrigger > 0) refreshFnRef.current?.();
+  }, [refreshTrigger]);
+
+  useEffect(() => {
     engineRef.current?.setGuardEnabled?.(guardEnabled);
   }, [guardEnabled]);
 
@@ -113,7 +121,7 @@ export default function GameCanvas({
       {/* Loading overlay — hidden via ref after engine ready */}
       <div ref={loadingRef} className="loading">
         <div className="loadingInner">
-          <div className="loadingTitle">AGENT TOWN</div>
+          <div className="loadingTitle">AGENT VALLEY</div>
           <div className="loadingBar">
             <div className="loadingFill" style={{ width: `${Math.round(progress * 100)}%` }} />
           </div>

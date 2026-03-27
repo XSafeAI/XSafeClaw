@@ -118,6 +118,27 @@ function durationStr(startStr: string, endStr: string | null): string {
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
+/** Same buckets as Agent Town / GET /api/events (Event.status). */
+function mapEventStatusToDashboardKey(status: string | undefined): string {
+  const s = String(status || '').toLowerCase();
+  if (s === 'running') return 'running';
+  if (s === 'pending') return 'pending';
+  if (s === 'completed' || s === 'ok') return 'completed';
+  if (s === 'error') return 'error';
+  if (s === 'fail' || s === 'failed') return 'failed';
+  return 'running';
+}
+
+function monitorEventStatusBadgeClass(status: string | undefined): string {
+  const key = mapEventStatusToDashboardKey(status);
+  if (key === 'completed') return 'bg-emerald-500/15 text-emerald-400';
+  if (key === 'error') return 'bg-red-500/15 text-red-400';
+  if (key === 'failed') return 'bg-orange-500/15 text-orange-400';
+  if (key === 'pending') return 'bg-amber-500/15 text-amber-400';
+  if (key === 'running') return 'bg-sky-500/15 text-sky-400';
+  return 'bg-yellow-500/15 text-yellow-400';
+}
+
 /** Determine which sessions are "active" based on their most-recent event time. */
 function classifyActiveSessions(events: EventItem[], cutoffMs: number): Set<string> {
   const latestPerSession = new Map<string, number>();
@@ -1304,26 +1325,16 @@ export default function Monitor() {
     <div className="min-h-screen">
       {/* ===== Header ===== */}
       <div className="border-b border-border">
-        <div className="px-8 py-6 flex items-start justify-between">
-          <div>
-            <div className="flex items-center gap-4">
-              <h1 className="text-xl font-bold text-text-primary">{t.monitor.title}</h1>
-              <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
-                {t.common.active}
-              </span>
-            </div>
-            <p className="text-[13px] text-text-muted mt-2">
-              {t.monitor.subtitle}
-            </p>
+        <div className="px-8 py-6">
+          <div className="flex items-center gap-4">
+            <h1 className="text-xl font-bold text-text-primary">{t.monitor.title}</h1>
+            <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
+              {t.common.active}
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={() => navigate('/agent-town')}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent/10 border border-accent/30 text-accent text-[13px] font-semibold hover:bg-accent/20 hover:border-accent/50 transition-all"
-          >
-            <Activity className="w-4 h-4" />
-            {t.monitor.agentOffice}
-          </button>
+          <p className="text-[13px] text-text-muted mt-2">
+            {t.monitor.subtitle}
+          </p>
         </div>
         <div className="px-8 flex items-center gap-1">
           {monitorTabs.map(tab => {
@@ -1496,10 +1507,7 @@ export default function Monitor() {
                         Task {selectedEvent.user_message_id.slice(0, 10)}
                       </span>
                     </div>
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium
-                      ${selectedEvent.status === 'completed' ? 'bg-emerald-500/15 text-emerald-400'
-                        : selectedEvent.status === 'error' ? 'bg-red-500/15 text-red-400'
-                        : 'bg-yellow-500/15 text-yellow-400'}`}>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${monitorEventStatusBadgeClass(selectedEvent.status)}`}>
                       {selectedEvent.status}
                     </span>
                     <div className="flex items-center gap-4 text-[11px] text-text-muted">

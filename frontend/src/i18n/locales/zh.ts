@@ -39,6 +39,8 @@ export const zh: Translations = {
     systemOnline: '系统在线',
     allServicesRunning: '所有服务运行中',
     langToggle: 'EN',
+    agentTown: '智能体小镇',
+    agentTownDesc: '在一个地方管理和观察所有智能体',
   },
 
   home: {

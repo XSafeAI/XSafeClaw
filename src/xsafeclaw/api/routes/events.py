@@ -14,6 +14,152 @@ from ...models import Event, Message, ToolCall
 
 router = APIRouter()
 
+_USER_PREVIEW_MAX_LEN = 280
+
+
+def _clip_preview(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+    return text[:_USER_PREVIEW_MAX_LEN] if len(text) > _USER_PREVIEW_MAX_LEN else text
+
+
+def _extract_text_from_content_items(items: list | None) -> str:
+    """Collect text parts from OpenClaw-style content arrays (type/text blocks)."""
+    if not items or not isinstance(items, list):
+        return ""
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text" and item.get("text"):
+            parts.append(str(item["text"]).strip())
+        elif item.get("text") and not item.get("type"):
+            parts.append(str(item["text"]).strip())
+    return " ".join(p for p in parts if p)
+
+
+def _sender_from_dict(d: dict | None) -> str | None:
+    """Pick a short display label; prefer name over label (label often has '(gateway-client)' noise)."""
+    if not isinstance(d, dict):
+        return None
+    for key in ("name", "username", "displayName", "label", "id"):
+        v = d.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _sender_label_from_raw(raw: dict | None) -> str | None:
+    """Resolve gateway / client sender label from JSONL raw entry (e.g. gateway-client)."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    sender = raw.get("sender")
+    if isinstance(sender, dict):
+        sl = _sender_from_dict(sender)
+        if sl:
+            return sl
+    if isinstance(sender, str) and sender.strip():
+        return sender.strip()
+    msg = raw.get("message")
+    if isinstance(msg, dict):
+        sender = msg.get("sender")
+        if isinstance(sender, dict):
+            sl = _sender_from_dict(sender)
+            if sl:
+                return sl
+        if isinstance(sender, str) and sender.strip():
+            return sender.strip()
+        for meta_key in ("metadata", "meta"):
+            meta = msg.get(meta_key)
+            if isinstance(meta, dict):
+                sender = meta.get("sender")
+                if isinstance(sender, dict):
+                    sl = _sender_from_dict(sender)
+                    if sl:
+                        return sl
+    return None
+
+
+def _strip_sender_metadata_preamble(text: str) -> str:
+    """If the body is markdown 'Sender (untrusted metadata):' + ```json ... ```, keep text after the fence."""
+    s = text.strip()
+    if not s:
+        return ""
+    lower = s.lower()
+    if "sender (untrusted metadata)" not in lower and "untrusted metadata" not in lower:
+        return s
+    parts = s.split("```")
+    if len(parts) >= 3:
+        tail = "".join(parts[2:]).strip()
+        if tail:
+            return tail
+    # Only the fenced JSON block, no user line — let caller try raw_entry / other paths
+    return ""
+
+
+def _extract_user_message_preview(um: Message) -> str | None:
+    """Best-effort preview: user text first; sender label only when no body text exists."""
+    text = (um.content_text or "").strip()
+    if text:
+        cleaned = _strip_sender_metadata_preamble(text)
+        if cleaned:
+            return _clip_preview(cleaned)
+
+    cj = um.content_json
+    if isinstance(cj, list):
+        merged = _extract_text_from_content_items(cj)
+        if merged:
+            return _clip_preview(merged)
+    elif isinstance(cj, dict):
+        for key in ("text", "body", "message"):
+            v = cj.get(key)
+            if isinstance(v, str) and v.strip():
+                return _clip_preview(v)
+    elif isinstance(cj, str) and cj.strip():
+        return _clip_preview(cj.strip())
+
+    raw = um.raw_entry
+    sender_label = _sender_label_from_raw(raw)
+    if isinstance(raw, dict):
+        msg = raw.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, list):
+                merged = _extract_text_from_content_items(content)
+                if merged:
+                    cleaned = _strip_sender_metadata_preamble(merged)
+                    if cleaned:
+                        if sender_label and cleaned != sender_label:
+                            return _clip_preview(f"{sender_label}: {cleaned}")
+                        return _clip_preview(cleaned)
+            if isinstance(content, str) and content.strip():
+                merged = _strip_sender_metadata_preamble(content.strip())
+                if merged:
+                    if sender_label:
+                        return _clip_preview(f"{sender_label}: {merged}")
+                    return _clip_preview(merged)
+            for key in ("text", "body"):
+                v = msg.get(key)
+                if isinstance(v, str) and v.strip():
+                    merged = _strip_sender_metadata_preamble(v.strip())
+                    if merged:
+                        if sender_label:
+                            return _clip_preview(f"{sender_label}: {merged}")
+                        return _clip_preview(merged)
+
+    if sender_label:
+        return _clip_preview(sender_label)
+
+    return None
+
+
+def _user_message_preview_from_event(event: Event) -> str | None:
+    um = getattr(event, "user_message", None)
+    if um is None:
+        return None
+    return _extract_user_message_preview(um)
+
 
 # Pydantic schemas
 class EventToolCallSummary(BaseModel):
@@ -53,6 +199,10 @@ class EventResponse(BaseModel):
     tool_call_ids: list[str] | None = None  # List of tool call IDs
     status: str
     error_message: str | None
+    user_message_preview: str | None = Field(
+        default=None,
+        description="UI preview: user text, structured content blocks, or sender label from raw JSONL (e.g. gateway).",
+    )
     created_at: datetime
     updated_at: datetime | None
 
@@ -98,10 +248,9 @@ async def list_events(
     session_id: str | None = Query(None, description="Filter by session ID"),
     status: str | None = Query(None, description="Filter by status"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
-    limit: int = Query(50, ge=1, le=100, description="Max records to return"),
+    limit: int = Query(500, ge=1, le=5000, description="Max records to return"),
 ) -> EventListResponse:
     """List events with optional filters."""
-    # Build query
     query = select(Event)
 
     if session_id:
@@ -109,17 +258,26 @@ async def list_events(
     if status:
         query = query.where(Event.status == status)
 
-    # Get total count
     count_query = select(func.count()).select_from(query.subquery())
     total = await db.scalar(count_query) or 0
 
-    # Get events
-    query = query.order_by(desc(Event.started_at)).offset(skip).limit(limit)
+    query = (
+        query.options(selectinload(Event.user_message))
+        .order_by(desc(Event.started_at))
+        .offset(skip)
+        .limit(limit)
+    )
     result = await db.execute(query)
-    events = result.scalars().all()
+    events = result.scalars().unique().all()
+
+    event_rows: list[EventResponse] = []
+    for e in events:
+        preview = _user_message_preview_from_event(e)
+        base = EventResponse.model_validate(e)
+        event_rows.append(base.model_copy(update={"user_message_preview": preview}))
 
     return EventListResponse(
-        events=[EventResponse.model_validate(e) for e in events],
+        events=event_rows,
         total=total,
         page=skip // limit + 1,
         page_size=limit,
@@ -132,8 +290,9 @@ async def get_event(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> EventWithMessagesResponse:
     """Get a specific event with all its messages."""
-    # Get event
-    result = await db.execute(select(Event).where(Event.id == event_id))
+    result = await db.execute(
+        select(Event).options(selectinload(Event.user_message)).where(Event.id == event_id),
+    )
     event = result.scalar_one_or_none()
 
     if not event:
@@ -200,8 +359,11 @@ async def get_event(
             )
         )
 
+    base = EventResponse.model_validate(event).model_copy(
+        update={"user_message_preview": _user_message_preview_from_event(event)},
+    )
     return EventWithMessagesResponse(
-        **EventResponse.model_validate(event).model_dump(),
+        **base.model_dump(),
         messages=message_summaries,
     )
 

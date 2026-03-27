@@ -29,24 +29,31 @@ export const CHAR_BASE = '/character_assets/';
 export const EXCL_URL  = '/emotes/Exclamation_emote_16x16.png';
 
 // ── Map configuration ──
+/** All skins load from the same Tiled pack; PNGs + `Map_demo` previews live under `public/Map-opensorce/`. */
+const MAP_OPENSOURCE_BASE = '/Map-opensorce';
+const MAP_DEMO = `${MAP_OPENSOURCE_BASE}/Map_demo`;
+
 export const MAP_MODE       = 'tiled';       // 'static' | 'tiled'
 export const MAP_VARIANTS = [
   {
     id: 'map1',
     label: 'Classic',
-    description: 'Original office mood with the classic palette.',
-    mapUrl: '/Map/Map_opensource.tmj',
-    previewImage: '/Map/Map-demo/Map1-demo.png',
-    screenPreviewImage: '/Map/Map-demo/Map1_v2.png',
+    description: 'Office floor with screen + dashboard overlays and stage NPC layer.',
+    mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
+    previewImage: `${MAP_DEMO}/Map1.png`,
+    screenPreviewImage: `${MAP_DEMO}/Map1.png`,
     visualLayer: 'Map1',
     tilesetName: 'Map1',
-    imageAsset: '/Map/Map1.png',
+    imageAsset: `${MAP_OPENSOURCE_BASE}/Map1.png`,
     collisionLayer: 'collision-Map1',
     screenLayerName: 'screen',
     dashboardLayerName: 'dashboard',
     showLayerName: 'npc',
+    showNpcCharName: 'Roki',
     showEasterEggImage: '/sup/Phd_Ding_sit.png',
-    showEasterEggMessage: 'Can we really make it by March 16?',
+    showEasterEggMessage: 'we will',
+    showNpcOffsetX: -20,
+    showNpcOffsetY: 0,
     renderMode: 'whole-image',
     tileWidth: 32,
     tileHeight: 32,
@@ -56,18 +63,20 @@ export const MAP_VARIANTS = [
   {
     id: 'map2',
     label: 'Cyberpunk',
-    description: 'Neon cyberpunk lighting with the same playable layout.',
-    mapUrl: '/Map/Map_opensource.tmj',
-    previewImage: '/Map/Map-demo/Map2-demo.png',
+    description: 'Neon skin; same walkable layout, `filed_npc` crowd layer.',
+    mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
+    previewImage: `${MAP_DEMO}/Map2.png`,
+    screenPreviewImage: `${MAP_DEMO}/Map2.png`,
     visualLayer: 'Map2',
     tilesetName: 'Map2',
-    imageAsset: '/Map/Map2.png',
+    imageAsset: `${MAP_OPENSOURCE_BASE}/Map2.png`,
     collisionLayer: 'collision-Map2',
     screenLayerName: null,
     dashboardLayerName: null,
     showLayerName: 'npc',
+    showNpcCharName: 'Roki',
     showEasterEggImage: null,
-    showEasterEggMessage: null,
+    showEasterEggMessage: 'we will',
     renderMode: 'whole-image',
     tileWidth: 32,
     tileHeight: 32,
@@ -77,13 +86,58 @@ export const MAP_VARIANTS = [
   {
     id: 'map3',
     label: 'Mechanical',
-    description: 'Heavy mechanical factory skin with industrial accents.',
-    mapUrl: '/Map/Map_opensource.tmj',
-    previewImage: '/Map/Map-demo/Map3-demo.png',
+    description: 'Industrial palette with extra door cover collision.',
+    mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
+    previewImage: `${MAP_DEMO}/Map3.png`,
+    screenPreviewImage: `${MAP_DEMO}/Map3.png`,
     visualLayer: 'Map3',
     tilesetName: 'Map3',
-    imageAsset: '/Map/Map3.png',
+    imageAsset: `${MAP_OPENSOURCE_BASE}/Map3.png`,
     collisionLayer: 'collision-Map3',
+    screenLayerName: null,
+    dashboardLayerName: null,
+    showLayerName: null,
+    showEasterEggImage: null,
+    showEasterEggMessage: null,
+    renderMode: 'whole-image',
+    tileWidth: 32,
+    tileHeight: 32,
+    width: 172,
+    height: 100,
+  },
+  {
+    id: 'map4',
+    label: 'Imperial',
+    description: 'Chinese palace mood — courtyards, vermilion columns, gilded eaves.',
+    mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
+    previewImage: `${MAP_DEMO}/Map4.png`,
+    screenPreviewImage: `${MAP_DEMO}/Map4.png`,
+    visualLayer: 'Map4',
+    tilesetName: 'Map4',
+    imageAsset: `${MAP_OPENSOURCE_BASE}/Map4.png`,
+    collisionLayer: 'collision-Map4',
+    screenLayerName: null,
+    dashboardLayerName: null,
+    showLayerName: null,
+    showEasterEggImage: null,
+    showEasterEggMessage: null,
+    renderMode: 'whole-image',
+    tileWidth: 32,
+    tileHeight: 32,
+    width: 172,
+    height: 100,
+  },
+  {
+    id: 'map5',
+    label: 'Baroque',
+    description: 'European palace interior — marble floors, arches, and ornate gilding.',
+    mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
+    previewImage: `${MAP_DEMO}/Map5.png`,
+    screenPreviewImage: `${MAP_DEMO}/Map5.png`,
+    visualLayer: 'Map5',
+    tilesetName: 'Map5',
+    imageAsset: `${MAP_OPENSOURCE_BASE}/Map5.png`,
+    collisionLayer: 'collision-Map5',
     screenLayerName: null,
     dashboardLayerName: null,
     showLayerName: null,
@@ -99,6 +153,11 @@ export const MAP_VARIANTS = [
 export const DEFAULT_MAP_CONFIG = MAP_VARIANTS[0];
 export const TILED_MAP_URL  = DEFAULT_MAP_CONFIG.mapUrl;
 export const TILED_BASE_PATH = '';
+
+/** JSON array of `{ text, response? }` for double-tap on map `filed_npc` tiles. */
+export const FIELD_NPC_DIALOGUE_URL = '/Map-opensorce/dialogue.json';
+/** Max distance (px) from tap to an agent for `response` NPC line. */
+export const FIELD_NPC_RESPONSE_NEAR_PX = 220;
 
 // ── Static mode fallback ──
 export const SCENE_IMAGE_URL = '/dashboard/scenes/scene_office2.png';

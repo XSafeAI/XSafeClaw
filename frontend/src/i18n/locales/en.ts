@@ -45,6 +45,8 @@ export const en = {
     systemOnline: 'System Online',
     allServicesRunning: 'All services running',
     langToggle: '中文',
+    agentTown: 'Agent Valley',
+    agentTownDesc: 'Manage and observe all your AI agents in one place',
   },
 
   home: {

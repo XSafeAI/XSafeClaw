@@ -141,11 +141,26 @@ export default function AgentJourney({ data, onClose }) {
   const [activeEvt, setActiveEvt] = useState(null);   // { evt, pos: {x,y}, centered: bool }
   const [showBadge, setShowBadge] = useState(false);
   const [events] = useState(() => {
+    let all;
     const real = data.events;
     if (real && real.length > 0) {
-      return normalizeEvents(real, data.agent?.id);
+      all = normalizeEvents(real, data.agent?.id);
+    } else {
+      all = generateJourneyEvents(data.agent);
     }
-    return generateJourneyEvents(data.agent);
+    if (all.length <= 1) return all;
+    const first = { ...all[0], _isFirst: true };
+    const rest = all.slice(1);
+    const JOURNEY_MAX = 10;
+    let sampled;
+    if (rest.length <= JOURNEY_MAX) {
+      sampled = rest;
+    } else {
+      const indices = new Set();
+      while (indices.size < JOURNEY_MAX) indices.add(Math.floor(Math.random() * rest.length));
+      sampled = [...indices].sort((a, b) => a - b).map((i) => rest[i]);
+    }
+    return [first, ...sampled];
   });
 
   useEffect(() => {
@@ -430,12 +445,21 @@ export default function AgentJourney({ data, onClose }) {
         anim.visible = false;
 
         // Label
-        const label = new PIXI.Text(evt.event_type || 'task', {
-          fontFamily: 'Press Start 2P', fontSize: 5, fill: 0xFFE4A0, align: 'center',
+        const isFirst = evt._isFirst;
+        const labelText = isFirst ? '★ FIRST TASK' : (evt.event_type || 'task');
+        const label = new PIXI.Text(labelText, {
+          fontFamily: 'Press Start 2P',
+          fontSize: isFirst ? 6 : 5,
+          fill: isFirst ? 0xFFD580 : 0xFFE4A0,
+          align: 'center',
+          dropShadow: isFirst,
+          dropShadowColor: 0x000000,
+          dropShadowDistance: 1,
+          dropShadowAlpha: isFirst ? 0.6 : 0,
         });
         label.anchor.set(0.5, 0);
         label.y = (targetSize * 0.5) + 4;
-        label.alpha = 0.7;
+        label.alpha = isFirst ? 1 : 0.7;
         label.visible = false;
         c.addChild(label);
 
@@ -876,31 +900,57 @@ export default function AgentJourney({ data, onClose }) {
       </div>
 
       {/* Conversation panel */}
-      {activeEvt && (
-        <div
-          className={`journey-convo journey-convo-bubble ${activeEvt.centered ? 'journey-convo-centered' : ''}`}
-          key={activeEvt.evt?.event_id}
-          style={{
-            left: activeEvt.centered ? '50%' : `${Math.round(activeEvt.pos?.x || 0)}px`,
-            top: activeEvt.centered ? '12%' : `${Math.round(activeEvt.pos?.y || 0)}px`,
-          }}
-        >
-          <div className="journey-convo-head">
-            <span className="journey-convo-type">{activeEvt.evt?.event_type}</span>
-            <span className="journey-convo-time">
-              {activeEvt.evt?.duration ? Math.round(activeEvt.evt.duration) + 's' : ''}
-            </span>
-          </div>
-          <div className="journey-convo-body">
-            {(activeEvt.evt?.conversations || []).map((c, i) => (
-              <div key={i} className={`jc-msg jc-${c.role}`}>
-                <span className="jc-role">{c.role}</span>
-                <p className="jc-text">{c.text}</p>
+      {activeEvt && (() => {
+        const evt = activeEvt.evt;
+        const convos = evt?.conversations || [];
+        const statusClass = evt?.status === 'completed' ? 'jc-status-ok'
+          : evt?.status === 'error' ? 'jc-status-error'
+          : evt?.status === 'warning' ? 'jc-status-warn'
+          : 'jc-status-run';
+        const userMsgs = convos.filter((c) => c.role === 'user').length;
+        const assistMsgs = convos.filter((c) => c.role === 'assistant').length;
+        const toolMsgs = convos.filter((c) => c.role === 'tool').length;
+        return (
+          <div
+            className={`journey-convo journey-convo-bubble ${activeEvt.centered ? 'journey-convo-centered' : ''}`}
+            key={evt?.event_id}
+            style={{
+              left: activeEvt.centered ? '50%' : `${Math.round(activeEvt.pos?.x || 0)}px`,
+              top: activeEvt.centered ? '12%' : `${Math.round(activeEvt.pos?.y || 0)}px`,
+            }}
+          >
+            <div className="journey-convo-head">
+              <div className="jc-head-left">
+                {evt?._isFirst ? <span className="jc-status-pill jc-status-first">★ FIRST TASK</span> : null}
+                <span className={`jc-status-pill ${statusClass}`}>{evt?.status || 'event'}</span>
+                <span className="journey-convo-type">{evt?.event_type}</span>
               </div>
-            ))}
+              <div className="jc-head-right">
+                {evt?.start_time ? <span className="jc-head-time">{new Date(evt.start_time).toLocaleTimeString()}</span> : null}
+                {evt?.duration ? <span className="jc-head-dur">{Math.round(evt.duration)}s</span> : null}
+              </div>
+            </div>
+            <div className="jc-meta-strip">
+              <span className="jc-meta-chip">{convos.length} MSG</span>
+              {userMsgs > 0 ? <span className="jc-meta-chip jc-meta-user">{userMsgs} USER</span> : null}
+              {assistMsgs > 0 ? <span className="jc-meta-chip jc-meta-assist">{assistMsgs} ASSIST</span> : null}
+              {toolMsgs > 0 ? <span className="jc-meta-chip jc-meta-tool">{toolMsgs} TOOL</span> : null}
+            </div>
+            <div className="journey-convo-body">
+              {convos.map((c, i) => (
+                <div key={i} className={`jc-msg jc-${c.role}`}>
+                  <div className="jc-msg-head">
+                    <span className="jc-role">{c.role}</span>
+                    <span className="jc-msg-idx">#{i + 1}</span>
+                  </div>
+                  <p className="jc-text">{c.text}</p>
+                </div>
+              ))}
+              {convos.length === 0 ? <div className="jc-empty">No conversation data recorded for this event.</div> : null}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Achievement badge */}
       {showBadge && (
@@ -912,7 +962,7 @@ export default function AgentJourney({ data, onClose }) {
               <div>Tool Calls</div><span>{totalToolCalls}</span>
               <div>Warnings</div><span>{totalWarnings}</span>
             </div>
-            <button className="btn primary" onClick={() => finishRef.current()}>Back to Agent Town</button>
+            <button className="btn primary" onClick={() => finishRef.current()}>Back to Agent Valley</button>
           </div>
         </div>
       )}

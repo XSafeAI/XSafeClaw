@@ -112,7 +112,7 @@ class EventSyncService:
                         current_event["error_message"] = msg.error_message
                     elif msg.stop_reason == "stop":
                         if current_event["_has_guard_rejection"]:
-                            current_event["status"] = "fail"
+                            current_event["status"] = "failed"
                         else:
                             current_event["status"] = "completed"
 

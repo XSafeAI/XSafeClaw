@@ -248,7 +248,17 @@ function getHeatLevel(value) {
   return 1;
 }
 
-function SessionHeatCard({ bins }) {
+/** Matches trace.py `_build_activity_heat_24h`: bin idx 0 = 23–24h ago, idx 23 = last hour. */
+function formatHeatBinTooltip(idx, value) {
+  const n = Number(value || 0);
+  const tasks = `${n} task${n === 1 ? '' : 's'}`;
+  if (idx === 23) return `${tasks} · last hour (0–1h ago)`;
+  const hi = 24 - idx;
+  const lo = 23 - idx;
+  return `${tasks} · ${lo}–${hi}h ago`;
+}
+
+function SessionHeatCard({ bins, heatLabel, heatScore }) {
   const safeBins = Array.isArray(bins) && bins.length ? bins : new Array(24).fill(0);
   const hourMarks = [
     { idx: 0, text: '-24H' },
@@ -257,11 +267,23 @@ function SessionHeatCard({ bins }) {
     { idx: 18, text: '-6H' },
     { idx: 23, text: 'NOW' },
   ];
+  const labelRaw = String(heatLabel || '').trim();
+  const scoreNum = Number(heatScore);
+  const scoreLine = (labelRaw || Number.isFinite(scoreNum))
+    ? [labelRaw, Number.isFinite(scoreNum) ? `score ${scoreNum}` : null].filter(Boolean).join(' · ')
+    : '';
 
   return (
     <section className="tc-stage-info-card tc-stage-info-card-wide">
       <div className="tc-stage-info-card-head">
-        <div className="tc-stage-info-card-title">SESSION HEAT</div>
+        <div className="tc-stage-info-card-head-row">
+          <div className="tc-stage-info-card-title">SESSION HEAT</div>
+          {scoreLine ? (
+            <div className="tc-stage-heat-score-pill" title="From /api/trace working_heat_label + working_heat_score">
+              {scoreLine}
+            </div>
+          ) : null}
+        </div>
         <div className="tc-stage-heat-legend tc-stage-heat-legend-head">
           <span>Few</span>
           <div className="tc-stage-heat-legend-swatches" aria-hidden="true">
@@ -274,13 +296,16 @@ function SessionHeatCard({ bins }) {
           <span>More</span>
         </div>
       </div>
+      <p className="tc-stage-heat-microcopy">
+        Tasks started per hour (Event.started_at, rolling 24h) — same buckets as Monitor timeline.
+      </p>
 
       <div className="tc-stage-heat-grid" aria-label="Session heat over the last 24 hours">
         {safeBins.map((value, idx) => (
           <div
             key={`heat-${idx}`}
             className={`tc-stage-heat-cell tc-stage-heat-cell-${getHeatLevel(value)}`}
-            title={`${23 - idx}h ago: ${value}`}
+            title={formatHeatBinTooltip(idx, value)}
           />
         ))}
       </div>
@@ -319,42 +344,43 @@ function getMessageTimestampValue(value) {
 function ToolCallBubble({ msg, helpers }) {
   const argsPreview = previewChatValue(msg.args || msg.content || '');
   const resultPreview = msg.result_pending ? 'Running...' : previewChatValue(msg.result);
-  const toolState = msg.result_pending
-    ? 'TOOL RUNNING'
+  const metaTag = msg.result_pending
+    ? 'RUNNING'
     : msg.is_error
-      ? 'TOOL ERROR'
-      : resultPreview
-        ? 'TOOL RESULT'
-        : 'TOOL CALL';
+      ? 'ERROR'
+      : 'TOOL';
+  const metaClass = msg.result_pending
+    ? 'console-dialog-tag-tool-running'
+    : msg.is_error
+      ? 'console-dialog-tag-tool-error'
+      : 'console-dialog-tag-tool';
   const toolName = msg.tool_name || 'unknown';
 
   return (
     <div className="console-dialog-item console-dialog-item-tool">
       <div className="console-dialog-meta">
         <div className="console-dialog-meta-main">
-          <span className="console-dialog-tag console-dialog-tag-tool">{toolState}</span>
+          <span className={`console-dialog-tag ${metaClass}`}>{metaTag}</span>
           <span className="console-dialog-tool-name">{toolName}</span>
         </div>
         <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
       </div>
-      <div className="console-dialog-tool-card">
-        {argsPreview ? (
-          <div className="console-dialog-tool-section console-dialog-tool-section-call">
-            <div className="console-dialog-tool-section-head">
-              <span className="console-dialog-tool-section-tag">TOOL CALL</span>
+      {(argsPreview || resultPreview) ? (
+        <div className="console-dialog-tool-payload">
+          {argsPreview ? (
+            <div className="console-dialog-tool-row console-dialog-tool-row-call">
+              <span className="console-dialog-tool-row-label">Call</span>
+              <div className="console-dialog-code console-dialog-code-args">{argsPreview}</div>
             </div>
-            <div className="console-dialog-code console-dialog-code-args">{argsPreview}</div>
-          </div>
-        ) : null}
-        {resultPreview ? (
-          <div className="console-dialog-tool-section console-dialog-tool-section-result">
-            <div className="console-dialog-tool-section-head">
-              <span className="console-dialog-tool-section-tag">TOOL RESULT</span>
+          ) : null}
+          {resultPreview ? (
+            <div className="console-dialog-tool-row console-dialog-tool-row-result">
+              <span className="console-dialog-tool-row-label">Result</span>
+              <div className={`console-dialog-code console-dialog-code-result ${msg.is_error ? 'console-dialog-code-error' : ''}`}>{resultPreview}</div>
             </div>
-            <div className={`console-dialog-code console-dialog-code-result ${msg.is_error ? 'console-dialog-code-error' : ''}`}>{resultPreview}</div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -410,13 +436,29 @@ function ChatBubble({ msg, helpers }) {
 }
 
 function mapStageTaskStatus(status) {
-  if (status === 'completed') return 'completed';
-  if (status === 'error') return 'failed';
+  if (status === 'completed' || status === 'ok') return 'completed';
+  if (status === 'error') return 'error';
+  if (status === 'fail' || status === 'failed') return 'failed';
+  if (status === 'pending') return 'pending';
+  if (status === 'running') return 'running';
   return 'running';
 }
 
 function formatStageTaskId(value, length = 12) {
   return String(value || '').slice(0, length) || '---';
+}
+
+function ledgerTitleFromDashboardEvent(event) {
+  if (event?.user_message_id) return `msg ${String(event.user_message_id).slice(0, 16)}`;
+  return `Task ${formatStageTaskId(event.id)}`;
+}
+
+function ledgerSnippetFromDashboardEvent(event) {
+  const user = String(event?.user_message_preview || '').trim();
+  if (user) return user.slice(0, 140);
+  const err = String(event?.error_message || '').trim();
+  if (err) return err.slice(0, 140);
+  return '—';
 }
 
 function fmtStageTokens(value) {
@@ -450,13 +492,7 @@ function stringifyStageTaskValue(value) {
   }
 }
 
-function buildStageTaskTimeKey(sessionId, ts) {
-  if (!sessionId || !ts) return '';
-  const ms = new Date(ts).getTime();
-  return Number.isFinite(ms) ? `${sessionId}:${ms}` : `${sessionId}:${ts}`;
-}
-
-function normalizeStageTaskMessages(messages = [], idPrefix = 'trace') {
+function normalizeStageTaskMessages(messages = [], idPrefix = 'event') {
   const normalized = [];
 
   const tryAttachToolResult = (text, isError) => {
@@ -538,13 +574,9 @@ function normalizeStageTaskMessages(messages = [], idPrefix = 'trace') {
   return normalized;
 }
 
-function buildStageTaskMessagesFromTraceEvent(event) {
-  return normalizeStageTaskMessages(event?.conversations || [], event?.event_id || 'trace');
-}
-
 function stageTaskToneFromStatus(status) {
   if (status === 'completed') return 'success';
-  if (status === 'failed' || status === 'error') return 'danger';
+  if (status === 'failed' || status === 'error' || status === 'fail') return 'danger';
   if (status === 'pending' || status === 'running') return 'warn';
   return 'neutral';
 }
@@ -594,32 +626,65 @@ function StageTaskDetailMessage({ msg, helpers }) {
       ) : null}
 
       {isTool ? (
-        <div className={`tc-task-detail-tool ${msg.is_error ? 'tc-task-detail-tool-result' : 'tc-task-detail-tool-call'}`}>
-          <div className="tc-task-detail-tool-head">
-            <span className="tc-task-detail-tool-tag">{msg.result_pending ? 'TOOL RUNNING' : msg.is_error ? 'TOOL ERROR' : 'TOOL'}</span>
+        <div
+          className={`tc-task-detail-tool tc-task-detail-tool-card${msg.is_error ? ' tc-task-detail-tool--error' : ''}`}
+        >
+          <div className="tc-task-detail-tool-head tc-task-detail-tool-head-main">
+            <span className="tc-task-detail-tool-tag">
+              {msg.result_pending ? 'RUNNING' : msg.is_error ? 'ERROR' : 'TOOL'}
+            </span>
             <span className="tc-task-detail-tool-name">{msg.tool_name || 'tool-call'}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
-          {hasToolCall ? (
-            <>
-              <div className="tc-task-detail-tool-head">
-                <span className="tc-task-detail-tool-tag">TOOL CALL</span>
-              </div>
-              <pre className="tc-task-detail-tool-payload">{stringifyStageTaskValue(msg.tool_arguments)}</pre>
-            </>
-          ) : null}
-          {hasToolResult ? (
-            <>
-              <div className="tc-task-detail-tool-head">
-                <span className="tc-task-detail-tool-tag">TOOL RESULT</span>
-              </div>
-              <pre className="tc-task-detail-tool-payload">{msg.result_pending ? 'Running...' : stringifyStageTaskValue(msg.tool_result)}</pre>
-            </>
+          {(hasToolCall || hasToolResult) ? (
+            <div className="tc-task-detail-tool-body">
+              {hasToolCall ? (
+                <div className="tc-task-detail-tool-block tc-task-detail-tool-block-call">
+                  <div className="tc-task-detail-tool-subhead">Tool call</div>
+                  <pre className="tc-task-detail-tool-payload">{stringifyStageTaskValue(msg.tool_arguments)}</pre>
+                </div>
+              ) : null}
+              {hasToolResult ? (
+                <div className="tc-task-detail-tool-block tc-task-detail-tool-block-result">
+                  <div className="tc-task-detail-tool-subhead">Tool result</div>
+                  <pre className="tc-task-detail-tool-payload">
+                    {msg.result_pending ? 'Running...' : stringifyStageTaskValue(msg.tool_result)}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}
     </div>
   );
+}
+
+function getEffectiveRisk(item) {
+  if (item.risk_source || item.failure_mode || item.real_world_harm) {
+    return { risk_source: item.risk_source, failure_mode: item.failure_mode, real_world_harm: item.real_world_harm };
+  }
+  if (!item.guard_raw) return null;
+  const lines = item.guard_raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  let rs = null, fm = null, rwh = null;
+  const desc = [];
+  for (const line of lines) {
+    const bare = line.replace(/^[-*•]+\s*/, '').replace(/\*\*/g, '');
+    const lc = bare.toLowerCase();
+    if (lc === 'unsafe' || lc === 'safe') continue;
+    if (lc.startsWith('risk source:') || lc.startsWith('risk_source:')) {
+      rs = bare.substring(bare.indexOf(':') + 1).trim();
+    } else if (lc.startsWith('failure mode:') || lc.startsWith('failure_mode:')) {
+      fm = bare.substring(bare.indexOf(':') + 1).trim();
+    } else if (/^real[_\s-]*world[_\s]*harm:/i.test(lc)) {
+      rwh = bare.substring(bare.indexOf(':') + 1).trim();
+    } else if (bare) {
+      desc.push(bare);
+    }
+  }
+  if (rs || fm || rwh) return { risk_source: rs, failure_mode: fm, real_world_harm: rwh };
+  const fallback = desc.join(' ').substring(0, 300);
+  return fallback ? { risk_source: null, failure_mode: fallback, real_world_harm: null } : null;
 }
 
 export default function CrewTab({
@@ -630,8 +695,6 @@ export default function CrewTab({
   currentAgent,
   currentSummary,
   currentEvents,
-  eventsByAgentList,
-  eventsByAgent,
   activeMessages,
   currentInput,
   loadingHistory,
@@ -654,6 +717,10 @@ export default function CrewTab({
   creatingAgent,
   createError,
   taskStatusMeta,
+  pendingApprovals = [],
+  onResolveGuardPending,
+  guardResolvingId,
+  tokensByAgent = {},
   helpers,
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
@@ -673,19 +740,12 @@ export default function CrewTab({
       || msg.role === 'tool_call'
     ))
     .sort((a, b) => getMessageTimestampValue(a.timestamp) - getMessageTimestampValue(b.timestamp)), [activeMessages]);
-  const currentTraceEvents = useMemo(
-    () => (currentAgent ? (eventsByAgentList[currentAgent.id] || []) : []),
-    [currentAgent, eventsByAgentList],
-  );
-  const currentTraceEventIndex = useMemo(() => {
-    const map = {};
-    currentTraceEvents.forEach((event) => {
-      const key = buildStageTaskTimeKey(currentAgent?.id, event.start_time);
-      if (key) map[key] = event;
-    });
-    return map;
-  }, [currentAgent?.id, currentTraceEvents]);
 
+  const currentSessionKey = currentAgent ? helpers.getAgentSessionKey(currentAgent) : '';
+  const agentPendingItems = useMemo(() => {
+    if (!currentSessionKey || !pendingApprovals?.length) return [];
+    return pendingApprovals.filter((item) => !item.resolved && item.session_key === currentSessionKey);
+  }, [currentSessionKey, pendingApprovals]);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: 'end' });
   }, [conversationMessages, currentAgent?.id, loadingHistory, sending]);
@@ -716,7 +776,7 @@ export default function CrewTab({
       };
     }
 
-    const fallbackMessages = buildStageTaskMessagesFromTraceEvent(selectedLedgerTask.traceEvent);
+    const fallbackMessages = [];
 
     const loadDetail = async () => {
       setDetailLoading(true);
@@ -763,7 +823,7 @@ export default function CrewTab({
     <div className="tc-crew-layout">
       <aside className="tc-crew-sidebar">
         <section className="tc-ornate-panel tc-sidebar-section tc-summon-panel tc-summon-panel-top">
-          <BannerHeader label="NEW AGENT" tone="light" size="long" />
+          <BannerHeader label="CREATE AGENT" tone="light" size="long" />
           <div className="tc-panel-microcopy">Forge a new operative from the model deck.</div>
           <button type="button" className="tc-summon-toggle" onClick={onToggleModelPicker}>
             <span>{modelPickerOpen ? 'Hide Model Deck' : 'Summon From Model Deck'}</span>
@@ -909,11 +969,11 @@ export default function CrewTab({
                       </div>
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">Channel</span>
-                        <span className="tc-stage-meta-pill-value">{currentAgent.channel || 'session'}</span>
+                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.channel || 'default'}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
-                        <span className="tc-stage-meta-pill-label">Human Reviews</span>
-                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{String(currentAgent.human_interventions_total ?? 0)}</span>
+                        <span className="tc-stage-meta-pill-label">Tokens</span>
+                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{fmtStageTokens(tokensByAgent[currentAgent.id])}</span>
                       </div>
                     </div>
                   </div>
@@ -926,11 +986,14 @@ export default function CrewTab({
                   <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
                   <SummaryTile label="Pending" value={currentSummary.pending} tone="tc-summary-warn" />
                   <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
-                  <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-bad" />
+                  <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-failed" />
+                  <SummaryTile label="Error" value={currentSummary.error} tone="tc-summary-error" />
                 </div>
 
                 <SessionHeatCard
                   bins={currentAgent.activity_heat_24h}
+                  heatLabel={currentAgent.working_heat_label}
+                  heatScore={currentAgent.working_heat_score}
                 />
               </div>
             </div>
@@ -939,15 +1002,14 @@ export default function CrewTab({
             <section className="tc-stage-bottom">
               <div className="tc-ornate-panel tc-ledger-panel">
                 <BannerHeader label="TASK LEDGER" tone="light" size="long" />
-                <div className="tc-panel-microcopy">Recent task states and short event traces.</div>
+                <div className="tc-panel-microcopy">Recent tasks from dashboard events (same source as Monitor).</div>
                 <div className="tc-ledger-list">
                   {currentEvents.length === 0 ? (
                     <div className="tc-empty">This agent has no recorded task yet.</div>
                   ) : (
                     currentEvents.slice(0, 5).map((event) => {
                       const statusMeta = taskStatusMeta[event.status] || taskStatusMeta.running;
-                      const traceEvent = currentTraceEventIndex[buildStageTaskTimeKey(currentAgent?.id, event.started_at)] || null;
-                      const snippet = helpers.pickEventSnippet(traceEvent) || event.error_message || 'Awaiting operator review.';
+                      const snippet = ledgerSnippetFromDashboardEvent(event);
                       return (
                         <button
                           key={event.id}
@@ -955,7 +1017,6 @@ export default function CrewTab({
                           className={`tc-ledger-item tc-ledger-item-button tc-ledger-item-${event.status || 'running'} ${selectedLedgerTask?.task?.id === event.id ? 'tc-ledger-item-selected' : ''}`}
                           onClick={() => setSelectedLedgerTask({
                             task: event,
-                            traceEvent,
                             agentName: currentAgent.name,
                           })}
                         >
@@ -963,7 +1024,7 @@ export default function CrewTab({
                             <span className={`tc-ledger-badge ${statusMeta.className}`}>{statusMeta.label}</span>
                             <span className="tc-ledger-time">{helpers.fmtDate(event.started_at)}</span>
                           </div>
-                          <div className="tc-ledger-title">{traceEvent?.event_type || 'chat'}</div>
+                          <div className="tc-ledger-title">{ledgerTitleFromDashboardEvent(event)}</div>
                           <div className="tc-ledger-note">{snippet}</div>
                         </button>
                       );
@@ -989,6 +1050,42 @@ export default function CrewTab({
                         <ChatBubble key={msg.id} msg={msg} helpers={helpers} />
                       ))
                     )}
+                    {agentPendingItems.map((item) => (
+                      <div key={item.id} className="cd-pending-strip">
+                        <div className="cd-pending-strip-icon">⚠</div>
+                        <div className="cd-pending-strip-body">
+                          <div className="cd-pending-strip-top">
+                            <code className="cd-pending-strip-tool">{item.tool_name || 'tool-call'}</code>
+                            {item.guard_verdict ? <span className="cd-pending-tag cd-pending-tag-verdict">{item.guard_verdict}</span> : null}
+                          </div>
+                          {(() => {
+                            const eff = getEffectiveRisk(item);
+                            if (!eff) return null;
+                            return (
+                              <div className="cd-pending-risk-row">
+                                {eff.risk_source ? <span className="cd-pending-tag cd-pending-tag-risk">{eff.risk_source}</span> : null}
+                                {eff.failure_mode ? <span className="cd-pending-tag cd-pending-tag-failure">{eff.failure_mode}</span> : null}
+                                {eff.real_world_harm ? <span className="cd-pending-tag cd-pending-tag-harm">{eff.real_world_harm}</span> : null}
+                              </div>
+                            );
+                          })()}
+                          <span className="cd-pending-strip-btns">
+                            <button
+                              type="button"
+                              className="cd-pending-btn cd-pending-btn-approve"
+                              disabled={guardResolvingId === item.id}
+                              onClick={() => onResolveGuardPending?.(item.id, 'approved')}
+                            >{guardResolvingId === item.id ? '…' : '✓ Approve'}</button>
+                            <button
+                              type="button"
+                              className="cd-pending-btn cd-pending-btn-reject"
+                              disabled={guardResolvingId === item.id}
+                              onClick={() => onResolveGuardPending?.(item.id, 'rejected')}
+                            >✗ Reject</button>
+                          </span>
+                        </div>
+                      </div>
+                    ))}
                     <div ref={chatEndRef} />
                   </div>
 

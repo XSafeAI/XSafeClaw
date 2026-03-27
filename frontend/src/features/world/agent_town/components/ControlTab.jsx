@@ -18,19 +18,33 @@ const AMBIENT_OPTIONS = [
   { id: 'cinematic', label: 'Cinematic FX' },
 ];
 
-function OptionChipGroup({ options, value, onChange }) {
+function OptionChipGroup({ options, value, onChange, comingSoon = false }) {
+  const [showToast, setShowToast] = useState(false);
+
+  const handleClick = (id) => {
+    if (comingSoon) {
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 1500);
+      return;
+    }
+    onChange(id);
+  };
+
   return (
-    <div className="tc-control-chip-row">
+    <div className="tc-control-chip-row" style={{ position: 'relative' }}>
       {options.map((option) => (
         <button
           key={option.id}
           type="button"
-          className={`tc-control-chip ${value === option.id ? 'tc-control-chip-active' : ''}`}
-          onClick={() => onChange(option.id)}
+          className={`tc-control-chip ${value === option.id ? 'tc-control-chip-active' : ''} ${comingSoon ? 'tc-control-chip-disabled' : ''}`}
+          onClick={() => handleClick(option.id)}
         >
           {option.label}
         </button>
       ))}
+      {showToast && (
+        <span className="tc-coming-soon-toast">Coming Soon</span>
+      )}
     </div>
   );
 }
@@ -46,6 +60,8 @@ export default function ControlTab({
   onToggleMusic,
   musicVolume = 0.4,
   onChangeMusicVolume,
+  guardEnabled = false,
+  onToggleGuard,
 }) {
   const [language, setLanguage] = useState('zh-CN');
   const [density, setDensity] = useState('compact');
@@ -69,14 +85,12 @@ export default function ControlTab({
         </div>
 
         <div className="tc-control-description">
-          `Map_opensource.tmj` now drives all three world skins. The switch below changes the rendered layer and
+          {`Map_opensource.tmj`} now drives all five world skins. The switch below changes the rendered layer and
           its matching collision grid so the town keeps the same navigation chain while swapping theme.
         </div>
 
         <div className="tc-map-option-grid">
           {mapVariants.map((map) => {
-            const pixelWidth = map.width * map.tileWidth;
-            const pixelHeight = map.height * map.tileHeight;
             const isActive = map.id === activeMapId;
             return (
               <button
@@ -86,18 +100,12 @@ export default function ControlTab({
                 onClick={() => onChangeMap(map.id)}
               >
                 <div className="tc-map-option-top">
-                  <span className="tc-map-option-id">{map.visualLayer}</span>
-                  <span className="tc-map-option-theme">{map.label}</span>
+                  <span className="tc-map-option-id">{map.label}</span>
                 </div>
                 <div className="tc-map-option-copy">
                   <div className="tc-map-option-body">{map.description}</div>
                   <div className="tc-map-option-meta">
-                    <span>{map.width}x{map.height} tiles</span>
-                    <span>{pixelWidth}x{pixelHeight}px</span>
-                  </div>
-                  <div className="tc-map-option-meta">
-                    <span>{map.mapUrl}</span>
-                    <span>{map.collisionLayer}</span>
+                    <span>{map.width * map.tileWidth} × {map.height * map.tileHeight} px</span>
                   </div>
                 </div>
                 <div className="tc-map-option-preview">
@@ -132,16 +140,8 @@ export default function ControlTab({
                 <strong>{activeMap.label}</strong>
               </div>
               <div className="tc-control-fact">
-                <span>Tile Grid</span>
-                <strong>{activeMap.width} x {activeMap.height}</strong>
-              </div>
-              <div className="tc-control-fact">
-                <span>Tile Size</span>
-                <strong>{activeMap.tileWidth}px / {activeMap.tileHeight}px</strong>
-              </div>
-              <div className="tc-control-fact">
-                <span>Collision</span>
-                <strong>{activeMap.collisionLayer}</strong>
+                <span>Description</span>
+                <strong>{activeMap.description}</strong>
               </div>
             </div>
           ) : null}
@@ -205,17 +205,17 @@ export default function ControlTab({
 
             <div className="tc-control-setting">
               <span className="tc-control-setting-label">Language</span>
-              <OptionChipGroup options={LANGUAGE_OPTIONS} value={language} onChange={setLanguage} />
+              <OptionChipGroup options={LANGUAGE_OPTIONS} value={language} onChange={setLanguage} comingSoon />
             </div>
 
             <div className="tc-control-setting">
               <span className="tc-control-setting-label">Console Density</span>
-              <OptionChipGroup options={DENSITY_OPTIONS} value={density} onChange={setDensity} />
+              <OptionChipGroup options={DENSITY_OPTIONS} value={density} onChange={setDensity} comingSoon />
             </div>
 
             <div className="tc-control-setting">
               <span className="tc-control-setting-label">Ambient FX</span>
-              <OptionChipGroup options={AMBIENT_OPTIONS} value={ambientFx} onChange={setAmbientFx} />
+              <OptionChipGroup options={AMBIENT_OPTIONS} value={ambientFx} onChange={setAmbientFx} comingSoon />
             </div>
           </div>
         </div>

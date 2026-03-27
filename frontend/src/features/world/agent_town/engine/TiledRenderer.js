@@ -149,6 +149,21 @@ export default class TiledRenderer {
     return { top, bottom, left, right };
   }
 
+  /** True if map-local pixel (same space as `npcLayer` / pathfinder) lies on a `filed_npc` tile. */
+  isFieldNpcTileAtMapPixel(mapLocalX, mapLocalY) {
+    const layer = this._getScopedTileLayers().find(
+      (entry) => this._normalizeLayerName(entry.name) === 'filed_npc',
+    );
+    if (!layer || !Array.isArray(layer.data) || !layer.width || !layer.height) return false;
+
+    const ox = (layer.x || 0) + (layer.offsetx || 0);
+    const oy = (layer.y || 0) + (layer.offsety || 0);
+    const tx = Math.floor((mapLocalX - ox) / this.tileW);
+    const ty = Math.floor((mapLocalY - oy) / this.tileH);
+    if (tx < 0 || ty < 0 || tx >= layer.width || ty >= layer.height) return false;
+    return layer.data[ty * layer.width + tx] !== 0;
+  }
+
   getNamedLayerPixelBounds(layerName) {
     const targetName = this._normalizeLayerName(layerName);
     if (!targetName) return null;

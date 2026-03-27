@@ -7,23 +7,78 @@ import {
   MAP_MODE, TILED_MAP_URL, TILED_BASE_PATH, DEFAULT_MAP_CONFIG,
   SCENE_IMAGE_URL, SCENE_W, SCENE_H,
   WALK_ZONES, MEETING_DIST, MEETING_TIME, MEETING_COOLDOWN, BUBBLE_MAX_CHARS,
+  FIELD_NPC_DIALOGUE_URL,
 } from '../config/constants';
 
 const GUARD_PORTAL_URL = '/portals/3.png';
 const GUARD_IDLE_URL = '/guard/Idle.png';
 const GUARD_WALK_URL = '/guard/Walk.png';
 const GUARD_ATTACK_URL = '/guard/Attack.png';
-const ISSUE_QUESTION_URL = '/UI/png/status/status_question.png';
+const ISSUE_QUESTION_URL = '/UI/png/status/marks.png';
 const GUARD_PORTAL_SCALE = 4.2;
 const GUARD_BODY_SCALE = 3.6;
 const GUARD_SHADOW_SCALE = 3.3;
-const ISSUE_MARKER_SCALE = Math.max(2.8, NPC_SCALE * 0.92);
+const ISSUE_MARKER_SCALE = Math.max(0.5, NPC_SCALE * 0.2);
+const ISSUE_MARKER_Y_OFFSET = 10;
 const SHOW_EASTER_EGG_BUBBLE_MS = 3200;
 const SHOW_EASTER_EGG_DOUBLE_TAP_MS = 320;
 /** Same strip as pathfinding NPCs when moving right (`frames.right`); third frame = standing pose. */
 const SHOW_NPC_RIGHT_STAND_FRAME = 2;
+/** Default pixel offset from horizontal center of the map `npc` layer (negative = left). Layer bounds are approximate. */
+const SHOW_NPC_DEFAULT_OFFSET_X = -56;
 /** Readable monospace for dashboard metadata (subtitle, time axis); must match loaded webfont. */
 const DASHBOARD_CODE_FONT_FAMILY = 'JetBrains Mono, Consolas, Menlo, monospace';
+/** Wall dashboard left panel: extra carousel slot (photo + site id). */
+const DASHBOARD_PROMO_AGENT_ID = 'dashboard-promo-xsafeclaw';
+const DASHBOARD_PROMO_IMAGE_URL = '/sup/Ding.png';
+const DASHBOARD_PROMO_DISPLAY_ID = 'www.xsafeclaw.ai';
+
+/** Meeting pair speech bubbles — spaced apart, readable (long snippets). */
+const MEETING_BUBBLE_FONT_SIZE = 20;
+const MEETING_BUBBLE_LINE_HEIGHT = 30;
+const MEETING_BUBBLE_PAD = 26;
+const MEETING_BUBBLE_WORD_WRAP = 440;
+const MEETING_BUBBLE_MIN_W = 300;
+const MEETING_BUBBLE_MIN_H = 112;
+const MEETING_BUBBLE_CORNER = 10;
+const MEETING_BUBBLE_ANCHOR_Y = -FH * NPC_SCALE - 44;
+const MEETING_BUBBLE_SPREAD_X = 84;
+const MEETING_BUBBLE_STAGGER_Y = 22;
+/** Short `response` line on field-NPC tap — smaller box than meeting. */
+const FIELD_RESPONSE_BUBBLE_FONT_SIZE = 17;
+const FIELD_RESPONSE_BUBBLE_LINE_HEIGHT = 26;
+const FIELD_RESPONSE_BUBBLE_PAD = 20;
+const FIELD_RESPONSE_BUBBLE_WORD_WRAP = 320;
+const FIELD_RESPONSE_BUBBLE_MIN_W = 200;
+const FIELD_RESPONSE_BUBBLE_MIN_H = 72;
+const FIELD_RESPONSE_BUBBLE_CORNER = 10;
+const FIELD_NPC_FLOAT_LABEL_MS = 4200;
+/** Double-tap `filed_npc` narration — sized between meeting and response bubbles. */
+const FIELD_NPC_FLOAT_OFFSET_Y = 58;
+const FIELD_NPC_FLOAT_FONT_SIZE = 16;
+const FIELD_NPC_FLOAT_LINE_HEIGHT = 24;
+const FIELD_NPC_FLOAT_WORD_WRAP = 360;
+const FIELD_NPC_FLOAT_PAD = 20;
+const FIELD_NPC_FLOAT_CORNER = 10;
+const FIELD_NPC_FLOAT_MIN_W = 168;
+const FIELD_NPC_FLOAT_MIN_H = 72;
+
+function getShowNpcStandTexture(frames, direction = 'right') {
+  if (!frames) return null;
+  const idleKey = direction === 'left' ? 'idleLeft'
+    : direction === 'front' ? 'idleFront'
+      : direction === 'back' ? 'idleBack'
+        : 'idleRight';
+  const runKey = direction === 'left' ? 'left'
+    : direction === 'front' ? 'front'
+      : direction === 'back' ? 'back'
+        : 'right';
+  return frames[idleKey]?.[SHOW_NPC_RIGHT_STAND_FRAME]
+    || frames[runKey]?.[SHOW_NPC_RIGHT_STAND_FRAME]
+    || frames.idleRight?.[SHOW_NPC_RIGHT_STAND_FRAME]
+    || frames.right?.[SHOW_NPC_RIGHT_STAND_FRAME]
+    || null;
+}
 
 /** Google Fonts CSS may still be loading when the engine starts; wait so @font-face exists before fonts.load(). */
 async function waitForGoogleFontsStylesheet(timeoutMs = 2500) {
@@ -90,8 +145,7 @@ export default class GameEngine {
     this._guardWalkFrames = [];
     this._guardAttackFrames = [];
     this._issueQuestionTexture = null;
-    this._guardUnsafeIds = new Set();
-    this._guardChecking = false;
+    this._guardPendingSnapshot = new Set();
     this.mapConfig = {
       ...DEFAULT_MAP_CONFIG,
       ...(options.mapConfig || {}),
@@ -110,6 +164,17 @@ export default class GameEngine {
     this._windowPointerUp = null;
     this._floorScreenInfoSignature = '';
     this._wallDashboardSignature = '';
+    this._dashboardPromoTexture = null;
+    this._fieldNpcDialogueHitLayer = null;
+    /** @type {{ text?: string, response?: string }[] | null} */
+    this._fieldDialogueLines = null;
+    this._lastFieldNpcTapAt = 0;
+    this._fieldDialogueToken = 0;
+    this._fieldDialogueNpcTimer = null;
+    this._fieldDialogueFloatTimer = null;
+    this._fieldDialogueLockedNpc = null;
+    this._fieldDialogueNpcSnap = null;
+    this._fieldDialogueFloatBubble = null;
   }
 
   /** Initialize PixiJS application and attach to DOM element. */
@@ -179,6 +244,14 @@ export default class GameEngine {
     onProgress?.(0, 'Loading sprites...');
     await this.spriteLoader.load((p) => onProgress?.(p * 0.5, 'Loading sprites...'));
 
+    try {
+      const promoTex = await PIXI.Assets.load(DASHBOARD_PROMO_IMAGE_URL);
+      if (promoTex?.baseTexture) promoTex.baseTexture.scaleMode = PIXI.SCALE_MODES.LINEAR;
+      this._dashboardPromoTexture = promoTex;
+    } catch (_) {
+      this._dashboardPromoTexture = null;
+    }
+
     // 2. Wait for UI fonts (pixel + dashboard code style)
     await waitForGoogleFontsStylesheet();
     try { await document.fonts.load('8px "Press Start 2P"'); } catch (_) {}
@@ -196,6 +269,14 @@ export default class GameEngine {
 
     // 3. Load map
     onProgress?.(0.5, 'Loading map...');
+    try {
+      const dialogueUrl = this.mapConfig?.fieldNpcDialogueUrl || FIELD_NPC_DIALOGUE_URL;
+      const dr = await fetch(dialogueUrl, { cache: 'no-store' });
+      const raw = dr.ok ? await dr.json() : [];
+      this._fieldDialogueLines = Array.isArray(raw) ? raw : [];
+    } catch {
+      this._fieldDialogueLines = [];
+    }
     const mapUrl = this.mapConfig?.mapUrl || TILED_MAP_URL;
     if (MAP_MODE === 'tiled' && mapUrl) {
       try {
@@ -235,6 +316,7 @@ export default class GameEngine {
         this.sceneH = contentBounds.pixelH;
         this._worldOffsetX = -contentBounds.pixelX;
         this._worldOffsetY = -contentBounds.pixelY;
+        this._guardPortalPoint = null;
         this.overlayRects = {
           ...(screenBounds ? {
             screen: {
@@ -274,6 +356,7 @@ export default class GameEngine {
         mapContainer.y = this._worldOffsetY;
         this.npcLayer.x = this._worldOffsetX;
         this.npcLayer.y = this._worldOffsetY;
+        this._setupFieldNpcDialogueLayer();
         this.guardLayer.x = this._worldOffsetX;
         this.guardLayer.y = this._worldOffsetY;
         this.guardFxLayer.x = this._worldOffsetX;
@@ -333,20 +416,10 @@ export default class GameEngine {
         kind: (() => {
           const latest = this._agentsById.get(npc.agent?.id) || npc.agent || {};
           const rawStatus = String(latest.status || '').toLowerCase();
+          if (this._isPendingStatus(rawStatus)) return 'pending';
           return rawStatus === 'idle' ? 'idle' : 'active';
         })(),
       }));
-
-    const pendingMarkers = this.pendingNpc?.container
-      && Number.isFinite(this.pendingNpc.container.x)
-      && Number.isFinite(this.pendingNpc.container.y)
-      ? [{
-          id: 'pending-review',
-          x: this.pendingNpc.container.x + offsetX,
-          y: this.pendingNpc.container.y + offsetY,
-          kind: 'pending',
-        }]
-      : [];
 
     return {
       sceneW: this.sceneW,
@@ -356,7 +429,7 @@ export default class GameEngine {
       pendingCount: agentSummary.pending,
       offlineCount: agentSummary.offline,
       taskSummary,
-      markers: [...npcMarkers, ...pendingMarkers],
+      markers: npcMarkers,
     };
   }
 
@@ -400,27 +473,26 @@ export default class GameEngine {
   _resolveShowNpcCharName() {
     const pinned = this.mapConfig?.showNpcCharName;
     if (typeof pinned === 'string' && pinned.length) {
-      const fr = this.spriteLoader.charFrames[pinned]?.right;
-      if (fr?.length > SHOW_NPC_RIGHT_STAND_FRAME) return pinned;
+      const frames = this.spriteLoader.charFrames[pinned];
+      if (getShowNpcStandTexture(frames, 'right')) return pinned;
     }
     const firstNpc = this.npcs?.find((n) => n?.charName);
     if (firstNpc?.charName) {
-      const fr = this.spriteLoader.charFrames[firstNpc.charName]?.right;
-      if (fr?.length > SHOW_NPC_RIGHT_STAND_FRAME) return firstNpc.charName;
+      const frames = this.spriteLoader.charFrames[firstNpc.charName];
+      if (getShowNpcStandTexture(frames, 'right')) return firstNpc.charName;
     }
     const fallback = CHAR_NAMES.find((n) => {
-      const fr = this.spriteLoader.charFrames[n]?.right;
-      return fr?.length > SHOW_NPC_RIGHT_STAND_FRAME;
+      const frames = this.spriteLoader.charFrames[n];
+      return Boolean(getShowNpcStandTexture(frames, 'right'));
     });
     return fallback || CHAR_NAMES[0];
   }
 
-  /** After NPC roster changes, swap to the same character sheet + standing frame as walking right (run strip frame 3). */
   _syncShowNpcSpriteFromScene() {
     if (!this.showEasterEgg?.sprite) return;
     const charName = this._resolveShowNpcCharName();
     const frames = this.spriteLoader.charFrames[charName];
-    const tex = frames?.right?.[SHOW_NPC_RIGHT_STAND_FRAME];
+    const tex = getShowNpcStandTexture(frames, this.showEasterEgg.facing || 'right');
     if (!tex) return;
     if (this.showEasterEgg.charName === charName && this.showEasterEgg.sprite.texture === tex) return;
     this.showEasterEgg.charName = charName;
@@ -428,23 +500,25 @@ export default class GameEngine {
     const sprite = this.showEasterEgg.sprite;
     const root = sprite.parent;
     if (root) {
+      const spriteW = FW * NPC_SCALE;
+      const spriteH = FH * NPC_SCALE;
       root.hitArea = new PIXI.Rectangle(
         sprite.x - 8,
-        sprite.y - sprite.height - 8,
-        sprite.width + 16,
-        sprite.height + 16,
+        this.showEasterEgg.spriteBaseY - spriteH - 8,
+        spriteW + 16,
+        spriteH + 16,
       );
     }
-    const sw = sprite.width;
     const g = this.showEasterEgg.shadow;
     if (g) {
+      const spriteW = FW * NPC_SCALE;
       g.clear();
       g.beginFill(0x000000, 0.16);
       g.drawEllipse(
-        Math.round(sprite.x + sw * 0.52),
+        Math.round(sprite.x + spriteW * 0.52),
         this.showEasterEgg.spriteBaseY - 2,
-        Math.max(18, Math.round(sw * 0.34)),
-        Math.max(5, Math.round(sw * 0.12)),
+        Math.round(spriteW * 0.34),
+        Math.round(spriteW * 0.12),
       );
       g.endFill();
     }
@@ -457,7 +531,7 @@ export default class GameEngine {
 
     const charName = this._resolveShowNpcCharName();
     const frames = this.spriteLoader.charFrames[charName];
-    const standTex = frames?.right?.[SHOW_NPC_RIGHT_STAND_FRAME];
+    const standTex = getShowNpcStandTexture(frames, 'right');
     if (!standTex) return;
 
     const width = rect.w;
@@ -474,19 +548,25 @@ export default class GameEngine {
     root.cursor = 'pointer';
     container.addChild(root);
 
-    const maxImageW = Math.max(76, Math.round(width * 0.23));
-    const maxImageH = Math.max(92, Math.round(height * 0.78));
-    const scale = Math.max(0.48, Math.min(maxImageW / FW, maxImageH / FH, NPC_SCALE));
-    const spriteX = Math.max(8, Math.round(width * 0.04));
-    const spriteBaseY = height - Math.max(8, Math.round(height * 0.08));
+    const scale = NPC_SCALE;
+    const spriteW = FW * scale;
+    const offX = Number.isFinite(this.mapConfig?.showNpcOffsetX)
+      ? this.mapConfig.showNpcOffsetX
+      : SHOW_NPC_DEFAULT_OFFSET_X;
+    const offY = Number.isFinite(this.mapConfig?.showNpcOffsetY)
+      ? this.mapConfig.showNpcOffsetY
+      : 0;
+    // Center in the layer rect, then nudge; do not clamp spriteX — small/approximate regions need negative x.
+    const spriteX = Math.round(width * 0.5 - spriteW / 2) + offX;
+    const spriteBaseY = height - Math.max(8, Math.round(height * 0.08)) + offY;
 
     const shadow = new PIXI.Graphics();
-    shadow.beginFill(0x000000, 0.16);
+    shadow.beginFill(0x000000, 0.12);
     shadow.drawEllipse(
-      Math.round(spriteX + FW * scale * 0.52),
-      spriteBaseY - 2,
-      Math.max(18, Math.round(FW * scale * 0.34)),
-      Math.max(5, Math.round(FW * scale * 0.12)),
+      Math.round(spriteX + (FW * scale) / 2),
+      spriteBaseY - 1,
+      10 * NPC_SCALE,
+      3 * NPC_SCALE,
     );
     shadow.endFill();
     root.addChild(shadow);
@@ -508,57 +588,46 @@ export default class GameEngine {
 
     let bubble = null;
     let bubbleBaseY = 0;
+    let bubbleText = null;
     if (message) {
-      const bubbleFontSize = Math.max(10, Math.min(12, Math.round(height * 0.065)));
-      const bubbleText = new PIXI.Text(message, new PIXI.TextStyle({
-        fontFamily: 'Press Start 2P, monospace',
-        fontSize: bubbleFontSize,
+      bubbleText = new PIXI.Text(message, new PIXI.TextStyle({
+        fontFamily: 'Press Start 2P',
+        fontSize: FIELD_NPC_FLOAT_FONT_SIZE,
         fill: 0x3a3020,
         wordWrap: true,
-        wordWrapWidth: Math.max(180, Math.min(280, Math.round(width * 0.48))),
-        lineHeight: bubbleFontSize + 7,
+        wordWrapWidth: FIELD_NPC_FLOAT_WORD_WRAP,
+        lineHeight: FIELD_NPC_FLOAT_LINE_HEIGHT,
+        align: 'center',
       }));
       bubbleText.roundPixels = true;
 
-      const bubblePadX = 16;
-      const bubblePadY = 14;
-      const bubbleW = Math.max(204, Math.ceil(bubbleText.width + bubblePadX * 2));
-      const bubbleH = Math.max(68, Math.ceil(bubbleText.height + bubblePadY * 2));
+      const pad = FIELD_NPC_FLOAT_PAD;
+      const bubbleW = Math.max(FIELD_NPC_FLOAT_MIN_W, Math.ceil(bubbleText.width + pad * 2));
+      const bubbleH = Math.max(FIELD_NPC_FLOAT_MIN_H, Math.ceil(bubbleText.height + pad * 2));
       bubble = new PIXI.Container();
       bubble.visible = false;
       bubble.alpha = 0;
       bubble.eventMode = 'none';
 
-      const bubbleShadow = new PIXI.Graphics();
-      bubbleShadow.beginFill(0x000000, 0.12);
-      bubbleShadow.drawRoundedRect(4, 6, bubbleW, bubbleH, 12);
-      bubbleShadow.endFill();
-      bubble.addChild(bubbleShadow);
-
       const bubbleBg = new PIXI.Graphics();
-      bubbleBg.beginFill(0xfffbf2, 0.96);
-      bubbleBg.lineStyle(2, 0xb2773f, 0.34);
-      bubbleBg.drawRoundedRect(0, 0, bubbleW, bubbleH, 12);
+      bubbleBg.beginFill(0xFFFDF8, 0.95);
+      bubbleBg.lineStyle(1, 0xB2773F, 0.55);
+      bubbleBg.drawRoundedRect(0, 0, bubbleW, bubbleH, FIELD_NPC_FLOAT_CORNER);
       bubbleBg.endFill();
-      bubbleBg.beginFill(0xfffbf2, 0.96);
+      bubbleBg.beginFill(0xFFFDF8, 0.95);
       bubbleBg.moveTo(24, bubbleH);
-      bubbleBg.lineTo(12, bubbleH + 12);
+      bubbleBg.lineTo(13, bubbleH + 14);
       bubbleBg.lineTo(42, bubbleH);
       bubbleBg.endFill();
       bubble.addChild(bubbleBg);
 
-      bubbleText.x = bubblePadX;
-      bubbleText.y = bubblePadY;
+      bubbleText.x = pad;
+      bubbleText.y = pad;
       bubble.addChild(bubbleText);
 
-      const bubbleBaseX = Math.min(
-        Math.max(10, width - bubbleW - 10),
-        Math.round(sprite.x + sprite.width + 16),
-      );
-      bubbleBaseY = Math.max(
-        6,
-        Math.round(sprite.y - sprite.height - bubbleH + 18),
-      );
+      const spriteH = FH * NPC_SCALE;
+      const bubbleBaseX = Math.round(sprite.x + FW * NPC_SCALE + 16);
+      bubbleBaseY = Math.round(spriteBaseY - spriteH - bubbleH + 18);
       bubble.x = bubbleBaseX;
       bubble.y = bubbleBaseY;
       root.addChild(bubble);
@@ -580,19 +649,32 @@ export default class GameEngine {
       sprite,
       spriteBaseY,
       shadow,
-      shadowBaseAlpha: 0.16,
+      shadowBaseAlpha: 0.12,
       bubble,
+      bubbleText,
       bubbleBaseY,
       charName,
+      frames,
+      defaultTexture: standTex,
+      defaultBubbleText: message,
+      facing: 'right',
     };
 
     this.world.addChild(container);
     this._syncShowEasterEggOverlay(performance.now());
   }
 
-  _triggerShowEasterEggMessage() {
+  _triggerShowEasterEggMessage(targetX, targetY, textOverride) {
     if (!this.showEasterEgg?.bubble) return;
     if (this._showEasterEggHideTimer) clearTimeout(this._showEasterEggHideTimer);
+
+    if (typeof targetX === 'number' && typeof targetY === 'number') {
+      this._setShowNpcFacingTowardPoint(targetX, targetY);
+    }
+
+    if (typeof textOverride === 'string' && textOverride.length && this.showEasterEgg.bubbleText) {
+      this.showEasterEgg.bubbleText.text = textOverride;
+    }
 
     this.showEasterEgg.bubble.visible = true;
     this.showEasterEgg.bubble.alpha = 1;
@@ -604,7 +686,40 @@ export default class GameEngine {
       this.showEasterEgg.bubble.visible = false;
       this.showEasterEgg.bubble.alpha = 0;
       this.showEasterEgg.bubble.y = this.showEasterEgg.bubbleBaseY;
+      if (this.showEasterEgg.bubbleText && this.showEasterEgg.defaultBubbleText) {
+        this.showEasterEgg.bubbleText.text = this.showEasterEgg.defaultBubbleText;
+      }
+      if (this.showEasterEgg.defaultTexture) {
+        this.showEasterEgg.sprite.texture = this.showEasterEgg.defaultTexture;
+        this.showEasterEgg.facing = 'right';
+      }
     }, SHOW_EASTER_EGG_BUBBLE_MS);
+  }
+
+  _getShowNpcFacingTexture(targetDir) {
+    const ee = this.showEasterEgg;
+    if (!ee?.frames) return null;
+    return getShowNpcStandTexture(ee.frames, targetDir);
+  }
+
+  _setShowNpcFacingTowardPoint(mapX, mapY) {
+    const ee = this.showEasterEgg;
+    if (!ee?.sprite || !ee.container) return;
+    const spriteWorldX = ee.container.x + ee.sprite.x + (FW * NPC_SCALE) / 2;
+    const spriteWorldY = ee.container.y + ee.sprite.y - (FH * NPC_SCALE) / 2;
+    const dx = mapX - spriteWorldX;
+    const dy = mapY - spriteWorldY;
+    let dir;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      dir = dx >= 0 ? 'right' : 'left';
+    } else {
+      dir = dy >= 0 ? 'front' : 'back';
+    }
+    const tex = this._getShowNpcFacingTexture(dir);
+    if (tex) {
+      ee.sprite.texture = tex;
+      ee.facing = dir;
+    }
   }
 
   _syncShowEasterEggOverlay(now = performance.now()) {
@@ -640,18 +755,33 @@ export default class GameEngine {
     });
   }
 
+  /**
+   * Same buckets as TownConsole `mapToSummaryBucket` / `/api/events` dashboard rows.
+   * Used for the floor TASK DASHBOARD; `pending` is not shown on that panel.
+   */
+  _mapEventToDashboardBucket(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'running') return 'running';
+    if (s === 'pending') return 'pending';
+    if (s === 'completed' || s === 'ok') return 'completed';
+    if (s === 'error') return 'error';
+    if (s === 'fail' || s === 'failed') return 'failed';
+    return 'running';
+  }
+
   _summarizeFloorScreenTasks() {
     return (this._events || []).reduce((summary, event) => {
-      const status = String(event?.status || '').toLowerCase();
-      if (status === 'ok' || status === 'completed') summary.completed += 1;
-      else if (status === 'error' || status === 'failed') summary.failed += 1;
-      else if (status === 'pending' || status === 'waiting' || status === 'warning') summary.pending += 1;
-      else summary.running += 1;
+      const bucket = this._mapEventToDashboardBucket(event?.status);
+      if (bucket === 'pending') return summary;
+      if (bucket === 'running') summary.running += 1;
+      else if (bucket === 'completed') summary.completed += 1;
+      else if (bucket === 'error') summary.error += 1;
+      else if (bucket === 'failed') summary.failed += 1;
       return summary;
     }, {
       running: 0,
-      pending: 0,
       completed: 0,
+      error: 0,
       failed: 0,
     });
   }
@@ -772,11 +902,33 @@ export default class GameEngine {
     };
   }
 
+  _getDashboardPromoEntry() {
+    return {
+      id: DASHBOARD_PROMO_AGENT_ID,
+      name: DASHBOARD_PROMO_DISPLAY_ID,
+      idLabel: DASHBOARD_PROMO_DISPLAY_ID,
+      charName: null,
+      isDashboardPromo: true,
+      statusMeta: {
+        id: 'promo',
+        label: 'XSAFECLAW',
+        fill: 0x9edfff,
+        glow: 0x6aa6ff,
+        textFill: 0xa8dcff,
+        bgFill: 0x4a7fff,
+        bgAlpha: 0.2,
+        borderFill: 0xb8dcff,
+        borderAlpha: 0.22,
+      },
+      lastActiveAt: '',
+    };
+  }
+
   _getDashboardAgentEntries() {
     const priority = { pending: 3, working: 2, offline: 1 };
     const charNameMap = this._getAgentCharNameMap(this._agents || []);
 
-    return (this._agents || [])
+    const sorted = (this._agents || [])
       .map((agent, index) => {
         const latest = this._agentsById.get(agent?.id) || agent || {};
         const latestEvent = this._getLatestEvent(agent) || null;
@@ -797,6 +949,8 @@ export default class GameEngine {
         if (priorityDiff) return priorityDiff;
         return new Date(b.lastActiveAt || 0).getTime() - new Date(a.lastActiveAt || 0).getTime();
       });
+
+    return [...sorted, this._getDashboardPromoEntry()];
   }
 
   _getDashboard24hActivity(nowMs = Date.now()) {
@@ -806,6 +960,7 @@ export default class GameEngine {
       running: 0,
       pending: 0,
       completed: 0,
+      error: 0,
       failed: 0,
       total: 0,
     }));
@@ -813,6 +968,7 @@ export default class GameEngine {
       running: 0,
       pending: 0,
       completed: 0,
+      error: 0,
       failed: 0,
     };
 
@@ -825,15 +981,7 @@ export default class GameEngine {
       if (diffHours < 0 || diffHours >= 24) continue;
 
       const bucketIndex = 23 - diffHours;
-      const status = String(event?.status || '').toLowerCase();
-      const key = (status === 'pending' || status === 'waiting' || status === 'warning')
-        ? 'pending'
-        : (status === 'ok' || status === 'completed')
-          ? 'completed'
-          : (status === 'error' || status === 'failed')
-            ? 'failed'
-            : 'running';
-
+      const key = this._mapEventToDashboardBucket(event?.status);
       buckets[bucketIndex][key] += 1;
       buckets[bucketIndex].total += 1;
       totals[key] += 1;
@@ -1063,6 +1211,14 @@ export default class GameEngine {
     avatar.play();
     leftRoot.addChild(avatar);
 
+    const promoAvatar = new PIXI.Sprite(this._dashboardPromoTexture || PIXI.Texture.WHITE);
+    promoAvatar.visible = false;
+    promoAvatar.anchor.set(0.5, 1);
+    promoAvatar.x = Math.round(avatarAreaW * 0.5);
+    promoAvatar.y = avatarBaseY;
+    promoAvatar.roundPixels = true;
+    leftRoot.addChild(promoAvatar);
+
     const textX = avatarAreaW + 10;
     const textW = Math.max(110, leftRect.w - textX - 10);
 
@@ -1186,9 +1342,11 @@ export default class GameEngine {
       rotationMs: 4200,
       left: {
         rect: leftRect,
+        avatarAreaW,
         statusBg: leftStatusBg,
         statusText: leftStatusText,
         avatar,
+        promoAvatar,
         avatarBaseY,
         idText: leftId,
         currentAgentId: '',
@@ -1223,53 +1381,99 @@ export default class GameEngine {
     const featured = agentEntries[rotationIndex] || null;
     const activity = this._getDashboard24hActivity(Date.now());
     const activitySignature = JSON.stringify({
-      buckets: activity.buckets.map((bucket) => [bucket.running, bucket.pending, bucket.completed, bucket.failed]),
+      buckets: activity.buckets.map((bucket) => [
+        bucket.running,
+        bucket.pending,
+        bucket.completed,
+        bucket.error,
+        bucket.failed,
+        bucket.total,
+      ]),
       totals: activity.totals,
     });
 
     if (featured) {
-      const showcaseMode = featured.statusMeta.id === 'working'
-        ? this._pickDashboardShowcaseMode(`${featured.id}-${featured.charName}`)
-        : 'idle';
-      const avatarKey = `${featured.id}:${featured.charName}:${featured.statusMeta.id}:${showcaseMode}`;
-      if (left.currentAvatarKey !== avatarKey) {
-        const charFrames = this.spriteLoader.charFrames[featured.charName] || {};
-        const textures = featured.statusMeta.id === 'working'
-          ? (
-            showcaseMode === 'phone' && charFrames.phone?.length
-              ? charFrames.phone
-              : (charFrames.front?.length ? charFrames.front : (charFrames.idle || []))
-          )
-          : (charFrames.idle?.length ? charFrames.idle : (charFrames.front || []));
-        if (textures.length) {
-          left.avatar.textures = textures;
-          left.avatar.animationSpeed = featured.statusMeta.id === 'working'
-            ? (showcaseMode === 'phone' ? 0.11 : 0.13)
-            : 0.08;
-          left.avatar.play();
+      if (featured.isDashboardPromo) {
+        left.avatar.visible = false;
+        left.promoAvatar.visible = true;
+        const promoKey = `promo:${featured.id}`;
+        if (left.currentAvatarKey !== promoKey) {
+          left.promoAvatar.texture = this._dashboardPromoTexture || PIXI.Texture.WHITE;
+          const tex = left.promoAvatar.texture;
+          const tw = tex?.width || 1;
+          const th = tex?.height || 1;
+          const maxW = Math.max(56, (left.avatarAreaW || 108) - 2);
+          const maxH = Math.max(48, (left.rect?.h || 120) * 0.72);
+          const s = Math.min(maxW / tw, maxH / th, 1.48);
+          left.promoAvatar.scale.set(s);
+          left.currentAgentId = featured.id;
+          left.currentAvatarKey = promoKey;
         }
-        left.currentAgentId = featured.id;
-        left.currentAvatarKey = avatarKey;
+        left.idText.text = featured.name || DASHBOARD_PROMO_DISPLAY_ID;
+        left.statusText.text = featured.statusMeta.label;
+        left.promoAvatar.alpha = 0.98;
+        left.promoAvatar.tint = 0xffffff;
+        left.statusText.style.fill = featured.statusMeta.textFill;
+
+        left.statusBg.clear();
+        const chipX = left.idText.x;
+        const chipY = left.idText.y + left.idText.height + 12;
+        const chipW = left.statusText.width + 30;
+        const chipH = left.statusText.height + 14;
+        left.statusBg.beginFill(featured.statusMeta.bgFill, featured.statusMeta.bgAlpha);
+        left.statusBg.lineStyle(1, featured.statusMeta.borderFill, featured.statusMeta.borderAlpha);
+        left.statusBg.drawRoundedRect(chipX, chipY, chipW, chipH, Math.round(chipH / 2));
+        left.statusBg.endFill();
+        left.statusText.x = chipX + 16;
+        left.statusText.y = chipY + 7;
+      } else {
+        left.promoAvatar.visible = false;
+        left.avatar.visible = true;
+        const showcaseMode = featured.statusMeta.id === 'working'
+          ? this._pickDashboardShowcaseMode(`${featured.id}-${featured.charName}`)
+          : 'idle';
+        const avatarKey = `${featured.id}:${featured.charName}:${featured.statusMeta.id}:${showcaseMode}`;
+        if (left.currentAvatarKey !== avatarKey) {
+          const charFrames = this.spriteLoader.charFrames[featured.charName] || {};
+          const textures = featured.statusMeta.id === 'working'
+            ? (
+              showcaseMode === 'phone' && charFrames.phone?.length
+                ? charFrames.phone
+                : (charFrames.front?.length ? charFrames.front : (charFrames.idle || []))
+            )
+            : (charFrames.idle?.length ? charFrames.idle : (charFrames.front || []));
+          if (textures.length) {
+            left.avatar.textures = textures;
+            left.avatar.animationSpeed = featured.statusMeta.id === 'working'
+              ? (showcaseMode === 'phone' ? 0.11 : 0.13)
+              : 0.08;
+            left.avatar.play();
+          }
+          left.currentAgentId = featured.id;
+          left.currentAvatarKey = avatarKey;
+        }
+
+        left.idText.text = featured.name || 'AGENT';
+        left.statusText.text = featured.statusMeta.label;
+        left.avatar.alpha = featured.statusMeta.id === 'offline' ? 0.52 : 0.96;
+        left.avatar.tint = featured.statusMeta.id === 'offline' ? (palette.offlineTint || 0xbdb5ab) : 0xffffff;
+        left.statusText.style.fill = featured.statusMeta.textFill;
+
+        left.statusBg.clear();
+        const chipX = left.idText.x;
+        const chipY = left.idText.y + left.idText.height + 12;
+        const chipW = left.statusText.width + 30;
+        const chipH = left.statusText.height + 14;
+        left.statusBg.beginFill(featured.statusMeta.bgFill, featured.statusMeta.bgAlpha);
+        left.statusBg.lineStyle(1, featured.statusMeta.borderFill, featured.statusMeta.borderAlpha);
+        left.statusBg.drawRoundedRect(chipX, chipY, chipW, chipH, Math.round(chipH / 2));
+        left.statusBg.endFill();
+        left.statusText.x = chipX + 16;
+        left.statusText.y = chipY + 7;
       }
-
-      left.idText.text = featured.name || 'AGENT';
-      left.statusText.text = featured.statusMeta.label;
-      left.avatar.alpha = featured.statusMeta.id === 'offline' ? 0.52 : 0.96;
-      left.avatar.tint = featured.statusMeta.id === 'offline' ? (palette.offlineTint || 0xbdb5ab) : 0xffffff;
-      left.statusText.style.fill = featured.statusMeta.textFill;
-
-      left.statusBg.clear();
-      const chipX = left.idText.x;
-      const chipY = left.idText.y + left.idText.height + 12;
-      const chipW = left.statusText.width + 30;
-      const chipH = left.statusText.height + 14;
-      left.statusBg.beginFill(featured.statusMeta.bgFill, featured.statusMeta.bgAlpha);
-      left.statusBg.lineStyle(1, featured.statusMeta.borderFill, featured.statusMeta.borderAlpha);
-      left.statusBg.drawRoundedRect(chipX, chipY, chipW, chipH, Math.round(chipH / 2));
-      left.statusBg.endFill();
-      left.statusText.x = chipX + 16;
-      left.statusText.y = chipY + 7;
     } else {
+      left.promoAvatar.visible = false;
+      left.avatar.visible = true;
       left.idText.text = 'AGENT';
       left.statusText.text = 'OFFLINE';
       left.avatar.alpha = 0.3;
@@ -1289,7 +1493,12 @@ export default class GameEngine {
       left.currentAvatarKey = '';
     }
 
-    left.avatar.y = left.avatarBaseY + Math.sin(now / 420) * 1.8;
+    const dashBob = Math.sin(now / 420) * 1.8;
+    left.avatar.y = left.avatarBaseY + dashBob;
+    if (left.promoAvatar) {
+      left.promoAvatar.x = Math.round((left.avatarAreaW || 108) * 0.5);
+      left.promoAvatar.y = left.avatarBaseY + dashBob;
+    }
 
     if (activitySignature !== this._wallDashboardSignature) {
       this._wallDashboardSignature = activitySignature;
@@ -1682,7 +1891,7 @@ export default class GameEngine {
     welcomeLead.roundPixels = true;
     welcomeGroup.addChild(welcomeLead);
 
-    const welcomeTitle = new PIXI.Text('AGENT TOWN', new PIXI.TextStyle(welcomeTitleStyle));
+    const welcomeTitle = new PIXI.Text('AGENT VALLEY', new PIXI.TextStyle(welcomeTitleStyle));
     welcomeTitle.y = welcomeLead.height + Math.round(heroHeight * 0.055);
     welcomeTitle.roundPixels = true;
     welcomeGroup.addChild(welcomeTitle);
@@ -1692,6 +1901,19 @@ export default class GameEngine {
     welcomeSub.roundPixels = true;
     welcomeGroup.addChild(welcomeSub);
 
+    const guardStatusLine = new PIXI.Text(
+      this.guardEnabled ? '⚔ GUARD ACTIVE' : '⚠ GUARD OFFLINE',
+      new PIXI.TextStyle({
+        fontFamily: 'Press Start 2P, monospace',
+        fontSize: Math.max(11, Math.round(height * 0.016)),
+        fill: this.guardEnabled ? 0x34d399 : 0xffa500,
+        letterSpacing: 1.2,
+      })
+    );
+    guardStatusLine.y = welcomeSub.y + welcomeSub.height + Math.round(heroHeight * 0.05);
+    guardStatusLine.roundPixels = true;
+    welcomeGroup.addChild(guardStatusLine);
+
     const welcomeDecoLeft = new PIXI.Graphics();
     welcomeDecoLeft.lineStyle(2, 0x8edfff, 0.42);
     welcomeDecoLeft.moveTo(0, 0);
@@ -1699,7 +1921,7 @@ export default class GameEngine {
     welcomeDecoLeft.moveTo(Math.round(infoWidth * 0.02), 12);
     welcomeDecoLeft.lineTo(Math.round(infoWidth * 0.12), 12);
     welcomeDecoLeft.x = 0;
-    welcomeDecoLeft.y = welcomeSub.y + welcomeSub.height + Math.round(heroHeight * 0.08);
+    welcomeDecoLeft.y = guardStatusLine.y + guardStatusLine.height + Math.round(heroHeight * 0.06);
     welcomeGroup.addChild(welcomeDecoLeft);
 
     const welcomeDecoRight = new PIXI.Graphics();
@@ -1945,11 +2167,12 @@ export default class GameEngine {
       panelHeight: taskPanelHeight,
       title: 'TASK DASHBOARD',
       columns: 2,
+      /* Order matches console: running → pending (omitted) → completed → failed → error */
       metrics: [
         { key: 'running', label: 'RUNNING', fill: 0x97f5ff, tileOffsetY: -16 },
-        { key: 'pending', label: 'PENDING', fill: 0xff5664, tileOffsetY: -16 },
-        { key: 'completed', label: 'COMPLETED', fill: 0x99f2bf, tileOffsetY: 16  },
-        { key: 'failed', label: 'FAILED', fill: 0xffb382, tileOffsetY: 16  },
+        { key: 'completed', label: 'COMPLETED', fill: 0x99f2bf, tileOffsetY: -16 },
+        { key: 'failed', label: 'FAILED', fill: 0xffb382, tileOffsetY: 16 },
+        { key: 'error', label: 'ERROR', fill: 0xff6b8a, tileOffsetY: 16 },
       ],
     });
 
@@ -1989,6 +2212,7 @@ export default class GameEngine {
         welcomeDecoLeftBaseX: welcomeDecoLeft.x,
         welcomeDecoRight,
         welcomeDecoRightBaseX,
+        guardStatusLine,
         warningGroup,
         warningTriangle,
         warningBang,
@@ -2106,8 +2330,8 @@ export default class GameEngine {
     const hasPendingAlert = (telemetry.pendingCount || 0) > 0;
     const taskSummary = telemetry.taskSummary || {
       running: 0,
-      pending: 0,
       completed: 0,
+      error: 0,
       failed: 0,
     };
     const signature = JSON.stringify({
@@ -2116,6 +2340,7 @@ export default class GameEngine {
       offline: telemetry.offlineCount || 0,
       taskSummary,
       hasPendingAlert,
+      guardEnabled: !!this.guardEnabled,
     });
 
     if (signature !== this._floorScreenInfoSignature) {
@@ -2126,9 +2351,9 @@ export default class GameEngine {
       this.floorScreen.panels.agent.metricNodes.total.value.text = formatCount(telemetry.agentCount);
 
       this.floorScreen.panels.task.metricNodes.running.value.text = formatCount(taskSummary.running);
-      this.floorScreen.panels.task.metricNodes.pending.value.text = formatCount(taskSummary.pending);
       this.floorScreen.panels.task.metricNodes.completed.value.text = formatCount(taskSummary.completed);
       this.floorScreen.panels.task.metricNodes.failed.value.text = formatCount(taskSummary.failed);
+      this.floorScreen.panels.task.metricNodes.error.value.text = formatCount(taskSummary.error);
 
       this.floorScreen.hero.warningSub.text = hasPendingAlert
         ? 'Handle pending events first'
@@ -2137,6 +2362,12 @@ export default class GameEngine {
       this.floorScreen.hero.welcomeSub.text = taskSummary.running > 0
         ? `${formatCount(taskSummary.running)} tasks active on the grid`
         : 'No pending approvals on the floor';
+
+      const gLine = this.floorScreen.hero.guardStatusLine;
+      if (gLine) {
+        gLine.text = this.guardEnabled ? '⚔ GUARD ACTIVE' : '⚠ GUARD OFFLINE';
+        gLine.style.fill = this.guardEnabled ? 0x34d399 : 0xffa500;
+      }
     }
 
     this.floorScreen.hero.heroCoolOverlay.alpha = hasPendingAlert
@@ -2227,6 +2458,10 @@ export default class GameEngine {
     return status === 'working' || status === 'running' || status === 'idle';
   }
 
+  _isSceneAgentStatus(status) {
+    return this._isRunningStatus(status) || this._isPendingStatus(status);
+  }
+
   _isIdleStatus(status) {
     return status === 'idle';
   }
@@ -2267,16 +2502,18 @@ export default class GameEngine {
 
   _queueRunningPath(npc) {
     if (!npc || !this.pathfinder) return false;
-    const curTile = this.pathfinder.pixelToTile(npc.container.x, npc.container.y);
+    let curTile = this.pathfinder.pixelToTile(npc.container.x, npc.container.y);
     if (!this.pathfinder.isWalkable(curTile.x, curTile.y)) {
-      const near = this.pathfinder.getRandomWalkable();
+      const near = this.pathfinder.getNearestWalkable(curTile.x, curTile.y);
       if (near) {
         const np = this.pathfinder.tileToPixel(near.x, near.y);
         npc.container.x = np.x;
         npc.container.y = np.y;
+        curTile = near;
+      } else {
+        npc.idleTimer = 1.0;
+        return false;
       }
-      npc.idleTimer = 0.25;
-      return false;
     }
 
     const minDist = npc._failedPaths > 3 ? 2 : 6;
@@ -2319,7 +2556,7 @@ export default class GameEngine {
     npc._stuckFrames = 0;
     npc._curDir = 'idle';
 
-    if (npc._pendingFrozen || npc._guardFrozen) {
+    if (npc._pendingFrozen) {
       npc.aiState = 'frozen';
       npc.sprite.textures = npc.frames.idle;
       npc.sprite.play();
@@ -2328,7 +2565,7 @@ export default class GameEngine {
 
     if (npc.mode === 'pathfind') {
       npc.aiState = 'idle';
-      npc.idleTimer = afterMeeting ? (0.08 + Math.random() * 0.15) : (0.3 + Math.random() * 0.5);
+      npc.idleTimer = afterMeeting ? (1.5 + Math.random() * 2.0) : (1.0 + Math.random() * 2.0);
       npc.sprite.textures = npc.frames.idle;
       npc.sprite.play();
       return;
@@ -2352,7 +2589,7 @@ export default class GameEngine {
   _canStartMeeting(a, b) {
     if (!a || !b || a === b) return false;
     if (a.mode === 'pending' || b.mode === 'pending') return false;
-    if (a._dragActive || b._dragActive || a._guardFrozen || b._guardFrozen || a._pendingFrozen || b._pendingFrozen) {
+    if (a._dragActive || b._dragActive || a._pendingFrozen || b._pendingFrozen) {
       return false;
     }
     if (a.aiState === 'meeting' || b.aiState === 'meeting') return false;
@@ -2388,7 +2625,7 @@ export default class GameEngine {
 
   _renderNpcScene(agents = []) {
     const activeAgents = (agents || []).filter((agent) => (
-      this._isRunningStatus(agent?.status)
+      this._isSceneAgentStatus(agent?.status)
     ));
     const charNameMap = this._getAgentCharNameMap(agents);
     const maxSceneAgents = this.pathfinder
@@ -2399,32 +2636,81 @@ export default class GameEngine {
     for (let i = 0; i < sceneAgents.length; i++) {
       const npc = this._createNPC(sceneAgents[i], i, charNameMap);
       if (!npc) continue;
+      npc._sceneIndex = i;
       this.npcs.push(npc);
     }
-
-    this.pendingNpc = (agents || []).some((agent) => this._isPendingStatus(agent?.status))
-      ? this._createPendingNPC()
-      : null;
   }
 
   _getSceneAgentIds(agents = []) {
     return (agents || [])
-      .filter((agent) => this._isRunningStatus(agent?.status))
+      .filter((agent) => this._isSceneAgentStatus(agent?.status))
       .map((agent) => agent.id)
       .filter(Boolean);
   }
 
   _shouldRebuildScene(agents = []) {
-    const nextIds = this._getSceneAgentIds(agents);
-    const currentIds = this.npcs.map((npc) => npc?.agent?.id).filter(Boolean);
-    if (nextIds.length !== currentIds.length) return true;
-    for (let i = 0; i < nextIds.length; i += 1) {
-      if (nextIds[i] !== currentIds[i]) return true;
+    const nextIds = new Set(this._getSceneAgentIds(agents));
+    const currentIds = new Set(this.npcs.map((npc) => npc?.agent?.id).filter(Boolean));
+    if (nextIds.size !== currentIds.size) return true;
+    for (const id of nextIds) {
+      if (!currentIds.has(id)) return true;
     }
 
-    const hasPendingNpc = (agents || []).some((agent) => this._isPendingStatus(agent?.status));
-    if (Boolean(this.pendingNpc) !== hasPendingNpc) return true;
     return false;
+  }
+
+  _removeNpc(npc) {
+    if (!npc) return;
+    this._removeBubble?.(npc);
+    this._clearIssueVisuals?.(npc);
+    npc?.container?.destroy({ children: true });
+  }
+
+  _incrementalUpdateScene(agents = []) {
+    const activeAgents = (agents || []).filter((a) => this._isSceneAgentStatus(a?.status));
+    const charNameMap = this._getAgentCharNameMap(agents);
+    const maxSlots = this.pathfinder
+      ? Math.max(CHAR_NAMES.length, 1)
+      : WALK_ZONES.length;
+    const nextAgents = activeAgents.slice(0, maxSlots);
+    const nextIds = new Set(nextAgents.map((a) => a.id).filter(Boolean));
+    const nextById = new Map(nextAgents.map((a) => [a.id, a]));
+
+    const currentById = new Map(this.npcs.map((npc) => [npc?.agent?.id, npc]).filter(([id]) => id));
+
+    const toRemove = [];
+    const kept = [];
+    for (const npc of this.npcs) {
+      const id = npc?.agent?.id;
+      if (!id || !nextIds.has(id)) {
+        toRemove.push(npc);
+      } else {
+        npc.agent = nextById.get(id);
+        kept.push(npc);
+      }
+    }
+
+    for (const npc of toRemove) {
+      this._removeNpc(npc);
+    }
+
+    const usedIndices = new Set(kept.map((npc) => npc._sceneIndex).filter((i) => i != null));
+    const keptIds = new Set(kept.map((npc) => npc?.agent?.id).filter(Boolean));
+    const toAdd = nextAgents.filter((a) => a.id && !keptIds.has(a.id));
+
+    let freeIdx = 0;
+    for (const agent of toAdd) {
+      while (usedIndices.has(freeIdx)) freeIdx++;
+      const npc = this._createNPC(agent, freeIdx, charNameMap);
+      if (!npc) continue;
+      npc._sceneIndex = freeIdx;
+      usedIndices.add(freeIdx);
+      kept.push(npc);
+      freeIdx++;
+    }
+
+    this.npcs = kept;
+    this._syncPendingNpcStates();
   }
 
   _refreshNpcDataInPlace(agents = [], events = []) {
@@ -2440,48 +2726,58 @@ export default class GameEngine {
 
   _clearNpcScene() {
     for (const npc of this.npcs) {
-      this._removeBubble?.(npc);
-      npc?.container?.destroy({ children: true });
+      this._removeNpc(npc);
     }
     this.npcs = [];
-
-    if (this.pendingNpc?.container) {
-      this.pendingNpc.container.destroy({ children: true });
-    }
-    this.pendingNpc = null;
   }
 
   // ─── NPC Creation ─────────────────────────────────────────────
 
-  _createGoldOutlineSprites(sprite, container, offsetPx = 4, addAtIndex = null, alpha = 1) {
-    const goldFilter = new PIXI.ColorMatrixFilter();
-    goldFilter.matrix = [
-      0, 0, 0, 0, 232 / 255,
-      0, 0, 0, 0, 200 / 255,
-      0, 0, 0, 0, 96 / 255,
+  _createGoldOutlineSprites(sprite, container) {
+    const innerFilter = new PIXI.ColorMatrixFilter();
+    innerFilter.matrix = [
+      0, 0, 0, 0, 1.0,
+      0, 0, 0, 0, 0.82,
+      0, 0, 0, 0, 0.22,
       0, 0, 0, 1, 0,
     ];
 
-    const out = [];
-    const d = offsetPx;
-    const offsets = [[-d, 0], [d, 0], [0, -d], [0, d], [-d, -d], [d, -d], [-d, d], [d, d]];
+    const outerFilter = new PIXI.ColorMatrixFilter();
+    outerFilter.matrix = [
+      0, 0, 0, 0, 1.0,
+      0, 0, 0, 0, 0.65,
+      0, 0, 0, 0, 0.12,
+      0, 0, 0, 1, 0,
+    ];
 
-    for (const [ox, oy] of offsets) {
-      const clone = new PIXI.Sprite(sprite.texture);
-      clone.anchor.set(0.5, 1);
-      clone.scale.set(sprite.scale.x, sprite.scale.y);
-      clone.filters = [goldFilter];
-      clone.alpha = alpha;
-      clone.x = ox;
-      clone.y = oy;
-      if (typeof addAtIndex === 'number') {
-        container.addChildAt(clone, addAtIndex);
-      } else {
-        container.addChild(clone);
+    const d1 = 2;
+    const d2 = 4;
+    const layers = [
+      { offsets: [[-d2, 0], [d2, 0], [0, -d2], [0, d2]], alpha: 0.25, filter: outerFilter, layer: 'outer' },
+      { offsets: [[-d1, 0], [d1, 0], [0, -d1], [0, d1], [-d1, -d1], [d1, -d1], [-d1, d1], [d1, d1]], alpha: 0.7, filter: innerFilter, layer: 'inner' },
+    ];
+
+    const clones = [];
+    const insertIdx = Math.max(0, container.getChildIndex(sprite));
+
+    for (const { offsets, alpha, filter, layer } of layers) {
+      for (const [ox, oy] of offsets) {
+        const clone = new PIXI.AnimatedSprite(sprite.textures);
+        clone.anchor.set(sprite.anchor.x, sprite.anchor.y);
+        clone.scale.set(sprite.scale.x, sprite.scale.y);
+        clone.animationSpeed = sprite.animationSpeed;
+        clone.filters = [filter];
+        clone.alpha = alpha;
+        clone.x = ox;
+        clone.y = oy;
+        clone._glowLayer = layer;
+        clone._baseAlpha = alpha;
+        clone.play();
+        container.addChildAt(clone, insertIdx);
+        clones.push(clone);
       }
-      out.push(clone);
     }
-    return out;
+    return { clones };
   }
 
   _createIssueMarkerSprite() {
@@ -2490,7 +2786,7 @@ export default class GameEngine {
       marker.anchor.set(0.5, 1);
       marker.scale.set(ISSUE_MARKER_SCALE);
       marker.x = 0;
-      marker.y = -FH * NPC_SCALE - 2;
+      marker.y = -FH * NPC_SCALE + ISSUE_MARKER_Y_OFFSET;
       marker.alpha = 0.98;
       return marker;
     }
@@ -2841,7 +3137,7 @@ export default class GameEngine {
 
     if (npc.mode === 'pathfind') {
       npc.homeTile = drop.tile || this.pathfinder.pixelToTile(drop.x, drop.y);
-      npc.aiState = (npc._pendingFrozen || npc._guardFrozen) ? 'frozen' : 'idle';
+      npc.aiState = npc._pendingFrozen ? 'frozen' : 'idle';
       npc.idleTimer = 0.08 + Math.random() * 0.15;
       npc._curDir = 'idle';
       npc.sprite.textures = npc.frames.idle;
@@ -2857,7 +3153,7 @@ export default class GameEngine {
         yA: Math.max(FH * NPC_SCALE + 8, drop.y - 54),
         yB: Math.min(this.sceneH, drop.y + 54),
       };
-      if (npc._pendingFrozen || npc._guardFrozen) {
+      if (npc._pendingFrozen) {
         npc.sprite.textures = npc.frames.idle;
       } else {
         npc.movingDown = Math.random() > 0.5;
@@ -2891,14 +3187,45 @@ export default class GameEngine {
       npc.container.addChild(marker);
       npc.emoteSprite = marker;
     }
+    if (!npc.goldOutlines && npc.sprite) {
+      npc.goldOutlines = this._createGoldOutlineSprites(npc.sprite, npc.container);
+    }
+  }
+
+  _syncGoldOutlineTextures(npc) {
+    if (!npc?.goldOutlines?.clones?.length || !npc?.sprite) return;
+    const currentTex = npc.sprite.textures;
+    const currentFrame = npc.sprite.currentFrame;
+    for (const clone of npc.goldOutlines.clones) {
+      if (clone.textures !== currentTex) {
+        clone.textures = currentTex;
+        clone.gotoAndPlay(currentFrame);
+      }
+      clone.scale.set(npc.sprite.scale.x, npc.sprite.scale.y);
+    }
+  }
+
+  _syncIssueAuraPulse(npc, now = Date.now(), strength = 1) {
+    if (!npc?.goldOutlines?.clones?.length) return;
+    const breathe = Math.sin(now / 600) * 0.5 + 0.5;
+    const flicker = Math.sin(now / 170) * 0.12;
+    for (const clone of npc.goldOutlines.clones) {
+      const base = clone._baseAlpha ?? 0.7;
+      if (clone._glowLayer === 'outer') {
+        clone.alpha = base * (0.5 + breathe * 0.6 + flicker) * strength;
+      } else {
+        clone.alpha = base * (0.75 + breathe * 0.3 + flicker * 0.5) * strength;
+      }
+    }
+    this._syncGoldOutlineTextures(npc);
   }
 
   _clearIssueVisuals(npc) {
     if (!npc) return;
-    if (npc.goldOutlines) {
-      for (const os of npc.goldOutlines) {
-        if (os.parent) os.parent.removeChild(os);
-        os.destroy();
+    if (npc.goldOutlines?.clones) {
+      for (const clone of npc.goldOutlines.clones) {
+        if (clone.parent) clone.parent.removeChild(clone);
+        clone.destroy();
       }
       npc.goldOutlines = null;
     }
@@ -2912,7 +3239,7 @@ export default class GameEngine {
   _setPendingNpcState(npc, shouldFreeze) {
     if (!npc) return;
     npc._pendingFrozen = shouldFreeze;
-    npc.hasIssue = shouldFreeze || npc._guardFrozen;
+    npc.hasIssue = shouldFreeze;
 
     if (shouldFreeze) {
       if (npc.meetingPartner) {
@@ -2937,10 +3264,8 @@ export default class GameEngine {
       return;
     }
 
-    if (!npc._guardFrozen) {
-      this._clearIssueVisuals(npc);
-      npc.hasIssue = false;
-    }
+    this._clearIssueVisuals(npc);
+    npc.hasIssue = false;
 
     if (npc.mode === 'pathfind') {
       npc.aiState = 'idle';
@@ -2965,7 +3290,7 @@ export default class GameEngine {
     const charName = charNameMap?.[agent?.id] || CHAR_NAMES[idx % CHAR_NAMES.length];
     const frames   = this.spriteLoader.charFrames[charName];
     if (!frames || !frames.front.length) return null;
-    const isRunner = this._isRunningStatus(agent?.status);
+    const isRunner = this._isSceneAgentStatus(agent?.status);
     const state = this._getAgentState(agent);
 
     const container = new PIXI.Container();
@@ -2987,7 +3312,7 @@ export default class GameEngine {
     container.addChild(sprite);
 
     // Name tag
-    const nameTagColor = 0xd7b37a;
+    const nameTagColor = 0x7fb9ff;
     const nameTag  = new PIXI.Text(agent.name.replace(/^Agent-/, '').substring(0, 10), {
       fontFamily: 'Press Start 2P', fontSize: 20, fill: nameTagColor, align: 'center', stroke: 0x120d1c, strokeThickness: 2,
     });
@@ -3071,12 +3396,12 @@ export default class GameEngine {
       npcObj = {
         agent, container, sprite, frames, charName, emoteSprite,
         goldOutlines: _goldOutlines, hasIssue,
-        _originalHasIssue: hasIssue, _guardFrozen: false, _pendingFrozen: hasPendingApproval,
+        _originalHasIssue: hasIssue, _pendingFrozen: hasPendingApproval,
         mode: isRunner ? 'pathfind' : 'stationary',
         behavior: isRunner ? 'running' : 'idle',
         speed: 0.45 + Math.random() * 0.25,
         aiState: hasPendingApproval ? 'frozen' : (isRunner ? 'idle' : 'stationary'), _curDir: 'idle',
-        idleTimer: isRunner ? (0.08 + Math.random() * 0.15) : 0,
+        idleTimer: isRunner ? (1.0 + Math.random() * 3.0) : 0,
         activityTimer: isRunner ? 0 : (0.1 + Math.random() * 0.4),
         path: null, pathIdx: 0,
         homeTile: this.pathfinder.pixelToTile(startPx.x, startPx.y),
@@ -3102,7 +3427,7 @@ export default class GameEngine {
       npcObj = {
         agent, container, sprite, frames, charName, emoteSprite,
         goldOutlines: _goldOutlines, hasIssue,
-        _originalHasIssue: hasIssue, _guardFrozen: false, _pendingFrozen: hasPendingApproval,
+        _originalHasIssue: hasIssue, _pendingFrozen: hasPendingApproval,
         mode: isRunner ? 'patrol' : 'stationary',
         behavior: isRunner ? 'running' : 'idle',
         speed: 0.32 + Math.random() * 0.38,
@@ -3119,12 +3444,10 @@ export default class GameEngine {
       }
     }
 
+    if (hasPendingApproval) this._ensureIssueVisuals(npcObj);
+
     this._attachNpcDragHandlers(npcObj, () => {
       const pendingNow = this._isPendingApproval(agent);
-      if (pendingNow) {
-        this.onPendingClick?.();
-        return;
-      }
       this.onNpcClick?.({
         agent, charName, state,
         snippet: this._getSnippet(agent),
@@ -3214,44 +3537,62 @@ export default class GameEngine {
       mode: 'pending',
       _dragActive: false,
       _pendingFrozen: true,
-      _guardFrozen: false,
       meetingTimer: 0,
       meetingPartner: null,
     };
+    this._ensureIssueVisuals(pendingNpc);
     this._attachNpcDragHandlers(pendingNpc, () => this.onPendingClick?.());
     return pendingNpc;
   }
 
   // ─── Speech Bubbles ──────────────────────────────────────────
 
-  _createBubble(npc, text) {
+  /**
+   * @param {'meeting' | 'fieldResponse'} variant
+   *   meeting — two NPCs chatting (wider min box);
+   *   fieldResponse — short line after double-tap `filed_npc` with `response`.
+   */
+  _createBubble(npc, text, variant = 'meeting') {
     if (npc.bubble) this._removeBubble(npc);
+
+    const compact = variant === 'fieldResponse';
+    const fontSize = compact ? FIELD_RESPONSE_BUBBLE_FONT_SIZE : MEETING_BUBBLE_FONT_SIZE;
+    const lineHeight = compact ? FIELD_RESPONSE_BUBBLE_LINE_HEIGHT : MEETING_BUBBLE_LINE_HEIGHT;
+    const wordWrap = compact ? FIELD_RESPONSE_BUBBLE_WORD_WRAP : MEETING_BUBBLE_WORD_WRAP;
+    const pad = compact ? FIELD_RESPONSE_BUBBLE_PAD : MEETING_BUBBLE_PAD;
+    const minW = compact ? FIELD_RESPONSE_BUBBLE_MIN_W : MEETING_BUBBLE_MIN_W;
+    const minH = compact ? FIELD_RESPONSE_BUBBLE_MIN_H : MEETING_BUBBLE_MIN_H;
+    const corner = compact ? FIELD_RESPONSE_BUBBLE_CORNER : MEETING_BUBBLE_CORNER;
 
     const bc = new PIXI.Container();
     const truncated = text.length > BUBBLE_MAX_CHARS ? text.substring(0, BUBBLE_MAX_CHARS) + '…' : text;
     const bt = new PIXI.Text(truncated, {
-      fontFamily: 'Press Start 2P', fontSize: 15, fill: 0x3a3020,
-      wordWrap: true, wordWrapWidth: 360, lineHeight: 22,
+      fontFamily: 'Press Start 2P',
+      fontSize,
+      fill: 0x3a3020,
+      wordWrap: true,
+      wordWrapWidth: wordWrap,
+      lineHeight,
       align: 'center',
     });
     bt.anchor.set(0.5, 1);
 
-    const pad = 22;
     const bg = new PIXI.Graphics();
     bg.beginFill(0xFFFDF8, 0.94);
     bg.lineStyle(1, 0xB2773F, 0.6);
-    const bw = Math.max(320, bt.width + pad * 2);
-    const bh = Math.max(120, bt.height + pad * 2);
-    bg.drawRoundedRect(-bw / 2, -bh, bw, bh, 10);
+    const bw = Math.max(minW, bt.width + pad * 2);
+    const bh = Math.max(minH, bt.height + pad * 2);
+    bg.drawRoundedRect(-bw / 2, -bh, bw, bh, corner);
     bg.endFill();
-    // Small triangle pointer at bottom
     bg.beginFill(0xFFFDF8, 0.94);
-    bg.moveTo(-12, 0); bg.lineTo(0, 15); bg.lineTo(12, 0);
+    const triW = compact ? 10 : 12;
+    const triH = compact ? 13 : 15;
+    bg.moveTo(-triW, 0); bg.lineTo(0, triH); bg.lineTo(triW, 0);
     bg.endFill();
 
     bt.y = -pad;
     bc.addChild(bg); bc.addChild(bt);
-    bc.y = -FH * NPC_SCALE - 36;
+    bc.y = MEETING_BUBBLE_ANCHOR_Y;
     bc.alpha = 0;
     npc.container.addChild(bc);
     npc.bubble = bc;
@@ -3264,6 +3605,147 @@ export default class GameEngine {
       npc.bubble.destroy({ children: true });
       npc.bubble = null;
     }
+  }
+
+  // ─── Field NPC (`filed_npc` layer) dialogue ─────────────────
+
+  _setupFieldNpcDialogueLayer() {
+    this._destroyFieldNpcDialogueLayer();
+    if (!this.world || !this.tiledRenderer || !this.app) return;
+
+    const layer = new PIXI.Container();
+    layer.zIndex = 40;
+    layer.eventMode = 'static';
+    layer.cursor = 'default';
+    layer.hitArea = new PIXI.Rectangle(0, 0, this.sceneW, this.sceneH);
+    layer.x = this._worldOffsetX;
+    layer.y = this._worldOffsetY;
+    layer.on('pointertap', (e) => this._onFieldNpcLayerPointerTap(e));
+
+    this.world.addChild(layer);
+    this._fieldNpcDialogueHitLayer = layer;
+  }
+
+  _destroyFieldNpcDialogueLayer() {
+    if (this._fieldNpcDialogueHitLayer?.parent) {
+      this._fieldNpcDialogueHitLayer.parent.removeChild(this._fieldNpcDialogueHitLayer);
+    }
+    this._fieldNpcDialogueHitLayer?.destroy({ children: false });
+    this._fieldNpcDialogueHitLayer = null;
+  }
+
+  _onFieldNpcLayerPointerTap(event) {
+    if (this._dragContext || !this.tiledRenderer) return;
+    const local = event.data.getLocalPosition(this._fieldNpcDialogueHitLayer);
+    if (!this.tiledRenderer.isFieldNpcTileAtMapPixel(local.x, local.y)) {
+      this._lastFieldNpcTapAt = 0;
+      return;
+    }
+    const now = performance.now();
+    if (now - this._lastFieldNpcTapAt > SHOW_EASTER_EGG_DOUBLE_TAP_MS) {
+      this._lastFieldNpcTapAt = now;
+      return;
+    }
+    this._lastFieldNpcTapAt = 0;
+    this._triggerFieldNpcDialogue(local.x, local.y);
+  }
+
+  _cancelFieldNpcDialogue() {
+    this._fieldDialogueToken++;
+    if (this._fieldDialogueNpcTimer) {
+      clearTimeout(this._fieldDialogueNpcTimer);
+      this._fieldDialogueNpcTimer = null;
+    }
+    if (this._fieldDialogueFloatTimer) {
+      clearTimeout(this._fieldDialogueFloatTimer);
+      this._fieldDialogueFloatTimer = null;
+    }
+
+    if (this._fieldDialogueFloatBubble?.parent) {
+      this._fieldDialogueFloatBubble.parent.removeChild(this._fieldDialogueFloatBubble);
+      this._fieldDialogueFloatBubble.destroy({ children: true });
+      this._fieldDialogueFloatBubble = null;
+    }
+
+    const npc = this._fieldDialogueLockedNpc;
+    const snap = this._fieldDialogueNpcSnap;
+    this._fieldDialogueLockedNpc = null;
+    this._fieldDialogueNpcSnap = null;
+
+    if (npc?.sprite && snap?.textures) {
+      npc.sprite.textures = snap.textures;
+      npc._curDir = snap.curDir;
+      npc.sprite.play();
+      this._removeBubble(npc);
+      npc._fieldDialogueLock = false;
+    }
+  }
+
+  _createFieldNpcFloatingLabel(mapX, mapY, text) {
+    const raw = String(text || '').trim();
+    if (!raw || !this.npcLayer) return;
+
+    const bc = new PIXI.Container();
+    bc.zIndex = 15000;
+    bc.x = mapX;
+    bc.y = mapY - FIELD_NPC_FLOAT_OFFSET_Y;
+
+    const truncated = raw.length > BUBBLE_MAX_CHARS ? `${raw.slice(0, BUBBLE_MAX_CHARS)}…` : raw;
+    const bt = new PIXI.Text(truncated, {
+      fontFamily: 'Press Start 2P',
+      fontSize: FIELD_NPC_FLOAT_FONT_SIZE,
+      fill: 0x3a3020,
+      wordWrap: true,
+      wordWrapWidth: FIELD_NPC_FLOAT_WORD_WRAP,
+      lineHeight: FIELD_NPC_FLOAT_LINE_HEIGHT,
+      align: 'center',
+    });
+    bt.anchor.set(0.5, 1);
+
+    const pad = FIELD_NPC_FLOAT_PAD;
+    const bg = new PIXI.Graphics();
+    bg.beginFill(0xFFFDF8, 0.95);
+    bg.lineStyle(1, 0xB2773F, 0.55);
+    const bw = Math.max(FIELD_NPC_FLOAT_MIN_W, bt.width + pad * 2);
+    const bh = Math.max(FIELD_NPC_FLOAT_MIN_H, bt.height + pad * 2);
+    bg.drawRoundedRect(-bw / 2, -bh, bw, bh, FIELD_NPC_FLOAT_CORNER);
+    bg.endFill();
+    bg.beginFill(0xFFFDF8, 0.95);
+    bg.moveTo(-11, 0); bg.lineTo(0, 14); bg.lineTo(11, 0);
+    bg.endFill();
+
+    bt.y = -pad;
+    bc.addChild(bg);
+    bc.addChild(bt);
+    this.npcLayer.addChild(bc);
+    this._fieldDialogueFloatBubble = bc;
+  }
+
+  _triggerFieldNpcDialogue(mapX, mapY) {
+    this._cancelFieldNpcDialogue();
+    const lines = this._fieldDialogueLines;
+    if (!this.npcLayer || !Array.isArray(lines) || !lines.length) return;
+
+    const entry = lines[Math.floor(Math.random() * lines.length)] || {};
+    const lineText = String(entry.text || '').trim();
+    const response = String(entry.response || '').trim();
+    if (!lineText && !response) return;
+
+    const token = this._fieldDialogueToken;
+    if (lineText) this._createFieldNpcFloatingLabel(mapX, mapY, lineText);
+
+    this._fieldDialogueFloatTimer = window.setTimeout(() => {
+      if (token !== this._fieldDialogueToken) return;
+      if (this._fieldDialogueFloatBubble?.parent) {
+        this._fieldDialogueFloatBubble.parent.removeChild(this._fieldDialogueFloatBubble);
+        this._fieldDialogueFloatBubble.destroy({ children: true });
+        this._fieldDialogueFloatBubble = null;
+      }
+    }, FIELD_NPC_FLOAT_LABEL_MS);
+
+    if (!response) return;
+
+    this._triggerShowEasterEggMessage(mapX, mapY, response);
   }
 
   // ─── Game Loop ──────────────────────────────────────────────
@@ -3299,8 +3781,10 @@ export default class GameEngine {
 
         if (npc.aiState === 'meeting') {
           this._updateMeeting(npc, delta);
-        } else if (npc._dragActive || npc._guardFrozen || npc._pendingFrozen) {
-          // Frozen by guard — stay in place
+        } else if (npc._fieldDialogueLock) {
+          // Held for field-NPC response; no movement until timeout restores pose.
+        } else if (npc._dragActive || npc._pendingFrozen) {
+          // Frozen — stay in place
         } else if (npc.mode === 'patrol') {
           this._updatePatrol(npc, delta);
         } else if (npc.mode === 'pathfind' && this.pathfinder) {
@@ -3315,11 +3799,12 @@ export default class GameEngine {
       for (const npc of this.npcs) {
         if (!npc) continue;
         npc.container.zIndex = Math.round(npc.container.y);
+        this._syncIssueAuraPulse(npc, Date.now(), npc._pendingFrozen ? 1.05 : 0.8);
 
         if (npc.emoteSprite) {
           const bob = Math.sin(Date.now() / 240) * 5;
           const pulse = Math.sin(Date.now() / 220) * 0.08 + 0.98;
-          npc.emoteSprite.y = -FH * NPC_SCALE - 2 + bob;
+          npc.emoteSprite.y = -FH * NPC_SCALE + ISSUE_MARKER_Y_OFFSET + bob;
           npc.emoteSprite.scale.set(ISSUE_MARKER_SCALE * pulse);
           npc.emoteSprite.alpha = Math.sin(Date.now() / 260) * 0.08 + 0.94;
         }
@@ -3328,10 +3813,11 @@ export default class GameEngine {
       // Pending NPC: keep a gentle glow + marker pulse
       if (this.pendingNpc) {
         this.pendingNpc.container.alpha = Math.sin(Date.now() / 500) * 0.12 + 0.88;
+        this._syncIssueAuraPulse(this.pendingNpc, Date.now(), 1.15);
         if (this.pendingNpc.emoteSprite) {
           const bob = Math.sin(Date.now() / 240) * 5;
           const pulse = Math.sin(Date.now() / 220) * 0.08 + 0.98;
-          this.pendingNpc.emoteSprite.y = -FH * NPC_SCALE - 2 + bob;
+          this.pendingNpc.emoteSprite.y = -FH * NPC_SCALE + ISSUE_MARKER_Y_OFFSET + bob;
           this.pendingNpc.emoteSprite.scale.set(ISSUE_MARKER_SCALE * pulse);
           this.pendingNpc.emoteSprite.alpha = Math.sin(Date.now() / 260) * 0.08 + 0.94;
         }
@@ -3371,6 +3857,21 @@ export default class GameEngine {
 
     this._createBubble(a, this._getSnippet(a.agent) || a.agent.name + ' working...');
     this._createBubble(b, this._getSnippet(b.agent) || b.agent.name + ' working...');
+
+    const baseY = MEETING_BUBBLE_ANCHOR_Y;
+    const sx = MEETING_BUBBLE_SPREAD_X;
+    const sy = MEETING_BUBBLE_STAGGER_Y;
+    if (a.container.x <= b.container.x) {
+      a.bubble.x = -sx;
+      b.bubble.x = sx;
+      a.bubble.y = baseY - sy;
+      b.bubble.y = baseY + sy;
+    } else {
+      a.bubble.x = sx;
+      b.bubble.x = -sx;
+      a.bubble.y = baseY + sy;
+      b.bubble.y = baseY - sy;
+    }
   }
 
   _updatePatrol(npc, delta) {
@@ -3406,7 +3907,7 @@ export default class GameEngine {
       case 'walking': {
         if (!npc.path || npc.pathIdx >= npc.path.length) {
           npc.aiState = 'idle';
-          npc.idleTimer = 0.06 + Math.random() * 0.12;
+          npc.idleTimer = 2.0 + Math.random() * 4.0;
           npc._curDir = 'idle'; npc._failedPaths = 0;
           npc._stuckFrames = 0;
           this._setWorkingPauseSprite(npc, true);
@@ -3422,7 +3923,7 @@ export default class GameEngine {
         if (dist < 1) {
           npc.container.x = tpx.x; npc.container.y = tpx.y;
           npc.pathIdx++;
-          npc._stuckFrames = 0;  // made progress → reset
+          npc._stuckFrames = 0;
         } else {
           // Stuck detection: only while actively walking
           const mdx = npc.container.x - npc._lastX;
@@ -3436,14 +3937,24 @@ export default class GameEngine {
         npc._lastX = npc.container.x;
         npc._lastY = npc.container.y;
 
-        // If stuck for >5 seconds (~300 frames), find a new path
-        if (npc._stuckFrames > 300) {
-          npc.path = null;
-          npc.aiState = 'idle';
-          npc.idleTimer = 0.12 + Math.random() * 0.2;
+        if (npc._stuckFrames > 90) {
           npc._stuckFrames = 0;
           npc._failedPaths++;
-          this._setWorkingPauseSprite(npc, true);
+          if (npc._failedPaths > 6) {
+            npc.aiState = 'idle';
+            npc.idleTimer = 0.8 + Math.random() * 1.2;
+            npc.path = null;
+            npc._failedPaths = 0;
+            this._setWorkingPauseSprite(npc, true);
+            break;
+          }
+          const rerouted = this._queueRunningPath(npc);
+          if (!rerouted) {
+            npc.aiState = 'idle';
+            npc.idleTimer = 0.3 + Math.random() * 0.4;
+            npc.path = null;
+            this._setWorkingPauseSprite(npc, true);
+          }
           break;
         }
 
@@ -3462,7 +3973,7 @@ export default class GameEngine {
         if (npc.meetingTimer <= 0) {
           this._setMeetingPairCooldown(npc, npc.meetingPartner);
           this._removeBubble(npc);
-          npc.aiState = 'idle'; npc.idleTimer = 0.12 + Math.random() * 0.3;
+          npc.aiState = 'idle'; npc.idleTimer = 1.5 + Math.random() * 2.5;
           npc._curDir = 'idle'; npc._failedPaths = 0;
           this._setWorkingPauseSprite(npc, true);
           npc.meetingPartner = null;
@@ -3492,124 +4003,19 @@ export default class GameEngine {
     this._guardToken++;
     const token = this._guardToken;
     if (next) {
+      this._guardPendingSnapshot.clear();
       this._deployGuards(token);
-      this._checkGuardApi(token);
     } else {
-      this._unfreezeAllNpcs();
+      this._guardPendingSnapshot.clear();
       this._startRecallGuards();
-    }
-  }
-
-  async _checkGuardApi(token) {
-    if (this._guardChecking) return;
-    this._guardChecking = true;
-    try {
-      const agentIds = (this._agents || []).map((a) => a.id).filter(Boolean);
-      const checks = agentIds.map((sid) =>
-        fetch(`/api/guard/check/${sid}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: 'base' }),
-        })
-          .then((r) => (r.ok ? r.json() : null))
-          .then((data) => {
-            if (!data || !Array.isArray(data) || !data.length) return null;
-            return { session_id: sid, verdict: data[0].verdict };
-          })
-          .catch(() => null)
-      );
-      const results = await Promise.all(checks);
-      if (token !== this._guardToken || !this.guardEnabled) return;
-      this._applyGuardResults(results.filter(Boolean));
-    } catch (err) {
-      console.warn('[Guard] API check failed:', err);
-    } finally {
-      this._guardChecking = false;
-    }
-  }
-
-  _applyGuardResults(results) {
-    this._guardUnsafeIds.clear();
-    for (const r of results) {
-      if (r.verdict === 'unsafe') {
-        this._guardUnsafeIds.add(r.session_id);
-      }
-    }
-
-    for (const npc of this.npcs) {
-      if (!npc?.agent) continue;
-      if (this._guardUnsafeIds.has(npc.agent.id)) {
-        this._freezeNpc(npc);
-      }
-    }
-
-    this._reassignGuards();
-  }
-
-  _freezeNpc(npc) {
-    npc._guardFrozen = true;
-    if (npc.mode === 'pathfind') {
-      npc.aiState = 'frozen';
-      npc.path = null;
-    }
-    npc.sprite.textures = npc.frames.idle;
-    npc.sprite.play();
-
-    npc.hasIssue = true;
-    this._ensureIssueVisuals(npc);
-  }
-
-  _unfreezeNpc(npc) {
-    if (!npc._guardFrozen) return;
-    npc._guardFrozen = false;
-
-    if (npc.mode === 'pathfind') {
-      npc.aiState = 'idle';
-      npc.idleTimer = 1 + Math.random() * 2;
-    }
-
-    if (npc._pendingFrozen || this._isPendingApproval(npc.agent)) {
-      this._setPendingNpcState(npc, true);
-      return;
-    }
-    this._clearIssueVisuals(npc);
-    npc.hasIssue = false;
-  }
-
-  _unfreezeAllNpcs() {
-    this._guardUnsafeIds.clear();
-    for (const npc of this.npcs) {
-      if (npc) this._unfreezeNpc(npc);
-    }
-  }
-
-  _reassignGuards() {
-    const issueTargets = this._getIssueTargets();
-    const escorted = new Set();
-    for (const unit of this.guardUnits) {
-      if (unit.role === 'escort' && unit.targetNpc?.container?.parent) {
-        escorted.add(unit.targetNpc.container);
-      }
-    }
-    const free = issueTargets.filter((t) => !escorted.has(t.container));
-    let fi = 0;
-    for (const unit of this.guardUnits) {
-      if (fi >= free.length) break;
-      if (unit.role === 'patrol') {
-        unit.role = 'escort';
-        unit.targetNpc = free[fi++];
-        unit.patrolTarget = null;
-      }
     }
   }
 
   _getGuardPortalPoint() {
     if (this._guardPortalPoint) return this._guardPortalPoint;
-    this._guardPortalPoint = {
-      // Left-middle office area in town map
-      x: Math.round(this.sceneW * 0.205),
-      y: Math.round(this.sceneH * 0.67),
-    };
+    const absX = Math.round(this.sceneW * 0.205) - this._worldOffsetX;
+    const absY = Math.round(this.sceneH * 0.67) - this._worldOffsetY;
+    this._guardPortalPoint = { x: absX, y: absY };
     return this._guardPortalPoint;
   }
 
@@ -3687,18 +4093,10 @@ export default class GameEngine {
     };
   }
 
-  _getIssueTargets() {
-    const issueNpcs = this.npcs.filter((n) => n && this._isIssueAgent(n.agent));
-    const targets = issueNpcs.map((n) => ({ container: n.container }));
-    if (this.pendingNpc?.container) targets.push({ container: this.pendingNpc.container });
-    return targets;
-  }
-
-  _isIssueAgent(agent) {
-    if (!agent) return false;
-    if (this._guardUnsafeIds.has(agent.id)) return true;
-    const latest = this._agentsById.get(agent.id) || agent;
-    return this._isPendingStatus(latest.status) || latest.status === 'error' || this._waitingAgents.has(agent.id);
+  _getPendingNpcTargets() {
+    return this.npcs
+      .filter((n) => n?.agent && this._isPendingApproval(n.agent))
+      .map((n) => ({ container: n.container, npcId: n.agent.id }));
   }
 
   _deployGuards(token) {
@@ -3707,16 +4105,19 @@ export default class GameEngine {
     this._guardRecalling = false;
     this._guardPortalPlaying = false;
     const spawn = this._getGuardSpawnPoint();
-    const issueTargets = this._getIssueTargets();
-    const guardCount = Math.max(2, issueTargets.length + 2);
+    const pendingTargets = this._getPendingNpcTargets();
+    const guardCount = 2 + pendingTargets.length;
+
+    this._guardPendingSnapshot.clear();
+    for (const t of pendingTargets) this._guardPendingSnapshot.add(t.npcId);
 
     const units = [];
     for (let i = 0; i < guardCount; i++) {
       const unit = this._createGuardUnit(spawn.x + (Math.random() * 8 - 4), spawn.y + (Math.random() * 4 - 2));
       unit.container.visible = false;
-      if (i < issueTargets.length) {
+      if (i < pendingTargets.length) {
         unit.role = 'escort';
-        unit.targetNpc = issueTargets[i];
+        unit.targetNpc = pendingTargets[i];
       } else {
         unit.role = 'patrol';
       }
@@ -3775,16 +4176,17 @@ export default class GameEngine {
       if (tile) return this.pathfinder.tileToPixel(tile.x, tile.y);
     }
     return {
-      x: Math.round(this.sceneW * (0.1 + Math.random() * 0.8)),
-      y: Math.round(this.sceneH * (0.18 + Math.random() * 0.65)),
+      x: Math.round(this.sceneW * (0.1 + Math.random() * 0.8)) - this._worldOffsetX,
+      y: Math.round(this.sceneH * (0.18 + Math.random() * 0.65)) - this._worldOffsetY,
     };
   }
 
   _updateGuards(delta) {
-    if (!this.guardUnits.length) return;
-    const issueTargets = this._getIssueTargets();
-    let recallReadyCount = 0;
+    if (!this.guardEnabled && !this.guardUnits.length) return;
 
+    if (this.guardEnabled) this._syncGuardRoster();
+
+    const returning = [];
     for (const unit of this.guardUnits) {
       if (!unit?.container?.parent || !unit.container.visible) continue;
 
@@ -3796,8 +4198,6 @@ export default class GameEngine {
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist <= 2.2) {
           unit.arrivedForRecall = true;
-          unit.body.textures = this._guardIdleFrames.length ? this._guardIdleFrames : unit.body.textures;
-          if (this._guardIdleFrames.length) unit.body.play();
         } else {
           unit.arrivedForRecall = false;
           const step = Math.min((unit.speed + 0.18) * delta, dist);
@@ -3810,17 +4210,15 @@ export default class GameEngine {
           }
           unit.container.zIndex = Math.round(unit.container.y) + 1;
         }
-        if (unit.arrivedForRecall) recallReadyCount++;
+        if (unit.arrivedForRecall) returning.push(unit);
         continue;
       }
 
       if (!this.guardEnabled) continue;
 
-      if (unit.role === 'escort') {
-        if (!unit.targetNpc?.container?.parent) {
-          unit.targetNpc = issueTargets[0] || null;
-          if (!unit.targetNpc) unit.role = 'patrol';
-        }
+      if (unit.role === 'escort' && !unit.targetNpc?.container?.parent) {
+        unit.role = 'patrol';
+        unit.targetNpc = null;
       }
 
       let tx = unit.container.x;
@@ -3855,19 +4253,126 @@ export default class GameEngine {
       unit.container.zIndex = Math.round(unit.container.y) + 1;
     }
 
-    if (this._guardRecalling && !this._guardPortalPlaying && this.guardUnits.length > 0 && recallReadyCount >= this.guardUnits.length) {
-      this._guardPortalPlaying = true;
+    // Despawn individual returning guards that arrived at the portal (with animation)
+    if (returning.length && !this._guardPortalPlaying && !this._guardRecalling) {
       const gate = this._getGuardPortalPoint();
+      this._guardPortalPlaying = true;
+      for (const unit of returning) unit.container.visible = false;
       this._playGuardPortal(gate.x, gate.y).finally(() => {
-        for (const unit of this.guardUnits) {
+        for (const unit of returning) {
           if (unit.container.parent) unit.container.parent.removeChild(unit.container);
           unit.container.destroy({ children: true });
         }
-        this.guardUnits = [];
-        this._guardRecalling = false;
+        this.guardUnits = this.guardUnits.filter((u) => !returning.includes(u));
         this._guardPortalPlaying = false;
       });
     }
+
+    // Full recall (guard disabled): wait for all to arrive then portal out
+    if (this._guardRecalling && !this._guardPortalPlaying && this.guardUnits.length > 0) {
+      const allHome = this.guardUnits.every((u) => u.arrivedForRecall || !u.container?.visible);
+      if (allHome) {
+        this._guardPortalPlaying = true;
+        const gate = this._getGuardPortalPoint();
+        this._playGuardPortal(gate.x, gate.y).finally(() => {
+          for (const unit of this.guardUnits) {
+            if (unit.container.parent) unit.container.parent.removeChild(unit.container);
+            unit.container.destroy({ children: true });
+          }
+          this.guardUnits = [];
+          this._guardRecalling = false;
+          this._guardPortalPlaying = false;
+        });
+      }
+    }
+  }
+
+  _syncGuardRoster() {
+    if (this._guardPortalPlaying) return;
+    const pendingTargets = this._getPendingNpcTargets();
+    const currentPendingIds = new Set(pendingTargets.map((t) => t.npcId));
+
+    const escortedIds = new Set();
+    for (const unit of this.guardUnits) {
+      if (unit.role !== 'escort' || !unit.targetNpc?.npcId) continue;
+      if (!currentPendingIds.has(unit.targetNpc.npcId)) {
+        // This NPC is no longer pending — send guard back immediately
+        unit.role = 'returning';
+        const gate = this._getGuardPortalPoint();
+        unit.returnTarget = { x: gate.x + (Math.random() * 16 - 8), y: gate.y };
+        unit.targetNpc = null;
+      } else {
+        escortedIds.add(unit.targetNpc.npcId);
+      }
+    }
+
+    // Find pending NPCs that don't have an escort yet
+    const unescorted = pendingTargets.filter((t) => !escortedIds.has(t.npcId));
+
+    // Assign nearest patrol guard to each unescorted pending NPC
+    for (const target of unescorted) {
+      const patrols = this.guardUnits.filter((u) => u.role === 'patrol' && u.container?.visible);
+      if (patrols.length > 0) {
+        let nearest = patrols[0];
+        let bestDist = Infinity;
+        for (const p of patrols) {
+          const dx = p.container.x - target.container.x;
+          const dy = p.container.y - target.container.y;
+          const d = dx * dx + dy * dy;
+          if (d < bestDist) { bestDist = d; nearest = p; }
+        }
+        nearest.role = 'escort';
+        nearest.targetNpc = target;
+        nearest.patrolTarget = null;
+      }
+    }
+
+    // Ensure we have at least 2 patrol guards + 1 per pending
+    const activeUnits = this.guardUnits.filter((u) => u.role !== 'returning');
+    const patrolCount = activeUnits.filter((u) => u.role === 'patrol').length;
+    const escortCount = activeUnits.filter((u) => u.role === 'escort').length;
+    const desiredTotal = 2 + currentPendingIds.size;
+    const deficit = desiredTotal - (patrolCount + escortCount);
+
+    if (deficit > 0) {
+      this._spawnExtraGuards(deficit, unescorted);
+    }
+
+    this._guardPendingSnapshot = currentPendingIds;
+  }
+
+  _spawnExtraGuards(count, unescortedTargets) {
+    if (!this.app || !this.guardLayer || this._guardPortalPlaying) return;
+    const spawn = this._getGuardSpawnPoint();
+    const token = this._guardToken;
+    const units = [];
+    for (let i = 0; i < count; i++) {
+      const unit = this._createGuardUnit(spawn.x + (Math.random() * 8 - 4), spawn.y + (Math.random() * 4 - 2));
+      unit.container.visible = false;
+      if (i < unescortedTargets.length) {
+        unit.role = 'escort';
+        unit.targetNpc = unescortedTargets[i];
+      } else {
+        unit.role = 'patrol';
+      }
+      units.push(unit);
+      this.guardUnits.push(unit);
+    }
+    this._guardPortalPlaying = true;
+    this._playGuardPortal(spawn.x, spawn.y).then(() => {
+      this._guardPortalPlaying = false;
+      for (const unit of units) {
+        if (!this.guardEnabled || token !== this._guardToken) {
+          if (unit.container.parent) unit.container.parent.removeChild(unit.container);
+          unit.container.destroy({ children: true });
+          continue;
+        }
+        unit.container.visible = true;
+      }
+      if (!this.guardEnabled || token !== this._guardToken) {
+        this.guardUnits = this.guardUnits.filter((u) => !units.includes(u));
+      }
+    });
   }
 
   // ─── Data Helpers ─────────────────────────────────────────────
@@ -3913,20 +4418,18 @@ export default class GameEngine {
     this._events = events;
     this._agentsById = new Map((agents || []).map((a) => [a.id, a]));
     this._indexEvents(events);
-    this._meetingCooldowns.clear();
     if (this._shouldRebuildScene(agents)) {
-      this._clearNpcScene();
-      this._renderNpcScene(agents);
-      this._syncPendingNpcStates();
+      this._incrementalUpdateScene(agents);
       this._syncShowNpcSpriteFromScene();
     } else {
       this._refreshNpcDataInPlace(agents, events);
     }
-    if (this.guardEnabled) this._deployGuards(this._guardToken);
   }
 
   /** Clean up PixiJS resources. */
   destroy() {
+    this._cancelFieldNpcDialogue();
+    this._destroyFieldNpcDialogueLayer();
     this._clearCursorStateTimer();
     this._setCursorState('normal');
     if (this._windowPointerMove) window.removeEventListener('pointermove', this._windowPointerMove);

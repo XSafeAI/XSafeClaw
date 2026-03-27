@@ -2,9 +2,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import GameCanvas from './components/GameCanvas';
 import Tooltip from './components/Tooltip';
 import AgentCard from './components/AgentCard';
-import PendingPopup from './components/PendingPopup';
 import TownConsole from './components/TownConsole';
-import { DEFAULT_MAP_CONFIG, MAP_VARIANTS, MUSIC_TRACKS } from './config/constants';
+import { DEFAULT_MAP_CONFIG, MAP_VARIANTS, MUSIC_TRACKS, USE_AGENT_TOWN_MOCK } from './config/constants';
 import './components/TownConsole.css';
 const AgentJourney = lazy(() => import('./components/AgentJourney'));
 
@@ -17,7 +16,6 @@ const MAP_SCALE_BOOST = 1.8;
 export default function App() {
   const [tooltip, setTooltip]       = useState(null);
   const [agentCard, setAgentCard]   = useState(null);
-  const [showPopup, setShowPopup]   = useState(false);
   const [journeyData, setJourneyData] = useState(null);
   const [guardEnabled, setGuardEnabled] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
@@ -26,6 +24,7 @@ export default function App() {
   const [musicEnabled, setMusicEnabled] = useState(true);
   const [musicVolume, setMusicVolume] = useState(0.42);
   const [cursorState, setCursorState] = useState('normal');
+  const [canvasRefreshTrigger, setCanvasRefreshTrigger] = useState(0);
   const audioRef = useRef(null);
   const [mapSize, setMapSize] = useState(null);
   const [viewport, setViewport] = useState(() => ({
@@ -100,16 +99,30 @@ export default function App() {
     setAgentCard(data);
   }, []);
 
-  const handlePendingClick = useCallback(() => {
-    setShowPopup(true);
-  }, []);
-
   const handleCursorStateChange = useCallback((nextState) => {
     setCursorState(nextState || 'normal');
   }, []);
 
+  useEffect(() => {
+    if (USE_AGENT_TOWN_MOCK) return;
+    fetch('/api/guard/enabled', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => { if (typeof d.enabled === 'boolean') setGuardEnabled(d.enabled); })
+      .catch(() => {});
+  }, []);
+
   const handleToggleGuard = useCallback(() => {
-    setGuardEnabled((value) => !value);
+    setGuardEnabled((prev) => {
+      const next = !prev;
+      if (!USE_AGENT_TOWN_MOCK) {
+        fetch('/api/guard/enabled', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: next }),
+        }).catch(() => { setGuardEnabled(prev); });
+      }
+      return next;
+    });
   }, []);
 
   const handleCloseCard = useCallback(() => {
@@ -131,16 +144,6 @@ export default function App() {
   const mapW = Math.round(mapBaseW * scale * MAP_SCALE_BOOST);
   const mapH = Math.round(mapBaseH * scale * MAP_SCALE_BOOST);
   const topGap = Math.round(MAP_TOP_GAP * scale);
-
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        setConsoleOpen(false);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
 
   useEffect(() => {
     setMapSize(null);
@@ -218,27 +221,72 @@ export default function App() {
     syncAudioTrack(nextTrack, musicEnabled, musicVolume, true);
   }, [musicEnabled, musicVolume, syncAudioTrack]);
 
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const tag = event.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (event.target.isContentEditable || event.target.closest('[contenteditable]')) return;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (window.getSelection()?.toString()) return;
+      if (event.key === 'Escape') { setConsoleOpen(false); return; }
+      if (event.key === 'c' || event.key === 'C') { setConsoleOpen((v) => !v); return; }
+      if (event.key === 'm' || event.key === 'M') { handleToggleMusic(); return; }
+      if (event.key === 'g' || event.key === 'G') { handleToggleGuard(); return; }
+      if (event.key === 'h' || event.key === 'H') { window.location.href = '/'; return; }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleToggleMusic, handleToggleGuard]);
+
   return (
-    <div className={`app-layout agent-town-cursor cursor-${cursorState}`} ref={layoutRef}>
+    <div
+      className={`app-layout agent-town-cursor cursor-${cursorState}`}
+      data-map-theme={activeMapConfig.id}
+      ref={layoutRef}
+    >
       <audio ref={audioRef} preload="auto" hidden />
-      <div className="town-quick-actions">
+      <nav className="town-hud">
         <button
           type="button"
-          className={`town-console-toggle ${consoleOpen ? 'is-open' : ''}`}
+          className={`town-hud-btn town-hud-console ${consoleOpen ? 'is-on' : ''}`}
           onClick={() => setConsoleOpen((prev) => !prev)}
+          title={`${consoleOpen ? 'Close' : 'Open'} Console  [C]`}
         >
-          <span className="town-console-toggle-dot" />
-          <span className="town-console-toggle-text">{consoleOpen ? 'Close Console' : 'Open Console'}</span>
+          <span className="town-hud-pip" />
+          <span className="town-hud-icon">☰</span>
+          <span className="town-hud-label">CMD</span>
         </button>
         <button
           type="button"
-          className={`town-guard-toggle ${guardEnabled ? 'is-active' : ''}`}
-          onClick={handleToggleGuard}
+          className={`town-hud-btn town-hud-music ${musicEnabled ? 'is-on' : ''}`}
+          onClick={handleToggleMusic}
+          title={`${musicEnabled ? 'Mute' : 'Play'} Music  [M]`}
         >
-          <span className="town-guard-toggle-label">Guard</span>
-          <span className="town-guard-toggle-state">{guardEnabled ? 'ON' : 'OFF'}</span>
+          <span className="town-hud-pip" />
+          <span className="town-hud-icon">{musicEnabled ? '♫' : '♪'}</span>
+          <span className="town-hud-label">BGM</span>
         </button>
-      </div>
+        <button
+          type="button"
+          className={`town-hud-btn town-hud-guard ${guardEnabled ? 'is-on' : ''}`}
+          onClick={handleToggleGuard}
+          title={`${guardEnabled ? 'Disable' : 'Enable'} Guard  [G]`}
+        >
+          <span className="town-hud-pip" />
+          <span className="town-hud-icon">⚔</span>
+          <span className="town-hud-label">GRD</span>
+        </button>
+        <span className="town-hud-sep" />
+        <a
+          className="town-hud-btn town-hud-home"
+          href="/monitor"
+          title="Back to Monitor  [H]"
+        >
+          <span className="town-hud-pip" />
+          <span className="town-hud-icon">⌂</span>
+          <span className="town-hud-label">HOME</span>
+        </a>
+      </nav>
 
       <div
         className="content-stack"
@@ -255,11 +303,11 @@ export default function App() {
             onNpcHover={handleNpcHover}
             onNpcLeave={handleNpcLeave}
             onNpcClick={handleNpcClick}
-            onPendingClick={handlePendingClick}
             onCursorStateChange={handleCursorStateChange}
             guardEnabled={guardEnabled}
             onLayoutChange={handleLayoutChange}
             mapConfig={activeMapConfig}
+            refreshTrigger={canvasRefreshTrigger}
           />
         </div>
       </div>
@@ -288,6 +336,7 @@ export default function App() {
               onToggleMusic={handleToggleMusic}
               musicVolume={musicVolume}
               onChangeMusicVolume={setMusicVolume}
+              onDataChanged={() => setCanvasRefreshTrigger((n) => n + 1)}
             />
           </div>
         </div>
@@ -301,10 +350,6 @@ export default function App() {
           onClose={handleCloseCard}
           onJourney={handleOpenJourney}
         />
-      )}
-
-      {showPopup && (
-        <PendingPopup onClose={() => setShowPopup(false)} />
       )}
 
       {journeyData && (

@@ -449,21 +449,28 @@ class MessageSyncService:
         role = msg_data.get("role", "unknown")
         content = msg_data.get("content", [])
         
-        # Extract text content and tool calls
+        # Extract text content (join all text blocks) and tool calls
         content_text = ""
         tool_calls_data = []
-        
-        if content and isinstance(content, list):
+        text_parts: list[str] = []
+
+        if isinstance(content, list):
             for item in content:
                 if isinstance(item, dict):
                     if item.get("type") == "text":
-                        content_text = item.get("text", "")
+                        t = item.get("text", "")
+                        if t:
+                            text_parts.append(str(t))
                     elif item.get("type") == "toolCall":
                         # Extract tool call info from assistant message
                         tool_calls_data.append(item)
-        
-        # Clean NULL bytes from content_text (PostgreSQL doesn't support them)
-        content_text = self._clean_null_bytes(content_text)
+        elif isinstance(content, str) and content.strip():
+            text_parts.append(content.strip())
+
+        if text_parts:
+            content_text = self._clean_null_bytes(" ".join(text_parts))
+        else:
+            content_text = ""
         
         # Clean NULL bytes from JSON data
         cleaned_content = self._clean_null_bytes_from_json(content) if content else None

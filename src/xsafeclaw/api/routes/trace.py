@@ -3,10 +3,10 @@
 Returns a unified { agents, events } payload that maps directly
 to the data model expected by the PixiJS Agent Town visualization.
 
-Agent status uses the same buckets as the dashboard monitor:
-- working: active + today buckets combined
-- pending: guard-blocked subset that still needs human attention
-- offline: all remaining sessions from the monitor's "all" set
+Session agent status (three states, same rules as dashboard docs):
+- pending: unresolved guard approval AND last activity within 24h
+- working: last activity within 24h, excluding pending
+- offline: no activity within 24h (pending is never classified here)
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from ...database import get_db
 from ...models import Message, Session, ToolCall
 from ...models.event import Event
 from ...services import guard_service
-from ...services.guard_service import GUARD_REJECTION_MARKER
 
 router = APIRouter()
 
@@ -59,16 +58,40 @@ def _classify_sessions(
     return active, today
 
 
+def _session_ids_with_unresolved_guard_approval(
+    session_map: dict[str, Session],
+    session_store_index: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Session IDs that have at least one unresolved in-memory guard approval (session_key match)."""
+    pending_keys = {
+        p.session_key
+        for p in guard_service.get_all_pending()
+        if not p.resolved and p.session_key
+    }
+    if not pending_keys:
+        return set()
+    out: set[str] = set()
+    for sid, sess in session_map.items():
+        sk = sess.session_key
+        if sk and sk in pending_keys:
+            out.add(sid)
+    for sid, meta in session_store_index.items():
+        sk = meta.get("session_key")
+        if sk and sk in pending_keys:
+            out.add(sid)
+    return out
+
+
 def _agent_status_from_buckets(
     session_id: str,
-    active_ids: set[str],
     today_ids: set[str],
-    pending_ids: set[str],
+    guard_unresolved_session_ids: set[str],
 ) -> str:
-    """Map session buckets to Agent Town statuses."""
-    if session_id in pending_ids and (session_id in active_ids or session_id in today_ids):
+    """pending = guard unresolved ∧ 24h active; working = 24h active \\ pending; offline = else."""
+    in_today = session_id in today_ids
+    if session_id in guard_unresolved_session_ids and in_today:
         return "pending"
-    if session_id in active_ids or session_id in today_ids:
+    if in_today:
         return "working"
     return "offline"
 
@@ -147,6 +170,10 @@ def _build_activity_heat_24h(
     *,
     now: dt.datetime,
 ) -> list[int]:
+    """Count ``Event.started_at`` per hour over the last 24h (Monitor timeline semantics).
+
+    Bin ``i`` gets events with ``floor((now-ts)/1h) == 23 - i`` (``i=0`` oldest hour slice, ``i=23`` last hour).
+    """
     bins = [0] * 24
     for ts in timestamps:
         utc_ts = _to_utc(ts)
@@ -209,6 +236,8 @@ async def get_trace(
     corresponds to a database session and each *event* is one
     user-message turn with its full conversation chain.
 
+    Per-turn ``status`` is taken **only** from the persisted :class:`~...models.event.Event`
+    row (same field as ``GET /api/events``), so Agent Town counts match Monitor.
     Session status buckets use the **events** table and mirror the monitor's
     active / today / all semantics. "All" means every session that has events.
     """
@@ -258,11 +287,13 @@ async def get_trace(
         event_timestamps_by_session.setdefault(row.session_id, []).append(row.started_at)
         dialog_turns_by_session[row.session_id] = dialog_turns_by_session.get(row.session_id, 0) + 1
 
-    # ── Guard: sessions flagged as unsafe ──────────────────────────
+    # ── Guard: unresolved approvals (in-memory queue) + session store ─
     latest_guard_by_session = guard_service.get_latest_results_by_session()
-    pending_ids = guard_service.get_pending_session_ids()
     all_pending_items = guard_service.get_all_pending()
     session_store_index = _load_session_store_index()
+    guard_unresolved_session_ids = _session_ids_with_unresolved_guard_approval(
+        session_map, session_store_index
+    )
     intervention_counts_by_session_key: dict[str, int] = {}
     for pending_item in all_pending_items:
         if not pending_item.session_key:
@@ -279,7 +310,7 @@ async def get_trace(
         s = session_map.get(sid)
         if s is None:
             continue
-        status = _agent_status_from_buckets(sid, active_ids, today_ids, pending_ids)
+        status = _agent_status_from_buckets(sid, today_ids, guard_unresolved_session_ids)
         session_store = session_store_index.get(sid, {})
         session_key = session_store.get("session_key") or s.session_key or ""
         activity_heat_24h = _build_activity_heat_24h(
@@ -335,6 +366,14 @@ async def get_trace(
     for m in all_messages:
         msgs_by_session.setdefault(m.session_id, []).append(m)
 
+    # Event.id == triggering user_message_id — same status Monitor and /api/events use
+    event_status_result = await db.execute(
+        select(Event.id, Event.status).where(Event.session_id.in_(session_ids))
+    )
+    event_status_by_user_message_id: dict[str, str] = {
+        row.id: row.status for row in event_status_result.all()
+    }
+
     # ── 7. Build events (one per user-message turn) ─────────────────
     events: list[dict[str, Any]] = []
     event_counter = 0
@@ -368,8 +407,6 @@ async def get_trace(
 
             conversations: list[dict[str, Any]] = []
             tool_names: set[str] = set()
-            has_error = False
-            has_guard_rejection = False
 
             for msg in turn:
                 role = "tool" if msg.role == "toolResult" else msg.role
@@ -391,22 +428,11 @@ async def get_trace(
 
                 for tc in msg_tool_calls:
                     tool_names.add(tc.tool_name)
-                    if tc.is_error:
-                        if tc.result_text and GUARD_REJECTION_MARKER in tc.result_text.lower():
-                            has_guard_rejection = True
-                        else:
-                            has_error = True
 
             event_type = ", ".join(sorted(tool_names)) if tool_names else "chat"
 
-            if has_error:
-                status = "error"
-            elif has_guard_rejection:
-                status = "fail"
-            elif end_time and end_time != start_time:
-                status = "completed"
-            else:
-                status = "running"
+            user_message_id = turn[0].message_id
+            status = event_status_by_user_message_id.get(user_message_id, "running")
 
             duration = None
             if start_time and end_time:
@@ -418,14 +444,11 @@ async def get_trace(
                     pass
 
             guard_result = None
-            is_latest_turn = turn_index == latest_turn_index
             if (
-                is_latest_turn
-                and session_id in active_ids
+                status == "pending"
+                and turn_index == latest_turn_index
                 and session_guard
-                and session_id in pending_ids
             ):
-                status = "pending"
                 guard_result = {
                     "verdict": session_guard.verdict,
                     "mode": session_guard.mode,

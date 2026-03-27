@@ -437,12 +437,28 @@ function normalizeTownStatus(status) {
   return status || 'offline';
 }
 
+/**
+ * Event rows use the same `status` strings as GET /api/events (Event.status).
+ * Do not apply agent-roster mapping (e.g. running → working) — that would break
+ * Monitor / Task Ledger parity for the five dashboard buckets.
+ */
+function normalizeDashboardEventStatus(status) {
+  if (status == null || status === '') return 'running';
+  const s = String(status).toLowerCase();
+  if (s === 'ok') return 'completed';
+  if (s === 'fail') return 'failed';
+  return String(status);
+}
+
 export function normalizeTownData(data) {
   const agents = Array.isArray(data?.agents)
     ? data.agents.map((agent) => ({ ...agent, status: normalizeTownStatus(agent.status) }))
     : [];
   const events = Array.isArray(data?.events)
-    ? data.events.map((event) => ({ ...event, status: normalizeTownStatus(event.status) }))
+    ? data.events.map((event) => ({
+      ...event,
+      status: normalizeDashboardEventStatus(event.status),
+    }))
     : [];
   return { agents, events };
 }

@@ -97,61 +97,122 @@ export default class PathFinder {
    * A* search from (sx,sy) to (ex,ey) in tile coordinates.
    * Returns array of {x,y} tile coords including start and end, or null.
    */
-  findPath(sx, sy, ex, ey) {
+  findPath(sx, sy, ex, ey, maxIter = 4000) {
     if (!this.isWalkable(sx, sy) || !this.isWalkable(ex, ey)) return null;
     if (sx === ex && sy === ey) return [{ x: sx, y: sy }];
 
-    const key = (x, y) => `${x},${y}`;
-    const heuristic = (ax, ay, bx, by) => Math.abs(ax - bx) + Math.abs(ay - by);
-    const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]]; // 4-directional
+    const cols = this.cols;
+    const idx = (x, y) => y * cols + x;
+    const heuristic = (ax, ay) => Math.abs(ax - ex) + Math.abs(ay - ey);
+    const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
-    const openMap   = new Map();
-    const closedSet = new Set();
-    const gScore    = new Map();
-    const parent    = new Map();
+    const gScore = new Map();
+    const parent = new Map();
+    const closed = new Set();
 
-    const sk = key(sx, sy);
-    gScore.set(sk, 0);
-    openMap.set(sk, { x: sx, y: sy, f: heuristic(sx, sy, ex, ey) });
-
-    while (openMap.size > 0) {
-      let bestKey = null, bestF = Infinity;
-      for (const [k, node] of openMap) {
-        if (node.f < bestF) { bestF = node.f; bestKey = k; }
+    const heap = [];
+    const push = (node) => {
+      heap.push(node);
+      let i = heap.length - 1;
+      while (i > 0) {
+        const pi = (i - 1) >> 1;
+        if (heap[pi].f <= heap[i].f) break;
+        [heap[pi], heap[i]] = [heap[i], heap[pi]];
+        i = pi;
       }
+    };
+    const pop = () => {
+      const top = heap[0];
+      const last = heap.pop();
+      if (heap.length > 0) {
+        heap[0] = last;
+        let i = 0;
+        while (true) {
+          let s = i, l = 2 * i + 1, r = l + 1;
+          if (l < heap.length && heap[l].f < heap[s].f) s = l;
+          if (r < heap.length && heap[r].f < heap[s].f) s = r;
+          if (s === i) break;
+          [heap[i], heap[s]] = [heap[s], heap[i]];
+          i = s;
+        }
+      }
+      return top;
+    };
 
-      const cur = openMap.get(bestKey);
-      openMap.delete(bestKey);
+    const si = idx(sx, sy);
+    gScore.set(si, 0);
+    push({ x: sx, y: sy, f: heuristic(sx, sy), i: si });
 
+    let iterations = 0;
+    while (heap.length > 0 && iterations++ < maxIter) {
+      const cur = pop();
       if (cur.x === ex && cur.y === ey) {
         const path = [];
-        let ck = key(ex, ey);
-        while (ck !== undefined) {
-          const [cx, cy] = ck.split(',').map(Number);
-          path.unshift({ x: cx, y: cy });
-          ck = parent.get(ck);
+        let ci = idx(ex, ey);
+        while (ci !== undefined) {
+          const cx = ci % cols, cy = (ci / cols) | 0;
+          path.push({ x: cx, y: cy });
+          ci = parent.get(ci);
         }
-        return path;
+        path.reverse();
+        return this._simplifyPath(path);
       }
 
-      closedSet.add(bestKey);
-      const curG = gScore.get(bestKey) || 0;
+      if (closed.has(cur.i)) continue;
+      closed.add(cur.i);
+      const curG = gScore.get(cur.i) || 0;
 
       for (const [dx, dy] of DIRS) {
         const nx = cur.x + dx, ny = cur.y + dy;
-        const nk = key(nx, ny);
-        if (closedSet.has(nk) || !this.isWalkable(nx, ny)) continue;
+        const ni = idx(nx, ny);
+        if (closed.has(ni) || !this.isWalkable(nx, ny)) continue;
 
         const g = curG + 1;
-        if (g < (gScore.get(nk) ?? Infinity)) {
-          parent.set(nk, bestKey);
-          gScore.set(nk, g);
-          openMap.set(nk, { x: nx, y: ny, f: g + heuristic(nx, ny, ex, ey) });
+        if (g < (gScore.get(ni) ?? Infinity)) {
+          parent.set(ni, cur.i);
+          gScore.set(ni, g);
+          push({ x: nx, y: ny, f: g + heuristic(nx, ny), i: ni });
         }
       }
     }
 
-    return null; // unreachable
+    return null;
+  }
+
+  _simplifyPath(path) {
+    if (path.length <= 2) return path;
+    const result = [path[0]];
+    for (let i = 1; i < path.length - 1; i++) {
+      const prev = result[result.length - 1];
+      const next = path[i + 1];
+      if ((path[i].x - prev.x) !== (next.x - path[i].x) ||
+          (path[i].y - prev.y) !== (next.y - path[i].y)) {
+        result.push(path[i]);
+      }
+    }
+    result.push(path[path.length - 1]);
+    return result;
+  }
+
+  /** Nearest walkable tile to (fx, fy) via BFS spiral. */
+  getNearestWalkable(fx, fy) {
+    if (this.isWalkable(fx, fy)) return { x: fx, y: fy };
+    const visited = new Set();
+    const queue = [{ x: fx, y: fy }];
+    visited.add(`${fx},${fy}`);
+    while (queue.length) {
+      const { x, y } = queue.shift();
+      for (const [dx, dy] of [[0,-1],[1,0],[0,1],[-1,0]]) {
+        const nx = x + dx, ny = y + dy;
+        const k = `${nx},${ny}`;
+        if (visited.has(k)) continue;
+        visited.add(k);
+        if (nx < 0 || nx >= this.cols || ny < 0 || ny >= this.rows) continue;
+        if (this.grid[ny][nx] === 0) return { x: nx, y: ny };
+        queue.push({ x: nx, y: ny });
+      }
+    }
+    return this.getRandomWalkable();
   }
 
   /** Random walkable tile. */

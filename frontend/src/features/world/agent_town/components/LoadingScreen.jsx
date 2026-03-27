@@ -2,7 +2,7 @@ export default function LoadingScreen({ progress, text }) {
   return (
     <div className="loading">
       <div className="loadingInner">
-        <div className="loadingTitle">AGENT TOWN</div>
+        <div className="loadingTitle">AGENT VALLEY</div>
         <div className="loadingBar">
           <div
             className="loadingFill"

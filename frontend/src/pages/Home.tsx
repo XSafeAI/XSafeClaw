@@ -44,7 +44,7 @@ export default function Home() {
   const navigate = useNavigate();
   const { t } = useI18n();
   const goToWorld = () => {
-    navigate('/agent-town');
+    navigate('/agent-valley');
   };
 
   return (
