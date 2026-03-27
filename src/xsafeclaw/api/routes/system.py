@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import os
 import re
 import select as _select
 import shutil
 import struct
-import termios
 import threading
 import uuid
 from pathlib import Path
@@ -19,6 +17,16 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import termios
+except ImportError:
+    termios = None
 
 router = APIRouter()
 
@@ -69,6 +77,36 @@ def _is_text_input_question(text: str) -> bool:
 
 # ── nvm / node helpers ────────────────────────────────────────────────────────
 _NVM_SCRIPT = Path.home() / ".nvm" / "nvm.sh"
+_PATH_SEP = os.pathsep
+_OPENCLAW_EXECUTABLES = (
+    ("openclaw.cmd", "openclaw.exe", "openclaw.bat", "openclaw.ps1", "openclaw")
+    if os.name == "nt"
+    else ("openclaw",)
+)
+
+
+def _is_runnable_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if os.name == "nt":
+        return True
+    return os.access(path, os.X_OK)
+
+
+def _pty_supported() -> bool:
+    return (
+        os.name != "nt"
+        and hasattr(os, "openpty")
+        and fcntl is not None
+        and termios is not None
+        and hasattr(termios, "TIOCSWINSZ")
+    )
+
+
+def _set_pty_size(fd: int, rows: int, cols: int) -> None:
+    if not _pty_supported():
+        return
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 def _build_env() -> dict:
     """Build an env dict that includes nvm Node 22 bin directory if available."""
@@ -83,17 +121,36 @@ def _build_env() -> dict:
             v22_bin = str(v22_dirs[0] / "bin")
             current_path = env.get("PATH", "")
             if v22_bin not in current_path:
-                env["PATH"] = v22_bin + ":" + current_path
+                env["PATH"] = v22_bin + _PATH_SEP + current_path
     return env
 
 def _find_openclaw() -> Optional[str]:
     """Locate the openclaw binary, checking nvm Node 22 paths first."""
     env = _build_env()
-    for d in env.get("PATH", "").split(":"):
-        candidate = Path(d) / "openclaw"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+    for d in env.get("PATH", "").split(_PATH_SEP):
+        if not d:
+            continue
+        for executable in _OPENCLAW_EXECUTABLES:
+            candidate = Path(d) / executable
+            if _is_runnable_file(candidate):
+                return str(candidate)
     return shutil.which("openclaw")
+
+
+def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
+    """Build a subprocess command that can launch OpenClaw across platforms."""
+    suffix = Path(openclaw_path).suffix.lower()
+    if suffix == ".ps1":
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            openclaw_path,
+            *args,
+        ]
+    return [openclaw_path, *args]
 
 def _find_node_version() -> str:
     """Return the currently accessible Node.js version string."""
@@ -445,26 +502,40 @@ async def onboard_start():
     env = _build_env()
     openclaw_path = _find_openclaw() or "openclaw"
 
-    # ── Create PTY pair ───────────────────────────────────────────────────
-    master_fd, slave_fd = os.openpty()
-    # Give the terminal a generous size so clack doesn't wrap strangely
-    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
-                struct.pack("HHHH", 50, 220, 0, 0))
+    master_fd: int | None = None
+    stdin_stream = None
 
-    proc = await asyncio.create_subprocess_exec(
-        openclaw_path, "onboard", "--install-daemon",
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        env=env,
-        close_fds=True,
-    )
-    os.close(slave_fd)  # parent no longer needs the slave end
+    if _pty_supported():
+        # Unix/macOS: keep the existing PTY flow so clack prompts behave normally.
+        master_fd, slave_fd = os.openpty()
+        _set_pty_size(slave_fd, 50, 220)
+
+        proc = await asyncio.create_subprocess_exec(
+            openclaw_path, "onboard", "--install-daemon",
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+    else:
+        # Windows fallback: use regular pipes so the API can still start and
+        # attempt interactive onboarding without importing Unix-only modules.
+        proc = await asyncio.create_subprocess_exec(
+            openclaw_path, "onboard", "--install-daemon",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+        stdin_stream = proc.stdin
 
     queue: asyncio.Queue = asyncio.Queue()
     _procs[proc_id] = {
         "proc":      proc,
         "master_fd": master_fd,
+        "stdin":     stdin_stream,
         "queue":     queue,
         "done":      False,
     }
@@ -629,33 +700,48 @@ async def onboard_start():
             if content:
                 queue.put_nowait(json.dumps({"type": "output", "text": line}))
 
-        # ── Dedicated reader thread ───────────────────────────────────────
-        # Runs blocking os.read() in its own daemon thread (not the asyncio
-        # thread pool), uses select() with a 0.5 s timeout so it never hangs,
-        # and forwards raw bytes to the asyncio coroutine via call_soon_threadsafe.
-        loop      = asyncio.get_event_loop()
+        # ── Raw byte reader ───────────────────────────────────────────────
+        # Unix/macOS keeps the PTY reader thread. Windows falls back to
+        # reading process stdout directly.
+        loop = asyncio.get_event_loop()
         raw_queue: asyncio.Queue = asyncio.Queue()
-        stop_evt  = threading.Event()
+        stop_evt = threading.Event()
 
-        def _pty_reader_thread():
-            try:
-                while not stop_evt.is_set():
-                    try:
-                        r, _, _ = _select.select([master_fd], [], [master_fd], 0.5)
-                    except (OSError, ValueError):
-                        break
-                    if r:
+        if master_fd is not None:
+            def _pty_reader_thread():
+                try:
+                    while not stop_evt.is_set():
                         try:
-                            data = os.read(master_fd, 4096)
-                            loop.call_soon_threadsafe(raw_queue.put_nowait, data)
-                        except OSError:
+                            r, _, _ = _select.select([master_fd], [], [master_fd], 0.5)
+                        except (OSError, ValueError):
                             break
-                    elif proc.returncode is not None:
-                        break
-            finally:
-                loop.call_soon_threadsafe(raw_queue.put_nowait, None)  # sentinel
+                        if r:
+                            try:
+                                data = os.read(master_fd, 4096)
+                                loop.call_soon_threadsafe(raw_queue.put_nowait, data)
+                            except OSError:
+                                break
+                        elif proc.returncode is not None:
+                            break
+                finally:
+                    loop.call_soon_threadsafe(raw_queue.put_nowait, None)
 
-        threading.Thread(target=_pty_reader_thread, daemon=True).start()
+            threading.Thread(target=_pty_reader_thread, daemon=True).start()
+        else:
+            async def _pipe_reader():
+                try:
+                    stdout = proc.stdout
+                    if stdout is None:
+                        return
+                    while True:
+                        data = await stdout.read(4096)
+                        if not data:
+                            break
+                        await raw_queue.put(data)
+                finally:
+                    await raw_queue.put(None)
+
+            asyncio.create_task(_pipe_reader())
 
         try:
             while True:
@@ -694,10 +780,11 @@ async def onboard_start():
                 _process_line(buf.strip())
             _flush_select()
             await proc.wait()
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
+            if master_fd is not None:
+                try:
+                    os.close(master_fd)
+                except OSError:
+                    pass
             _procs[proc_id]["done"] = True
             queue.put_nowait(json.dumps({
                 "type":      "done",
@@ -763,7 +850,8 @@ async def onboard_input(proc_id: str, body: OnboardInputRequest):
         raise HTTPException(status_code=404, detail="Process not found")
 
     mfd = _procs[proc_id].get("master_fd")
-    if mfd is None:
+    stdin_stream = _procs[proc_id].get("stdin")
+    if mfd is None and stdin_stream is None:
         raise HTTPException(status_code=400, detail="PTY not available")
 
     t     = body.text.strip()
@@ -800,7 +888,11 @@ async def onboard_input(proc_id: str, body: OnboardInputRequest):
         payload = (t + "\r").encode()
 
     try:
-        os.write(mfd, payload)
+        if mfd is not None:
+            os.write(mfd, payload)
+        else:
+            stdin_stream.write(payload)
+            await stdin_stream.drain()
         return {"ok": True, "sent": repr(payload)}
     except OSError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1123,21 +1215,46 @@ async def _run_openclaw_json(args: list[str], timeout: int = 30) -> dict | list 
     """Run an openclaw CLI command with --json and return parsed output."""
     openclaw_path = _find_openclaw()
     if not openclaw_path:
+        print(f"[openclaw-json] openclaw executable not found for args={args!r}")
         return None
     env = _build_env()
+    cmd = _build_openclaw_command(openclaw_path, [*args, "--json"])
     try:
         proc = await asyncio.create_subprocess_exec(
-            openclaw_path, *args, "--json",
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        if proc.returncode != 0:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout_text = (stdout or b"").decode("utf-8", errors="replace")
+        stderr_text = (stderr or b"").decode("utf-8", errors="replace")
+        raw = "\n".join(part for part in (stdout_text, stderr_text) if part).strip()
+        if not raw:
+            print(
+                f"[openclaw-json] empty output for cmd={cmd!r}, returncode={proc.returncode}"
+            )
             return None
-        raw = stdout.decode("utf-8", errors="replace")
-        return _extract_json_obj(raw)
-    except Exception:
+        try:
+            parsed = _extract_json_obj(raw)
+        except Exception as exc:
+            snippet = raw[:500].replace("\n", "\\n")
+            print(
+                f"[openclaw-json] failed to parse JSON for cmd={cmd!r}, "
+                f"returncode={proc.returncode}, error={exc}, output={snippet}"
+            )
+            return None
+        if proc.returncode != 0:
+            print(
+                f"[openclaw-json] non-zero exit for cmd={cmd!r}, returncode={proc.returncode}; "
+                "using parsed JSON payload anyway"
+            )
+        return parsed
+    except asyncio.TimeoutError:
+        print(f"[openclaw-json] timeout after {timeout}s for cmd={cmd!r}")
+        return None
+    except Exception as exc:
+        print(f"[openclaw-json] exec failed for cmd={cmd!r}: {exc}")
         return None
 
 
