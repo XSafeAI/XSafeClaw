@@ -328,6 +328,19 @@ function AgentDialogMessage({ msg }) {
         </div>
         <span className="agent-dialog-time">{fmtTime(msg.timestamp)}</span>
       </div>
+      {msg.images && msg.images.length > 0 && (
+        <div className="agent-dialog-images">
+          {msg.images.map((img, i) => (
+            <img
+              key={i}
+              src={img.dataUrl}
+              alt={`attachment ${i + 1}`}
+              className="agent-dialog-img-thumb"
+              onClick={() => window.open(img.dataUrl, '_blank')}
+            />
+          ))}
+        </div>
+      )}
       <div className="agent-dialog-text">
         {msg.pending ? (
           <div className="agent-dialog-typing">
@@ -387,7 +400,61 @@ export default function AgentCard({ data, onClose, onJourney }) {
   const [guardPending, setGuardPending] = useState([]);
   const [gpResolving, setGpResolving] = useState(null);
   const [gpExpandedId, setGpExpandedId] = useState(null);
+  const [pendingImages, setPendingImages] = useState([]);
+  const [fetchedTokens, setFetchedTokens] = useState(0);
+  const fileInputRef = useRef(null);
   const spriteUrl = `${CHAR_BASE}${charName}_idle_anim_32x32.png`;
+
+  useEffect(() => {
+    if (totalTokens > 0 || USE_AGENT_TOWN_MOCK || !agent?.id) return;
+    let cancelled = false;
+    fetch(`/api/events/?session_id=${encodeURIComponent(agent.id)}&limit=500`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        if (cancelled || !json?.events) return;
+        const sum = json.events.reduce((acc, evt) => acc + (evt.total_tokens || 0), 0);
+        setFetchedTokens(sum);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [agent?.id, totalTokens]);
+
+  const displayTokens = totalTokens > 0 ? totalTokens : fetchedTokens;
+
+  const MAX_IMAGES = 8;
+  const MAX_SINGLE_SIZE = 5 * 1024 * 1024;
+
+  const fileToBase64 = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        const base64 = dataUrl.split(',')[1] ?? '';
+        resolve({ dataUrl, base64 });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const addImages = useCallback(async (files) => {
+    const arr = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    if (arr.length === 0) return;
+    const remaining = MAX_IMAGES - pendingImages.length;
+    const toAdd = arr.slice(0, remaining);
+    const results = [];
+    for (const file of toAdd) {
+      if (file.size > MAX_SINGLE_SIZE) continue;
+      const { dataUrl, base64 } = await fileToBase64(file);
+      results.push({ id: makeId(), file, dataUrl, base64, mimeType: file.type });
+    }
+    if (results.length > 0) {
+      setPendingImages((prev) => [...prev, ...results]);
+    }
+  }, [pendingImages.length]);
+
+  const removeImage = useCallback((imgId) => {
+    setPendingImages((prev) => prev.filter((img) => img.id !== imgId));
+  }, []);
 
   const stateDot = state === 'working'
     ? 'dot-working'
@@ -575,13 +642,15 @@ export default function AgentCard({ data, onClose, onJourney }) {
   const handleSend = useCallback(async () => {
     if (!sessionKey || sending) return;
     const text = input.trim();
-    if (!text) return;
+    const imagesToSend = [...pendingImages];
+    if (!text && imagesToSend.length === 0) return;
 
     const userMsg = {
       id: makeId(),
       role: 'user',
-      content: text,
+      content: text || '(see attached image)',
       timestamp: new Date(),
+      images: imagesToSend.map((img) => ({ dataUrl: img.dataUrl })),
     };
     const pendingId = makeId();
     const pendingMsg = {
@@ -593,6 +662,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
     };
 
     setInput('');
+    setPendingImages([]);
     setMessages((prev) => {
       const base = prev.length ? prev : displayMessages;
       return [...base, userMsg, pendingMsg];
@@ -605,7 +675,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
 
     try {
       if (USE_AGENT_TOWN_MOCK) {
-        const reply = buildMockAssistantReply(text, agent);
+        const reply = buildMockAssistantReply(text || '(image)', agent);
         await delayWithAbort(420, controller.signal);
         setMessages((prev) => prev.map((msg) => (
           msg.id === pendingId
@@ -615,10 +685,19 @@ export default function AgentCard({ data, onClose, onJourney }) {
         return;
       }
 
+      const body = { session_key: sessionKey, message: text || '(see attached image)' };
+      if (imagesToSend.length > 0) {
+        body.images = imagesToSend.map((img) => ({
+          mime_type: img.mimeType,
+          data: img.base64,
+          file_name: img.file.name,
+        }));
+      }
+
       const response = await fetch('/api/chat/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_key: sessionKey, message: text }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -725,7 +804,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
       stopRequestedRef.current = false;
       setSending(false);
     }
-  }, [agent, displayMessages, finalizeStoppedMessage, input, sending, sessionKey]);
+  }, [agent, displayMessages, finalizeStoppedMessage, input, pendingImages, sending, sessionKey]);
 
   return (
     <div className="card-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -769,7 +848,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
                     <span className="agent-card-thread-chip">{displayMessages.length} MSG</span>
                     <span className="agent-card-thread-chip">{threadSummary.tool} TOOL</span>
                     <span className="agent-card-thread-chip">{boundEvents.length} RUNS</span>
-                    <span className="agent-card-thread-chip">{fmtTokens(totalTokens)} TKN</span>
+                    <span className="agent-card-thread-chip">{fmtTokens(displayTokens)} TKN</span>
                     <span className="agent-card-thread-chip">{fmtDate(latestEvent?.start_time || agent.first_seen_at) || 'just now'}</span>
                     {threadStateLabel ? <span className="agent-card-thread-chip">{threadStateLabel}</span> : null}
                   </div>
@@ -889,6 +968,21 @@ export default function AgentCard({ data, onClose, onJourney }) {
             </div>
 
             <div className="agent-dialog-compose">
+              {pendingImages.length > 0 && (
+                <div className="agent-dialog-img-preview-strip">
+                  {pendingImages.map((img) => (
+                    <div key={img.id} className="agent-dialog-img-preview-item">
+                      <img src={img.dataUrl} alt="pending" className="agent-dialog-img-preview" />
+                      <button
+                        type="button"
+                        className="agent-dialog-img-remove"
+                        onClick={() => removeImage(img.id)}
+                        title="Remove image"
+                      >×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 ref={textareaRef}
                 className="agent-dialog-input"
@@ -902,28 +996,66 @@ export default function AgentCard({ data, onClose, onJourney }) {
                     handleSend();
                   }
                 }}
+                onPaste={(e) => {
+                  const items = e.clipboardData?.items;
+                  if (!items) return;
+                  const imageFiles = [];
+                  for (let i = 0; i < items.length; i++) {
+                    if (items[i].type.startsWith('image/')) {
+                      const file = items[i].getAsFile();
+                      if (file) imageFiles.push(file);
+                    }
+                  }
+                  if (imageFiles.length > 0) {
+                    e.preventDefault();
+                    addImages(imageFiles);
+                  }
+                }}
                 placeholder={sessionKey ? 'Reply in this session...' : 'This agent is not bound to an active session.'}
                 disabled={!sessionKey || sending}
               />
-              <button
-                type="button"
-                className={`agent-dialog-send ${sending ? 'agent-dialog-send-stop' : ''}`}
-                onClick={sending ? handleStop : handleSend}
-                disabled={sending ? false : !sessionKey || !input.trim()}
-                aria-label={sending ? 'Stop current response' : 'Send message'}
-                title={sending ? 'Stop current response' : 'Send message'}
-              >
-                {sending ? (
-                  <svg className="agent-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="7" y="7" width="10" height="10" rx="1.5" />
+              <div className="agent-dialog-compose-toolbar">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => { if (e.target.files) addImages(e.target.files); e.target.value = ''; }}
+                />
+                <button
+                  type="button"
+                  className="agent-dialog-img-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!sessionKey || pendingImages.length >= MAX_IMAGES}
+                  title="Attach image"
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <polyline points="21 15 16 10 5 21" />
                   </svg>
-                ) : (
-                  <svg className="agent-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 12.5 19 4l-3.8 16-4.3-5-6.9-2.5Z" />
-                    <path d="M10.9 15 19 4" />
-                  </svg>
-                )}
-              </button>
+                </button>
+                <button
+                  type="button"
+                  className={`agent-dialog-send ${sending ? 'agent-dialog-send-stop' : ''}`}
+                  onClick={sending ? handleStop : handleSend}
+                  disabled={sending ? false : !sessionKey || (!input.trim() && pendingImages.length === 0)}
+                  aria-label={sending ? 'Stop current response' : 'Send message'}
+                  title={sending ? 'Stop current response' : 'Send message'}
+                >
+                  {sending ? (
+                    <svg className="agent-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                    </svg>
+                  ) : (
+                    <svg className="agent-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 12.5 19 4l-3.8 16-4.3-5-6.9-2.5Z" />
+                      <path d="M10.9 15 19 4" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
           </section>
         </div>

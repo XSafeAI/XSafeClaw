@@ -1219,9 +1219,14 @@ export default function TownConsole({
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [createError, setCreateError] = useState('');
   const [guardResolvingId, setGuardResolvingId] = useState(null);
+  const [pendingImagesMap, setPendingImagesMap] = useState({});
   const streamControllerRef = useRef(null);
   const stopRequestedRef = useRef(false);
   const mockReplyTimeoutRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const MAX_IMAGES = 8;
+  const MAX_SINGLE_SIZE = 5 * 1024 * 1024;
 
   useEffect(() => () => {
     streamControllerRef.current?.abort();
@@ -1476,6 +1481,50 @@ export default function TownConsole({
   const currentSessionKey = currentAgent ? getAgentSessionKey(currentAgent) : '';
   const currentEvents = currentAgent ? (eventsByAgentList[currentAgent.id] || []) : [];
   const currentDashboardEvents = currentAgent ? (dashboardEventsByAgentList[currentAgent.id] || []) : [];
+
+  const currentPendingImages = currentIdentity ? (pendingImagesMap[currentIdentity] || []) : [];
+
+  const fileToBase64 = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        const base64 = dataUrl.split(',')[1] ?? '';
+        resolve({ dataUrl, base64 });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const addImages = useCallback(async (files) => {
+    if (!currentIdentity) return;
+    const arr = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    if (arr.length === 0) return;
+    const current = pendingImagesMap[currentIdentity] || [];
+    const remaining = MAX_IMAGES - current.length;
+    const toAdd = arr.slice(0, remaining);
+    const results = [];
+    for (const file of toAdd) {
+      if (file.size > MAX_SINGLE_SIZE) continue;
+      const { dataUrl, base64 } = await fileToBase64(file);
+      results.push({ id: makeId(), file, dataUrl, base64, mimeType: file.type });
+    }
+    if (results.length > 0) {
+      setPendingImagesMap((prev) => ({
+        ...prev,
+        [currentIdentity]: [...(prev[currentIdentity] || []), ...results],
+      }));
+    }
+  }, [currentIdentity, pendingImagesMap]);
+
+  const removeImage = useCallback((imgId) => {
+    if (!currentIdentity) return;
+    setPendingImagesMap((prev) => ({
+      ...prev,
+      [currentIdentity]: (prev[currentIdentity] || []).filter((img) => img.id !== imgId),
+    }));
+  }, [currentIdentity]);
+
   const currentMessages = useMemo(() => {
     if (!currentIdentity) return [];
     const stored = messageMap[currentIdentity] || [];
@@ -1648,13 +1697,15 @@ export default function TownConsole({
   const handleSendTask = useCallback(async () => {
     if (!currentSessionKey || !currentIdentity || sendingIdentity === currentIdentity) return;
     const text = currentInput.trim();
-    if (!text) return;
+    const imagesToSend = [...currentPendingImages];
+    if (!text && imagesToSend.length === 0) return;
 
     const userMsg = {
       id: makeId(),
       role: 'user',
-      content: text,
+      content: text || '(see attached image)',
       timestamp: new Date(),
+      images: imagesToSend.map((img) => ({ dataUrl: img.dataUrl })),
     };
     const pendingId = makeId();
     const pendingMsg = {
@@ -1666,6 +1717,7 @@ export default function TownConsole({
     };
 
     setInputMap((prev) => ({ ...prev, [currentIdentity]: '' }));
+    setPendingImagesMap((prev) => ({ ...prev, [currentIdentity]: [] }));
     setMessageMap((prev) => ({
       ...prev,
       [currentIdentity]: [...(prev[currentIdentity] || []), userMsg, pendingMsg],
@@ -1709,10 +1761,19 @@ export default function TownConsole({
       const controller = new AbortController();
       streamControllerRef.current = controller;
 
+      const body = { session_key: currentSessionKey, message: text || '(see attached image)' };
+      if (imagesToSend.length > 0) {
+        body.images = imagesToSend.map((img) => ({
+          mime_type: img.mimeType,
+          data: img.base64,
+          file_name: img.file.name,
+        }));
+      }
+
       const response = await fetch('/api/chat/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_key: currentSessionKey, message: text }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -1917,6 +1978,10 @@ export default function TownConsole({
                   guardResolvingId={guardResolvingId}
                   tokensByAgent={tokensByAgent}
                   helpers={crewHelpers}
+                  pendingImages={currentPendingImages}
+                  onAddImages={addImages}
+                  onRemoveImage={removeImage}
+                  fileInputRef={fileInputRef}
                 />
               ) : null}
 

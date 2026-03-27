@@ -420,6 +420,19 @@ function ChatBubble({ msg, helpers }) {
         </div>
         <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
       </div>
+      {msg.images && msg.images.length > 0 && (
+        <div className="console-dialog-images">
+          {msg.images.map((img, i) => (
+            <img
+              key={i}
+              src={img.dataUrl}
+              alt={`attachment ${i + 1}`}
+              className="console-dialog-img-thumb"
+              onClick={() => window.open(img.dataUrl, '_blank')}
+            />
+          ))}
+        </div>
+      )}
       <div className="console-dialog-text">
         {msg.pending ? (
           <div className="console-dialog-typing">
@@ -722,6 +735,10 @@ export default function CrewTab({
   guardResolvingId,
   tokensByAgent = {},
   helpers,
+  pendingImages = [],
+  onAddImages,
+  onRemoveImage,
+  fileInputRef,
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
   const chatEndRef = useRef(null);
@@ -1090,43 +1107,96 @@ export default function CrewTab({
                   </div>
 
                   <div className="console-dialog-compose">
-                    <input
-                      type="text"
-                      className="console-dialog-input"
-                      value={currentInput}
-                      onChange={(e) => onChangeInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          if (sending) {
-                            onStopTask?.();
-                          } else {
-                            onSendTask();
+                    {pendingImages.length > 0 && (
+                      <div className="console-dialog-img-preview-strip">
+                        {pendingImages.map((img) => (
+                          <div key={img.id} className="console-dialog-img-preview-item">
+                            <img src={img.dataUrl} alt="pending" className="console-dialog-img-preview" />
+                            <button
+                              type="button"
+                              className="console-dialog-img-remove"
+                              onClick={() => onRemoveImage(img.id)}
+                              title="Remove image"
+                            >×</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="console-dialog-compose-row">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        style={{ display: 'none' }}
+                        onChange={(e) => { if (e.target.files) onAddImages(e.target.files); e.target.value = ''; }}
+                      />
+                      <button
+                        type="button"
+                        className="console-dialog-img-btn"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!helpers.getAgentSessionKey(currentAgent) || pendingImages.length >= 8}
+                        title="Attach image"
+                      >
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                          <circle cx="8.5" cy="8.5" r="1.5" />
+                          <polyline points="21 15 16 10 5 21" />
+                        </svg>
+                      </button>
+                      <input
+                        type="text"
+                        className="console-dialog-input"
+                        value={currentInput}
+                        onChange={(e) => onChangeInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (sending) {
+                              onStopTask?.();
+                            } else {
+                              onSendTask();
+                            }
                           }
-                        }
-                      }}
-                      placeholder="Reply in this session..."
-                      disabled={!helpers.getAgentSessionKey(currentAgent)}
-                    />
-                    <button
-                      type="button"
-                      className={`console-dialog-send ${sending ? 'console-dialog-send-stop' : ''}`}
-                      onClick={sending ? onStopTask : onSendTask}
-                      disabled={sending ? false : !helpers.getAgentSessionKey(currentAgent) || !currentInput.trim()}
-                      aria-label={sending ? 'Stop current response' : 'Send message'}
-                      title={sending ? 'Stop current response' : 'Send message'}
-                    >
-                      {sending ? (
-                        <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                          <rect x="7" y="7" width="10" height="10" rx="1.5" />
-                        </svg>
-                      ) : (
-                        <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                          <path d="M4 12.5 19 4l-3.8 16-4.3-5-6.9-2.5Z" />
-                          <path d="M10.9 15 19 4" />
-                        </svg>
-                      )}
-                    </button>
+                        }}
+                        onPaste={(e) => {
+                          const items = e.clipboardData?.items;
+                          if (!items) return;
+                          const imageFiles = [];
+                          for (let i = 0; i < items.length; i++) {
+                            if (items[i].type.startsWith('image/')) {
+                              const file = items[i].getAsFile();
+                              if (file) imageFiles.push(file);
+                            }
+                          }
+                          if (imageFiles.length > 0) {
+                            e.preventDefault();
+                            onAddImages(imageFiles);
+                          }
+                        }}
+                        placeholder="Reply in this session..."
+                        disabled={!helpers.getAgentSessionKey(currentAgent)}
+                      />
+                      <button
+                        type="button"
+                        className={`console-dialog-send ${sending ? 'console-dialog-send-stop' : ''}`}
+                        onClick={sending ? onStopTask : onSendTask}
+                        disabled={sending ? false : !helpers.getAgentSessionKey(currentAgent) || (!currentInput.trim() && pendingImages.length === 0)}
+                        aria-label={sending ? 'Stop current response' : 'Send message'}
+                        title={sending ? 'Stop current response' : 'Send message'}
+                      >
+                        {sending ? (
+                          <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                          </svg>
+                        ) : (
+                          <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 12.5 19 4l-3.8 16-4.3-5-6.9-2.5Z" />
+                            <path d="M10.9 15 19 4" />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </section>
