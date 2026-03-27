@@ -1384,7 +1384,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 .agent-card-sprite-crop-compact {
   width: 48px;
   height: 72px;
-  margin-top: -4px;
+  margin-top: -26px;
 }
 
 .agent-card-sprite-sheet-compact {
@@ -2423,28 +2423,36 @@ body.agent-town-page-cursor.cursor-grab-full *,
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding: 8px 10px 10px;
-  border: 1px solid rgba(255, 224, 177, 0.1);
-  border-radius: 18px;
+  padding: 0;
+  border: 1px solid rgba(255, 224, 177, 0.12);
+  border-radius: 16px;
   background: rgba(14, 11, 24, 0.98);
   box-shadow: 0 -8px 24px rgba(6, 4, 12, 0.6);
   z-index: 1;
+  overflow: hidden;
+  transition: border-color 0.2s;
 }
 
-.agent-dialog-compose-row {
+.agent-dialog-compose:focus-within {
+  border-color: rgba(240, 187, 96, 0.3);
+}
+
+.agent-dialog-compose-toolbar {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
+  padding: 4px 8px 8px;
 }
 
 .agent-dialog-img-btn {
   flex-shrink: 0;
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  border: 1.5px solid rgba(240, 187, 96, 0.32);
-  background: rgba(96, 63, 23, 0.55);
-  color: rgba(245, 224, 188, 0.88);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(240, 187, 96, 0.2);
+  background: rgba(96, 63, 23, 0.35);
+  color: rgba(245, 224, 188, 0.7);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2452,10 +2460,9 @@ body.agent-town-page-cursor.cursor-grab-full *,
   transition: all 0.15s;
 }
 .agent-dialog-img-btn:hover:not(:disabled) {
-  background: rgba(128, 86, 32, 0.72);
+  background: rgba(128, 86, 32, 0.6);
   color: #fff1d5;
-  border-color: rgba(240, 187, 96, 0.55);
-  box-shadow: 0 0 8px rgba(240, 187, 96, 0.15);
+  border-color: rgba(240, 187, 96, 0.45);
 }
 .agent-dialog-img-btn:disabled {
   opacity: 0.35;
@@ -2465,12 +2472,12 @@ body.agent-town-page-cursor.cursor-grab-full *,
 .agent-dialog-img-preview-strip {
   display: flex;
   gap: 6px;
-  padding: 6px 8px;
+  padding: 8px 10px 4px;
   overflow-x: auto;
-  border-radius: 12px 12px 0 0;
-  background: rgba(19, 15, 31, 0.85);
-  border: 1px solid rgba(255, 224, 177, 0.1);
-  border-bottom: none;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 224, 177, 0.06);
 }
 
 .agent-dialog-img-preview-item {
@@ -2479,11 +2486,11 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .agent-dialog-img-preview {
-  width: 48px;
-  height: 48px;
+  width: 42px;
+  height: 42px;
   object-fit: cover;
   border-radius: 6px;
-  border: 1px solid rgba(240, 187, 96, 0.2);
+  border: 1px solid rgba(240, 187, 96, 0.15);
 }
 
 .agent-dialog-img-remove {
@@ -2528,63 +2535,64 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .agent-dialog-input {
-  flex: 1;
-  min-width: 0;
-  min-height: 38px;
-  max-height: 38px;
+  width: 100%;
+  min-height: 40px;
+  max-height: 80px;
   resize: none;
-  padding: 0 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 224, 177, 0.12);
-  background: rgba(255, 255, 255, 0.04);
+  padding: 10px 12px 2px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: #f5eddc;
   font-size: 12px;
   line-height: 1.6;
   outline: none;
   box-shadow: none;
+  box-sizing: border-box;
 }
 
 .agent-dialog-input::placeholder {
-  color: rgba(245, 224, 188, 0.4);
+  color: rgba(245, 224, 188, 0.35);
 }
 
 .agent-dialog-input:focus {
-  border-color: rgba(240, 187, 96, 0.28);
-  background: rgba(255, 255, 255, 0.06);
+  border: none;
+  background: transparent;
 }
 
 .agent-dialog-send {
   flex-shrink: 0;
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  border: 1px solid rgba(240, 187, 96, 0.18);
-  background: rgba(96, 63, 23, 0.48);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(240, 187, 96, 0.2);
+  background: rgba(96, 63, 23, 0.4);
   color: #fff1d5;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  box-shadow: inset 0 1px 0 rgba(255, 246, 224, 0.05);
   cursor: pointer;
+  transition: all 0.15s;
 }
 
 .agent-dialog-send:hover:not(:disabled) {
-  filter: brightness(1.05);
+  background: rgba(128, 86, 32, 0.65);
+  border-color: rgba(240, 187, 96, 0.45);
 }
 
 .agent-dialog-send:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.4;
 }
 
 .agent-dialog-send-stop {
   border-color: #aa5b44;
-  background: rgba(123, 58, 45, 0.6);
+  background: rgba(123, 58, 45, 0.55);
 }
 
 .agent-dialog-send-icon {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.9;
@@ -2593,8 +2601,8 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .agent-dialog-send-stop .agent-dialog-send-icon {
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
   fill: currentColor;
   stroke: none;
 }
@@ -2655,13 +2663,9 @@ body.agent-town-page-cursor.cursor-grab-full *,
   }
 
   .agent-dialog-compose {
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
-  }
-
-  .agent-dialog-send {
-    width: 40px;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
   }
 }
 
