@@ -1,6 +1,9 @@
 """Service for synchronizing OpenClaw messages to database (new Message-based schema)."""
 
 import asyncio
+import os
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,9 +28,17 @@ class MessageSyncService:
         self._running = False
         self._sync_task: asyncio.Task | None = None
         self._event_sync_service = EventSyncService()
+        self._file_sync_task: asyncio.Task | None = None
         
         # Track file sync positions: {file_path: last_synced_line}
         self._sync_positions: dict[str, int] = {}
+
+        # Coalesce rapid file events before syncing to reduce watcher churn.
+        self._pending_file_sync: dict[str, dict[str, object]] = {}
+        self._sync_lock = asyncio.Lock()
+        self._created_event_debounce_seconds = 0.5 if os.name == "nt" else 0.25
+        self._modified_event_debounce_seconds = 1.5 if os.name == "nt" else 0.75
+        self._file_sync_poll_interval_seconds = 0.5 if os.name == "nt" else 0.25
         
         # Track sessions that need event sync: set of session_ids
         self._pending_event_sync: set[str] = set()
@@ -59,11 +70,17 @@ class MessageSyncService:
         )
         await self.watcher.start()
 
-        # Re-scan after watcher starts to catch files created during the startup gap
-        # (between _initial_scan() and watcher.start() there is a brief window where
-        # new files can appear without triggering a "created" event).
-        print("🔄 Post-watcher gap scan...")
-        await self._initial_scan()
+        # Reconcile after watcher startup to catch files created/updated during the
+        # small startup gap between the initial full scan and watcher activation.
+        # Keep this light: reuse tracked sync positions for known files and only do
+        # a full sync for files we have never seen before.
+        print("🔄 Post-watcher gap reconciliation...")
+        await self._post_watcher_gap_scan()
+
+        self._running = True
+
+        # Batch file updates so rapid modified events do not hammer the parser/db.
+        self._file_sync_task = asyncio.create_task(self._batched_file_sync_loop())
 
         # Start periodic full scan task
         self._sync_task = asyncio.create_task(self._periodic_full_scan())
@@ -71,7 +88,6 @@ class MessageSyncService:
         # Start debounced event sync task
         self._event_sync_task = asyncio.create_task(self._debounced_event_sync_loop())
         
-        self._running = True
         print("✅ Message Sync Service started")
 
     async def stop(self) -> None:
@@ -93,6 +109,14 @@ class MessageSyncService:
             except asyncio.CancelledError:
                 pass
 
+        # Cancel file sync task
+        if self._file_sync_task:
+            self._file_sync_task.cancel()
+            try:
+                await self._file_sync_task
+            except asyncio.CancelledError:
+                pass
+
         # Cancel event sync task
         if self._event_sync_task:
             self._event_sync_task.cancel()
@@ -109,36 +133,211 @@ class MessageSyncService:
         
         Also cleans up database sessions whose JSONL files no longer exist.
         """
-        print("📊 Performing initial scan...")
-        
-        if not self.sessions_dir.exists():
-            print(f"⚠️  Sessions directory not found: {self.sessions_dir}")
-            return
+        started_at = time.perf_counter()
+        file_count = 0
 
-        jsonl_files = list(self.sessions_dir.glob("*.jsonl"))
-        existing_session_ids = {f.stem for f in jsonl_files}
-        print(f"Found {len(jsonl_files)} session files on disk")
+        async with self._sync_lock:
+            print("📊 Performing initial scan...")
+            
+            if not self.sessions_dir.exists():
+                print(f"⚠️  Sessions directory not found: {self.sessions_dir}")
+                return
 
-        # 1. Clean up stale sessions (exist in DB but not on disk)
-        await self._cleanup_stale_sessions(existing_session_ids)
+            jsonl_files = list(self.sessions_dir.glob("*.jsonl"))
+            file_count = len(jsonl_files)
+            existing_session_ids = {f.stem for f in jsonl_files}
+            print(f"Found {file_count} session files on disk")
 
-        # 2. Sync existing files
-        for file_path in jsonl_files:
-            try:
-                await self._sync_file(file_path, full_sync=True)
-            except Exception as e:
-                print(f"❌ Error syncing {file_path.name}: {e}")
+            # 1. Clean up stale sessions (exist in DB but not on disk)
+            await self._cleanup_stale_sessions(existing_session_ids)
+
+            # 2. Sync existing files
+            for file_path in jsonl_files:
+                try:
+                    await self._sync_file(file_path, full_sync=True)
+                except Exception as e:
+                    print(f"❌ Error syncing {file_path.name}: {e}")
 
         print("✅ Initial scan completed")
+        self._log_runtime_metrics("Initial scan", started_at=started_at, extra=f"files={file_count}")
+
+    async def _post_watcher_gap_scan(self) -> None:
+        """Lightweight reconciliation after watcher startup.
+
+        This catches files created, deleted, or appended during the startup gap
+        without re-reading every existing session file from the beginning.
+        """
+        started_at = time.perf_counter()
+        file_count = 0
+
+        async with self._sync_lock:
+            if not self.sessions_dir.exists():
+                print(f"⚠️  Sessions directory not found: {self.sessions_dir}")
+                return
+
+            jsonl_files = sorted(self.sessions_dir.glob("*.jsonl"))
+            file_count = len(jsonl_files)
+            existing_session_ids = {f.stem for f in jsonl_files}
+            print(f"Rechecking {file_count} session files after watcher startup")
+
+            # Handle files deleted during the startup gap before the watcher came up.
+            await self._cleanup_stale_sessions(existing_session_ids)
+
+            for file_path in jsonl_files:
+                file_path_str = str(file_path)
+                seen_before = file_path_str in self._sync_positions
+                try:
+                    await self._sync_file(file_path, full_sync=not seen_before)
+                except Exception as e:
+                    print(f"❌ Error reconciling {file_path.name}: {e}")
+
+        print("✅ Post-watcher gap reconciliation completed")
+        self._log_runtime_metrics("Post-watcher reconciliation", started_at=started_at, extra=f"files={file_count}")
+
+    def _get_periodic_full_scan_interval_seconds(self) -> int:
+        """Return the periodic full-scan interval, relaxed on Windows."""
+        base_interval = max(1, settings.FULL_SCAN_INTERVAL_HOURS) * 3600
+        if os.name == "nt":
+            return max(base_interval, 6 * 3600)
+        return base_interval
+
+    def _get_process_rss_mb(self) -> float | None:
+        """Best-effort process RSS reading without adding extra dependencies."""
+        try:
+            if os.name == "nt":
+                import ctypes
+
+                class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", ctypes.c_ulong),
+                        ("PageFaultCount", ctypes.c_ulong),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                    ]
+
+                counters = PROCESS_MEMORY_COUNTERS()
+                counters.cb = ctypes.sizeof(counters)
+                if ctypes.windll.psapi.GetProcessMemoryInfo(
+                    ctypes.windll.kernel32.GetCurrentProcess(),
+                    ctypes.byref(counters),
+                    counters.cb,
+                ):
+                    return counters.WorkingSetSize / (1024 * 1024)
+                return None
+
+            import resource
+
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if sys.platform == "darwin":
+                return rss / (1024 * 1024)
+            return rss / 1024
+        except Exception:
+            return None
+
+    def _log_runtime_metrics(
+        self,
+        label: str,
+        *,
+        started_at: float | None = None,
+        extra: str = "",
+    ) -> None:
+        """Emit lightweight runtime metrics for field debugging."""
+        rss_mb = self._get_process_rss_mb()
+        elapsed = f"{time.perf_counter() - started_at:.2f}s" if started_at is not None else "n/a"
+        rss_text = f"{rss_mb:.1f}MB" if rss_mb is not None else "n/a"
+        suffix = f", {extra}" if extra else ""
+        print(
+            "📈 "
+            f"{label}: elapsed={elapsed}, rss={rss_text}, "
+            f"pending_file_sync={len(self._pending_file_sync)}, "
+            f"pending_event_sync={len(self._pending_event_sync)}, "
+            f"tracked_files={len(self._sync_positions)}"
+            f"{suffix}"
+        )
+
+    def _queue_file_sync(self, path: Path, *, full_sync: bool) -> tuple[int, bool]:
+        """Queue a file sync, coalescing repeated created/modified events."""
+        loop = asyncio.get_running_loop()
+        file_path_str = str(path)
+        debounce = (
+            self._created_event_debounce_seconds if full_sync
+            else self._modified_event_debounce_seconds
+        )
+        ready_at = loop.time() + debounce
+        existing = self._pending_file_sync.get(file_path_str)
+        coalesced = existing is not None
+
+        if existing:
+            full_sync = bool(existing["full_sync"]) or full_sync
+            ready_at = max(float(existing["ready_at"]), ready_at)
+
+        self._pending_file_sync[file_path_str] = {
+            "path": path,
+            "full_sync": full_sync,
+            "ready_at": ready_at,
+        }
+        return len(self._pending_file_sync), coalesced
+
+    async def _batched_file_sync_loop(self) -> None:
+        """Flush queued file events in small batches instead of immediately."""
+        while self._running:
+            try:
+                await asyncio.sleep(self._file_sync_poll_interval_seconds)
+
+                if not self._pending_file_sync:
+                    continue
+
+                now = asyncio.get_running_loop().time()
+                due_keys = [
+                    file_path
+                    for file_path, entry in self._pending_file_sync.items()
+                    if float(entry["ready_at"]) <= now
+                ]
+                if not due_keys:
+                    continue
+
+                batch = [self._pending_file_sync.pop(file_path) for file_path in due_keys]
+                batch.sort(key=lambda entry: str(entry["path"]))
+                started_at = time.perf_counter()
+
+                async with self._sync_lock:
+                    for entry in batch:
+                        path = entry["path"]
+                        full_sync = bool(entry["full_sync"])
+                        if not path.exists():
+                            continue
+                        try:
+                            await self._sync_file(path, full_sync=full_sync)
+                            self._pending_event_sync.add(path.stem)
+                        except Exception as e:
+                            print(f"❌ Error syncing queued file {path.name}: {e}")
+
+                elapsed = time.perf_counter() - started_at
+                if len(batch) > 1 or elapsed > 1.0 or len(self._pending_file_sync) > 5:
+                    self._log_runtime_metrics("File sync batch", started_at=started_at, extra=f"batch={len(batch)}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ Error in batched file sync loop: {e}")
 
     async def _periodic_full_scan(self) -> None:
         """Periodically scan all files for changes."""
-        interval = settings.FULL_SCAN_INTERVAL_HOURS * 3600
+        interval = self._get_periodic_full_scan_interval_seconds()
+        if interval != settings.FULL_SCAN_INTERVAL_HOURS * 3600:
+            print(f"🕒 Relaxed periodic full scan interval to {interval / 3600:.1f}h on Windows")
         
         while self._running:
             try:
                 await asyncio.sleep(interval)
                 print("🔄 Running periodic full scan...")
+                scan_started = time.perf_counter()
                 await self._initial_scan()
                 # After full scan, sync events for all sessions
                 print("🔄 Syncing events after periodic scan...")
@@ -146,6 +345,7 @@ class MessageSyncService:
                     await self._event_sync_service.sync_all_sessions()
                 except Exception as e:
                     print(f"❌ Error syncing events after periodic scan: {e}")
+                self._log_runtime_metrics("Periodic full scan", started_at=scan_started)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -186,21 +386,24 @@ class MessageSyncService:
         path = Path(file_path)
         
         if event_type == "created":
-            print(f"📄 New session file: {path.name}")
-            await self._sync_file(path, full_sync=True)
-            # Schedule event sync for this session
-            self._pending_event_sync.add(path.stem)
+            backlog, _ = self._queue_file_sync(path, full_sync=True)
+            print(f"📄 Queued new session file: {path.name}")
+            if backlog > 10:
+                self._log_runtime_metrics("File sync backlog", extra=f"queued={backlog}")
         
         elif event_type == "modified":
-            print(f"✏️  Session file updated: {path.name}")
-            await self._sync_file(path, full_sync=False)
-            # Schedule event sync for this session
-            self._pending_event_sync.add(path.stem)
+            backlog, coalesced = self._queue_file_sync(path, full_sync=False)
+            if not coalesced:
+                print(f"✏️  Queued session update: {path.name}")
+            if backlog > 10 and not coalesced:
+                self._log_runtime_metrics("File sync backlog", extra=f"queued={backlog}")
         
         elif event_type == "deleted":
             print(f"🗑️  Session file deleted: {path.name}")
             session_id = path.stem
-            await self._delete_session_data(session_id)
+            self._pending_file_sync.pop(str(path), None)
+            async with self._sync_lock:
+                await self._delete_session_data(session_id)
             # Clean up sync position tracking and pending event sync
             file_path_str = str(path)
             self._sync_positions.pop(file_path_str, None)
@@ -330,6 +533,9 @@ class MessageSyncService:
 
     async def _sync_file(self, file_path: Path, full_sync: bool = False) -> None:
         """Sync a single JSONL file to database."""
+        if not file_path.exists():
+            return
+
         session_id = file_path.stem
         file_path_str = str(file_path)
 

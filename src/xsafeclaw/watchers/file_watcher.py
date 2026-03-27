@@ -8,6 +8,8 @@ from typing import Any
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
 
+from ..config import settings
+
 
 class SessionFileEventHandler(FileSystemEventHandler):
     """Handler for session file system events."""
@@ -88,14 +90,15 @@ class SessionFileWatcher:
         self.event_handler = SessionFileEventHandler(self.on_file_event)
 
         # Create and start observer
-        self.observer = Observer()
+        poll_interval = max(1, int(settings.watch_interval_seconds))
+        self.observer = Observer(timeout=poll_interval)
         self.observer.schedule(
             self.event_handler, str(self.watch_directory), recursive=False
         )
         self.observer.start()
         self._running = True
 
-        print(f"📁 Started watching: {self.watch_directory}")
+        print(f"📁 Started watching: {self.watch_directory} (poll={poll_interval}s)")
 
     async def stop(self) -> None:
         """Stop watching directory."""
