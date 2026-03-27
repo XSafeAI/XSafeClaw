@@ -118,9 +118,23 @@ export const MAP_VARIANTS = [
     collisionLayer: 'collision-Map4',
     screenLayerName: null,
     dashboardLayerName: null,
-    showLayerName: null,
+    showLayerName: 'npc',
     showEasterEggImage: null,
     showEasterEggMessage: null,
+    creatorEasterEggs: [
+      {
+        name: 'npc2',
+        sheetImage: '/sup/Creator Set/Elara.png',
+        idleCell: [1, 6],
+        responseCell: [2, 2],
+      },
+      {
+        name: 'npc1',
+        sheetImage: '/sup/Creator Set/Seraphine.png',
+        idleCell: [3, 3],
+        responseCell: [2, 5],
+      },
+    ],
     renderMode: 'whole-image',
     tileWidth: 32,
     tileHeight: 32,
@@ -170,6 +184,38 @@ export const CHAR_NAMES = [
   'Molly','Rob','Roki','Samuel','Alex','Pier','Conference_man',
   'Bouncer','Doctor_1','Nurse_1','Old_man_Josh','Old_woman_Jenny',
 ];
+
+/** Deterministic agent→character index from ID hash (stable across list reordering). */
+export function hashAgentCharIndex(agentId) {
+  let h = 0;
+  const s = String(agentId || '');
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return ((h % CHAR_NAMES.length) + CHAR_NAMES.length) % CHAR_NAMES.length;
+}
+
+/**
+ * Build a stable agentId → charName map.
+ * Hashes each ID for a base index, resolves collisions in sorted-ID order.
+ */
+export function buildStableCharNameMap(agents) {
+  const map = {};
+  const used = new Set();
+  const total = CHAR_NAMES.length;
+  const sorted = [...(agents || [])].filter((a) => a?.id).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  for (const agent of sorted) {
+    const base = hashAgentCharIndex(agent.id);
+    let idx = base;
+    if (used.has(idx)) {
+      for (let j = 1; j < total; j++) {
+        const c = (base + j) % total;
+        if (!used.has(c)) { idx = c; break; }
+      }
+    }
+    used.add(idx);
+    map[agent.id] = CHAR_NAMES[idx];
+  }
+  return { map, used };
+}
 
 // ── NPC meeting interaction ──
 export const MEETING_DIST     = 40;   // pixel distance to trigger

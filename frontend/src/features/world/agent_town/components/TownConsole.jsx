@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK } from '../config/constants';
+import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK, buildStableCharNameMap, hashAgentCharIndex } from '../config/constants';
 import {
   buildMockAssistantReply,
   buildMockHistory,
@@ -1372,23 +1372,20 @@ export default function TownConsole({
   );
 
   const charNameMap = useMemo(() => {
-    const map = {};
-    const used = new Set();
     const liveAgents = combinedAgents.filter((a) => !String(a.id).startsWith('draft:'));
     const drafts = combinedAgents.filter((a) => String(a.id).startsWith('draft:'));
+    const { map, used } = buildStableCharNameMap(liveAgents);
 
-    liveAgents.forEach((agent, index) => {
-      const char = CHAR_NAMES[index % CHAR_NAMES.length];
-      map[agent.id] = char;
-      used.add(char);
-    });
-
-    drafts.forEach((agent) => {
-      const unused = CHAR_NAMES.find((c) => !used.has(c));
-      const char = unused || CHAR_NAMES[(liveAgents.length + drafts.indexOf(agent)) % CHAR_NAMES.length];
-      map[agent.id] = char;
-      used.add(char);
-    });
+    for (const agent of drafts) {
+      const base = hashAgentCharIndex(agent.id);
+      let idx = base;
+      if (used.has(idx)) {
+        const unused = CHAR_NAMES.findIndex((_, i) => !used.has(i));
+        if (unused >= 0) idx = unused;
+      }
+      used.add(idx);
+      map[agent.id] = CHAR_NAMES[idx];
+    }
 
     return map;
   }, [combinedAgents]);

@@ -1374,22 +1374,40 @@ body.agent-town-page-cursor.cursor-grab-full *,
   height: 136px;
 }
 
+/* 勿写死小尺寸：与 .agent-card-avatar-frame 同优先级且写在前时会把外框缩没；只保留收缩。 */
 .agent-card-avatar-frame-compact {
-  width: 62px;
-  height: 72px;
-  border-radius: 10px;
   flex-shrink: 0;
 }
 
-.agent-card-sprite-crop-compact {
-  width: 48px;
-  height: 72px;
-  margin-top: -26px;
+/* 卡片小头像用满标准外框 114×154，内层人物区与控制台同款比例，单独提高特异性压住 TownConsole 的 .tc-showcase */
+.agent-card-avatar-frame.agent-card-avatar-frame-compact {
+  width: 114px;
+  height: 154px;
+  border-radius: 16px;
 }
 
-.agent-card-sprite-sheet-compact {
-  left: calc(-18 * 48px);
-  height: 96px;
+.tc-showcase.agent-card-showcase-mini {
+  --tc-showcase-sprite-width: 56px;
+  --tc-showcase-sprite-height: 112px;
+  position: relative;
+  width: 112px;
+  height: 90px;
+  flex-shrink: 0;
+}
+
+.tc-showcase.agent-card-showcase-mini .tc-showcase-crop {
+  width: calc(var(--tc-showcase-sprite-width) - 0.25px);
+  height: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 4px;
+  top: auto;
+  overflow: hidden;
+}
+
+.tc-showcase.agent-card-showcase-mini .tc-showcase-sheet {
+  bottom: 0;
+  top: auto;
 }
 
 .agent-card-hero-compact .agent-card-sprite-crop {
@@ -2425,7 +2443,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
   gap: 0;
   padding: 0;
   border: 1px solid rgba(255, 224, 177, 0.12);
-  border-radius: 16px;
+  border-radius: 14px;
   background: rgba(14, 11, 24, 0.98);
   box-shadow: 0 -8px 24px rgba(6, 4, 12, 0.6);
   z-index: 1;
@@ -2437,12 +2455,11 @@ body.agent-town-page-cursor.cursor-grab-full *,
   border-color: rgba(240, 187, 96, 0.3);
 }
 
-.agent-dialog-compose-toolbar {
+.agent-dialog-compose-row {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 6px;
-  padding: 4px 8px 8px;
+  padding: 6px 8px;
 }
 
 .agent-dialog-img-btn {
@@ -2472,7 +2489,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 .agent-dialog-img-preview-strip {
   display: flex;
   gap: 6px;
-  padding: 8px 10px 4px;
+  padding: 6px 10px 2px;
   overflow-x: auto;
   border-radius: 0;
   background: transparent;
@@ -2535,17 +2552,18 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .agent-dialog-input {
-  width: 100%;
-  min-height: 40px;
-  max-height: 80px;
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  max-height: 30px;
   resize: none;
-  padding: 10px 12px 2px;
+  padding: 5px 10px;
   border: none;
   border-radius: 0;
   background: transparent;
   color: #f5eddc;
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.5;
   outline: none;
   box-shadow: none;
   box-sizing: border-box;
@@ -2666,6 +2684,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
     left: 10px;
     right: 10px;
     bottom: 10px;
+    border-radius: 12px;
   }
 }
 

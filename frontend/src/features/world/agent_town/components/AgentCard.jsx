@@ -3,6 +3,15 @@ import { guardAPI } from '../../../../services/api';
 import { CHAR_BASE, USE_AGENT_TOWN_MOCK } from '../config/constants';
 import { buildMockAssistantReply, buildMockHistory } from '../data/mockData';
 
+function pickActiveShowcaseMode(seed) {
+  let hash = 0;
+  const text = String(seed || '');
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) % 9973;
+  }
+  return hash % 3 === 0 ? 'phone' : 'run';
+}
+
 function makeId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -383,6 +392,46 @@ function getEffectiveRisk(item) {
   return fallback ? { risk_source: null, failure_mode: fallback, real_world_harm: null } : null;
 }
 
+function CardShowcase({ agentId, charName, status }) {
+  const isActive = status === 'working';
+  const isOffline = status === 'offline';
+  const [phoneFailed, setPhoneFailed] = useState(false);
+  const idleUrl = `${CHAR_BASE}${charName}_idle_anim_32x32.png`;
+  const runUrl = `${CHAR_BASE}${charName}_run_32x32.png`;
+  const phoneUrl = `${CHAR_BASE}${charName}_phone_32x32.png`;
+  const activeMode = pickActiveShowcaseMode(`${agentId}-${charName}`);
+
+  let spriteUrl = idleUrl;
+  let spriteClass = 'tc-showcase-sheet tc-showcase-idle-sheet';
+  if (isActive && activeMode === 'phone' && !phoneFailed) {
+    spriteUrl = phoneUrl;
+    spriteClass = 'tc-showcase-sheet tc-showcase-phone-sheet tc-showcase-phone-animated';
+  } else if (isActive) {
+    spriteUrl = runUrl;
+    spriteClass = 'tc-showcase-sheet tc-showcase-run-sheet tc-showcase-run-animated';
+  }
+
+  return (
+    <div className={`tc-showcase agent-card-showcase-mini ${isOffline ? 'tc-showcase-offline' : ''}`}>
+      <div className="tc-showcase-crop">
+        <img
+          className={spriteClass}
+          src={spriteUrl}
+          alt={charName}
+          draggable={false}
+          onError={(e) => {
+            if (isActive && activeMode === 'phone' && !phoneFailed) {
+              setPhoneFailed(true);
+              return;
+            }
+            e.target.style.display = 'none';
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function AgentCard({ data, onClose, onJourney }) {
   if (!data) return null;
 
@@ -403,7 +452,6 @@ export default function AgentCard({ data, onClose, onJourney }) {
   const [pendingImages, setPendingImages] = useState([]);
   const [fetchedTokens, setFetchedTokens] = useState(0);
   const fileInputRef = useRef(null);
-  const spriteUrl = `${CHAR_BASE}${charName}_idle_anim_32x32.png`;
 
   useEffect(() => {
     if (totalTokens > 0 || USE_AGENT_TOWN_MOCK || !agent?.id) return;
@@ -818,15 +866,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
             <div className="agent-card-summary-bar">
               <div className="agent-card-summary-primary">
                 <div className="agent-card-avatar-frame agent-card-avatar-frame-compact">
-                  <div className="card-sprite-crop agent-card-sprite-crop agent-card-sprite-crop-compact">
-                    <img
-                      className="card-sprite-sheet agent-card-sprite-sheet agent-card-sprite-sheet-compact"
-                      src={spriteUrl}
-                      alt={charName}
-                      draggable={false}
-                      onError={(e) => { e.target.style.display = 'none'; }}
-                    />
-                  </div>
+                  <CardShowcase agentId={agent.id} charName={charName} status={state} />
                   {isPending ? <div className="card-gold-glow" /> : null}
                 </div>
 
@@ -983,38 +1023,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
                   ))}
                 </div>
               )}
-              <textarea
-                ref={textareaRef}
-                className="agent-dialog-input"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onCompositionStart={() => setIsComposing(true)}
-                onCompositionEnd={() => setIsComposing(false)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey && !isComposing && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                onPaste={(e) => {
-                  const items = e.clipboardData?.items;
-                  if (!items) return;
-                  const imageFiles = [];
-                  for (let i = 0; i < items.length; i++) {
-                    if (items[i].type.startsWith('image/')) {
-                      const file = items[i].getAsFile();
-                      if (file) imageFiles.push(file);
-                    }
-                  }
-                  if (imageFiles.length > 0) {
-                    e.preventDefault();
-                    addImages(imageFiles);
-                  }
-                }}
-                placeholder={sessionKey ? 'Reply in this session...' : 'This agent is not bound to an active session.'}
-                disabled={!sessionKey || sending}
-              />
-              <div className="agent-dialog-compose-toolbar">
+              <div className="agent-dialog-compose-row">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -1036,6 +1045,38 @@ export default function AgentCard({ data, onClose, onJourney }) {
                     <polyline points="21 15 16 10 5 21" />
                   </svg>
                 </button>
+                <textarea
+                  ref={textareaRef}
+                  className="agent-dialog-input"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onCompositionStart={() => setIsComposing(true)}
+                  onCompositionEnd={() => setIsComposing(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && !isComposing && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  onPaste={(e) => {
+                    const items = e.clipboardData?.items;
+                    if (!items) return;
+                    const imageFiles = [];
+                    for (let i = 0; i < items.length; i++) {
+                      if (items[i].type.startsWith('image/')) {
+                        const file = items[i].getAsFile();
+                        if (file) imageFiles.push(file);
+                      }
+                    }
+                    if (imageFiles.length > 0) {
+                      e.preventDefault();
+                      addImages(imageFiles);
+                    }
+                  }}
+                  placeholder={sessionKey ? 'Reply in this session...' : 'No active session.'}
+                  disabled={!sessionKey || sending}
+                  rows={1}
+                />
                 <button
                   type="button"
                   className={`agent-dialog-send ${sending ? 'agent-dialog-send-stop' : ''}`}

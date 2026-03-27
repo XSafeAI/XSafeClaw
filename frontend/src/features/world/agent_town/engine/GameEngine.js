@@ -8,6 +8,8 @@ import {
   SCENE_IMAGE_URL, SCENE_W, SCENE_H,
   WALK_ZONES, MEETING_DIST, MEETING_TIME, MEETING_COOLDOWN, BUBBLE_MAX_CHARS,
   FIELD_NPC_DIALOGUE_URL,
+  buildStableCharNameMap,
+  hashAgentCharIndex,
 } from '../config/constants';
 
 const GUARD_PORTAL_URL = '/portals/3.png';
@@ -80,6 +82,15 @@ function getShowNpcStandTexture(frames, direction = 'right') {
     || null;
 }
 
+function getSheetCellTexture(baseTexture, row, col, rows = 5, cols = 6) {
+  if (!baseTexture) return null;
+  const fw = baseTexture.width / cols;
+  const fh = baseTexture.height / rows;
+  const x = (Math.max(1, col) - 1) * fw;
+  const y = (Math.max(1, row) - 1) * fh;
+  return new PIXI.Texture(baseTexture, new PIXI.Rectangle(x, y, fw, fh));
+}
+
 /** Google Fonts CSS may still be loading when the engine starts; wait so @font-face exists before fonts.load(). */
 async function waitForGoogleFontsStylesheet(timeoutMs = 2500) {
   const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).filter((l) =>
@@ -146,6 +157,10 @@ export default class GameEngine {
     this._guardAttackFrames = [];
     this._issueQuestionTexture = null;
     this._guardPendingSnapshot = new Set();
+    this._pendingBots = new Map();
+    this._botLayer = null;
+    this._creatorEggs = [];
+    this._creatorEggLayer = null;
     this.mapConfig = {
       ...DEFAULT_MAP_CONFIG,
       ...(options.mapConfig || {}),
@@ -175,6 +190,8 @@ export default class GameEngine {
     this._fieldDialogueLockedNpc = null;
     this._fieldDialogueNpcSnap = null;
     this._fieldDialogueFloatBubble = null;
+    this._creatorEggResponseTimer = null;
+    this._creatorEggBubble = null;
   }
 
   /** Initialize PixiJS application and attach to DOM element. */
@@ -205,6 +222,12 @@ export default class GameEngine {
     this.guardFxLayer = new PIXI.Container();
     this.guardFxLayer.sortableChildren = true;
     this.guardFxLayer.zIndex = 106;
+    this._botLayer = new PIXI.Container();
+    this._botLayer.sortableChildren = true;
+    this._botLayer.zIndex = 103;
+    this._creatorEggLayer = new PIXI.Container();
+    this._creatorEggLayer.sortableChildren = true;
+    this._creatorEggLayer.zIndex = 39;
 
     this._containerEl = containerEl;
     this._resizeObs = new ResizeObserver(() => this._resize());
@@ -311,6 +334,7 @@ export default class GameEngine {
         const showBounds = this.mapConfig?.showLayerName
           ? this.tiledRenderer.getNamedLayerPixelBounds(this.mapConfig.showLayerName)
           : null;
+        const fieldNpcBounds = this.tiledRenderer.getNamedLayerPixelBounds('filed_npc');
 
         this.sceneW = contentBounds.pixelW;
         this.sceneH = contentBounds.pixelH;
@@ -361,9 +385,19 @@ export default class GameEngine {
         this.guardLayer.y = this._worldOffsetY;
         this.guardFxLayer.x = this._worldOffsetX;
         this.guardFxLayer.y = this._worldOffsetY;
+        this._botLayer.x = this._worldOffsetX;
+        this._botLayer.y = this._worldOffsetY;
+        this._creatorEggLayer.x = this._worldOffsetX;
+        this._creatorEggLayer.y = this._worldOffsetY;
         this._createFloorScreenOverlay(this.overlayRects.screen || null);
         this._createWallDashboardOverlay(this.overlayRects.dashboardPanels || []);
         this._createShowEasterEggOverlay(this.overlayRects.show || null);
+        await this._createCreatorEasterEggs(fieldNpcBounds ? {
+          x: fieldNpcBounds.pixelX - contentBounds.pixelX,
+          y: fieldNpcBounds.pixelY - contentBounds.pixelY,
+          w: fieldNpcBounds.pixelW,
+          h: fieldNpcBounds.pixelH,
+        } : null);
 
         console.log(
           `Map loaded: ${this.tiledRenderer.mapW}×${this.tiledRenderer.mapH} tiles, ` +
@@ -391,7 +425,9 @@ export default class GameEngine {
       this.sceneH = SCENE_H;
     }
 
+    this.world.addChild(this._creatorEggLayer);
     this.world.addChild(this.npcLayer);
+    this.world.addChild(this._botLayer);
     this.world.addChild(this.guardLayer);
     this.world.addChild(this.guardFxLayer);
     await this._loadGuardAssets();
@@ -526,6 +562,7 @@ export default class GameEngine {
 
   _createShowEasterEggOverlay(rect) {
     this._destroyShowEasterEggOverlay();
+    if (this.mapConfig?.creatorEasterEggs?.length) return;
     const message = String(this.mapConfig?.showEasterEggMessage || '').trim();
     if (!rect?.w || !rect?.h || !this.world) return;
 
@@ -868,13 +905,7 @@ export default class GameEngine {
   }
 
   _getAgentCharNameMap(agents = this._agents || []) {
-    const map = {};
-    const totalChars = Math.max(1, CHAR_NAMES.length);
-    (agents || []).forEach((agent, index) => {
-      if (!agent?.id) return;
-      map[agent.id] = CHAR_NAMES[index % totalChars];
-    });
-    return map;
+    return buildStableCharNameMap(agents).map;
   }
 
   _getDashboardSafeRect(
@@ -2729,6 +2760,7 @@ export default class GameEngine {
       this._removeNpc(npc);
     }
     this.npcs = [];
+    this._clearAllPendingBots();
   }
 
   // ─── NPC Creation ─────────────────────────────────────────────
@@ -3261,11 +3293,13 @@ export default class GameEngine {
       npc.sprite.textures = npc.frames.idle;
       npc.sprite.play();
       this._ensureIssueVisuals(npc);
+      this._spawnPendingBot(npc);
       return;
     }
 
     this._clearIssueVisuals(npc);
     npc.hasIssue = false;
+    this._despawnPendingBot(npc.agent?.id);
 
     if (npc.mode === 'pathfind') {
       npc.aiState = 'idle';
@@ -3287,7 +3321,7 @@ export default class GameEngine {
   }
 
   _createNPC(agent, idx, charNameMap = null) {
-    const charName = charNameMap?.[agent?.id] || CHAR_NAMES[idx % CHAR_NAMES.length];
+    const charName = charNameMap?.[agent?.id] || CHAR_NAMES[hashAgentCharIndex(agent?.id)];
     const frames   = this.spriteLoader.charFrames[charName];
     if (!frames || !frames.front.length) return null;
     const isRunner = this._isSceneAgentStatus(agent?.status);
@@ -3679,6 +3713,8 @@ export default class GameEngine {
       this._removeBubble(npc);
       npc._fieldDialogueLock = false;
     }
+
+    this._resetCreatorEggResponse();
   }
 
   _createFieldNpcFloatingLabel(mapX, mapY, text) {
@@ -3745,7 +3781,9 @@ export default class GameEngine {
 
     if (!response) return;
 
-    this._triggerShowEasterEggMessage(mapX, mapY, response);
+    if (!this._triggerCreatorEggResponse(response)) {
+      this._triggerShowEasterEggMessage(mapX, mapY, response);
+    }
   }
 
   // ─── Game Loop ──────────────────────────────────────────────
@@ -3825,6 +3863,8 @@ export default class GameEngine {
 
       // Guard units
       this._updateGuards(delta);
+      this._updatePendingBots(delta);
+      this._updateCreatorEasterEggs(performance.now());
       this._syncFloorScreenOverlay(performance.now());
       this._syncWallDashboardOverlay(performance.now());
       this._syncShowEasterEggOverlay(performance.now());
@@ -4426,6 +4466,364 @@ export default class GameEngine {
     }
   }
 
+  // ─── Creator Set Easter Eggs ─────────────────────────────────
+
+  async _createCreatorEasterEggs(showRect) {
+    this._destroyCreatorEasterEggs();
+    const eggs = this.mapConfig?.creatorEasterEggs;
+    if (!Array.isArray(eggs) || !eggs.length || !this._creatorEggLayer) return;
+    const DISPLAY_HEIGHT = FH * NPC_SCALE * 0.92;
+    const rect = showRect || {
+      x: Math.round(this.sceneW * 0.62),
+      y: Math.round(this.sceneH * 0.38),
+      w: 160,
+      h: 224,
+    };
+    const fallbackPosXs = [
+      Math.round(rect.x + rect.w * 0.32),
+      Math.round(rect.x + rect.w * 0.68),
+    ];
+    const fallbackBaseY = Math.round(rect.y + rect.h - 8);
+
+    for (let i = 0; i < eggs.length; i++) {
+      const cfg = eggs[i];
+      let sheetTex = null;
+      try {
+        sheetTex = await PIXI.Assets.load(cfg.sheetImage);
+      } catch (_) { continue; }
+      const baseTexture = sheetTex?.baseTexture;
+      if (!baseTexture) continue;
+      baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
+
+      const idleTexture = getSheetCellTexture(baseTexture, cfg.idleCell?.[0] || 1, cfg.idleCell?.[1] || 1);
+      const responseTexture = getSheetCellTexture(baseTexture, cfg.responseCell?.[0] || 1, cfg.responseCell?.[1] || 1);
+      if (!idleTexture) continue;
+
+      const anchorBounds = typeof cfg.name === 'string' && this.tiledRenderer
+        ? this.tiledRenderer.getNamedLayerPixelBounds(cfg.name)
+        : null;
+      const posX = anchorBounds
+        ? Math.round(anchorBounds.pixelX + anchorBounds.pixelW * 0.5)
+        : fallbackPosXs[Math.min(i, fallbackPosXs.length - 1)];
+      const baseY = anchorBounds
+        ? Math.round(anchorBounds.pixelY + anchorBounds.pixelH - 8)
+        : fallbackBaseY;
+
+      const container = new PIXI.Container();
+      container.x = posX;
+      container.y = baseY;
+      container.zIndex = Math.round(baseY);
+
+      const scale = DISPLAY_HEIGHT / idleTexture.height;
+      const shadow = new PIXI.Graphics();
+      shadow.beginFill(0x000000, 0.12);
+      shadow.drawEllipse(0, -2, 10 * scale, 3 * scale);
+      shadow.endFill();
+      container.addChild(shadow);
+
+      const sprite = new PIXI.Sprite(idleTexture);
+      sprite.anchor.set(0.5, 1);
+      sprite.scale.set(scale);
+      container.addChild(sprite);
+
+      this._creatorEggLayer.addChild(container);
+      this._creatorEggs.push({
+        name: cfg.name,
+        container,
+        sprite,
+        shadow,
+        idleTexture,
+        responseTexture: responseTexture || idleTexture,
+        baseY,
+      });
+    }
+  }
+
+  _destroyCreatorEasterEggs() {
+    if (this._creatorEggResponseTimer) {
+      clearTimeout(this._creatorEggResponseTimer);
+      this._creatorEggResponseTimer = null;
+    }
+    if (this._creatorEggBubble?.parent) {
+      this._creatorEggBubble.parent.removeChild(this._creatorEggBubble);
+      this._creatorEggBubble.destroy({ children: true });
+    }
+    this._creatorEggBubble = null;
+    for (const egg of this._creatorEggs) {
+      if (egg.container.parent) egg.container.parent.removeChild(egg.container);
+      egg.container.destroy({ children: true });
+    }
+    this._creatorEggs = [];
+  }
+
+  _updateCreatorEasterEggs(now) {
+    for (const egg of this._creatorEggs) {
+      const floatOffset = Math.sin(now / 520 + egg.container.x * 0.01) * 1.6;
+      egg.sprite.y = floatOffset;
+      egg.shadow.alpha = 0.10 + Math.sin(now / 620) * 0.02;
+    }
+  }
+
+  _resetCreatorEggResponse() {
+    if (this._creatorEggResponseTimer) {
+      clearTimeout(this._creatorEggResponseTimer);
+      this._creatorEggResponseTimer = null;
+    }
+    if (this._creatorEggBubble?.parent) {
+      this._creatorEggBubble.parent.removeChild(this._creatorEggBubble);
+      this._creatorEggBubble.destroy({ children: true });
+    }
+    this._creatorEggBubble = null;
+    for (const egg of this._creatorEggs) {
+      if (egg.sprite && egg.idleTexture) egg.sprite.texture = egg.idleTexture;
+    }
+  }
+
+  _triggerCreatorEggResponse(text) {
+    if (!this._creatorEggs.length || !this._creatorEggLayer) return false;
+    this._resetCreatorEggResponse();
+
+    for (const egg of this._creatorEggs) {
+      if (egg.sprite && egg.responseTexture) egg.sprite.texture = egg.responseTexture;
+    }
+
+    const raw = String(text || '').trim();
+    if (raw) {
+      const bc = new PIXI.Container();
+      const bt = new PIXI.Text(raw, {
+        fontFamily: 'Press Start 2P',
+        fontSize: FIELD_NPC_FLOAT_FONT_SIZE,
+        fill: 0x3a3020,
+        wordWrap: true,
+        wordWrapWidth: FIELD_NPC_FLOAT_WORD_WRAP,
+        lineHeight: FIELD_NPC_FLOAT_LINE_HEIGHT,
+        align: 'center',
+      });
+      bt.anchor.set(0.5, 1);
+
+      const pad = FIELD_NPC_FLOAT_PAD;
+      const bg = new PIXI.Graphics();
+      bg.beginFill(0xFFFDF8, 0.95);
+      bg.lineStyle(1, 0xB2773F, 0.55);
+      const bw = Math.max(FIELD_NPC_FLOAT_MIN_W, bt.width + pad * 2);
+      const bh = Math.max(FIELD_NPC_FLOAT_MIN_H, bt.height + pad * 2);
+      bg.drawRoundedRect(-bw / 2, -bh, bw, bh, FIELD_NPC_FLOAT_CORNER);
+      bg.endFill();
+      bg.beginFill(0xFFFDF8, 0.95);
+      bg.moveTo(-11, 0); bg.lineTo(0, 14); bg.lineTo(11, 0);
+      bg.endFill();
+      bt.y = -pad;
+      bc.addChild(bg);
+      bc.addChild(bt);
+
+      const centerX = this._creatorEggs.reduce((sum, egg) => sum + egg.container.x, 0) / this._creatorEggs.length;
+      const topY = Math.min(...this._creatorEggs.map((egg) => egg.container.y - FH * NPC_SCALE - 18));
+      bc.x = Math.round(centerX);
+      bc.y = Math.round(topY);
+      bc.zIndex = 15000;
+      this._creatorEggLayer.addChild(bc);
+      this._creatorEggBubble = bc;
+    }
+
+    this._creatorEggResponseTimer = window.setTimeout(() => {
+      this._creatorEggResponseTimer = null;
+      this._resetCreatorEggResponse();
+    }, SHOW_EASTER_EGG_BUBBLE_MS);
+
+    return true;
+  }
+
+  // ─── Pending Review Bot ──────────────────────────────────────
+
+  _createPendingBotGraphic() {
+    const container = new PIXI.Container();
+
+    const shadow = new PIXI.Graphics();
+    shadow.beginFill(0x000000, 0.10);
+    shadow.drawEllipse(0, 0, 12, 3.5);
+    shadow.endFill();
+    container.addChild(shadow);
+
+    const bodyGroup = new PIXI.Container();
+    const gfx = new PIXI.Graphics();
+    gfx.beginFill(0x2d8cf0);
+    gfx.drawRoundedRect(-12, -36, 24, 22, 5);
+    gfx.endFill();
+    gfx.beginFill(0x5bb8f5);
+    gfx.drawRoundedRect(-10, -50, 20, 18, 7);
+    gfx.endFill();
+    gfx.beginFill(0xffffff);
+    gfx.drawCircle(-4, -42, 3.5);
+    gfx.drawCircle(4, -42, 3.5);
+    gfx.endFill();
+    gfx.beginFill(0x111122);
+    gfx.drawCircle(-4, -42, 1.6);
+    gfx.drawCircle(4, -42, 1.6);
+    gfx.endFill();
+    gfx.lineStyle(1.5, 0x5bb8f5);
+    gfx.moveTo(0, -50);
+    gfx.lineTo(0, -58);
+    gfx.lineStyle(0);
+    gfx.beginFill(0xff5555);
+    gfx.drawCircle(0, -60, 2.5);
+    gfx.endFill();
+    bodyGroup.addChild(gfx);
+    container.addChild(bodyGroup);
+
+    return { container, bodyGroup, shadow };
+  }
+
+  _spawnPendingBot(npc) {
+    if (!npc?.agent?.id || !this._botLayer) return;
+    const agentId = npc.agent.id;
+    if (this._pendingBots.has(agentId)) return;
+
+    const { container, bodyGroup, shadow } = this._createPendingBotGraphic();
+
+    const npcX = npc.container.x;
+    const npcY = npc.container.y;
+    const side = (npcX > (this.sceneW / 2 - this._worldOffsetX)) ? -1 : 1;
+    const haltX = npcX + side * 55;
+    const haltY = npcY - 10;
+
+    const edge = side > 0 ? this.sceneW - this._worldOffsetX + 60 : -60;
+    container.x = edge;
+    container.y = haltY - 120 + Math.random() * 80;
+    container.zIndex = Math.round(haltY) + 2;
+
+    this._botLayer.addChild(container);
+
+    const bot = {
+      container,
+      bodyGroup,
+      shadow,
+      agentId,
+      npc,
+      phase: 'flying',
+      haltX,
+      haltY,
+      speed: 8 + Math.random() * 4,
+      particles: [],
+      spawnTime: Date.now(),
+    };
+    this._pendingBots.set(agentId, bot);
+  }
+
+  _despawnPendingBot(agentId) {
+    if (!agentId) return;
+    const bot = this._pendingBots.get(agentId);
+    if (!bot) return;
+    if (bot.phase === 'leaving') return;
+
+    bot.phase = 'leaving';
+    const side = (bot.container.x < bot.npc?.container?.x) ? -1 : 1;
+    bot.leaveX = side > 0 ? this.sceneW - this._worldOffsetX + 100 : -100;
+    bot.leaveY = bot.container.y - 80;
+  }
+
+  _clearAllPendingBots() {
+    for (const [, bot] of this._pendingBots) {
+      for (const p of bot.particles) {
+        if (p.parent) p.parent.removeChild(p);
+        p.destroy();
+      }
+      if (bot.container.parent) bot.container.parent.removeChild(bot.container);
+      bot.container.destroy({ children: true });
+    }
+    this._pendingBots.clear();
+  }
+
+  _updatePendingBots(delta) {
+    if (!this._pendingBots.size) return;
+    const now = Date.now();
+
+    for (const [agentId, bot] of this._pendingBots) {
+      if (bot.phase === 'flying') {
+        const tx = bot.haltX;
+        const ty = bot.haltY;
+        const dx = tx - bot.container.x;
+        const dy = ty - bot.container.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 3) {
+          bot.container.x = tx;
+          bot.container.y = ty;
+          bot.phase = 'stationed';
+        } else {
+          const ease = Math.max(0.3, Math.min(1, dist / 300));
+          const step = Math.min(bot.speed * ease * delta, dist);
+          bot.container.x += (dx / dist) * step;
+          bot.container.y += (dy / dist) * step;
+        }
+
+        if (Math.random() < 0.6) {
+          this._emitBotParticle(bot);
+        }
+      } else if (bot.phase === 'stationed') {
+        if (bot.npc?.container) {
+          const npcX = bot.npc.container.x;
+          const npcY = bot.npc.container.y;
+          const side = (bot.container.x < npcX) ? -1 : 1;
+          bot.haltX = npcX + side * 55;
+          bot.haltY = npcY - 10;
+          bot.container.x += (bot.haltX - bot.container.x) * 0.08;
+          bot.container.y += (bot.haltY - bot.container.y) * 0.08;
+          bot.container.zIndex = Math.round(bot.npc.container.y) + 2;
+        }
+        const bob = Math.sin(now / 300) * 4;
+        bot.bodyGroup.y = bob;
+        const antennaPulse = Math.sin(now / 200) * 0.15 + 0.85;
+        bot.bodyGroup.alpha = antennaPulse * 0.12 + 0.88;
+      } else if (bot.phase === 'leaving') {
+        const dx = bot.leaveX - bot.container.x;
+        const dy = bot.leaveY - bot.container.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 5) {
+          for (const p of bot.particles) {
+            if (p.parent) p.parent.removeChild(p);
+            p.destroy();
+          }
+          if (bot.container.parent) bot.container.parent.removeChild(bot.container);
+          bot.container.destroy({ children: true });
+          this._pendingBots.delete(agentId);
+          continue;
+        }
+        const step = Math.min(10 * delta, dist);
+        bot.container.x += (dx / dist) * step;
+        bot.container.y += (dy / dist) * step;
+        bot.container.alpha = Math.max(0, bot.container.alpha - 0.015);
+        if (Math.random() < 0.4) this._emitBotParticle(bot);
+      }
+
+      const stale = [];
+      for (const p of bot.particles) {
+        p.alpha -= 0.04;
+        p.scale.x *= 0.96;
+        p.scale.y *= 0.96;
+        if (p.alpha <= 0) {
+          if (p.parent) p.parent.removeChild(p);
+          p.destroy();
+          stale.push(p);
+        }
+      }
+      if (stale.length) {
+        bot.particles = bot.particles.filter((p) => !stale.includes(p));
+      }
+    }
+  }
+
+  _emitBotParticle(bot) {
+    if (!this._botLayer || bot.particles.length > 12) return;
+    const p = new PIXI.Graphics();
+    p.beginFill(0x5bb8f5, 0.7);
+    p.drawCircle(0, 0, 2 + Math.random() * 2);
+    p.endFill();
+    p.x = bot.container.x + (Math.random() - 0.5) * 10;
+    p.y = bot.container.y - 30 + (Math.random() - 0.5) * 14;
+    p.zIndex = bot.container.zIndex - 1;
+    this._botLayer.addChild(p);
+    bot.particles.push(p);
+  }
+
   /** Clean up PixiJS resources. */
   destroy() {
     this._cancelFieldNpcDialogue();
@@ -4440,6 +4838,8 @@ export default class GameEngine {
     }
     this._dragContext = null;
     this._clearGuardsImmediate();
+    this._clearAllPendingBots();
+    this._destroyCreatorEasterEggs();
     this._destroyFloorScreenOverlay();
     this._destroyWallDashboardOverlay();
     this._destroyShowEasterEggOverlay();
