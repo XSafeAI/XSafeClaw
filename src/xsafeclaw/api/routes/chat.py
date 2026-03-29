@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 
@@ -14,6 +15,52 @@ from ...gateway_client import GatewayClient
 # Path to OpenClaw sessions directory
 _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
 _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+_AVAILABLE_MODELS_CLI_TIMEOUT = 25
+_AVAILABLE_MODELS_CACHE_TTL = 30.0
+_AVAILABLE_MODELS_FAILURE_TTL = 5.0
+_available_models_cache: dict[str, object] = {
+    "expires_at": 0.0,
+    "payload": {"models": [], "default_model": ""},
+    "last_success": None,
+}
+_available_models_lock = None
+
+
+def _get_available_models_lock() -> asyncio.Lock:
+    global _available_models_lock
+    if _available_models_lock is None:
+        _available_models_lock = asyncio.Lock()
+    return _available_models_lock
+
+
+def _build_available_models_payload(raw: dict | list | None, status_raw: dict | list | None) -> dict:
+    """Normalize OpenClaw CLI JSON into the frontend payload shape."""
+    models = []
+    inferred_default = ""
+
+    if raw and isinstance(raw, dict):
+        for model in raw.get("models", []):
+            key = model.get("key", "")
+            if "/" not in key:
+                continue
+            tags = model.get("tags") or []
+            if not inferred_default and "default" in tags:
+                inferred_default = key
+            models.append({
+                "id": key,
+                "name": model.get("name", key),
+                "provider": key.split("/")[0],
+                "reasoning": "reasoning" in tags,
+            })
+
+    default_model = ""
+    if status_raw and isinstance(status_raw, dict):
+        default_model = status_raw.get("defaultModel", "")
+
+    if not default_model:
+        default_model = inferred_default or (models[0]["id"] if len(models) == 1 else "")
+
+    return {"models": models, "default_model": default_model}
 
 
 def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
@@ -590,29 +637,41 @@ async def patch_session(request: PatchSessionRequest):
 
 @router.get("/available-models")
 async def available_models():
-    """Return models from configured providers only (no --all flag)."""
+    """Return models from configured providers with Windows-friendly fallback."""
     from .system import _run_openclaw_json
 
-    raw, status_raw = await asyncio.gather(
-        _run_openclaw_json(["models", "list"]),
-        _run_openclaw_json(["models", "status"]),
-    )
+    now = time.monotonic()
+    expires_at = float(_available_models_cache.get("expires_at", 0.0) or 0.0)
+    cached_payload = _available_models_cache.get("payload")
+    if now < expires_at and isinstance(cached_payload, dict):
+        return cached_payload
 
-    default_model = ""
-    if status_raw and isinstance(status_raw, dict):
-        default_model = status_raw.get("defaultModel", "")
+    async with _get_available_models_lock():
+        now = time.monotonic()
+        expires_at = float(_available_models_cache.get("expires_at", 0.0) or 0.0)
+        cached_payload = _available_models_cache.get("payload")
+        if now < expires_at and isinstance(cached_payload, dict):
+            return cached_payload
 
-    models = []
-    if raw and isinstance(raw, dict):
-        for m in raw.get("models", []):
-            key = m.get("key", "")
-            if "/" not in key:
-                continue
-            models.append({
-                "id": key,
-                "name": m.get("name", key),
-                "provider": key.split("/")[0],
-                "reasoning": "reasoning" in (m.get("tags") or []),
-            })
+        raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
+        status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None
+        payload = _build_available_models_payload(raw, status_raw)
 
-    return {"models": models, "default_model": default_model}
+        if payload["models"]:
+            _available_models_cache["payload"] = payload
+            _available_models_cache["last_success"] = payload
+            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+            return payload
+
+        last_success = _available_models_cache.get("last_success")
+        if isinstance(last_success, dict) and last_success.get("models"):
+            print("[available-models] using last known good model list after CLI returned no models")
+            _available_models_cache["payload"] = last_success
+            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
+            return last_success
+
+        print("[available-models] openclaw returned no models and no cached model list is available")
+        empty_payload = {"models": [], "default_model": ""}
+        _available_models_cache["payload"] = empty_payload
+        _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
+        return empty_payload

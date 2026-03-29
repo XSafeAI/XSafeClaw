@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from ...database import get_db
 from ...models import Message, Session, ToolCall
@@ -245,6 +246,18 @@ async def get_trace(
     # ── 1. Load all non-deleted sessions ────────────────────────────
     sess_result = await db.execute(
         select(Session)
+        .options(
+            load_only(
+                Session.session_id,
+                Session.session_key,
+                Session.channel,
+                Session.first_seen_at,
+                Session.current_model_provider,
+                Session.current_model_name,
+                Session.last_activity_at,
+                Session.deleted_at,
+            )
+        )
         .where(Session.deleted_at.is_(None))
         .order_by(Session.last_activity_at.desc())
     )
@@ -346,6 +359,16 @@ async def get_trace(
     # ── 4. Messages for all monitor-visible sessions ────────────────
     msg_result = await db.execute(
         select(Message)
+        .options(
+            load_only(
+                Message.id,
+                Message.session_id,
+                Message.message_id,
+                Message.role,
+                Message.timestamp,
+                Message.content_text,
+            )
+        )
         .where(Message.session_id.in_(session_ids))
         .order_by(Message.session_id, Message.timestamp)
     )
@@ -354,6 +377,21 @@ async def get_trace(
     # ── 5. Tool calls ──────────────────────────────────────────────
     tc_result = await db.execute(
         select(ToolCall)
+        .options(
+            load_only(
+                ToolCall.id,
+                ToolCall.message_db_id,
+                ToolCall.tool_name,
+                ToolCall.arguments,
+                ToolCall.result_text,
+                ToolCall.status,
+                ToolCall.is_error,
+                ToolCall.started_at,
+                ToolCall.completed_at,
+                ToolCall.duration_seconds,
+                ToolCall.error_message,
+            )
+        )
         .join(Message, ToolCall.message_db_id == Message.id)
         .where(Message.session_id.in_(session_ids))
     )
