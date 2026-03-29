@@ -8,6 +8,32 @@ export const NPC_SCALE = 3.9;
 // ── Data source mode ──
 export const USE_AGENT_TOWN_MOCK = false;
 
+// ── Demo mode (env var, default ON) ──
+export const DEMO_MODE = (import.meta.env.VITE_DEMO_MODE ?? 'true') === 'true';
+export const DEMO_CHAR_NAME = 'Lucy';
+const _demoSessionKeys = new Set(JSON.parse(localStorage.getItem('_demo_sessions') || '[]'));
+function _normKey(k) {
+  const s = String(k || '');
+  return s.startsWith('agent:main:') ? s.slice('agent:main:'.length) : s;
+}
+function _persistDemo() {
+  try { localStorage.setItem('_demo_sessions', JSON.stringify([..._demoSessionKeys])); } catch (_) {}
+}
+export function markDemoSession(sessionKey) {
+  if (!sessionKey) return;
+  _demoSessionKeys.add(_normKey(sessionKey));
+  _persistDemo();
+}
+export function isDemoSession(sessionKey) {
+  if (!sessionKey) return false;
+  return _demoSessionKeys.has(_normKey(sessionKey));
+}
+export function removeDemoSession(sessionKey) {
+  if (!sessionKey) return;
+  _demoSessionKeys.delete(_normKey(sessionKey));
+  _persistDemo();
+}
+
 // ── Background music ──
 export const MUSIC_TRACKS = [
   {
@@ -21,6 +47,30 @@ export const MUSIC_TRACKS = [
     label: 'Undertale',
     fileName: 'toby fox - UNDERTALE Soundtrack - 71 Undertale.mp3',
     url: '/music/toby fox - UNDERTALE Soundtrack - 71 Undertale.mp3',
+  },
+  {
+    id: 'bright-steps',
+    label: 'Bright Steps',
+    fileName: '欢快1.mp3',
+    url: '/music/欢快1.mp3',
+  },
+  {
+    id: 'golden-parade',
+    label: 'Golden Parade',
+    fileName: '欢快2.mp3',
+    url: '/music/欢快2.mp3',
+  },
+  {
+    id: 'quiet-breeze',
+    label: 'Quiet Breeze',
+    fileName: '舒缓1.mp3',
+    url: '/music/舒缓1.mp3',
+  },
+  {
+    id: 'evening-glow',
+    label: 'Evening Glow',
+    fileName: '舒缓2.mp3',
+    url: '/music/舒缓2.mp3',
   },
 ];
 
@@ -99,6 +149,7 @@ export const MAP_VARIANTS = [
     showLayerName: null,
     showEasterEggImage: null,
     showEasterEggMessage: null,
+    overlayLayerName: 'Doorcover3',
     renderMode: 'whole-image',
     tileWidth: 32,
     tileHeight: 32,
@@ -118,21 +169,19 @@ export const MAP_VARIANTS = [
     collisionLayer: 'collision-Map4',
     screenLayerName: null,
     dashboardLayerName: null,
-    showLayerName: 'npc',
+    showLayerName: null,
     showEasterEggImage: null,
     showEasterEggMessage: null,
     creatorEasterEggs: [
       {
-        name: 'npc2',
-        sheetImage: '/sup/Creator Set/Elara.png',
-        idleCell: [1, 6],
-        responseCell: [2, 2],
+        layerName: 'npc1',
+        idleImage: '/sup/Creator Set/npc2.png',
+        responseImage: '/sup/Creator Set/npc2_back.png',
       },
       {
-        name: 'npc1',
-        sheetImage: '/sup/Creator Set/Seraphine.png',
-        idleCell: [3, 3],
-        responseCell: [2, 5],
+        layerName: 'npc2',
+        idleImage: '/sup/Creator Set/npc1.png',
+        responseImage: '/sup/Creator Set/npc1_back.png',
       },
     ],
     renderMode: 'whole-image',
@@ -185,35 +234,42 @@ export const CHAR_NAMES = [
   'Bouncer','Doctor_1','Nurse_1','Old_man_Josh','Old_woman_Jenny',
 ];
 
-/** Deterministic agent→character index from ID hash (stable across list reordering). */
-export function hashAgentCharIndex(agentId) {
+/** Deterministic agent->character index from key hash (stable across list reordering). */
+export function hashAgentCharIndex(key) {
   let h = 0;
-  const s = String(agentId || '');
-  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  const s = String(key || '');
+  for (let i = 0; i < s.length; i += 1) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return ((h % CHAR_NAMES.length) + CHAR_NAMES.length) % CHAR_NAMES.length;
 }
 
 /**
- * Build a stable agentId → charName map.
+ * Build a stable agentId -> charName map.
  * Hashes each ID for a base index, resolves collisions in sorted-ID order.
  */
 export function buildStableCharNameMap(agents) {
   const map = {};
   const used = new Set();
   const total = CHAR_NAMES.length;
-  const sorted = [...(agents || [])].filter((a) => a?.id).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const sorted = [...(agents || [])]
+    .filter((agent) => agent?.id)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
   for (const agent of sorted) {
-    const base = hashAgentCharIndex(agent.id);
+    const base = hashAgentCharIndex(agent.session_key || agent.id);
     let idx = base;
     if (used.has(idx)) {
-      for (let j = 1; j < total; j++) {
-        const c = (base + j) % total;
-        if (!used.has(c)) { idx = c; break; }
+      for (let j = 1; j < total; j += 1) {
+        const candidate = (base + j) % total;
+        if (!used.has(candidate)) {
+          idx = candidate;
+          break;
+        }
       }
     }
     used.add(idx);
     map[agent.id] = CHAR_NAMES[idx];
   }
+
   return { map, used };
 }
 
@@ -238,4 +294,5 @@ export const WALK_ZONES = [
 ];
 
 // ── PixiJS background ──
-export const BG_COLOR = 0xF7F6F2;
+// Match the darker page backdrop so transparent map edges do not show a light seam.
+export const BG_COLOR = 0x211928;

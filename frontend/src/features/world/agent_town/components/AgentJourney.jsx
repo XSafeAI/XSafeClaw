@@ -27,31 +27,9 @@ function normalizeEvents(rawEvents, agentId) {
 /* ── Configuration ── */
 const CHAR_SCALE     = 1.35;       // smaller character
 const WALK_SPEED     = 0.6;        // px per frame (slow)
-const STAR_VARIANT_URLS = [
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/blue-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/cyan-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/green-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/orange-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/pink-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/purple-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/red-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/yellow-star-18px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/blue-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/cyan-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/green-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/orange-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/pink-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/purple-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/red-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/yellow-star-36px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/blue-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/cyan-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/green-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/orange-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/pink-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/purple-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/red-star-72px.png',
-  '/emotes/stars/Pixel Star Badges.glitchedinorbit/yellow-star-72px.png',
+const STAR_FRAME_URLS = [
+  '/UI/png/status/status_star_1.png',
+  '/UI/png/status/status_star_2.png',
 ];
 const LASER_ALL_FRAMES = 24;
 const LASER_ALL_DIR = '/beams/Laser (All States)';
@@ -122,7 +100,7 @@ function fitSpriteToSceneHeight(sprite, sceneRect) {
  *
  * Controls: scroll ↓ = go right, scroll ↑ = go left.
  */
-export default function AgentJourney({ data, onClose }) {
+export default function AgentJourney({ data, onClose, onDeleteAgent }) {
   const canvasRef  = useRef(null);
   const pauseTimerRef = useRef(null);
   const convoCenterTimerRef = useRef(null);
@@ -404,7 +382,7 @@ export default function AgentJourney({ data, onClose }) {
     const loadStars = async () => {
       try {
         const texList = await Promise.all(
-          STAR_VARIANT_URLS.map((url) =>
+          STAR_FRAME_URLS.map((url) =>
             PIXI.Assets.load(url).then((tex) => {
               tex.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
               return tex;
@@ -421,14 +399,16 @@ export default function AgentJourney({ data, onClose }) {
         c.y = y;
         c.zIndex = 0;
 
-        // Static random star sprite (no spin).
-        const chosenTex = starTextures[Math.floor(Math.random() * starTextures.length)];
-        const anim = new PIXI.Sprite(chosenTex);
+        // Two-frame status star, slightly varied in size and cadence.
+        const anim = new PIXI.AnimatedSprite(starTextures);
         anim.anchor.set(0.5);
         const targetSize = STAR_TARGET_MIN_PX + Math.random() * (STAR_TARGET_MAX_PX - STAR_TARGET_MIN_PX);
-        const baseSize = Math.max(1, chosenTex.width);
+        const baseSize = Math.max(1, starTextures[0]?.width || starTextures[0]?.height || 1);
         const starScale = targetSize / baseSize;
         anim.scale.set(starScale);
+        anim.animationSpeed = 0.075 + Math.random() * 0.045;
+        anim.loop = true;
+        anim.gotoAndPlay(Math.floor(Math.random() * starTextures.length));
         c.addChild(anim);
 
         // Laser now appears only when the character gets close.
@@ -890,10 +870,13 @@ export default function AgentJourney({ data, onClose }) {
       <button className="journey-close" onClick={() => {
         const st = stateRef.current;
         if (st.finishing) return;
-        // Before entering main run, allow direct close.
         if (!st.active) onCloseRef.current?.();
         else finishRef.current();
       }}>×</button>
+
+      <button className="journey-delete-agent" onClick={() => {
+        if (window.confirm('Delete this agent and its session?')) onDeleteAgent?.(data?.agent);
+      }}>Delete Agent</button>
 
       <div className="journey-hint">
         <span>↑ Scroll to change direction ↓</span>

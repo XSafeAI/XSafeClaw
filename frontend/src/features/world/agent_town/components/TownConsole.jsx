@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK, buildStableCharNameMap, hashAgentCharIndex } from '../config/constants';
+import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK, buildStableCharNameMap, hashAgentCharIndex, DEMO_MODE, DEMO_CHAR_NAME, markDemoSession, isDemoSession } from '../config/constants';
 import {
   buildMockAssistantReply,
   buildMockHistory,
@@ -1198,6 +1198,7 @@ export default function TownConsole({
   onToggleMusic,
   musicVolume = 0.4,
   onChangeMusicVolume,
+  onDeleteAgent,
   onDataChanged,
 }) {
   const [activeTab, setActiveTab] = useState('crew');
@@ -1376,15 +1377,25 @@ export default function TownConsole({
     const drafts = combinedAgents.filter((a) => String(a.id).startsWith('draft:'));
     const { map, used } = buildStableCharNameMap(liveAgents);
 
-    for (const agent of drafts) {
-      const base = hashAgentCharIndex(agent.id);
-      let idx = base;
-      if (used.has(idx)) {
-        const unused = CHAR_NAMES.findIndex((_, i) => !used.has(i));
-        if (unused >= 0) idx = unused;
+    if (DEMO_MODE) {
+      for (const a of liveAgents) {
+        if (isDemoSession(a.session_key) || isDemoSession(a.id)) map[a.id] = DEMO_CHAR_NAME;
       }
-      used.add(idx);
-      map[agent.id] = CHAR_NAMES[idx];
+    }
+
+    for (const agent of drafts) {
+      if (DEMO_MODE) {
+        map[agent.id] = DEMO_CHAR_NAME;
+      } else {
+        const base = hashAgentCharIndex(agent.id);
+        let idx = base;
+        if (used.has(idx)) {
+          const unused = CHAR_NAMES.findIndex((_, i) => !used.has(i));
+          if (unused >= 0) idx = unused;
+        }
+        used.add(idx);
+        map[agent.id] = CHAR_NAMES[idx];
+      }
     }
 
     return map;
@@ -1631,6 +1642,7 @@ export default function TownConsole({
 
       if (USE_AGENT_TOWN_MOCK) {
         const sessionKey = `chat-mock-${makeId().slice(0, 10)}`;
+        if (DEMO_MODE) markDemoSession(sessionKey);
         const draftAgent = {
           ...buildDraftAgent(sessionKey, modelOption),
           mock: true,
@@ -1661,6 +1673,7 @@ export default function TownConsole({
 
       const json = await res.json();
       const sessionKey = json.session_key;
+      if (DEMO_MODE) markDemoSession(sessionKey);
 
       if (pendingModelId) {
         try {
@@ -1891,9 +1904,12 @@ export default function TownConsole({
       streamControllerRef.current = null;
       stopRequestedRef.current = false;
       setSendingIdentity('');
-      window.setTimeout(() => {
-        loadConsoleData();
-      }, 800);
+      for (const delay of [800, 2500, 5000, 8000]) {
+        window.setTimeout(() => {
+          loadConsoleData();
+          onDataChangedRef.current?.();
+        }, delay);
+      }
     }
   }, [currentAgent, currentIdentity, currentInput, currentSessionKey, loadConsoleData, sendingIdentity]);
 
@@ -1973,6 +1989,7 @@ export default function TownConsole({
                   pendingApprovals={pendingApprovals}
                   onResolveGuardPending={handleResolveGuardPending}
                   guardResolvingId={guardResolvingId}
+                  onDeleteAgent={onDeleteAgent}
                   tokensByAgent={tokensByAgent}
                   helpers={crewHelpers}
                   pendingImages={currentPendingImages}

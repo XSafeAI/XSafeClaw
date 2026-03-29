@@ -1374,12 +1374,10 @@ body.agent-town-page-cursor.cursor-grab-full *,
   height: 136px;
 }
 
-/* 勿写死小尺寸：与 .agent-card-avatar-frame 同优先级且写在前时会把外框缩没；只保留收缩。 */
 .agent-card-avatar-frame-compact {
   flex-shrink: 0;
 }
 
-/* 卡片小头像用满标准外框 114×154，内层人物区与控制台同款比例，单独提高特异性压住 TownConsole 的 .tc-showcase */
 .agent-card-avatar-frame.agent-card-avatar-frame-compact {
   width: 114px;
   height: 154px;
@@ -2443,7 +2441,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
   gap: 0;
   padding: 0;
   border: 1px solid rgba(255, 224, 177, 0.12);
-  border-radius: 14px;
+  border-radius: 16px;
   background: rgba(14, 11, 24, 0.98);
   box-shadow: 0 -8px 24px rgba(6, 4, 12, 0.6);
   z-index: 1;
@@ -2684,7 +2682,6 @@ body.agent-town-page-cursor.cursor-grab-full *,
     left: 10px;
     right: 10px;
     bottom: 10px;
-    border-radius: 12px;
   }
 }
 
@@ -2985,11 +2982,36 @@ body.agent-town-page-cursor.cursor-grab-full *,
   border-color: rgba(240, 187, 96, 0.24);
 }
 
+.agent-card-action-btns {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  width: 100%;
+}
+
 .agent-card-journey-btn {
   width: auto;
   min-width: 152px;
   padding: 9px 12px;
   flex-shrink: 0;
+}
+
+.agent-card-delete-btn {
+  width: auto;
+  min-width: 120px;
+  padding: 9px 12px;
+  flex-shrink: 0;
+  border-color: #aa5b44 !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0)),
+    linear-gradient(180deg, #7b3a2d 0%, #572219 100%) !important;
+  color: #ffb89a !important;
+}
+.agent-card-delete-btn:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0)),
+    linear-gradient(180deg, #9a4a36 0%, #6f2e1e 100%) !important;
 }
 
 .agent-card-profile-scroll::-webkit-scrollbar,
@@ -3517,4 +3539,23 @@ body.agent-town-page-cursor.cursor-grab-full *,
 .journey-badge .btn.primary:hover {
   background: linear-gradient(135deg, rgba(180, 140, 80, 0.55), rgba(212, 168, 60, 0.45));
   border-color: rgba(212, 168, 60, 0.6);
+}
+
+.journey-delete-agent {
+  position: fixed;
+  top: 16px; right: 72px; z-index: 210;
+  font-family: var(--px-font);
+  font-size: 7px;
+  color: #ffb89a;
+  background: rgba(123, 58, 45, 0.85);
+  border: 1px solid rgba(170, 91, 68, 0.7);
+  border-radius: 8px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  letter-spacing: 0.5px;
+}
+.journey-delete-agent:hover {
+  color: #fff;
+  background: rgba(154, 74, 54, 0.95);
 }

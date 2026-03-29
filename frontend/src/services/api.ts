@@ -170,6 +170,9 @@ export const chatAPI = {
   closeSession: (sessionKey: string) =>
     api.post('/chat/close-session', null, { params: { session_key: sessionKey } }),
 
+  deleteSession: (sessionId: string) =>
+    api.delete(`/sessions/${sessionId}`),
+
   patchSession: (sessionKey: string, data: { model?: string | null; thinking_level?: string | null }) =>
     api.post<{ status: string }>('/chat/patch-session', { session_key: sessionKey, ...data }),
 

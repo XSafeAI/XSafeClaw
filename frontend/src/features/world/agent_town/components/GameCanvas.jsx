@@ -9,9 +9,9 @@ import { fetchData } from '../data/mockData';
 export default function GameCanvas({
   onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, guardEnabled = false,
   onLayoutChange,
-  onScreenTelemetryChange,
   mapConfig,
   refreshTrigger = 0,
+  gameEngineRef,
 }) {
   const containerRef  = useRef(null);
   const loadingRef    = useRef(null);
@@ -22,10 +22,10 @@ export default function GameCanvas({
 
   // Keep callbacks in refs so the engine always has the latest copies
   const cbRef = useRef({
-    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange, onScreenTelemetryChange,
+    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange,
   });
   cbRef.current = {
-    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange, onScreenTelemetryChange,
+    onNpcHover, onNpcLeave, onNpcClick, onPendingClick, onCursorStateChange, onLayoutChange,
   };
 
   useEffect(() => {
@@ -33,9 +33,9 @@ export default function GameCanvas({
     let aborted = false;
     let refreshTimer = null;
     let hideLoadingTimer = null;
-    let telemetryTimer = null;
     const engine = new GameEngine({ mapConfig });
     engineRef.current = engine;
+    if (gameEngineRef) gameEngineRef.current = engine;
 
     // Wire callbacks through ref
     engine.onNpcHover     = (...a) => cbRef.current.onNpcHover?.(...a);
@@ -61,21 +61,11 @@ export default function GameCanvas({
 
         engine.populateNPCs(data.agents || [], data.events || []);
 
-        const pushTelemetry = () => {
-          if (aborted || !cbRef.current.onScreenTelemetryChange) return;
-          cbRef.current.onScreenTelemetryChange(engine.getMapScreenTelemetry?.() || null);
-        };
-        if (cbRef.current.onScreenTelemetryChange) {
-          pushTelemetry();
-          telemetryTimer = setInterval(pushTelemetry, 180);
-        }
-
         const doRefresh = async () => {
           try {
             const nextData = await fetchData();
             if (!aborted) {
               engine.updateData(nextData.agents || [], nextData.events || []);
-              pushTelemetry();
             }
           } catch (_) {}
         };
@@ -99,11 +89,10 @@ export default function GameCanvas({
       aborted = true;
       refreshFnRef.current = null;
       if (refreshTimer) clearInterval(refreshTimer);
-      if (telemetryTimer) clearInterval(telemetryTimer);
       if (hideLoadingTimer) clearTimeout(hideLoadingTimer);
-      cbRef.current.onScreenTelemetryChange?.(null);
       engine.destroy();
       engineRef.current = null;
+      if (gameEngineRef) gameEngineRef.current = null;
       cbRef.current.onCursorStateChange?.('normal');
     };
   }, [mapConfig]); // eslint-disable-line react-hooks/exhaustive-deps

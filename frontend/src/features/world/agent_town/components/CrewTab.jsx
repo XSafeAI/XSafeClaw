@@ -733,6 +733,7 @@ export default function CrewTab({
   pendingApprovals = [],
   onResolveGuardPending,
   guardResolvingId,
+  onDeleteAgent,
   tokensByAgent = {},
   helpers,
   pendingImages = [],
@@ -950,7 +951,19 @@ export default function CrewTab({
                 <div className="tc-stage-overline">TACTICAL PROFILE</div>
                 <div className="tc-stage-info-head">
                   <div>
-                    <div className="tc-stage-agent-name">{currentAgent.name}</div>
+                    <div className="tc-stage-agent-name-row">
+                      <div className="tc-stage-agent-name">{currentAgent.name}</div>
+                      <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
+                        {(currentAgent.status || 'offline').toUpperCase()}
+                      </div>
+                      <button
+                        type="button"
+                        className="tc-crew-delete-btn-inline"
+                        onClick={() => { if (window.confirm('Delete this agent and its session?')) onDeleteAgent?.(currentAgent); }}
+                      >
+                        Delete Agent
+                      </button>
+                    </div>
                     <div className="tc-stage-identity-inline tc-stage-identity-inline-top">
                       <div className="tc-stage-identity-chip">
                         <span className="tc-stage-identity-label">SESSION ID</span>
@@ -994,9 +1007,6 @@ export default function CrewTab({
                       </div>
                     </div>
                   </div>
-                  <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
-                    {(currentAgent.status || 'offline').toUpperCase()}
-                  </div>
                 </div>
 
                 <div className="tc-stage-summary-grid">
@@ -1024,7 +1034,7 @@ export default function CrewTab({
                   {currentEvents.length === 0 ? (
                     <div className="tc-empty">This agent has no recorded task yet.</div>
                   ) : (
-                    currentEvents.slice(0, 5).map((event) => {
+                    currentEvents.map((event) => {
                       const statusMeta = taskStatusMeta[event.status] || taskStatusMeta.running;
                       const snippet = ledgerSnippetFromDashboardEvent(event);
                       return (

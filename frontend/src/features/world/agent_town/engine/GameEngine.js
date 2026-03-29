@@ -10,16 +10,30 @@ import {
   FIELD_NPC_DIALOGUE_URL,
   buildStableCharNameMap,
   hashAgentCharIndex,
+  DEMO_MODE, DEMO_CHAR_NAME, isDemoSession,
 } from '../config/constants';
 
+const AGENT_PORTAL_URL = '/portals/2.png';
 const GUARD_PORTAL_URL = '/portals/3.png';
 const GUARD_IDLE_URL = '/guard/Idle.png';
 const GUARD_WALK_URL = '/guard/Walk.png';
 const GUARD_ATTACK_URL = '/guard/Attack.png';
 const ISSUE_QUESTION_URL = '/UI/png/status/marks.png';
 const GUARD_PORTAL_SCALE = 4.2;
+const AGENT_PORTAL_SCALE = 3.8;
+const AGENT_PORTAL_SPEED = 0.18;
 const GUARD_BODY_SCALE = 3.6;
 const GUARD_SHADOW_SCALE = 3.3;
+const GUARD_BASE_SPEED_MIN = 0.72;
+const GUARD_BASE_SPEED_VARIANCE = 0.18;
+const GUARD_ESCORT_SPEED_MULTIPLIER = 8.0;
+const GUARD_RETURN_SPEED_MULTIPLIER = 1.55;
+const GUARD_WALK_ANIM_SPEED = 0.16;
+const GUARD_ESCORT_ANIM_SPEED = 0.28;
+const GUARD_RETURN_ANIM_SPEED = 0.22;
+const GUARD_ESCORT_SIDE_OFFSET = 10 * NPC_SCALE + 10 * GUARD_SHADOW_SCALE + 8;
+const GUARD_ESCORT_JITTER_X = 6;
+const GUARD_ESCORT_JITTER_Y = 4;
 const ISSUE_MARKER_SCALE = Math.max(0.5, NPC_SCALE * 0.2);
 const ISSUE_MARKER_Y_OFFSET = 10;
 const SHOW_EASTER_EGG_BUBBLE_MS = 3200;
@@ -82,15 +96,6 @@ function getShowNpcStandTexture(frames, direction = 'right') {
     || null;
 }
 
-function getSheetCellTexture(baseTexture, row, col, rows = 5, cols = 6) {
-  if (!baseTexture) return null;
-  const fw = baseTexture.width / cols;
-  const fh = baseTexture.height / rows;
-  const x = (Math.max(1, col) - 1) * fw;
-  const y = (Math.max(1, row) - 1) * fh;
-  return new PIXI.Texture(baseTexture, new PIXI.Rectangle(x, y, fw, fh));
-}
-
 /** Google Fonts CSS may still be loading when the engine starts; wait so @font-face exists before fonts.load(). */
 async function waitForGoogleFontsStylesheet(timeoutMs = 2500) {
   const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).filter((l) =>
@@ -132,8 +137,12 @@ export default class GameEngine {
     this.floorScreen  = null;
     this.wallDashboard = null;
     this.showEasterEgg = null;
+    this.creatorEasterEggs = [];
+    this._mapOverlayContainer = null;
     this._floorScreenPreviewTexture = null;
     this._showEasterEggHideTimer = null;
+    this._creatorEasterEggResponseTimer = null;
+    this._creatorEasterEggResponseBubble = null;
     this.pendingNpc   = null;
     this.sceneW       = SCENE_W;
     this.sceneH       = SCENE_H;
@@ -155,16 +164,15 @@ export default class GameEngine {
     this._guardIdleFrames = [];
     this._guardWalkFrames = [];
     this._guardAttackFrames = [];
+    this._agentPortalFrames = [];
     this._issueQuestionTexture = null;
     this._guardPendingSnapshot = new Set();
-    this._pendingBots = new Map();
-    this._botLayer = null;
-    this._creatorEggs = [];
-    this._creatorEggLayer = null;
     this.mapConfig = {
       ...DEFAULT_MAP_CONFIG,
       ...(options.mapConfig || {}),
     };
+    this.sceneNpcDisplayMode = options.sceneNpcDisplayMode === 'capped' ? 'capped' : 'all';
+    this.sceneNpcDisplayCap = Math.max(1, Math.floor(Number(options.sceneNpcDisplayCap) || 12));
 
     // Callbacks set by React component
     this.onNpcHover   = null;  // (npcData, globalPos) => void
@@ -190,8 +198,6 @@ export default class GameEngine {
     this._fieldDialogueLockedNpc = null;
     this._fieldDialogueNpcSnap = null;
     this._fieldDialogueFloatBubble = null;
-    this._creatorEggResponseTimer = null;
-    this._creatorEggBubble = null;
   }
 
   /** Initialize PixiJS application and attach to DOM element. */
@@ -222,12 +228,6 @@ export default class GameEngine {
     this.guardFxLayer = new PIXI.Container();
     this.guardFxLayer.sortableChildren = true;
     this.guardFxLayer.zIndex = 106;
-    this._botLayer = new PIXI.Container();
-    this._botLayer.sortableChildren = true;
-    this._botLayer.zIndex = 103;
-    this._creatorEggLayer = new PIXI.Container();
-    this._creatorEggLayer.sortableChildren = true;
-    this._creatorEggLayer.zIndex = 39;
 
     this._containerEl = containerEl;
     this._resizeObs = new ResizeObserver(() => this._resize());
@@ -334,7 +334,6 @@ export default class GameEngine {
         const showBounds = this.mapConfig?.showLayerName
           ? this.tiledRenderer.getNamedLayerPixelBounds(this.mapConfig.showLayerName)
           : null;
-        const fieldNpcBounds = this.tiledRenderer.getNamedLayerPixelBounds('filed_npc');
 
         this.sceneW = contentBounds.pixelW;
         this.sceneH = contentBounds.pixelH;
@@ -385,19 +384,21 @@ export default class GameEngine {
         this.guardLayer.y = this._worldOffsetY;
         this.guardFxLayer.x = this._worldOffsetX;
         this.guardFxLayer.y = this._worldOffsetY;
-        this._botLayer.x = this._worldOffsetX;
-        this._botLayer.y = this._worldOffsetY;
-        this._creatorEggLayer.x = this._worldOffsetX;
-        this._creatorEggLayer.y = this._worldOffsetY;
         this._createFloorScreenOverlay(this.overlayRects.screen || null);
         this._createWallDashboardOverlay(this.overlayRects.dashboardPanels || []);
         this._createShowEasterEggOverlay(this.overlayRects.show || null);
-        await this._createCreatorEasterEggs(fieldNpcBounds ? {
-          x: fieldNpcBounds.pixelX - contentBounds.pixelX,
-          y: fieldNpcBounds.pixelY - contentBounds.pixelY,
-          w: fieldNpcBounds.pixelW,
-          h: fieldNpcBounds.pixelH,
-        } : null);
+        await this._createCreatorEasterEggOverlay();
+
+        if (this.mapConfig?.overlayLayerName) {
+          const olc = this.tiledRenderer.renderOverlayLayer(this.mapConfig.overlayLayerName);
+          if (olc) {
+            olc.x = this._worldOffsetX;
+            olc.y = this._worldOffsetY;
+            olc.zIndex = 200;
+            olc.eventMode = 'none';
+            this._mapOverlayContainer = olc;
+          }
+        }
 
         console.log(
           `Map loaded: ${this.tiledRenderer.mapW}×${this.tiledRenderer.mapH} tiles, ` +
@@ -414,6 +415,7 @@ export default class GameEngine {
       this._destroyFloorScreenOverlay();
       this._destroyWallDashboardOverlay();
       this._destroyShowEasterEggOverlay();
+      this._destroyCreatorEasterEggOverlay();
       try {
         const bgTex = await PIXI.Assets.load(SCENE_IMAGE_URL);
         bgTex.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
@@ -425,11 +427,12 @@ export default class GameEngine {
       this.sceneH = SCENE_H;
     }
 
-    this.world.addChild(this._creatorEggLayer);
     this.world.addChild(this.npcLayer);
-    this.world.addChild(this._botLayer);
     this.world.addChild(this.guardLayer);
     this.world.addChild(this.guardFxLayer);
+    if (this._mapOverlayContainer) {
+      this.world.addChild(this._mapOverlayContainer);
+    }
     await this._loadGuardAssets();
     this._resize();
     onProgress?.(1, 'Ready');
@@ -502,6 +505,30 @@ export default class GameEngine {
     this.showEasterEgg = null;
   }
 
+  _destroyCreatorEasterEggResponseBubble() {
+    if (this._creatorEasterEggResponseBubble?.parent) {
+      this._creatorEasterEggResponseBubble.parent.removeChild(this._creatorEasterEggResponseBubble);
+    }
+    this._creatorEasterEggResponseBubble?.destroy({ children: true });
+    this._creatorEasterEggResponseBubble = null;
+  }
+
+  _destroyCreatorEasterEggOverlay() {
+    if (this._creatorEasterEggResponseTimer) {
+      clearTimeout(this._creatorEasterEggResponseTimer);
+      this._creatorEasterEggResponseTimer = null;
+    }
+    this._destroyCreatorEasterEggResponseBubble();
+    for (const egg of this.creatorEasterEggs || []) {
+      const container = egg?.container;
+      if (container) {
+        container.parent?.removeChild(container);
+        container.destroy({ children: true });
+      }
+    }
+    this.creatorEasterEggs = [];
+  }
+
   /**
    * Character for the map "npc" show layer: optional `mapConfig.showNpcCharName`,
    * else first on-field NPC (same roster as `_createNPC`), else first CHAR_NAMES with a valid right-run strip.
@@ -562,7 +589,6 @@ export default class GameEngine {
 
   _createShowEasterEggOverlay(rect) {
     this._destroyShowEasterEggOverlay();
-    if (this.mapConfig?.creatorEasterEggs?.length) return;
     const message = String(this.mapConfig?.showEasterEggMessage || '').trim();
     if (!rect?.w || !rect?.h || !this.world) return;
 
@@ -701,6 +727,85 @@ export default class GameEngine {
     this._syncShowEasterEggOverlay(performance.now());
   }
 
+  async _createCreatorEasterEggOverlay() {
+    this._destroyCreatorEasterEggOverlay();
+    if (!this.world || !this.tiledRenderer) return;
+
+    const configs = Array.isArray(this.mapConfig?.creatorEasterEggs)
+      ? this.mapConfig.creatorEasterEggs
+      : [];
+    if (!configs.length) return;
+
+    const eggs = [];
+    for (const config of configs) {
+      const layerName = String(config?.layerName || '').trim();
+      const idleImage = String(config?.idleImage || '').trim();
+      const responseImage = String(config?.responseImage || '').trim();
+      if (!layerName || !idleImage || !responseImage) continue;
+
+      const rect = this.tiledRenderer.getNamedLayerPixelBounds(layerName);
+      if (!rect?.pixelW || !rect?.pixelH) continue;
+
+      const [idleTexture, responseTexture] = await Promise.all([
+        PIXI.Assets.load(idleImage),
+        PIXI.Assets.load(responseImage),
+      ]);
+      if (!idleTexture || !responseTexture) continue;
+
+      idleTexture.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
+      responseTexture.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
+
+      const container = new PIXI.Container();
+      container.x = rect.pixelX;
+      container.y = rect.pixelY;
+      container.zIndex = 38;
+      container.sortableChildren = true;
+      container.eventMode = 'passive';
+
+      const sprite = new PIXI.Sprite(idleTexture);
+      sprite.anchor.set(0, 1);
+      sprite.roundPixels = true;
+
+      const scale = Math.min(
+        rect.pixelW / Math.max(1, idleTexture.width),
+        rect.pixelH / Math.max(1, idleTexture.height),
+      );
+      sprite.scale.set(scale);
+      sprite.x = Math.round((rect.pixelW - idleTexture.width * scale) / 2);
+      sprite.y = rect.pixelH;
+
+      const shadow = new PIXI.Graphics();
+      shadow.beginFill(0x000000, 0.12);
+      shadow.drawEllipse(
+        Math.round(rect.pixelW / 2),
+        Math.round(rect.pixelH - 1),
+        Math.max(8, Math.round((idleTexture.width * scale) * 0.18)),
+        Math.max(3, Math.round((idleTexture.width * scale) * 0.06)),
+      );
+      shadow.endFill();
+
+      container.addChild(shadow);
+      container.addChild(sprite);
+      this.world.addChild(container);
+
+      eggs.push({
+        layerName,
+        config,
+        rect,
+        container,
+        sprite,
+        shadow,
+        idleTexture,
+        responseTexture,
+        baseSpriteY: sprite.y,
+        shadowBaseAlpha: 0.12,
+      });
+    }
+
+    this.creatorEasterEggs = eggs;
+    this._syncCreatorEasterEggOverlay(performance.now());
+  }
+
   _triggerShowEasterEggMessage(targetX, targetY, textOverride) {
     if (!this.showEasterEgg?.bubble) return;
     if (this._showEasterEggHideTimer) clearTimeout(this._showEasterEggHideTimer);
@@ -730,6 +835,80 @@ export default class GameEngine {
         this.showEasterEgg.sprite.texture = this.showEasterEgg.defaultTexture;
         this.showEasterEgg.facing = 'right';
       }
+    }, SHOW_EASTER_EGG_BUBBLE_MS);
+  }
+
+  _resetCreatorEasterEggResponse() {
+    if (this._creatorEasterEggResponseTimer) {
+      clearTimeout(this._creatorEasterEggResponseTimer);
+      this._creatorEasterEggResponseTimer = null;
+    }
+    this._destroyCreatorEasterEggResponseBubble();
+    for (const egg of this.creatorEasterEggs || []) {
+      if (egg?.sprite && egg.idleTexture) {
+        egg.sprite.texture = egg.idleTexture;
+      }
+    }
+  }
+
+  _triggerCreatorEasterEggResponse(text) {
+    const eggs = (this.creatorEasterEggs || []).filter((egg) => egg?.sprite && egg?.responseTexture);
+    if (!eggs.length) return;
+
+    this._resetCreatorEasterEggResponse();
+    for (const egg of eggs) {
+      egg.sprite.texture = egg.responseTexture;
+    }
+
+    const raw = String(text || '').trim();
+    if (raw && this.world) {
+      const bubble = new PIXI.Container();
+      bubble.zIndex = 39;
+      bubble.sortableChildren = false;
+      bubble.eventMode = 'none';
+
+      const bubbleText = new PIXI.Text(raw, new PIXI.TextStyle({
+        fontFamily: 'Press Start 2P',
+        fontSize: FIELD_RESPONSE_BUBBLE_FONT_SIZE,
+        fill: 0x3a3020,
+        wordWrap: true,
+        wordWrapWidth: FIELD_RESPONSE_BUBBLE_WORD_WRAP,
+        lineHeight: FIELD_RESPONSE_BUBBLE_LINE_HEIGHT,
+        align: 'center',
+      }));
+      bubbleText.anchor.set(0.5, 1);
+      bubbleText.roundPixels = true;
+
+      const pad = FIELD_RESPONSE_BUBBLE_PAD;
+      const bubbleW = Math.max(FIELD_RESPONSE_BUBBLE_MIN_W, Math.ceil(bubbleText.width + pad * 2));
+      const bubbleH = Math.max(FIELD_RESPONSE_BUBBLE_MIN_H, Math.ceil(bubbleText.height + pad * 2));
+      const bubbleBg = new PIXI.Graphics();
+      bubbleBg.beginFill(0xFFFDF8, 0.95);
+      bubbleBg.lineStyle(1, 0xB2773F, 0.55);
+      bubbleBg.drawRoundedRect(-bubbleW / 2, -bubbleH, bubbleW, bubbleH, FIELD_RESPONSE_BUBBLE_CORNER);
+      bubbleBg.endFill();
+      bubbleBg.beginFill(0xFFFDF8, 0.95);
+      bubbleBg.moveTo(-11, 0);
+      bubbleBg.lineTo(0, 14);
+      bubbleBg.lineTo(11, 0);
+      bubbleBg.endFill();
+
+      const left = Math.min(...eggs.map((egg) => egg.container.x));
+      const right = Math.max(...eggs.map((egg) => egg.container.x + egg.rect.pixelW));
+      const top = Math.min(...eggs.map((egg) => egg.container.y));
+      bubble.x = Math.round((left + right) / 2);
+      bubble.y = Math.round(top - 16);
+      bubbleText.y = -pad;
+
+      bubble.addChild(bubbleBg);
+      bubble.addChild(bubbleText);
+      this.world.addChild(bubble);
+      this._creatorEasterEggResponseBubble = bubble;
+    }
+
+    this._creatorEasterEggResponseTimer = window.setTimeout(() => {
+      this._creatorEasterEggResponseTimer = null;
+      this._resetCreatorEasterEggResponse();
     }, SHOW_EASTER_EGG_BUBBLE_MS);
   }
 
@@ -769,6 +948,21 @@ export default class GameEngine {
     if (this.showEasterEgg.bubble?.visible) {
       this.showEasterEgg.bubble.y = this.showEasterEgg.bubbleBaseY + Math.sin(now / 460) * 1.2;
       this.showEasterEgg.bubble.alpha = 0.94 + Math.sin(now / 180) * 0.05;
+    }
+  }
+
+  _syncCreatorEasterEggOverlay(now = performance.now()) {
+    if (!this.creatorEasterEggs?.length) return;
+
+    this.creatorEasterEggs.forEach((egg, index) => {
+      if (!egg?.sprite || !egg?.shadow) return;
+      const floatOffset = Math.sin(now / 620 + index * 0.9) * 1.6;
+      egg.sprite.y = egg.baseSpriteY + floatOffset;
+      egg.shadow.alpha = egg.shadowBaseAlpha + Math.sin(now / 760 + index * 0.7) * 0.02;
+    });
+
+    if (this._creatorEasterEggResponseBubble) {
+      this._creatorEasterEggResponseBubble.alpha = 0.95 + Math.sin(now / 180) * 0.04;
     }
   }
 
@@ -905,7 +1099,13 @@ export default class GameEngine {
   }
 
   _getAgentCharNameMap(agents = this._agents || []) {
-    return buildStableCharNameMap(agents).map;
+    const { map } = buildStableCharNameMap(agents);
+    if (DEMO_MODE) {
+      for (const a of agents) {
+        if (isDemoSession(a?.session_key) || isDemoSession(a?.id)) map[a.id] = DEMO_CHAR_NAME;
+      }
+    }
+    return map;
   }
 
   _getDashboardSafeRect(
@@ -2020,7 +2220,7 @@ export default class GameEngine {
     warningBang.addChild(bangDot);
 
     warningBang.x = 0;
-    warningBang.y = 0;
+    warningBang.y = Math.max(2, Math.round(warningTriangleHeight * 0.05));
     warningTriangle.addChild(warningBang);
 
     const warningLead = new PIXI.Text('WARNING', new PIXI.TextStyle({
@@ -2429,8 +2629,9 @@ export default class GameEngine {
 
   async _loadGuardAssets() {
     try {
-      const [portalTex, idleTex, walkTex, attackTex, issueQuestionTex] = await Promise.all([
+      const [portalTex, agentPortalTex, idleTex, walkTex, attackTex, issueQuestionTex] = await Promise.all([
         PIXI.Assets.load(GUARD_PORTAL_URL),
+        PIXI.Assets.load(AGENT_PORTAL_URL),
         PIXI.Assets.load(GUARD_IDLE_URL),
         PIXI.Assets.load(GUARD_WALK_URL),
         PIXI.Assets.load(GUARD_ATTACK_URL),
@@ -2452,6 +2653,7 @@ export default class GameEngine {
       };
 
       this._guardPortalFrames = toFrames(portalTex);
+      this._agentPortalFrames = toFrames(agentPortalTex);
       this._guardIdleFrames = toFrames(idleTex);
       this._guardWalkFrames = toFrames(walkTex);
       this._guardAttackFrames = toFrames(attackTex);
@@ -2459,6 +2661,7 @@ export default class GameEngine {
       this._issueQuestionTexture = issueQuestionTex;
     } catch (_) {
       this._guardPortalFrames = [];
+      this._agentPortalFrames = [];
       this._guardIdleFrames = [];
       this._guardWalkFrames = [];
       this._guardAttackFrames = [];
@@ -2491,6 +2694,25 @@ export default class GameEngine {
 
   _isSceneAgentStatus(status) {
     return this._isRunningStatus(status) || this._isPendingStatus(status);
+  }
+
+  _normalizeSceneNpcDisplayMode(mode) {
+    return mode === 'capped' ? 'capped' : 'all';
+  }
+
+  _normalizeSceneNpcDisplayCap(cap) {
+    return Math.max(1, Math.floor(Number(cap) || 1));
+  }
+
+  setSceneNpcDisplayConfig({ mode = this.sceneNpcDisplayMode, cap = this.sceneNpcDisplayCap } = {}) {
+    const nextMode = this._normalizeSceneNpcDisplayMode(mode);
+    const nextCap = this._normalizeSceneNpcDisplayCap(cap);
+    if (this.sceneNpcDisplayMode === nextMode && this.sceneNpcDisplayCap === nextCap) return;
+    this.sceneNpcDisplayMode = nextMode;
+    this.sceneNpcDisplayCap = nextCap;
+    if (!this._agents?.length) return;
+    this._incrementalUpdateScene(this._agents);
+    this._syncShowNpcSpriteFromScene();
   }
 
   _isIdleStatus(status) {
@@ -2654,15 +2876,49 @@ export default class GameEngine {
     this._resumeNpcBehavior(npc, true);
   }
 
+  _getAgentLatestTaskTimeMs(agent) {
+    if (!agent?.id) return 0;
+    const latestEvent = this._getLatestEvent(agent);
+    return this._getEventTimeMs(latestEvent);
+  }
+
+  _getSceneAgents(agents = []) {
+    const entries = (agents || [])
+      .map((agent, index) => ({
+        agent,
+        index,
+        isPending: this._isPendingApproval(agent),
+        latestTaskTimeMs: this._getAgentLatestTaskTimeMs(agent),
+      }))
+      .filter(({ agent }) => this._isSceneAgentStatus(agent?.status));
+
+    const pendingEntries = entries
+      .filter((entry) => entry.isPending)
+      .sort((a, b) => a.index - b.index);
+    const otherEntries = entries.filter((entry) => !entry.isPending);
+
+    if (this.sceneNpcDisplayMode === 'capped') {
+      otherEntries.sort((a, b) => {
+        if (b.latestTaskTimeMs !== a.latestTaskTimeMs) return b.latestTaskTimeMs - a.latestTaskTimeMs;
+        return a.index - b.index;
+      });
+      const effectiveCap = Math.max(this.sceneNpcDisplayCap, pendingEntries.length + 1);
+      const remainingSlots = Math.max(0, effectiveCap - pendingEntries.length);
+      return [
+        ...pendingEntries,
+        ...otherEntries.slice(0, remainingSlots),
+      ].map((entry) => entry.agent);
+    }
+
+    return [
+      ...pendingEntries,
+      ...otherEntries.sort((a, b) => a.index - b.index),
+    ].map((entry) => entry.agent);
+  }
+
   _renderNpcScene(agents = []) {
-    const activeAgents = (agents || []).filter((agent) => (
-      this._isSceneAgentStatus(agent?.status)
-    ));
+    const sceneAgents = this._getSceneAgents(agents);
     const charNameMap = this._getAgentCharNameMap(agents);
-    const maxSceneAgents = this.pathfinder
-      ? Math.min(activeAgents.length, Math.max(CHAR_NAMES.length, 1))
-      : Math.min(activeAgents.length, WALK_ZONES.length);
-    const sceneAgents = activeAgents.slice(0, maxSceneAgents);
 
     for (let i = 0; i < sceneAgents.length; i++) {
       const npc = this._createNPC(sceneAgents[i], i, charNameMap);
@@ -2673,8 +2929,7 @@ export default class GameEngine {
   }
 
   _getSceneAgentIds(agents = []) {
-    return (agents || [])
-      .filter((agent) => this._isSceneAgentStatus(agent?.status))
+    return this._getSceneAgents(agents)
       .map((agent) => agent.id)
       .filter(Boolean);
   }
@@ -2698,12 +2953,8 @@ export default class GameEngine {
   }
 
   _incrementalUpdateScene(agents = []) {
-    const activeAgents = (agents || []).filter((a) => this._isSceneAgentStatus(a?.status));
     const charNameMap = this._getAgentCharNameMap(agents);
-    const maxSlots = this.pathfinder
-      ? Math.max(CHAR_NAMES.length, 1)
-      : WALK_ZONES.length;
-    const nextAgents = activeAgents.slice(0, maxSlots);
+    const nextAgents = this._getSceneAgents(agents);
     const nextIds = new Set(nextAgents.map((a) => a.id).filter(Boolean));
     const nextById = new Map(nextAgents.map((a) => [a.id, a]));
 
@@ -2729,6 +2980,7 @@ export default class GameEngine {
     const keptIds = new Set(kept.map((npc) => npc?.agent?.id).filter(Boolean));
     const toAdd = nextAgents.filter((a) => a.id && !keptIds.has(a.id));
 
+    const newNpcs = [];
     let freeIdx = 0;
     for (const agent of toAdd) {
       while (usedIndices.has(freeIdx)) freeIdx++;
@@ -2737,11 +2989,52 @@ export default class GameEngine {
       npc._sceneIndex = freeIdx;
       usedIndices.add(freeIdx);
       kept.push(npc);
+      newNpcs.push(npc);
       freeIdx++;
     }
 
     this.npcs = kept;
     this._syncPendingNpcStates();
+
+    if (newNpcs.length > 0 && this._agentPortalFrames?.length) {
+      for (const npc of newNpcs) {
+        const isDemo = DEMO_MODE && (isDemoSession(npc.agent?.session_key) || isDemoSession(npc.agent?.id));
+        if (isDemo) {
+          const guard = this._getGuardPortalPoint();
+          npc.container.x = guard.x;
+          npc.container.y = guard.y;
+          npc.container.zIndex = Math.round(guard.y);
+          if (npc.homeTile && this.pathfinder) {
+            npc.homeTile = this.pathfinder.pixelToTile(guard.x, guard.y);
+          }
+        }
+        npc.container.visible = false;
+        const px = npc.container.x;
+        const py = npc.container.y;
+
+        const doSpawn = () => {
+          if (!npc.container || npc.container.destroyed) return;
+          this._playAgentPortal(px, py, {
+            onMidpoint: () => {
+              if (!npc.container || npc.container.destroyed) return;
+              npc.container.visible = true;
+              if (isDemo && npc.frames?.phone?.length) {
+                npc.sprite.textures = npc.frames.phone;
+                npc.sprite.play();
+                npc._curDir = 'idle';
+                npc._demoPhoneTimer = 1.0;
+              }
+            },
+          });
+        };
+
+        if (isDemo) {
+          doSpawn();
+        } else {
+          setTimeout(doSpawn, 2000);
+        }
+      }
+    }
   }
 
   _refreshNpcDataInPlace(agents = [], events = []) {
@@ -2760,7 +3053,6 @@ export default class GameEngine {
       this._removeNpc(npc);
     }
     this.npcs = [];
-    this._clearAllPendingBots();
   }
 
   // ─── NPC Creation ─────────────────────────────────────────────
@@ -2768,25 +3060,25 @@ export default class GameEngine {
   _createGoldOutlineSprites(sprite, container) {
     const innerFilter = new PIXI.ColorMatrixFilter();
     innerFilter.matrix = [
-      0, 0, 0, 0, 1.0,
-      0, 0, 0, 0, 0.82,
-      0, 0, 0, 0, 0.22,
+      0, 0, 0, 0, 1.06,
+      0, 0, 0, 0, 0.9,
+      0, 0, 0, 0, 0.2,
       0, 0, 0, 1, 0,
     ];
 
     const outerFilter = new PIXI.ColorMatrixFilter();
     outerFilter.matrix = [
-      0, 0, 0, 0, 1.0,
-      0, 0, 0, 0, 0.65,
-      0, 0, 0, 0, 0.12,
+      0, 0, 0, 0, 1.12,
+      0, 0, 0, 0, 0.82,
+      0, 0, 0, 0, 0.18,
       0, 0, 0, 1, 0,
     ];
 
     const d1 = 2;
-    const d2 = 4;
+    const d2 = 5;
     const layers = [
-      { offsets: [[-d2, 0], [d2, 0], [0, -d2], [0, d2]], alpha: 0.25, filter: outerFilter, layer: 'outer' },
-      { offsets: [[-d1, 0], [d1, 0], [0, -d1], [0, d1], [-d1, -d1], [d1, -d1], [-d1, d1], [d1, d1]], alpha: 0.7, filter: innerFilter, layer: 'inner' },
+      { offsets: [[-d2, 0], [d2, 0], [0, -d2], [0, d2]], alpha: 0.42, filter: outerFilter, layer: 'outer' },
+      { offsets: [[-d1, 0], [d1, 0], [0, -d1], [0, d1], [-d1, -d1], [d1, -d1], [-d1, d1], [d1, d1]], alpha: 0.92, filter: innerFilter, layer: 'inner' },
     ];
 
     const clones = [];
@@ -3244,9 +3536,9 @@ export default class GameEngine {
     for (const clone of npc.goldOutlines.clones) {
       const base = clone._baseAlpha ?? 0.7;
       if (clone._glowLayer === 'outer') {
-        clone.alpha = base * (0.5 + breathe * 0.6 + flicker) * strength;
+        clone.alpha = Math.min(1, base * (0.78 + breathe * 0.92 + flicker * 1.1) * strength);
       } else {
-        clone.alpha = base * (0.75 + breathe * 0.3 + flicker * 0.5) * strength;
+        clone.alpha = Math.min(1, base * (0.96 + breathe * 0.48 + flicker * 0.65) * strength);
       }
     }
     this._syncGoldOutlineTextures(npc);
@@ -3293,13 +3585,11 @@ export default class GameEngine {
       npc.sprite.textures = npc.frames.idle;
       npc.sprite.play();
       this._ensureIssueVisuals(npc);
-      this._spawnPendingBot(npc);
       return;
     }
 
     this._clearIssueVisuals(npc);
     npc.hasIssue = false;
-    this._despawnPendingBot(npc.agent?.id);
 
     if (npc.mode === 'pathfind') {
       npc.aiState = 'idle';
@@ -3321,7 +3611,7 @@ export default class GameEngine {
   }
 
   _createNPC(agent, idx, charNameMap = null) {
-    const charName = charNameMap?.[agent?.id] || CHAR_NAMES[hashAgentCharIndex(agent?.id)];
+    const charName = charNameMap?.[agent?.id] || CHAR_NAMES[idx % CHAR_NAMES.length];
     const frames   = this.spriteLoader.charFrames[charName];
     if (!frames || !frames.front.length) return null;
     const isRunner = this._isSceneAgentStatus(agent?.status);
@@ -3714,7 +4004,7 @@ export default class GameEngine {
       npc._fieldDialogueLock = false;
     }
 
-    this._resetCreatorEggResponse();
+    this._resetCreatorEasterEggResponse();
   }
 
   _createFieldNpcFloatingLabel(mapX, mapY, text) {
@@ -3781,7 +4071,9 @@ export default class GameEngine {
 
     if (!response) return;
 
-    if (!this._triggerCreatorEggResponse(response)) {
+    if (this.creatorEasterEggs?.length) {
+      this._triggerCreatorEasterEggResponse(response);
+    } else {
       this._triggerShowEasterEggMessage(mapX, mapY, response);
     }
   }
@@ -3811,6 +4103,24 @@ export default class GameEngine {
       for (const npc of this.npcs) {
         if (!npc) continue;
 
+        if (npc._demoPhoneTimer > 0) {
+          npc._demoPhoneTimer -= delta / 60;
+          if (npc._demoPhoneTimer <= 0) {
+            npc._demoPhoneTimer = 0;
+            if (npc.frames?.idle?.length) {
+              npc.sprite.textures = npc.frames.idle;
+              npc.sprite.play();
+              npc._curDir = 'idle';
+            }
+            if (npc.mode === 'pathfind') {
+              npc.aiState = 'idle';
+              npc.idleTimer = 0.1;
+            }
+          } else {
+            continue;
+          }
+        }
+
         // Bubble fade
         if (npc.bubble && npc._bubbleFadeIn) {
           npc.bubble.alpha = Math.min(1, npc.bubble.alpha + 0.05);
@@ -3837,7 +4147,7 @@ export default class GameEngine {
       for (const npc of this.npcs) {
         if (!npc) continue;
         npc.container.zIndex = Math.round(npc.container.y);
-        this._syncIssueAuraPulse(npc, Date.now(), npc._pendingFrozen ? 1.05 : 0.8);
+        this._syncIssueAuraPulse(npc, Date.now(), npc._pendingFrozen ? 1.35 : 0.8);
 
         if (npc.emoteSprite) {
           const bob = Math.sin(Date.now() / 240) * 5;
@@ -3851,7 +4161,7 @@ export default class GameEngine {
       // Pending NPC: keep a gentle glow + marker pulse
       if (this.pendingNpc) {
         this.pendingNpc.container.alpha = Math.sin(Date.now() / 500) * 0.12 + 0.88;
-        this._syncIssueAuraPulse(this.pendingNpc, Date.now(), 1.15);
+        this._syncIssueAuraPulse(this.pendingNpc, Date.now(), 1.55);
         if (this.pendingNpc.emoteSprite) {
           const bob = Math.sin(Date.now() / 240) * 5;
           const pulse = Math.sin(Date.now() / 220) * 0.08 + 0.98;
@@ -3863,11 +4173,10 @@ export default class GameEngine {
 
       // Guard units
       this._updateGuards(delta);
-      this._updatePendingBots(delta);
-      this._updateCreatorEasterEggs(performance.now());
       this._syncFloorScreenOverlay(performance.now());
       this._syncWallDashboardOverlay(performance.now());
       this._syncShowEasterEggOverlay(performance.now());
+      this._syncCreatorEasterEggOverlay(performance.now());
     });
   }
 
@@ -4090,6 +4399,60 @@ export default class GameEngine {
     });
   }
 
+  _playAgentPortal(x, y, { onMidpoint } = {}) {
+    return new Promise((resolve) => {
+      if (!this.guardFxLayer || !this._agentPortalFrames.length || !this.app || this.app.destroyed) {
+        onMidpoint?.();
+        resolve();
+        return;
+      }
+      const forwardFrames = [...this._agentPortalFrames];
+      const reverseFrames = [...forwardFrames].reverse();
+      const allFrames = [...forwardFrames, ...reverseFrames];
+      const midFrame = forwardFrames.length;
+      let midFired = false;
+
+      const anim = new PIXI.AnimatedSprite(allFrames);
+      anim.anchor.set(0.5, 1);
+      anim.x = x;
+      anim.y = y;
+      anim.scale.set(AGENT_PORTAL_SCALE);
+      anim.zIndex = Math.round(y) + 1000;
+      anim.loop = false;
+      anim.animationSpeed = AGENT_PORTAL_SPEED;
+      anim.onFrameChange = (frame) => {
+        if (!midFired && frame >= midFrame) {
+          midFired = true;
+          onMidpoint?.();
+        }
+      };
+      anim.onComplete = () => {
+        if (!midFired) { midFired = true; onMidpoint?.(); }
+        setTimeout(() => {
+          if (anim.parent) anim.parent.removeChild(anim);
+          anim.destroy();
+          resolve();
+        }, 120);
+      };
+      this.guardFxLayer.addChild(anim);
+      anim.play();
+    });
+  }
+
+  deleteAgentById(agentId) {
+    const npc = this.npcs.find((n) => n?.agent?.id === agentId);
+    if (!npc?.container || npc.container.destroyed) return;
+    const px = npc.container.x;
+    const py = npc.container.y;
+    this._playAgentPortal(px, py, {
+      onMidpoint: () => {
+        if (npc.container && !npc.container.destroyed) {
+          npc.container.visible = false;
+        }
+      },
+    });
+  }
+
   _createGuardUnit(x, y) {
     const container = new PIXI.Container();
     container.x = x;
@@ -4105,7 +4468,7 @@ export default class GameEngine {
     const body = new PIXI.AnimatedSprite(spriteFrames.length ? spriteFrames : [PIXI.Texture.WHITE]);
     body.anchor.set(0.5, 1);
     body.scale.set(GUARD_BODY_SCALE);
-    body.animationSpeed = 0.16;
+    body.animationSpeed = GUARD_WALK_ANIM_SPEED;
     if (spriteFrames.length) {
       body.play();
     } else {
@@ -4123,13 +4486,13 @@ export default class GameEngine {
       container,
       body,
       role: 'patrol',
-      speed: 0.55 + Math.random() * 0.22,
+      speed: GUARD_BASE_SPEED_MIN + Math.random() * GUARD_BASE_SPEED_VARIANCE,
       targetNpc: null,
       patrolTarget: null,
       returnTarget: null,
       arrivedForRecall: false,
-      offsetX: -20 + Math.random() * 40,
-      offsetY: -5 + Math.random() * 10,
+      offsetX: -GUARD_ESCORT_JITTER_X + Math.random() * (GUARD_ESCORT_JITTER_X * 2),
+      offsetY: -GUARD_ESCORT_JITTER_Y + Math.random() * (GUARD_ESCORT_JITTER_Y * 2),
     };
   }
 
@@ -4240,7 +4603,8 @@ export default class GameEngine {
           unit.arrivedForRecall = true;
         } else {
           unit.arrivedForRecall = false;
-          const step = Math.min((unit.speed + 0.18) * delta, dist);
+          unit.body.animationSpeed = GUARD_RETURN_ANIM_SPEED;
+          const step = Math.min((unit.speed * GUARD_RETURN_SPEED_MULTIPLIER + 0.22) * delta, dist);
           unit.container.x += (dx / dist) * step;
           unit.container.y += (dy / dist) * step;
           unit.body.rotation = Math.atan2(dy, dx) * 0.12;
@@ -4264,7 +4628,8 @@ export default class GameEngine {
       let tx = unit.container.x;
       let ty = unit.container.y;
       if (unit.role === 'escort' && unit.targetNpc?.container) {
-        tx = unit.targetNpc.container.x + unit.offsetX;
+        const escortSide = unit.targetNpc.container.x < this.sceneW * 0.5 ? 1 : -1;
+        tx = unit.targetNpc.container.x + escortSide * GUARD_ESCORT_SIDE_OFFSET + unit.offsetX;
         ty = unit.targetNpc.container.y + unit.offsetY;
       } else {
         if (!unit.patrolTarget) unit.patrolTarget = this._pickGuardPatrolTarget();
@@ -4284,7 +4649,12 @@ export default class GameEngine {
           unit.body.textures = this._guardWalkFrames;
           unit.body.play();
         }
-        const step = Math.min(unit.speed * delta, dist);
+        const isEscortingPending = unit.role === 'escort' && unit.targetNpc?.container;
+        unit.body.animationSpeed = isEscortingPending ? GUARD_ESCORT_ANIM_SPEED : GUARD_WALK_ANIM_SPEED;
+        const moveSpeed = isEscortingPending
+          ? unit.speed * GUARD_ESCORT_SPEED_MULTIPLIER + 0.42
+          : unit.speed;
+        const step = Math.min(moveSpeed * delta, dist);
         unit.container.x += (dx / dist) * step;
         unit.container.y += (dy / dist) * step;
       }
@@ -4335,14 +4705,20 @@ export default class GameEngine {
     const escortedIds = new Set();
     for (const unit of this.guardUnits) {
       if (unit.role !== 'escort' || !unit.targetNpc?.npcId) continue;
-      if (!currentPendingIds.has(unit.targetNpc.npcId)) {
+      const targetId = unit.targetNpc.npcId;
+      if (!currentPendingIds.has(targetId)) {
         // This NPC is no longer pending — send guard back immediately
         unit.role = 'returning';
         const gate = this._getGuardPortalPoint();
         unit.returnTarget = { x: gate.x + (Math.random() * 16 - 8), y: gate.y };
         unit.targetNpc = null;
+      } else if (escortedIds.has(targetId)) {
+        // Keep only one escort per pending NPC; extras fall back to patrol.
+        unit.role = 'patrol';
+        unit.targetNpc = null;
+        unit.patrolTarget = null;
       } else {
-        escortedIds.add(unit.targetNpc.npcId);
+        escortedIds.add(targetId);
       }
     }
 
@@ -4364,8 +4740,11 @@ export default class GameEngine {
         nearest.role = 'escort';
         nearest.targetNpc = target;
         nearest.patrolTarget = null;
+        escortedIds.add(target.npcId);
       }
     }
+
+    const remainingUnescorted = pendingTargets.filter((target) => !escortedIds.has(target.npcId));
 
     // Ensure we have at least 2 patrol guards + 1 per pending
     const activeUnits = this.guardUnits.filter((u) => u.role !== 'returning');
@@ -4375,7 +4754,7 @@ export default class GameEngine {
     const deficit = desiredTotal - (patrolCount + escortCount);
 
     if (deficit > 0) {
-      this._spawnExtraGuards(deficit, unescorted);
+      this._spawnExtraGuards(deficit, remainingUnescorted);
     }
 
     this._guardPendingSnapshot = currentPendingIds;
@@ -4427,6 +4806,15 @@ export default class GameEngine {
       this._eventsByAgent.get(agentId).push(evt);
       if (this._isPendingStatus(evt.status)) this._waitingAgents.add(agentId);
     }
+    for (const list of this._eventsByAgent.values()) {
+      list.sort((a, b) => this._getEventTimeMs(a) - this._getEventTimeMs(b));
+    }
+  }
+
+  _getEventTimeMs(event) {
+    const timeValue = event?.start_time || event?.created_at || event?.updated_at || event?.end_time;
+    const timeMs = timeValue ? new Date(timeValue).getTime() : NaN;
+    return Number.isFinite(timeMs) ? timeMs : 0;
   }
 
   _getAgentState(agent) {
@@ -4466,364 +4854,6 @@ export default class GameEngine {
     }
   }
 
-  // ─── Creator Set Easter Eggs ─────────────────────────────────
-
-  async _createCreatorEasterEggs(showRect) {
-    this._destroyCreatorEasterEggs();
-    const eggs = this.mapConfig?.creatorEasterEggs;
-    if (!Array.isArray(eggs) || !eggs.length || !this._creatorEggLayer) return;
-    const DISPLAY_HEIGHT = FH * NPC_SCALE * 0.92;
-    const rect = showRect || {
-      x: Math.round(this.sceneW * 0.62),
-      y: Math.round(this.sceneH * 0.38),
-      w: 160,
-      h: 224,
-    };
-    const fallbackPosXs = [
-      Math.round(rect.x + rect.w * 0.32),
-      Math.round(rect.x + rect.w * 0.68),
-    ];
-    const fallbackBaseY = Math.round(rect.y + rect.h - 8);
-
-    for (let i = 0; i < eggs.length; i++) {
-      const cfg = eggs[i];
-      let sheetTex = null;
-      try {
-        sheetTex = await PIXI.Assets.load(cfg.sheetImage);
-      } catch (_) { continue; }
-      const baseTexture = sheetTex?.baseTexture;
-      if (!baseTexture) continue;
-      baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
-
-      const idleTexture = getSheetCellTexture(baseTexture, cfg.idleCell?.[0] || 1, cfg.idleCell?.[1] || 1);
-      const responseTexture = getSheetCellTexture(baseTexture, cfg.responseCell?.[0] || 1, cfg.responseCell?.[1] || 1);
-      if (!idleTexture) continue;
-
-      const anchorBounds = typeof cfg.name === 'string' && this.tiledRenderer
-        ? this.tiledRenderer.getNamedLayerPixelBounds(cfg.name)
-        : null;
-      const posX = anchorBounds
-        ? Math.round(anchorBounds.pixelX + anchorBounds.pixelW * 0.5)
-        : fallbackPosXs[Math.min(i, fallbackPosXs.length - 1)];
-      const baseY = anchorBounds
-        ? Math.round(anchorBounds.pixelY + anchorBounds.pixelH - 8)
-        : fallbackBaseY;
-
-      const container = new PIXI.Container();
-      container.x = posX;
-      container.y = baseY;
-      container.zIndex = Math.round(baseY);
-
-      const scale = DISPLAY_HEIGHT / idleTexture.height;
-      const shadow = new PIXI.Graphics();
-      shadow.beginFill(0x000000, 0.12);
-      shadow.drawEllipse(0, -2, 10 * scale, 3 * scale);
-      shadow.endFill();
-      container.addChild(shadow);
-
-      const sprite = new PIXI.Sprite(idleTexture);
-      sprite.anchor.set(0.5, 1);
-      sprite.scale.set(scale);
-      container.addChild(sprite);
-
-      this._creatorEggLayer.addChild(container);
-      this._creatorEggs.push({
-        name: cfg.name,
-        container,
-        sprite,
-        shadow,
-        idleTexture,
-        responseTexture: responseTexture || idleTexture,
-        baseY,
-      });
-    }
-  }
-
-  _destroyCreatorEasterEggs() {
-    if (this._creatorEggResponseTimer) {
-      clearTimeout(this._creatorEggResponseTimer);
-      this._creatorEggResponseTimer = null;
-    }
-    if (this._creatorEggBubble?.parent) {
-      this._creatorEggBubble.parent.removeChild(this._creatorEggBubble);
-      this._creatorEggBubble.destroy({ children: true });
-    }
-    this._creatorEggBubble = null;
-    for (const egg of this._creatorEggs) {
-      if (egg.container.parent) egg.container.parent.removeChild(egg.container);
-      egg.container.destroy({ children: true });
-    }
-    this._creatorEggs = [];
-  }
-
-  _updateCreatorEasterEggs(now) {
-    for (const egg of this._creatorEggs) {
-      const floatOffset = Math.sin(now / 520 + egg.container.x * 0.01) * 1.6;
-      egg.sprite.y = floatOffset;
-      egg.shadow.alpha = 0.10 + Math.sin(now / 620) * 0.02;
-    }
-  }
-
-  _resetCreatorEggResponse() {
-    if (this._creatorEggResponseTimer) {
-      clearTimeout(this._creatorEggResponseTimer);
-      this._creatorEggResponseTimer = null;
-    }
-    if (this._creatorEggBubble?.parent) {
-      this._creatorEggBubble.parent.removeChild(this._creatorEggBubble);
-      this._creatorEggBubble.destroy({ children: true });
-    }
-    this._creatorEggBubble = null;
-    for (const egg of this._creatorEggs) {
-      if (egg.sprite && egg.idleTexture) egg.sprite.texture = egg.idleTexture;
-    }
-  }
-
-  _triggerCreatorEggResponse(text) {
-    if (!this._creatorEggs.length || !this._creatorEggLayer) return false;
-    this._resetCreatorEggResponse();
-
-    for (const egg of this._creatorEggs) {
-      if (egg.sprite && egg.responseTexture) egg.sprite.texture = egg.responseTexture;
-    }
-
-    const raw = String(text || '').trim();
-    if (raw) {
-      const bc = new PIXI.Container();
-      const bt = new PIXI.Text(raw, {
-        fontFamily: 'Press Start 2P',
-        fontSize: FIELD_NPC_FLOAT_FONT_SIZE,
-        fill: 0x3a3020,
-        wordWrap: true,
-        wordWrapWidth: FIELD_NPC_FLOAT_WORD_WRAP,
-        lineHeight: FIELD_NPC_FLOAT_LINE_HEIGHT,
-        align: 'center',
-      });
-      bt.anchor.set(0.5, 1);
-
-      const pad = FIELD_NPC_FLOAT_PAD;
-      const bg = new PIXI.Graphics();
-      bg.beginFill(0xFFFDF8, 0.95);
-      bg.lineStyle(1, 0xB2773F, 0.55);
-      const bw = Math.max(FIELD_NPC_FLOAT_MIN_W, bt.width + pad * 2);
-      const bh = Math.max(FIELD_NPC_FLOAT_MIN_H, bt.height + pad * 2);
-      bg.drawRoundedRect(-bw / 2, -bh, bw, bh, FIELD_NPC_FLOAT_CORNER);
-      bg.endFill();
-      bg.beginFill(0xFFFDF8, 0.95);
-      bg.moveTo(-11, 0); bg.lineTo(0, 14); bg.lineTo(11, 0);
-      bg.endFill();
-      bt.y = -pad;
-      bc.addChild(bg);
-      bc.addChild(bt);
-
-      const centerX = this._creatorEggs.reduce((sum, egg) => sum + egg.container.x, 0) / this._creatorEggs.length;
-      const topY = Math.min(...this._creatorEggs.map((egg) => egg.container.y - FH * NPC_SCALE - 18));
-      bc.x = Math.round(centerX);
-      bc.y = Math.round(topY);
-      bc.zIndex = 15000;
-      this._creatorEggLayer.addChild(bc);
-      this._creatorEggBubble = bc;
-    }
-
-    this._creatorEggResponseTimer = window.setTimeout(() => {
-      this._creatorEggResponseTimer = null;
-      this._resetCreatorEggResponse();
-    }, SHOW_EASTER_EGG_BUBBLE_MS);
-
-    return true;
-  }
-
-  // ─── Pending Review Bot ──────────────────────────────────────
-
-  _createPendingBotGraphic() {
-    const container = new PIXI.Container();
-
-    const shadow = new PIXI.Graphics();
-    shadow.beginFill(0x000000, 0.10);
-    shadow.drawEllipse(0, 0, 12, 3.5);
-    shadow.endFill();
-    container.addChild(shadow);
-
-    const bodyGroup = new PIXI.Container();
-    const gfx = new PIXI.Graphics();
-    gfx.beginFill(0x2d8cf0);
-    gfx.drawRoundedRect(-12, -36, 24, 22, 5);
-    gfx.endFill();
-    gfx.beginFill(0x5bb8f5);
-    gfx.drawRoundedRect(-10, -50, 20, 18, 7);
-    gfx.endFill();
-    gfx.beginFill(0xffffff);
-    gfx.drawCircle(-4, -42, 3.5);
-    gfx.drawCircle(4, -42, 3.5);
-    gfx.endFill();
-    gfx.beginFill(0x111122);
-    gfx.drawCircle(-4, -42, 1.6);
-    gfx.drawCircle(4, -42, 1.6);
-    gfx.endFill();
-    gfx.lineStyle(1.5, 0x5bb8f5);
-    gfx.moveTo(0, -50);
-    gfx.lineTo(0, -58);
-    gfx.lineStyle(0);
-    gfx.beginFill(0xff5555);
-    gfx.drawCircle(0, -60, 2.5);
-    gfx.endFill();
-    bodyGroup.addChild(gfx);
-    container.addChild(bodyGroup);
-
-    return { container, bodyGroup, shadow };
-  }
-
-  _spawnPendingBot(npc) {
-    if (!npc?.agent?.id || !this._botLayer) return;
-    const agentId = npc.agent.id;
-    if (this._pendingBots.has(agentId)) return;
-
-    const { container, bodyGroup, shadow } = this._createPendingBotGraphic();
-
-    const npcX = npc.container.x;
-    const npcY = npc.container.y;
-    const side = (npcX > (this.sceneW / 2 - this._worldOffsetX)) ? -1 : 1;
-    const haltX = npcX + side * 55;
-    const haltY = npcY - 10;
-
-    const edge = side > 0 ? this.sceneW - this._worldOffsetX + 60 : -60;
-    container.x = edge;
-    container.y = haltY - 120 + Math.random() * 80;
-    container.zIndex = Math.round(haltY) + 2;
-
-    this._botLayer.addChild(container);
-
-    const bot = {
-      container,
-      bodyGroup,
-      shadow,
-      agentId,
-      npc,
-      phase: 'flying',
-      haltX,
-      haltY,
-      speed: 8 + Math.random() * 4,
-      particles: [],
-      spawnTime: Date.now(),
-    };
-    this._pendingBots.set(agentId, bot);
-  }
-
-  _despawnPendingBot(agentId) {
-    if (!agentId) return;
-    const bot = this._pendingBots.get(agentId);
-    if (!bot) return;
-    if (bot.phase === 'leaving') return;
-
-    bot.phase = 'leaving';
-    const side = (bot.container.x < bot.npc?.container?.x) ? -1 : 1;
-    bot.leaveX = side > 0 ? this.sceneW - this._worldOffsetX + 100 : -100;
-    bot.leaveY = bot.container.y - 80;
-  }
-
-  _clearAllPendingBots() {
-    for (const [, bot] of this._pendingBots) {
-      for (const p of bot.particles) {
-        if (p.parent) p.parent.removeChild(p);
-        p.destroy();
-      }
-      if (bot.container.parent) bot.container.parent.removeChild(bot.container);
-      bot.container.destroy({ children: true });
-    }
-    this._pendingBots.clear();
-  }
-
-  _updatePendingBots(delta) {
-    if (!this._pendingBots.size) return;
-    const now = Date.now();
-
-    for (const [agentId, bot] of this._pendingBots) {
-      if (bot.phase === 'flying') {
-        const tx = bot.haltX;
-        const ty = bot.haltY;
-        const dx = tx - bot.container.x;
-        const dy = ty - bot.container.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 3) {
-          bot.container.x = tx;
-          bot.container.y = ty;
-          bot.phase = 'stationed';
-        } else {
-          const ease = Math.max(0.3, Math.min(1, dist / 300));
-          const step = Math.min(bot.speed * ease * delta, dist);
-          bot.container.x += (dx / dist) * step;
-          bot.container.y += (dy / dist) * step;
-        }
-
-        if (Math.random() < 0.6) {
-          this._emitBotParticle(bot);
-        }
-      } else if (bot.phase === 'stationed') {
-        if (bot.npc?.container) {
-          const npcX = bot.npc.container.x;
-          const npcY = bot.npc.container.y;
-          const side = (bot.container.x < npcX) ? -1 : 1;
-          bot.haltX = npcX + side * 55;
-          bot.haltY = npcY - 10;
-          bot.container.x += (bot.haltX - bot.container.x) * 0.08;
-          bot.container.y += (bot.haltY - bot.container.y) * 0.08;
-          bot.container.zIndex = Math.round(bot.npc.container.y) + 2;
-        }
-        const bob = Math.sin(now / 300) * 4;
-        bot.bodyGroup.y = bob;
-        const antennaPulse = Math.sin(now / 200) * 0.15 + 0.85;
-        bot.bodyGroup.alpha = antennaPulse * 0.12 + 0.88;
-      } else if (bot.phase === 'leaving') {
-        const dx = bot.leaveX - bot.container.x;
-        const dy = bot.leaveY - bot.container.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 5) {
-          for (const p of bot.particles) {
-            if (p.parent) p.parent.removeChild(p);
-            p.destroy();
-          }
-          if (bot.container.parent) bot.container.parent.removeChild(bot.container);
-          bot.container.destroy({ children: true });
-          this._pendingBots.delete(agentId);
-          continue;
-        }
-        const step = Math.min(10 * delta, dist);
-        bot.container.x += (dx / dist) * step;
-        bot.container.y += (dy / dist) * step;
-        bot.container.alpha = Math.max(0, bot.container.alpha - 0.015);
-        if (Math.random() < 0.4) this._emitBotParticle(bot);
-      }
-
-      const stale = [];
-      for (const p of bot.particles) {
-        p.alpha -= 0.04;
-        p.scale.x *= 0.96;
-        p.scale.y *= 0.96;
-        if (p.alpha <= 0) {
-          if (p.parent) p.parent.removeChild(p);
-          p.destroy();
-          stale.push(p);
-        }
-      }
-      if (stale.length) {
-        bot.particles = bot.particles.filter((p) => !stale.includes(p));
-      }
-    }
-  }
-
-  _emitBotParticle(bot) {
-    if (!this._botLayer || bot.particles.length > 12) return;
-    const p = new PIXI.Graphics();
-    p.beginFill(0x5bb8f5, 0.7);
-    p.drawCircle(0, 0, 2 + Math.random() * 2);
-    p.endFill();
-    p.x = bot.container.x + (Math.random() - 0.5) * 10;
-    p.y = bot.container.y - 30 + (Math.random() - 0.5) * 14;
-    p.zIndex = bot.container.zIndex - 1;
-    this._botLayer.addChild(p);
-    bot.particles.push(p);
-  }
-
   /** Clean up PixiJS resources. */
   destroy() {
     this._cancelFieldNpcDialogue();
@@ -4838,11 +4868,15 @@ export default class GameEngine {
     }
     this._dragContext = null;
     this._clearGuardsImmediate();
-    this._clearAllPendingBots();
-    this._destroyCreatorEasterEggs();
     this._destroyFloorScreenOverlay();
     this._destroyWallDashboardOverlay();
     this._destroyShowEasterEggOverlay();
+    this._destroyCreatorEasterEggOverlay();
+    if (this._mapOverlayContainer) {
+      if (this._mapOverlayContainer.parent) this._mapOverlayContainer.parent.removeChild(this._mapOverlayContainer);
+      this._mapOverlayContainer.destroy({ children: true });
+      this._mapOverlayContainer = null;
+    }
     this._resizeObs?.disconnect();
     this.app?.destroy(true, { children: true, texture: false, baseTexture: false });
     this.app = null;

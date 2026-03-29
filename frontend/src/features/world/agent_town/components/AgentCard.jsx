@@ -432,7 +432,7 @@ function CardShowcase({ agentId, charName, status }) {
   );
 }
 
-export default function AgentCard({ data, onClose, onJourney }) {
+export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
   if (!data) return null;
 
   const { agent, charName, state, event, events = [], isPending, totalTokens = 0 } = data;
@@ -892,16 +892,24 @@ export default function AgentCard({ data, onClose, onJourney }) {
                     <span className="agent-card-thread-chip">{fmtDate(latestEvent?.start_time || agent.first_seen_at) || 'just now'}</span>
                     {threadStateLabel ? <span className="agent-card-thread-chip">{threadStateLabel}</span> : null}
                   </div>
+                  <div className="agent-card-action-btns">
+                    <button
+                      type="button"
+                      className="tc-stage-inspect agent-card-journey-btn"
+                      onClick={() => onJourney?.({ agent, charName, state, events: boundEvents })}
+                    >
+                      View Work Journey
+                    </button>
+                    <button
+                      type="button"
+                      className="tc-stage-inspect agent-card-delete-btn"
+                      onClick={() => { if (window.confirm('Delete this agent and its session?')) onDeleteAgent?.(agent); }}
+                    >
+                      Delete Agent
+                    </button>
+                  </div>
                 </div>
               </div>
-
-              <button
-                type="button"
-                className="tc-stage-inspect agent-card-journey-btn"
-                onClick={() => onJourney?.({ agent, charName, state, events: boundEvents })}
-              >
-                View Work Journey
-              </button>
             </div>
           </section>
 
@@ -1073,7 +1081,7 @@ export default function AgentCard({ data, onClose, onJourney }) {
                       addImages(imageFiles);
                     }
                   }}
-                  placeholder={sessionKey ? 'Reply in this session...' : 'No active session.'}
+                  placeholder={sessionKey ? 'Reply in this session...' : 'This agent is not bound to an active session.'}
                   disabled={!sessionKey || sending}
                   rows={1}
                 />

@@ -534,6 +534,48 @@ export default class TiledRenderer {
     return this.container;
   }
 
+  /**
+   * Render an overlay from the whole-image tileset, using a named layer as a
+   * position mask.  Non-zero tiles in the layer mark which tile-sized rectangles
+   * should be copied from the whole-image PNG and placed in the returned container.
+   * Returns null if the layer or whole-image tileset is unavailable.
+   */
+  renderOverlayLayer(layerName) {
+    const target = this._normalizeLayerName(layerName);
+    if (!target) return null;
+
+    const layer = this._getTileLayers().find(
+      (l) => this._normalizeLayerName(l.name) === target
+    );
+    if (!layer || !this._layerHasTiles(layer)) return null;
+
+    const tileset = this._findWholeImageTileset();
+    if (!tileset?.texture) return null;
+
+    const baseTex = tileset.texture.baseTexture;
+    const lc = new PIXI.Container();
+    lc.eventMode = 'none';
+
+    for (let y = 0; y < layer.height; y++) {
+      for (let x = 0; x < layer.width; x++) {
+        if (layer.data[y * layer.width + x] === 0) continue;
+
+        const px = x * this.tileW;
+        const py = y * this.tileH;
+        if (px + this.tileW > baseTex.width || py + this.tileH > baseTex.height) continue;
+
+        const rect = new PIXI.Rectangle(px, py, this.tileW, this.tileH);
+        const tex = new PIXI.Texture(baseTex, rect);
+        const sprite = new PIXI.Sprite(tex);
+        sprite.x = px;
+        sprite.y = py;
+        lc.addChild(sprite);
+      }
+    }
+
+    return lc;
+  }
+
   /** Extract collision grid: 0 = walkable, 1 = blocked. */
   getCollisionGrid(layerName) {
     const requestedCollisionLayerName = this._normalizeLayerName(

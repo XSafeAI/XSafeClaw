@@ -3,7 +3,7 @@ import GameCanvas from './components/GameCanvas';
 import Tooltip from './components/Tooltip';
 import AgentCard from './components/AgentCard';
 import TownConsole from './components/TownConsole';
-import { DEFAULT_MAP_CONFIG, MAP_VARIANTS, MUSIC_TRACKS, USE_AGENT_TOWN_MOCK } from './config/constants';
+import { DEFAULT_MAP_CONFIG, MAP_VARIANTS, MUSIC_TRACKS, USE_AGENT_TOWN_MOCK, removeDemoSession } from './config/constants';
 import './components/TownConsole.css';
 const AgentJourney = lazy(() => import('./components/AgentJourney'));
 
@@ -17,8 +17,8 @@ export default function App() {
   const [tooltip, setTooltip]       = useState(null);
   const [agentCard, setAgentCard]   = useState(null);
   const [journeyData, setJourneyData] = useState(null);
-  const [guardEnabled, setGuardEnabled] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
+  const [guardEnabled, setGuardEnabled] = useState(false);
   const [activeMapId, setActiveMapId] = useState(DEFAULT_MAP_CONFIG.id);
   const [activeMusicId, setActiveMusicId] = useState(MUSIC_TRACKS[0]?.id || '');
   const [musicEnabled, setMusicEnabled] = useState(true);
@@ -26,6 +26,7 @@ export default function App() {
   const [cursorState, setCursorState] = useState('normal');
   const [canvasRefreshTrigger, setCanvasRefreshTrigger] = useState(0);
   const audioRef = useRef(null);
+  const gameEngineRef = useRef(null);
   const [mapSize, setMapSize] = useState(null);
   const [viewport, setViewport] = useState(() => ({
     w: window.innerWidth,
@@ -123,6 +124,27 @@ export default function App() {
       }
       return next;
     });
+  }, []);
+
+  const handleDeleteAgent = useCallback(async (agent) => {
+    if (!agent) return;
+    const sessionKey = agent.session_key || '';
+    const sessionId = agent.id || '';
+    setAgentCard(null);
+    setJourneyData(null);
+    removeDemoSession(sessionKey);
+    if (sessionId && gameEngineRef.current) {
+      gameEngineRef.current.deleteAgentById(sessionId);
+    }
+    try {
+      if (sessionKey) {
+        await fetch('/api/chat/close-session?' + new URLSearchParams({ session_key: sessionKey }), { method: 'POST' }).catch(() => {});
+      }
+      if (sessionId) {
+        await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }).catch(() => {});
+      }
+    } catch (_) {}
+    setTimeout(() => setCanvasRefreshTrigger((n) => n + 1), 2000);
   }, []);
 
   const handleCloseCard = useCallback(() => {
@@ -308,6 +330,7 @@ export default function App() {
             onLayoutChange={handleLayoutChange}
             mapConfig={activeMapConfig}
             refreshTrigger={canvasRefreshTrigger}
+            gameEngineRef={gameEngineRef}
           />
         </div>
       </div>
@@ -336,6 +359,7 @@ export default function App() {
               onToggleMusic={handleToggleMusic}
               musicVolume={musicVolume}
               onChangeMusicVolume={setMusicVolume}
+              onDeleteAgent={handleDeleteAgent}
               onDataChanged={() => setCanvasRefreshTrigger((n) => n + 1)}
             />
           </div>
@@ -349,12 +373,13 @@ export default function App() {
           data={agentCard}
           onClose={handleCloseCard}
           onJourney={handleOpenJourney}
+          onDeleteAgent={handleDeleteAgent}
         />
       )}
 
       {journeyData && (
         <Suspense fallback={null}>
-          <AgentJourney data={journeyData} onClose={() => setJourneyData(null)} />
+          <AgentJourney data={journeyData} onClose={() => setJourneyData(null)} onDeleteAgent={handleDeleteAgent} />
         </Suspense>
       )}
     </div>
