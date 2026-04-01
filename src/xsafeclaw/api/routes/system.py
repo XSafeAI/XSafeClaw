@@ -1040,18 +1040,18 @@ _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 # Auth provider groups — 1:1 from OpenClaw auth-choice-options.ts AUTH_CHOICE_GROUP_DEFS.
 # Only methods that have non-interactive CLI flags are included (OAuth-only excluded).
 AUTH_PROVIDERS: list[dict] = [
+    {"id": "moonshot", "name": "Moonshot AI (Kimi K2.5)", "hint": "Kimi K2.5 + Kimi Coding (recommended)", "supported": True, "methods": [
+        {"id": "moonshot-api-key", "label": "Kimi API key (.ai)", "hint": "International endpoint", "modelProviders": ["moonshot"]},
+        {"id": "moonshot-api-key-cn", "label": "Kimi API key (.cn)", "hint": "China endpoint (中国区)", "modelProviders": ["moonshot"]},
+        {"id": "kimi-code-api-key", "label": "Kimi Code API key (subscription)", "hint": "Code-optimized models", "modelProviders": ["kimi-coding"]},
+    ]},
     {"id": "anthropic", "name": "Anthropic", "hint": "API key", "supported": True, "methods": [
         {"id": "apiKey", "label": "Anthropic API key"},
     ]},
     {"id": "openai", "name": "OpenAI", "hint": "API key", "supported": True, "methods": [
         {"id": "openai-api-key", "label": "OpenAI API key"},
     ]},
-    {"id": "moonshot", "name": "Moonshot AI (Kimi K2.5)", "hint": "Kimi K2.5 + Kimi Coding", "supported": True, "methods": [
-        {"id": "moonshot-api-key", "label": "Kimi API key (.ai)", "hint": "International endpoint", "modelProviders": ["moonshot"]},
-        {"id": "moonshot-api-key-cn", "label": "Kimi API key (.cn)", "hint": "China endpoint (中国区)", "modelProviders": ["moonshot"]},
-        {"id": "kimi-code-api-key", "label": "Kimi Code API key (subscription)", "hint": "Code-optimized models", "modelProviders": ["kimi-coding"]},
-    ]},
-    {"id": "minimax", "name": "MiniMax", "hint": "M2.5 (recommended)", "supported": True, "methods": [
+    {"id": "minimax", "name": "MiniMax", "hint": "M2.5", "supported": True, "methods": [
         {"id": "minimax-api", "label": "MiniMax M2.5 API key", "hint": "Global (api.minimax.io)", "modelProviders": ["minimax"]},
         {"id": "minimax-api-key-cn", "label": "MiniMax API key (China)", "hint": "China endpoint (api.minimaxi.com)", "modelProviders": ["minimax-cn"]},
         {"id": "minimax-api-lightning", "label": "MiniMax M2.5 Highspeed", "hint": "Low-latency variant", "modelProviders": ["minimax"]},
