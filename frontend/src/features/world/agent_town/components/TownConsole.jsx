@@ -672,6 +672,7 @@ function TasksTab({
   guardResolvingId,
   guardEnabled = false,
   onToggleGuard,
+  onTaskDetailChange,
 }) {
   const [selectedTask, setSelectedTask] = useState(null);
   const [detailMessages, setDetailMessages] = useState([]);
@@ -700,7 +701,8 @@ function TasksTab({
       setDetailError('');
       setDetailEventData(null);
     }
-  }, [selectedTask]);
+    onTaskDetailChange?.(!!selectedTask);
+  }, [selectedTask, onTaskDetailChange]);
 
   const unresolvedApprovals = useMemo(
     () => pendingApprovals
@@ -1220,6 +1222,7 @@ export default function TownConsole({
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [createError, setCreateError] = useState('');
   const [guardResolvingId, setGuardResolvingId] = useState(null);
+  const [taskDetailOpen, setTaskDetailOpen] = useState(false);
   const [pendingImagesMap, setPendingImagesMap] = useState({});
   const streamControllerRef = useRef(null);
   const stopRequestedRef = useRef(false);
@@ -1937,17 +1940,19 @@ export default function TownConsole({
   return (
     <div className="tc-shell">
       <div className="tc-frame">
-        <div className="tc-tabbar">
-          {TAB_META.map((tab) => (
-            <button
-              key={tab.id}
-              className={`tc-tab ${activeTab === tab.id ? 'tc-tab-active' : ''}`}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              <span className="tc-tab-label">{tab.label}</span>
-            </button>
-          ))}
-        </div>
+        {!taskDetailOpen && (
+          <div className="tc-tabbar">
+            {TAB_META.map((tab) => (
+              <button
+                key={tab.id}
+                className={`tc-tab ${activeTab === tab.id ? 'tc-tab-active' : ''}`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                <span className="tc-tab-label">{tab.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="tc-panel">
           <div className="tc-panel-inner">
@@ -2027,6 +2032,7 @@ export default function TownConsole({
                   guardResolvingId={guardResolvingId}
                   guardEnabled={guardEnabled}
                   onToggleGuard={onToggleGuard}
+                  onTaskDetailChange={setTaskDetailOpen}
                 />
               ) : null}
             </div>
