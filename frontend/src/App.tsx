@@ -6,6 +6,7 @@ import Monitor from './pages/Monitor';
 import World from './pages/World';
 import Assets from './pages/Assets';
 import RiskScanner from './pages/RiskScanner';
+import RiskTest from './pages/RiskTest';
 import Chat from './pages/Chat';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
@@ -104,6 +105,7 @@ function AppRoutes() {
           <Route path="/" element={<Navigate to="/agent-valley" replace />} />
           <Route path="/monitor" element={<Monitor />} />
           <Route path="/assets" element={<Assets />} />
+          <Route path="/risk-test" element={<RiskTest />} />
           <Route path="/safety-rehearsal" element={<RiskScanner />} />
           <Route path="/chat" element={<Chat />} />
         </Route>

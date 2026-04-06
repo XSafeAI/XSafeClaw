@@ -178,6 +178,9 @@ export default function Assets() {
   const [safetyOp, setSafetyOp] = useState<string>('delete');
   const [safetyChecking, setSafetyChecking] = useState(false);
   const [safetyHistory, setSafetyHistory] = useState<SafetyResult[]>([]);
+  const [denyPath, setDenyPath] = useState('');
+  const [denylist, setDenylist] = useState<string[]>([]);
+  const [denyLoading, setDenyLoading] = useState(false);
 
   /* --- Resume in-flight scans on mount --- */
   const stopFilePolling = useCallback(() => {
@@ -315,6 +318,44 @@ export default function Assets() {
     } catch (err: any) { alert(err.response?.data?.detail || 'Check failed'); }
     finally { setSafetyChecking(false); }
   }, [safetyPath, safetyOp]);
+
+  /* --- Denylist --- */
+  const loadDenylist = useCallback(async () => {
+    try {
+      const res = await assetsAPI.getDenylist();
+      setDenylist(res.data.paths);
+    } catch (e) {
+      console.error('load denylist failed', e);
+    }
+  }, []);
+
+  const addDeny = useCallback(async () => {
+    if (!denyPath.trim()) return;
+    setDenyLoading(true);
+    try {
+      const res = await assetsAPI.addDenyPath(denyPath.trim());
+      setDenylist(res.data.paths);
+      setDenyPath('');
+    } catch (e) {
+      alert('添加失败，请重试');
+    } finally {
+      setDenyLoading(false);
+    }
+  }, [denyPath]);
+
+  const removeDeny = useCallback(async (path: string) => {
+    setDenyLoading(true);
+    try {
+      const res = await assetsAPI.removeDenyPath(path);
+      setDenylist(res.data.paths);
+    } catch (e) {
+      alert('移除失败，请重试');
+    } finally {
+      setDenyLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadDenylist(); }, [loadDenylist]);
 
   /* --- Derived software list --- */
   const filteredSoftware = softwareList.filter(s => {
@@ -642,6 +683,44 @@ export default function Assets() {
                     {safetyChecking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
                     {safetyChecking ? t.assets.safety.checking : t.assets.safety.checkSafety}
                   </button>
+                </div>
+              </Card>
+
+              {/* Denylist */}
+              <Card className="flex-1 flex flex-col">
+                <CardHeader icon={ShieldCheck} title={t.assets.safety.denyTitle} />
+                <div className="p-5 flex flex-col gap-4">
+                  <p className="text-[12px] text-text-muted">{t.assets.safety.denyDesc}</p>
+                  <div>
+                    <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1.5 block">{t.assets.safety.denyPath}</label>
+                    <div className="flex gap-2">
+                      <input
+                        value={denyPath}
+                        onChange={e => setDenyPath(e.target.value)}
+                        placeholder={t.assets.safety.denyPlaceholder}
+                        className="flex-1 px-3 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
+                        onKeyDown={e => e.key === 'Enter' && addDeny()}
+                      />
+                      <button onClick={addDeny} disabled={denyLoading || !denyPath.trim()}
+                        className="px-4 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20">
+                        {denyLoading ? t.common.loading : t.common.add}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="divide-y divide-border rounded-lg border border-border">
+                    {denylist.length === 0 && (
+                      <div className="p-4 text-[12px] text-text-muted text-center">{t.assets.safety.denyEmpty}</div>
+                    )}
+                    {denylist.map((p) => (
+                      <div key={p} className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2/40">
+                        <span className="text-[12px] font-mono text-text-primary break-all flex-1">{p}</span>
+                        <button onClick={() => removeDeny(p)} disabled={denyLoading}
+                          className="text-[12px] text-error border border-error/30 px-2 py-1 rounded-lg hover:bg-error/10 disabled:opacity-40">
+                          {t.common.remove}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </Card>
 

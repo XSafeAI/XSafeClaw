@@ -273,6 +273,52 @@ def clear_results() -> None:
     _results.clear()
 
 
+def _denylist_precheck(tool_name: str, params: dict[str, Any]) -> str | None:
+    """Block any exec targeting a user denylisted path."""
+    if tool_name != "exec":
+        return None
+    cmd = params.get("command") or params.get("cmd") or ""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return None
+    try:
+        import shlex
+        parts = shlex.split(cmd)
+    except Exception:
+        return None
+    if not parts:
+        return None
+
+    denylist = _load_denylist()
+    if not denylist:
+        return None
+
+    def is_denied(path: Path) -> bool:
+        try:
+            rp = path.expanduser().resolve()
+        except Exception:
+            return False
+        for d in denylist:
+            dp = Path(d)
+            try:
+                rp.relative_to(dp)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    for p in parts[1:]:
+        if p.startswith("-"):
+            continue
+        try:
+            target = Path(p)
+        except Exception:
+            continue
+        if is_denied(target):
+            return f"路径被用户保护，操作已阻断：{target}"
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Trajectory conversion (mirrors convert_from_api.py logic)
 # ---------------------------------------------------------------------------
@@ -617,6 +663,18 @@ _pending: dict[str, PendingApproval] = {}
 _PENDING_TIMEOUT = 300  # 5 minutes max wait
 
 _guard_enabled: bool = True
+_DENYLIST_FILE = settings.data_dir / "denylist.json"
+_DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_denylist() -> set[str]:
+    if not _DENYLIST_FILE.exists():
+        return set()
+    try:
+        paths = json.loads(_DENYLIST_FILE.read_text())
+        return {str(Path(p).expanduser().resolve()) for p in paths if isinstance(p, str)}
+    except Exception:
+        return set()
 
 
 def is_guard_enabled() -> bool:
@@ -709,6 +767,10 @@ async def check_tool_call(
       action: "allow" | "block"
       reason: str (only when blocked)
     """
+    deny_reason = _denylist_precheck(tool_name, params)
+    if deny_reason:
+        return {"action": "block", "reason": deny_reason}
+
     if not _guard_enabled:
         return {"action": "allow"}
 

@@ -6,7 +6,7 @@
 
 **Keeping Your Claw Safe.**
 
-Real-time monitoring, security guard, and red team testing for OpenClaw AI agents.
+Real-time monitoring, path protection, guard approval, and risk testing for OpenClaw AI agents.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
@@ -19,7 +19,7 @@ Real-time monitoring, security guard, and red team testing for OpenClaw AI agent
 
 ## What is XSafeClaw?
 
-XSafeClaw is a security-focused companion platform for [OpenClaw](https://openclaw.ai) AI agents. It monitors agent activity in real time, intercepts unsafe tool calls before they execute, scans system assets for risk, and provides automated red team testing — all from a single `xsafeclaw start` command.
+XSafeClaw is a security-focused companion platform for [OpenClaw](https://openclaw.ai) AI agents. It monitors agent activity in real time, intercepts unsafe tool calls before they execute, scans system assets for risk, lets users protect custom paths from agent access, and provides a built-in risk-testing workspace for adversarial safety checks — all from a single `xsafeclaw start` command.
 
 ### Core Modules
 
@@ -27,7 +27,8 @@ XSafeClaw is a security-focused companion platform for [OpenClaw](https://opencl
 |---|---|
 | **Claw Monitor** | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning |
 | **Safe Chat** | Secure gateway to chat with your OpenClaw agent with built-in guard protection |
-| **Asset Shield** | File system scanning with risk classification (L0–L3), software audit, hardware inventory, and safety checks |
+| **Asset Shield** | File system scanning with risk classification (L0–L3), software audit, hardware inventory, safety checks, and custom path protection |
+| **Risk Test** | Built-in adversarial testing workspace that wraps malicious intents into realistic attack prompts to test whether an agent remains safe |
 | **Guard (AgentDoG)** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval workflow |
 | **Agent Office** | PixiJS-powered 2D visualization of all agents' status and activities |
 | **Onboard Setup** | Interactive wizard to install and configure OpenClaw CLI |
@@ -117,9 +118,11 @@ Then add it to your OpenClaw config (`~/.openclaw/openclaw.json`):
 ```json
 {
   "plugins": {
+    "enabled": true,
+    "allow": ["safeclaw-guard"],
     "entries": {
       "safeclaw-guard": {
-        "path": "~/.openclaw/extensions/safeclaw-guard"
+        "enabled": true
       }
     }
   }
@@ -137,6 +140,11 @@ xsafeclaw start
 Browser opens automatically at `http://127.0.0.1:6874`. The database is created at `~/.xsafeclaw/data.db` on first launch.
 
 If OpenClaw is not yet installed, the web UI will guide you through an interactive setup wizard.
+
+### Key Workflows
+
+- **Asset Shield → Permissions → Path Protection**: Add a folder or file path to the protected list and the guard will block agent operations against that path and everything under it. Removing the path restores normal access immediately.
+- **Risk Test**: Pick one of the built-in attack cases or enter your own malicious intent. XSafeClaw wraps it into more realistic attacker phrasing so you can test whether the agent refuses unsafe behavior.
 
 ### CLI Reference
 
@@ -228,8 +236,9 @@ XSafeClaw/
 │   │       ├── events.py             # Event timeline & stats
 │   │       ├── messages.py           # Message history
 │   │       ├── stats.py              # Token & usage stats
-│   │       ├── assets.py             # Hardware, file, software scanning
+│   │       ├── assets.py             # Hardware, file, software scanning + path protection
 │   │       ├── redteam.py            # Red team attack generation
+│   │       ├── risk_test.py          # Built-in risk-test APIs
 │   │       ├── chat.py               # Agent chat gateway
 │   │       ├── guard.py              # Tool-call guard & pending approvals
 │   │       ├── trace.py              # Aggregated trace for Agent Office
@@ -245,13 +254,14 @@ XSafeClaw/
 │   │   ├── guard_service.py          # AgentDoG guard logic & pending queue
 │   │   ├── message_sync_service.py   # JSONL → DB synchronization
 │   │   ├── event_sync_service.py     # Message → Event aggregation
+│   │   ├── risk_test_service.py      # Localized risk-test case generation
 │   │   ├── skill_scan_service.py     # SKILL.md safety scanning
 │   │   └── memory_scan_service.py    # Memory file safety scanning
 │   ├── asset_scanner/                # System asset scanner
 │   └── static/                       # Built frontend (auto-generated)
 ├── frontend/                         # React SPA
 │   ├── src/
-│   │   ├── pages/                    # Monitor, Chat, Assets, RiskScanner, etc.
+│   │   ├── pages/                    # Monitor, Chat, Assets, RiskTest, RiskScanner, etc.
 │   │   ├── components/               # Layout, shared UI
 │   │   ├── features/world/           # Agent Office (PixiJS visualization)
 │   │   ├── services/api.ts           # Axios API client
@@ -374,8 +384,9 @@ All endpoints are prefixed with `/api`. Full OpenAPI docs available at `http://l
 | `/api/events` | Query interaction events with timing and stats |
 | `/api/messages` | Browse messages with content and token info |
 | `/api/stats` | Aggregated stats by model, daily usage, overview |
-| `/api/assets` | Hardware scan, file scan, software audit, safety check |
+| `/api/assets` | Hardware scan, file scan, software audit, safety check, denylist-based path protection |
 | `/api/redteam` | List instructions, generate decomposed attacks |
+| `/api/risk-test` | Built-in adversarial testing, localized examples, and risk-test cases |
 | `/api/chat` | Start sessions, send messages to OpenClaw agent |
 | `/api/guard` | Guard evaluation, tool-check (long-poll), pending approvals |
 | `/api/trace` | Aggregated agent/event data for Agent Office |

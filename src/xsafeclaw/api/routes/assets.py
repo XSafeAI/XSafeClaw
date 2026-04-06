@@ -16,12 +16,16 @@ except ImportError:
     AssetScanner = None
     SafetyGuard = None
 
+from xsafeclaw.config import settings
+
 # --------------- Software scan task store ---------------
 # {scan_id: { status, result, error }}
 _software_scan_tasks: dict[str, dict] = {}
 
 # --------------- SafetyGuard singleton (loaded on demand) ---------------
 _safety_guard: "SafetyGuard | None" = None
+_DENYLIST_FILE = settings.data_dir / "denylist.json"
+_DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 router = APIRouter()
 
@@ -98,6 +102,11 @@ class AssetListResponse(BaseModel):
     total: int
     risk_level: int | None
     description: str
+
+
+class DenyEntry(BaseModel):
+    """User-defined denylist entry."""
+    path: str
 
 
 def _build_scan_response(scanner: "AssetScanner", assets: list, per_level_limit: int = 200) -> dict:
@@ -246,6 +255,23 @@ def _cleanup_old_tasks(keep_id: str):
     finished = [k for k, v in _scan_tasks.items() if v["status"] in ("completed", "failed") and k != keep_id]
     for old_id in finished[:-4]:  # keep the 4 most recent + current
         _scan_tasks.pop(old_id, None)
+
+
+# ----------------------- Denylist helpers ----------------------- #
+def _load_denylist() -> set[str]:
+    if not _DENYLIST_FILE.exists():
+        return set()
+    try:
+        import json
+        paths = json.loads(_DENYLIST_FILE.read_text())
+        return {str(Path(p).expanduser().resolve()) for p in paths if isinstance(p, str)}
+    except Exception:
+        return set()
+
+
+def _save_denylist(paths: set[str]) -> None:
+    import json
+    _DENYLIST_FILE.write_text(json.dumps(sorted(paths), ensure_ascii=False, indent=2))
 
 
 @router.get("/hardware", response_model=HardwareScanResponse)
@@ -601,3 +627,31 @@ async def reload_software_whitelist() -> dict:
         "protected_paths_count": len(_safety_guard.protected_paths),
         "message": "Software whitelist reloaded successfully",
     }
+
+
+# ----------------------- Denylist CRUD ----------------------- #
+
+@router.get("/denylist")
+async def list_denylist() -> dict:
+    """Return all user-defined protected paths."""
+    return {"paths": sorted(_load_denylist())}
+
+
+@router.post("/denylist")
+async def add_deny_path(body: DenyEntry) -> dict:
+    """Add a path to the denylist (blocked for all operations)."""
+    resolved = str(Path(body.path).expanduser().resolve())
+    paths = _load_denylist()
+    paths.add(resolved)
+    _save_denylist(paths)
+    return {"paths": sorted(paths)}
+
+
+@router.delete("/denylist")
+async def remove_deny_path(path: str = Query(..., description="Path to remove from denylist")) -> dict:
+    resolved = str(Path(path).expanduser().resolve())
+    paths = _load_denylist()
+    if resolved in paths:
+        paths.remove(resolved)
+        _save_denylist(paths)
+    return {"paths": sorted(paths)}

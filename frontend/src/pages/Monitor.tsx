@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import {
   Activity, MessageSquare, Wrench, Clock,
   User, Bot, Terminal,
@@ -1121,7 +1121,6 @@ function DashboardPanel({ data }: { data: any }) {
 /* ============ Main Page ============ */
 export default function Monitor() {
   const { t } = useI18n();
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as MonitorTabId | null) ?? 'agent';
   const [activeTab, setActiveTab] = useState<MonitorTabId>(
