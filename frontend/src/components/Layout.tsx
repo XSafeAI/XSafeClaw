@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity } from 'lucide-react';
+import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical } from 'lucide-react';
 import { useI18n } from '../i18n';
 
 function useTheme() {
@@ -27,6 +27,7 @@ export default function Layout() {
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
+    { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },
   ];
 
   return (

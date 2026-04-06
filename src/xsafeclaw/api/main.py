@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from ..config import settings
 from ..database import close_db, init_db
 from ..services.message_sync_service import MessageSyncService
-from .routes import events, guard, memory, messages, sessions, skills, stats, tool_calls, assets, redteam, chat, system, trace
+from .routes import assets, chat, events, guard, memory, messages, redteam, risk_test, sessions, skills, stats, system, tool_calls, trace
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
@@ -82,6 +82,7 @@ app.include_router(tool_calls.router, prefix="/api/tool-calls", tags=["Tool Call
 app.include_router(events.router, prefix="/api/events", tags=["Events"])
 app.include_router(stats.router, prefix="/api/stats", tags=["Statistics"])
 app.include_router(assets.router, prefix="/api/assets", tags=["Asset Scanning"])
+app.include_router(risk_test.router, prefix="/api/risk-test", tags=["Risk Test"])
 app.include_router(redteam.router, prefix="/api/redteam", tags=["Red Team"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(system.router, prefix="/api/system", tags=["System"])

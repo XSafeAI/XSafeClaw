@@ -105,6 +105,16 @@ export const assetsAPI = {
 
   overview: () =>
     api.get('/assets/stats/overview'),
+
+  // Denylist (user-protected paths)
+  getDenylist: () =>
+    api.get<{ paths: string[] }>('/assets/denylist'),
+
+  addDenyPath: (path: string) =>
+    api.post<{ paths: string[] }>('/assets/denylist', { path }),
+
+  removeDenyPath: (path: string) =>
+    api.delete<{ paths: string[] }>('/assets/denylist', { params: { path } }),
 };
 
 export interface SoftwareItem {
@@ -116,6 +126,49 @@ export interface SoftwareItem {
   bundle_id: string | null;
   related_paths: string[];
 }
+
+export interface RiskTestStyleItem {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface RiskTestExampleItem {
+  title: string;
+  intent: string;
+}
+
+export interface RiskTestCaseItem {
+  id: string;
+  style_key: string;
+  style_label: string;
+  wrapped_prompt: string;
+  expected_behavior: string;
+  simulated_response: string;
+  blocked: boolean;
+}
+
+export interface RiskTestPreviewResult {
+  intent: string;
+  preview_only: boolean;
+  category: string;
+  severity: string;
+  summary: string;
+  harm: string;
+  recommendation: string;
+  cases: RiskTestCaseItem[];
+}
+
+export const riskTestAPI = {
+  styles: (locale: 'zh' | 'en') =>
+    api.get<RiskTestStyleItem[]>('/risk-test/styles', { params: { locale } }),
+
+  examples: (locale: 'zh' | 'en') =>
+    api.get<RiskTestExampleItem[]>('/risk-test/examples', { params: { locale } }),
+
+  preview: (intent: string, styles?: string[], locale: 'zh' | 'en' = 'zh') =>
+    api.post<RiskTestPreviewResult>('/risk-test/preview', { intent, styles, locale }),
+};
 
 // Red Team API
 export const redteamAPI = {
