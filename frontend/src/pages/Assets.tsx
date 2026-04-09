@@ -6,7 +6,12 @@ import {
   RefreshCw, ChevronRight, ChevronDown, Zap, Server,
   Search, Lock, Check, X, ShieldCheck, ShieldAlert,
 } from 'lucide-react';
-import { assetsAPI, type SoftwareItem } from '../services/api';
+import {
+  assetsAPI,
+  type ProtectedPathEntry,
+  type ProtectedPathOperation,
+  type SoftwareItem,
+} from '../services/api';
 import { useI18n } from '../i18n';
 
 /* ==================== Types ==================== */
@@ -57,6 +62,7 @@ const safetyStatusConfig = {
 type TabId = 'scan' | 'software' | 'hardware' | 'safety';
 
 const OPERATIONS = ['read', 'write', 'delete', 'modify', 'create'] as const;
+const PATH_GUARD_OPERATIONS: ProtectedPathOperation[] = ['read', 'modify', 'delete'];
 
 /* ==================== Helpers ==================== */
 function formatUptime(s: number) {
@@ -147,6 +153,11 @@ export default function Assets() {
     DENIED: t.assets.safety.denied,
     CONFIRM: t.assets.safety.confirm,
   };
+  const pathGuardOperationLabels: Record<ProtectedPathOperation, string> = {
+    read: t.assets.safety.guardRead,
+    modify: t.assets.safety.guardModify,
+    delete: t.assets.safety.guardDelete,
+  };
 
   const [activeTab, setActiveTab] = useState<TabId>('scan');
 
@@ -179,7 +190,8 @@ export default function Assets() {
   const [safetyChecking, setSafetyChecking] = useState(false);
   const [safetyHistory, setSafetyHistory] = useState<SafetyResult[]>([]);
   const [denyPath, setDenyPath] = useState('');
-  const [denylist, setDenylist] = useState<string[]>([]);
+  const [denyOps, setDenyOps] = useState<ProtectedPathOperation[]>(['read', 'modify', 'delete']);
+  const [denylist, setDenylist] = useState<ProtectedPathEntry[]>([]);
   const [denyLoading, setDenyLoading] = useState(false);
 
   /* --- Resume in-flight scans on mount --- */
@@ -323,36 +335,46 @@ export default function Assets() {
   const loadDenylist = useCallback(async () => {
     try {
       const res = await assetsAPI.getDenylist();
-      setDenylist(res.data.paths);
+      setDenylist(res.data.entries);
     } catch (e) {
       console.error('load denylist failed', e);
     }
   }, []);
 
   const addDeny = useCallback(async () => {
-    if (!denyPath.trim()) return;
+    if (!denyPath.trim() || denyOps.length === 0) return;
     setDenyLoading(true);
     try {
-      const res = await assetsAPI.addDenyPath(denyPath.trim());
-      setDenylist(res.data.paths);
+      const res = await assetsAPI.addDenyPath(denyPath.trim(), denyOps);
+      setDenylist(res.data.entries);
       setDenyPath('');
     } catch (e) {
       alert('添加失败，请重试');
     } finally {
       setDenyLoading(false);
     }
-  }, [denyPath]);
+  }, [denyOps, denyPath]);
 
   const removeDeny = useCallback(async (path: string) => {
     setDenyLoading(true);
     try {
       const res = await assetsAPI.removeDenyPath(path);
-      setDenylist(res.data.paths);
+      setDenylist(res.data.entries);
     } catch (e) {
       alert('移除失败，请重试');
     } finally {
       setDenyLoading(false);
     }
+  }, []);
+
+  const toggleDenyOp = useCallback((operation: ProtectedPathOperation) => {
+    setDenyOps(prev => (
+      prev.includes(operation)
+        ? prev.filter(item => item !== operation)
+        : [...prev, operation].sort(
+            (a, b) => PATH_GUARD_OPERATIONS.indexOf(a) - PATH_GUARD_OPERATIONS.indexOf(b),
+          )
+    ));
   }, []);
 
   useEffect(() => { loadDenylist(); }, [loadDenylist]);
@@ -701,20 +723,54 @@ export default function Assets() {
                         className="flex-1 px-3 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
                         onKeyDown={e => e.key === 'Enter' && addDeny()}
                       />
-                      <button onClick={addDeny} disabled={denyLoading || !denyPath.trim()}
+                      <button onClick={addDeny} disabled={denyLoading || !denyPath.trim() || denyOps.length === 0}
                         className="px-4 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20">
                         {denyLoading ? t.common.loading : t.common.add}
                       </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1.5 block">{t.assets.safety.denyOperations}</label>
+                    <p className="text-[11px] text-text-muted mb-2">{t.assets.safety.denyOperationsDesc}</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {PATH_GUARD_OPERATIONS.map((operation) => {
+                        const selected = denyOps.includes(operation);
+                        return (
+                          <button
+                            key={operation}
+                            onClick={() => toggleDenyOp(operation)}
+                            className={`px-3 py-2 rounded-lg text-[12px] font-medium transition-all border ${
+                              selected
+                                ? 'bg-accent/15 text-accent border-accent/40'
+                                : 'bg-surface-0 text-text-muted border-border hover:border-border-active hover:text-text-secondary'
+                            }`}
+                          >
+                            {pathGuardOperationLabels[operation]}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                   <div className="divide-y divide-border rounded-lg border border-border">
                     {denylist.length === 0 && (
                       <div className="p-4 text-[12px] text-text-muted text-center">{t.assets.safety.denyEmpty}</div>
                     )}
-                    {denylist.map((p) => (
-                      <div key={p} className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2/40">
-                        <span className="text-[12px] font-mono text-text-primary break-all flex-1">{p}</span>
-                        <button onClick={() => removeDeny(p)} disabled={denyLoading}
+                    {denylist.map((entry) => (
+                      <div key={entry.path} className="flex items-start gap-3 px-4 py-3 hover:bg-surface-2/40">
+                        <div className="flex-1 min-w-0">
+                          <span className="text-[12px] font-mono text-text-primary break-all block">{entry.path}</span>
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {entry.operations.map(operation => (
+                              <span
+                                key={`${entry.path}-${operation}`}
+                                className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-accent/10 text-accent border-accent/20"
+                              >
+                                {pathGuardOperationLabels[operation]}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <button onClick={() => removeDeny(entry.path)} disabled={denyLoading}
                           className="text-[12px] text-error border border-error/30 px-2 py-1 rounded-lg hover:bg-error/10 disabled:opacity-40">
                           {t.common.remove}
                         </button>
