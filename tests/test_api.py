@@ -35,3 +35,22 @@ def test_chat_message_is_blocked_by_persisted_risk_rule(tmp_path, monkeypatch):
     assert payload["state"] == "final"
     assert payload["stop_reason"] == "blocked_by_persistent_rule"
     assert "该指令已写入长期防护规则" in payload["response_text"]
+
+
+def test_assets_browse_returns_child_directories(tmp_path, monkeypatch):
+    folder = tmp_path / "scan-root"
+    visible = folder / "Visible"
+    hidden = folder / ".Hidden"
+    visible.mkdir(parents=True)
+    hidden.mkdir()
+
+    client = TestClient(app)
+    response = client.get("/api/assets/browse", params={"path": str(folder)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_path"] == str(folder.resolve())
+    assert payload["parent_path"] == str(folder.resolve().parent)
+    assert payload["root_path"] == str(folder.resolve().anchor or folder.resolve())
+    assert [entry["name"] for entry in payload["entries"]] == ["Visible", ".Hidden"]
+    assert "shortcuts" not in payload

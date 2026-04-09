@@ -64,3 +64,17 @@ def test_persisted_risk_rule_matches_same_or_similar_user_message():
 
     assert match_risk_rule_text("今天几号", [rule]) is not None
     assert match_risk_rule_text("请告诉我今天几号", [rule]) is not None
+
+
+def test_persisted_risk_rule_matches_semantically_similar_text():
+    rule = build_risk_rule(
+        category_key="benign_info",
+        category="低风险（信息查询类）",
+        severity="low",
+        intent="今天上海天气怎么样",
+        risk_signals=[],
+        reason="来自风险测试的长期规则：天气查询",
+    )
+
+    assert match_risk_rule_text("今天上海天气预报", [rule]) is not None
+    assert match_risk_rule_text("今天北京天气预报", [rule]) is None

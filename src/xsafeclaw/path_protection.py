@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
+import posixpath
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable
 
 PROTECTED_OPERATION_ORDER = ("read", "modify", "delete")
@@ -23,16 +25,36 @@ _DISPLAY_NAMES_ZH = {
     "modify": "修改",
     "delete": "删除",
 }
-_READ_COMMANDS = {"cat", "less", "more", "head", "tail", "ls", "find", "stat", "file", "wc"}
-_READ_PATTERN_COMMANDS = {"grep", "rg"}
-_MODIFY_COMMANDS = {"mv", "cp", "touch", "mkdir", "chmod", "chown", "tee", "install"}
-_DELETE_COMMANDS = {"rm", "rmdir", "unlink", "trash", "trash-put", "gio-trash", "srm", "shred"}
-_SHELL_SEPARATORS = {"&&", "||", ";", "|"}
+_READ_COMMANDS = {
+    "cat", "less", "more", "head", "tail", "ls", "find", "stat", "file", "wc",
+    "type", "dir", "get-content", "gc",
+}
+_READ_PATTERN_COMMANDS = {"grep", "rg", "findstr", "select-string", "sls"}
+_MODIFY_COMMANDS = {
+    "mv", "cp", "touch", "mkdir", "chmod", "chown", "tee", "install",
+    "copy", "move", "ren", "rename", "md", "mklink",
+    "copy-item", "move-item", "rename-item", "new-item", "ni", "set-content", "add-content", "out-file",
+}
+_DELETE_COMMANDS = {
+    "rm", "rmdir", "unlink", "trash", "trash-put", "gio-trash", "srm", "shred",
+    "del", "erase", "rd", "remove-item", "ri",
+}
+_SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 _WRITE_REDIRECTION = re.compile(r"^(?:\d+)?>>?$")
 _READ_REDIRECTION = re.compile(r"^(?:\d+)?<$")
-_SHELL_WRAPPERS = {"bash", "sh", "zsh"}
+_POSIX_SHELL_WRAPPERS = {"bash", "sh", "zsh"}
+_WINDOWS_SHELL_WRAPPERS = {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+_SHELL_WRAPPERS = _POSIX_SHELL_WRAPPERS | _WINDOWS_SHELL_WRAPPERS
 _SCRIPT_RUNNERS = {"python", "python3", "perl", "ruby", "node", "osascript"}
-_PATH_LITERAL_PATTERN = re.compile(r'(?P<path>(?:~|/|\./|\.\./)[^\s"\'`;,|&><]+)')
+_POSIX_PATH_LITERAL_PATTERN = re.compile(r'(?P<path>(?:~|/|\./|\.\./)[^\s"\'`;,|&><]+)')
+_WINDOWS_DRIVE_PATH_PATTERN = re.compile(r'(?P<path>[A-Za-z]:[\\/][^\s"\'`;,|&><]+)')
+_WINDOWS_UNC_PATH_PATTERN = re.compile(r'(?P<path>(?:\\\\|//)[^\\/\s"\'`;,|&><]+(?:[\\/][^\\/\s"\'`;,|&><]+)+)')
+_WINDOWS_PERCENT_PATH_PATTERN = re.compile(r'(?P<path>%[A-Za-z_][A-Za-z0-9_]*%(?:[\\/][^\s"\'`;,|&><]+)*)')
+_POWERSHELL_ENV_PATH_PATTERN = re.compile(r'(?P<path>\$env:[A-Za-z_][A-Za-z0-9_]*(?:[\\/][^\s"\'`;,|&><]+)*)', re.IGNORECASE)
+_WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_UNC_PREFIX = re.compile(r"^(?:\\\\|//)[^\\/]+[\\/][^\\/]+")
+_PERCENT_ENV_PATTERN = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)%")
+_POWERSHELL_ENV_PATTERN = re.compile(r"\$env:([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 _OSASCRIPT_PATH_PATTERNS = (
     re.compile(r'POSIX file\s+"([^"]+)"', re.IGNORECASE),
     re.compile(r"POSIX file\s+'([^']+)'", re.IGNORECASE),
@@ -48,9 +70,76 @@ def normalize_protected_operation(operation: str | None) -> str | None:
     return _OPERATION_ALIASES.get(operation.strip().lower())
 
 
+def _strip_wrapping_quotes(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    return text
+
+
+def _expand_percent_vars(value: str) -> str:
+    return _PERCENT_ENV_PATTERN.sub(lambda match: os.environ.get(match.group(1), match.group(0)), value)
+
+
+def _expand_powershell_env_vars(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return (
+            os.environ.get(key)
+            or os.environ.get(key.upper())
+            or os.environ.get(key.lower())
+            or match.group(0)
+        )
+
+    return _POWERSHELL_ENV_PATTERN.sub(replace, value)
+
+
+def _expand_shell_path(path: str) -> str:
+    expanded = os.path.expandvars(path.strip())
+    expanded = _expand_percent_vars(expanded)
+    expanded = _expand_powershell_env_vars(expanded)
+    return expanded
+
+
+def _looks_like_windows_path(path: str) -> bool:
+    text = _strip_wrapping_quotes(path)
+    return bool(
+        _WINDOWS_DRIVE_PREFIX.match(text)
+        or _WINDOWS_UNC_PREFIX.match(text)
+        or text.startswith((".\\", "..\\"))
+        or ("\\" in text and not text.startswith(("/", "./", "../", "~")))
+        or text.lower().startswith("$env:")
+        or text.startswith("%")
+    )
+
+
+def _expand_windows_user(path: str) -> str:
+    text = _strip_wrapping_quotes(path)
+    if not text.startswith("~"):
+        return text
+
+    home = os.environ.get("USERPROFILE") or os.environ.get("HOME")
+    if not home:
+        return text
+
+    normalized_home = home.replace("/", "\\")
+    if text == "~":
+        return normalized_home
+    if text.startswith(("~/", "~\\")):
+        return ntpath.join(normalized_home, text[2:].replace("/", "\\"))
+    return text
+
+
 def resolve_user_path(path: str) -> Path:
     """Resolve a user-supplied path using shell-like expansion."""
-    expanded = os.path.expandvars(path)
+    expanded = _expand_shell_path(path)
+
+    if _looks_like_windows_path(expanded):
+        normalized_windows = _expand_windows_user(expanded)
+        if os.name == "nt":
+            return Path(normalized_windows).expanduser().resolve()
+        return Path(ntpath.normcase(ntpath.normpath(normalized_windows)))
+
     return Path(expanded).expanduser().resolve()
 
 
@@ -156,11 +245,8 @@ def match_protected_rule(
     for protected_path, protected_ops in sorted(rules.items(), key=lambda item: len(item[0]), reverse=True):
         if normalized not in protected_ops:
             continue
-        try:
-            resolved_target.relative_to(Path(protected_path))
+        if _is_relative_to(resolved_target, protected_path):
             return protected_path
-        except ValueError:
-            continue
 
     return None
 
@@ -188,8 +274,7 @@ def match_protected_scope(
     for protected_path, protected_ops in sorted(rules.items(), key=lambda item: len(item[0]), reverse=True):
         if normalized not in protected_ops:
             continue
-        protected = Path(protected_path)
-        if _is_relative_to(resolved_target, protected) or _is_relative_to(protected, resolved_target):
+        if _is_relative_to(resolved_target, protected_path) or _is_relative_to(protected_path, resolved_target):
             return protected_path
 
     return None
@@ -208,26 +293,22 @@ def extract_exec_operations(command: str) -> list[tuple[str, str]]:
     The goal is to support the common commands the agent uses in Safe Chat
     without trying to fully parse arbitrary shell syntax.
     """
-    try:
-        tokens = shlex.split(command)
-    except Exception:
-        return []
-
-    segments: list[list[str]] = []
-    current: list[str] = []
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            if current:
-                segments.append(current)
-                current = []
-            continue
-        current.append(token)
-    if current:
-        segments.append(current)
-
     extracted: list[tuple[str, str]] = []
-    for segment in segments:
-        extracted.extend(_extract_segment_operations(segment))
+    for tokens in _split_command_variants(command):
+        segments: list[list[str]] = []
+        current: list[str] = []
+        for token in tokens:
+            if token in _SHELL_SEPARATORS:
+                if current:
+                    segments.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(current)
+
+        for segment in segments:
+            extracted.extend(_extract_segment_operations(segment))
 
     seen: set[tuple[str, str]] = set()
     unique: list[tuple[str, str]] = []
@@ -238,11 +319,31 @@ def extract_exec_operations(command: str) -> list[tuple[str, str]]:
     return unique
 
 
+def _split_command_variants(command: str) -> list[list[str]]:
+    variants: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for posix_mode in (True, False):
+        try:
+            tokens = shlex.split(command, posix=posix_mode)
+        except Exception:
+            continue
+        normalized = tuple(tokens)
+        if tokens and normalized not in seen:
+            variants.append(tokens)
+            seen.add(normalized)
+    return variants
+
+
+def _command_name(token: str) -> str:
+    cleaned = _strip_wrapping_quotes(token)
+    return ntpath.basename(posixpath.basename(cleaned)).lower()
+
+
 def _extract_segment_operations(tokens: list[str]) -> list[tuple[str, str]]:
     if not tokens:
         return []
 
-    executable = Path(tokens[0]).name.lower()
+    executable = _command_name(tokens[0])
     args = tokens[1:]
     if executable == "env":
         nested = _extract_env_wrapper(args)
@@ -256,7 +357,7 @@ def _extract_segment_operations(tokens: list[str]) -> list[tuple[str, str]]:
     operations.extend(_extract_redirections(tokens))
 
     if executable in _SHELL_WRAPPERS:
-        operations.extend(_extract_shell_wrapper_operations(args))
+        operations.extend(_extract_shell_wrapper_operations(executable, args))
         return operations
 
     if executable == "find":
@@ -309,16 +410,21 @@ def _extract_env_wrapper(args: list[str]) -> tuple[str, list[str]] | None:
         if arg == "--":
             passthrough = True
             continue
-        if not passthrough and "=" in arg and not arg.startswith(("~", "/", "./", "../")):
+        if not passthrough and "=" in arg and not _looks_like_windows_path(arg) and not arg.startswith(("~", "/", "./", "../")):
             continue
         if not passthrough and arg.startswith("-"):
             continue
-        return Path(arg).name.lower(), args[idx + 1 :]
+        return _command_name(arg), args[idx + 1 :]
     return None
 
 
-def _extract_shell_wrapper_operations(args: list[str]) -> list[tuple[str, str]]:
-    script = _extract_inline_arg(args, {"-c", "-lc", "-xc"})
+def _extract_shell_wrapper_operations(executable: str, args: list[str]) -> list[tuple[str, str]]:
+    if executable in {"cmd", "cmd.exe"}:
+        script = _extract_wrapper_script(args, {"/c", "/k"}, take_rest=True)
+    elif executable in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        script = _extract_wrapper_script(args, {"-c", "-command", "/c", "/command"}, take_rest=True)
+    else:
+        script = _extract_wrapper_script(args, {"-c", "-lc", "-xc"})
     if not script:
         return []
     return extract_exec_operations(script)
@@ -350,7 +456,7 @@ def _extract_find_roots(args: list[str]) -> list[str]:
     for arg in args:
         if arg in {"--", "!", "("} or arg.startswith("-"):
             break
-        roots.append(arg)
+        roots.append(_strip_wrapping_quotes(arg))
     return roots
 
 
@@ -403,7 +509,7 @@ def _extract_osascript_paths(script: str) -> list[str]:
 
 
 def _extract_inline_script_operations(executable: str, args: list[str]) -> list[tuple[str, str]]:
-    script = _extract_inline_arg(args, {"-c", "-e"})
+    script = _extract_wrapper_script(args, {"-c", "-e"})
     if not script:
         return []
 
@@ -417,13 +523,16 @@ def _extract_inline_script_operations(executable: str, args: list[str]) -> list[
     return [(operation, path) for path in _extract_path_literals(script)]
 
 
-def _extract_inline_arg(args: list[str], flags: set[str]) -> str | None:
+def _extract_wrapper_script(args: list[str], flags: set[str], *, take_rest: bool = False) -> str | None:
     for idx, arg in enumerate(args):
-        if arg in flags and idx + 1 < len(args):
-            return args[idx + 1]
+        cleaned = _strip_wrapping_quotes(arg)
+        lowered = cleaned.lower()
+        if lowered in flags and idx + 1 < len(args):
+            tail = [_strip_wrapping_quotes(item) for item in args[idx + 1 :]]
+            return " ".join(tail) if take_rest else tail[0]
         for flag in flags:
-            if arg.startswith(flag) and len(arg) > len(flag):
-                return arg[len(flag) :]
+            if lowered.startswith(flag) and len(cleaned) > len(flag):
+                return cleaned[len(flag) :]
     return None
 
 
@@ -446,7 +555,16 @@ def _classify_text_operation(
 
 
 def _extract_path_literals(text: str) -> list[str]:
-    return _unique_paths(match.group("path") for match in _PATH_LITERAL_PATTERN.finditer(text))
+    matches: list[str] = []
+    for pattern in (
+        _POSIX_PATH_LITERAL_PATTERN,
+        _WINDOWS_DRIVE_PATH_PATTERN,
+        _WINDOWS_UNC_PATH_PATTERN,
+        _WINDOWS_PERCENT_PATH_PATTERN,
+        _POWERSHELL_ENV_PATH_PATTERN,
+    ):
+        matches.extend(match.group("path") for match in pattern.finditer(text))
+    return _unique_paths(matches)
 
 
 def _unique_paths(paths: Iterable[str]) -> list[str]:
@@ -459,9 +577,22 @@ def _unique_paths(paths: Iterable[str]) -> list[str]:
     return unique
 
 
-def _is_relative_to(path: Path, other: Path) -> bool:
+def _to_comparable_path(path: str | os.PathLike[str]) -> tuple[str, PurePosixPath | PureWindowsPath]:
+    resolved = resolve_user_path(str(path))
+    resolved_text = str(resolved)
+    if _looks_like_windows_path(resolved_text):
+        return "windows", PureWindowsPath(ntpath.normcase(ntpath.normpath(resolved_text)))
+    return "posix", PurePosixPath(posixpath.normpath(resolved_text))
+
+
+def _is_relative_to(path: str | os.PathLike[str], other: str | os.PathLike[str]) -> bool:
+    path_style, pure_path = _to_comparable_path(path)
+    other_style, pure_other = _to_comparable_path(other)
+    if path_style != other_style:
+        return False
+
     try:
-        path.relative_to(other)
+        pure_path.relative_to(pure_other)
         return True
     except ValueError:
         return False
@@ -476,7 +607,7 @@ def _non_option_args(args: list[str]) -> list[str]:
             continue
         if not passthrough and arg.startswith("-") and arg != "-":
             continue
-        values.append(arg)
+        values.append(_strip_wrapping_quotes(arg))
     return values
 
 
@@ -485,19 +616,19 @@ def _extract_redirections(tokens: list[str]) -> list[tuple[str, str]]:
     for idx, token in enumerate(tokens):
         if _WRITE_REDIRECTION.match(token):
             if idx + 1 < len(tokens):
-                results.append(("modify", tokens[idx + 1]))
+                results.append(("modify", _strip_wrapping_quotes(tokens[idx + 1])))
             continue
         if _READ_REDIRECTION.match(token):
             if idx + 1 < len(tokens):
-                results.append(("read", tokens[idx + 1]))
+                results.append(("read", _strip_wrapping_quotes(tokens[idx + 1])))
             continue
 
         compact_write = re.match(r"^(?:\d+)?(>>?)(.+)$", token)
         if compact_write:
-            results.append(("modify", compact_write.group(2)))
+            results.append(("modify", _strip_wrapping_quotes(compact_write.group(2))))
             continue
 
         compact_read = re.match(r"^(?:\d+)?(<)(.+)$", token)
         if compact_read:
-            results.append(("read", compact_read.group(2)))
+            results.append(("read", _strip_wrapping_quotes(compact_read.group(2))))
     return results

@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 _KEYWORD_PATTERN = re.compile(r"[A-Za-z0-9_.:/@-]{3,}|[\u4e00-\u9fff]{2,12}")
 _NORMALIZE_TEXT_PATTERN = re.compile(r"[\s\W_]+", re.UNICODE)
+_TEXT_UNIT_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]+", re.UNICODE)
 _GENERIC_STOPWORDS = {
     "please",
     "would",
@@ -42,6 +43,26 @@ _GENERIC_STOPWORDS = {
     "通过",
     "可以",
 }
+_SEMANTIC_FILLER_PHRASES = [
+    "请帮我",
+    "帮我看看",
+    "帮我查一下",
+    "帮我查询一下",
+    "请告诉我",
+    "请问",
+    "告诉我",
+    "查一下",
+    "查询一下",
+    "帮我",
+    "一下",
+    "please",
+    "can you",
+    "could you",
+    "would you",
+    "tell me",
+    "show me",
+    "help me",
+]
 
 _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
     "benign_info": {
@@ -429,8 +450,47 @@ def _intent_matches_message(message_text: str, intent_text: str) -> bool:
         if SequenceMatcher(None, normalized_message, normalized_intent).ratio() >= 0.82:
             return True
 
+    message_units = _semantic_units(message_text)
+    intent_units = _semantic_units(intent_text)
+    if message_units and intent_units:
+        overlap = message_units & intent_units
+        if overlap:
+            smaller = min(len(message_units), len(intent_units))
+            coverage = len(overlap) / smaller
+            dice = (2 * len(overlap)) / (len(message_units) + len(intent_units))
+            if len(overlap) >= 2 and (coverage >= 0.6 or dice >= 0.58):
+                return True
+
     return False
 
 
 def _normalize_match_text(text: str) -> str:
     return _NORMALIZE_TEXT_PATTERN.sub("", str(text or "").lower())
+
+
+def _semantic_units(text: str) -> set[str]:
+    lowered = str(text or "").lower()
+    for filler in _SEMANTIC_FILLER_PHRASES:
+        lowered = lowered.replace(filler, " ")
+
+    units: set[str] = set()
+    for token in _TEXT_UNIT_PATTERN.findall(lowered):
+        if token in _GENERIC_STOPWORDS:
+            continue
+
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+            token = token.strip()
+            if len(token) >= 2:
+                units.add(token)
+            for size in (2, 3):
+                if len(token) < size:
+                    continue
+                for idx in range(len(token) - size + 1):
+                    units.add(token[idx : idx + size])
+            continue
+
+        if len(token) < 2:
+            continue
+        units.add(token)
+
+    return units

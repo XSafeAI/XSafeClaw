@@ -1,6 +1,8 @@
 """API routes for Asset Scanning."""
 
 import asyncio
+import os
+import stat
 import threading
 import uuid
 from pathlib import Path
@@ -120,6 +122,19 @@ class DenyEntry(BaseModel):
         default_factory=lambda: list(PROTECTED_OPERATION_ORDER),
         description="Protected operations: read | modify | delete",
     )
+
+
+class BrowseEntry(BaseModel):
+    name: str
+    path: str
+    is_hidden: bool = False
+
+
+class BrowseResponse(BaseModel):
+    current_path: str
+    parent_path: str | None = None
+    root_path: str
+    entries: list[BrowseEntry]
 
 
 def _build_scan_response(scanner: "AssetScanner", assets: list, per_level_limit: int = 200) -> dict:
@@ -277,6 +292,74 @@ def _load_denylist() -> dict[str, set[str]]:
 
 def _save_denylist(paths: dict[str, set[str]]) -> None:
     save_rules(_DENYLIST_FILE, paths)
+
+
+def _resolve_browse_path(raw_path: str | None) -> Path:
+    if raw_path and raw_path.strip():
+        candidate = Path(raw_path).expanduser()
+    else:
+        candidate = Path.home()
+
+    resolved = candidate.resolve(strict=False)
+    if resolved.exists() and resolved.is_file():
+        resolved = resolved.parent
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {candidate}")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {candidate}")
+    return resolved
+
+
+def _is_hidden_directory(path: Path) -> bool:
+    if path.name.startswith("."):
+        return True
+
+    if os.name == "nt":
+        try:
+            attributes = path.stat().st_file_attributes
+        except (AttributeError, OSError):
+            return False
+        return bool(attributes & stat.FILE_ATTRIBUTE_HIDDEN)
+
+    return False
+
+
+def _root_path_for_directory(path: Path) -> str:
+    anchor = path.anchor
+    if anchor:
+        return anchor
+    return str(path)
+
+
+@router.get("/browse", response_model=BrowseResponse)
+async def browse_directories(path: str | None = Query(None, description="Directory to browse")) -> Any:
+    """List child directories for the shared folder picker used across asset forms."""
+    current = _resolve_browse_path(path)
+
+    try:
+        children = []
+        for child in current.iterdir():
+            if not child.is_dir():
+                continue
+            children.append(
+                {
+                    "name": child.name or str(child),
+                    "path": str(child.resolve()),
+                    "is_hidden": _is_hidden_directory(child),
+                }
+            )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {current}") from exc
+
+    children.sort(key=lambda item: (item["is_hidden"], item["name"].lower()))
+    parent = current.parent if current.parent != current else None
+    return {
+        "current_path": str(current),
+        "parent_path": str(parent) if parent else None,
+        "root_path": _root_path_for_directory(current),
+        "entries": children,
+    }
 
 
 @router.get("/hardware", response_model=HardwareScanResponse)

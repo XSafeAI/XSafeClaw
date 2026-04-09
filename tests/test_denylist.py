@@ -202,3 +202,61 @@ def test_guard_service_blocks_parent_scope_deletes_for_protected_child(tmp_path,
     )
     assert reason
     assert str(desktop_dir.resolve()) in reason
+
+
+def test_windows_style_commands_are_blocked_for_protected_paths(tmp_path, monkeypatch):
+    """Windows commands should match persisted path-protection rules too."""
+    denylist_file = tmp_path / "denylist.json"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+
+    denylist_file.write_text(
+        json.dumps(
+            [
+                {
+                    "path": r"C:\Users\demo\Secret",
+                    "operations": ["read", "delete"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    read_reason = guard_service._denylist_precheck(
+        "exec",
+        {"command": r'type C:\Users\demo\Secret\note.txt'},
+    )
+    delete_reason = guard_service._denylist_precheck(
+        "exec",
+        {"command": r'cmd /c del C:\Users\demo\Secret\note.txt'},
+    )
+
+    assert read_reason
+    assert delete_reason
+    assert r"C:\Users\demo\Secret\note.txt" in read_reason
+    assert r"C:\Users\demo\Secret\note.txt" in delete_reason
+
+
+def test_powershell_commands_respect_windows_path_protection(tmp_path, monkeypatch):
+    """PowerShell wrappers should not bypass Windows path-protection rules."""
+    denylist_file = tmp_path / "denylist.json"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+
+    denylist_file.write_text(
+        json.dumps(
+            [
+                {
+                    "path": r"C:\Users\demo\Secret",
+                    "operations": ["read"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    reason = guard_service._denylist_precheck(
+        "exec",
+        {"command": r'powershell -Command Get-Content C:\Users\demo\Secret\note.txt'},
+    )
+
+    assert reason
+    assert r"C:\Users\demo\Secret\note.txt" in reason

@@ -25,6 +25,19 @@ export interface ProtectedPathEntry {
   operations: ProtectedPathOperation[];
 }
 
+export interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+  is_hidden: boolean;
+}
+
+export interface DirectoryBrowseResult {
+  current_path: string;
+  parent_path: string | null;
+  root_path: string;
+  entries: DirectoryBrowseEntry[];
+}
+
 // Sessions API
 export const sessionsAPI = {
   list: (params?: { page?: number; page_size?: number }) =>
@@ -81,6 +94,9 @@ export const assetsAPI = {
   /** Start an async file scan */
   startScan: (data: { path?: string; max_depth?: number; scan_system_root?: boolean }) =>
     api.post('/assets/scan', data),
+
+  browseDirectories: (path?: string) =>
+    api.get<DirectoryBrowseResult>('/assets/browse', { params: { path } }),
 
   /** Poll file scan progress */
   scanProgress: (scanId: string) =>
