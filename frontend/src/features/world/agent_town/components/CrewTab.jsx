@@ -886,7 +886,19 @@ export default function CrewTab({
                           onClick={() => onPickModel(model.id)}
                           aria-pressed={isSelected}
                         >
-                          <span className="tc-model-option-name">{model.name}</span>
+                          <div className="tc-model-option-head">
+                            <span className="tc-model-option-name">{model.name}</span>
+                            {model.isNew || model.isLastUsed ? (
+                              <span className="tc-model-option-flags">
+                                {model.isNew ? (
+                                  <span className="tc-model-option-flag tc-model-option-flag-new">NEW</span>
+                                ) : null}
+                                {model.isLastUsed ? (
+                                  <span className="tc-model-option-flag tc-model-option-flag-last-used">LAST USED</span>
+                                ) : null}
+                              </span>
+                            ) : null}
+                          </div>
                         </button>
                         {isSelected ? (
                           <div className="tc-model-option-expand">

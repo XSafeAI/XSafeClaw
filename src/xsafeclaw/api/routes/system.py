@@ -1650,6 +1650,12 @@ async def onboard_scan():
     agents = current_config.get("agents", {}).get("defaults", {})
     hooks_cfg = current_config.get("hooks", {}).get("internal", {}).get("entries", {})
     search_cfg = current_config.get("tools", {}).get("web", {}).get("search", {})
+    models_cfg = current_config.get("models", {}).get("providers", {})
+    configured_provider_api_keys = {
+        provider_id: str((provider_cfg or {}).get("apiKey", "")).strip()
+        for provider_id, provider_cfg in models_cfg.items()
+        if str((provider_cfg or {}).get("apiKey", "")).strip()
+    }
 
     # Build config summary lines (mirrors summarizeExistingConfig in source)
     config_summary: list[str] = []
@@ -1695,6 +1701,7 @@ async def onboard_scan():
             "enabled_hooks": [k for k, v in hooks_cfg.items() if v.get("enabled")],
             "search_provider": search_cfg.get("provider", ""),
             "search_api_key": search_cfg.get("apiKey", ""),
+            "configured_provider_api_keys": configured_provider_api_keys,
         },
     }
 
@@ -1797,6 +1804,127 @@ class OnboardConfigRequest(BaseModel):
 
 # _METHOD_CLI_FLAGS is now dynamically built by _get_auth_providers_and_flags()
 # from each extension's openclaw.plugin.json → providerAuthChoices[].cliFlag.
+
+
+def _normalize_model_input(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return ["text"]
+    return [part.strip() for part in text.split("+") if part.strip()]
+
+
+def _lookup_catalog_model(model_id: str) -> tuple[str, dict] | None:
+    target = str(model_id or "").strip()
+    if not target:
+        return None
+
+    provider_hint = ""
+    short_id = target
+    if "/" in target:
+        provider_hint, short_id = target.split("/", 1)
+
+    if isinstance(_onboard_scan_cache, dict):
+        for provider in _onboard_scan_cache.get("model_providers", []) or []:
+            prov_id = str(provider.get("id", "")).strip()
+            for model in provider.get("models", []) or []:
+                candidate = str(model.get("id", "")).strip()
+                if not candidate:
+                    continue
+                candidate_short = candidate.split("/", 1)[1] if "/" in candidate else candidate
+                if candidate == target or (prov_id == provider_hint and candidate_short == short_id):
+                    return prov_id or provider_hint, model
+
+    for provider in PROVIDERS:
+        prov_id = str(provider.get("id", "")).strip()
+        if provider_hint and prov_id != provider_hint:
+            continue
+        for model in provider.get("models", []) or []:
+            candidate = str(model.get("id", "")).strip()
+            if not candidate:
+                continue
+            if candidate == target or candidate == short_id or f"{prov_id}/{candidate}" == target:
+                return prov_id, model
+
+    return None
+
+
+def _ensure_selected_model_entry(config: dict, model_id: str) -> bool:
+    target = str(model_id or "").strip()
+    if not target:
+        return False
+
+    provider_key = ""
+    short_id = target
+    if "/" in target:
+        provider_key, short_id = target.split("/", 1)
+
+    lookup = _lookup_catalog_model(target)
+    metadata: dict | None = None
+    if lookup:
+        provider_key = provider_key or lookup[0]
+        metadata = lookup[1]
+
+    if not provider_key:
+        return False
+
+    changed = False
+    models_cfg = config.setdefault("models", {})
+    providers = models_cfg.setdefault("providers", {})
+    provider_cfg = providers.setdefault(provider_key, {})
+
+    static_provider = next((provider for provider in PROVIDERS if provider.get("id") == provider_key), None)
+    if static_provider:
+        base_url = static_provider.get("baseUrl")
+        api_kind = static_provider.get("api")
+        if base_url and not provider_cfg.get("baseUrl"):
+            provider_cfg["baseUrl"] = base_url
+            changed = True
+        if api_kind and not provider_cfg.get("api"):
+            provider_cfg["api"] = api_kind
+            changed = True
+
+    models = provider_cfg.get("models")
+    if not isinstance(models, list):
+        provider_cfg["models"] = []
+        models = provider_cfg["models"]
+        changed = True
+
+    existing_ids: set[str] = set()
+    for existing in models:
+        if not isinstance(existing, dict):
+            continue
+        raw_id = str(existing.get("id", "")).strip()
+        if not raw_id:
+            continue
+        existing_ids.add(raw_id)
+        existing_ids.add(raw_id if "/" in raw_id else f"{provider_key}/{raw_id}")
+
+    if short_id in existing_ids or target in existing_ids:
+        return changed
+
+    entry = {
+        "id": short_id,
+        "name": short_id,
+        "reasoning": False,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+    }
+    if metadata:
+        entry["name"] = metadata.get("name", short_id)
+        entry["reasoning"] = bool(metadata.get("reasoning", False))
+        context_window = int(metadata.get("contextWindow", 0) or 0)
+        if context_window:
+            entry["contextWindow"] = context_window
+        max_tokens = int(metadata.get("maxTokens", 0) or 0)
+        if max_tokens:
+            entry["maxTokens"] = max_tokens
+        input_modes = _normalize_model_input(metadata.get("input"))
+        if input_modes:
+            entry["input"] = input_modes
+
+    models.append(entry)
+    return True
 
 
 def _patch_config_extras(body: OnboardConfigRequest) -> None:
@@ -1923,6 +2051,8 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
 
     # Model ID override (CLI picks the provider default; user may want a specific model)
     if body.model_id:
+        if _ensure_selected_model_entry(config, body.model_id):
+            changed = True
         agents = config.setdefault("agents", {})
         defaults = agents.setdefault("defaults", {})
         defaults.setdefault("model", {})["primary"] = body.model_id

@@ -56,6 +56,58 @@ function normalizeSessionIdentity(value) {
   return text.startsWith('agent:main:') ? text.slice('agent:main:'.length) : text;
 }
 
+function normalizeModelMatchToken(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeSearchToken(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s./_-]+/g, '');
+}
+
+function getConfiguredModelMatchKeys(model) {
+  const fullId = normalizeModelMatchToken(model?.id);
+  const shortId = fullId.includes('/') ? fullId.split('/').slice(1).join('/') : fullId;
+  const displayName = normalizeModelMatchToken(model?.name);
+  return new Set([fullId, shortId, displayName].filter(Boolean));
+}
+
+function matchConfiguredModelToAgent(model, agent) {
+  const agentModel = normalizeModelMatchToken(agent?.model);
+  if (!agentModel) return false;
+
+  const agentProvider = normalizeModelMatchToken(agent?.provider);
+  const modelProvider = normalizeModelMatchToken(model?.provider);
+  if (agentProvider && modelProvider && agentProvider !== modelProvider) {
+    return false;
+  }
+
+  return getConfiguredModelMatchKeys(model).has(agentModel);
+}
+
+function getAgentRecencyValue(agent) {
+  const candidates = [
+    agent?.first_seen_at,
+    agent?.updated_at,
+    agent?.created_at,
+    agent?.started_at,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return candidate > 1_000_000_000_000 ? candidate : candidate * 1000;
+    }
+    const parsed = Date.parse(String(candidate || ''));
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}
+
 function getAgentSessionKey(agent) {
   return agent?.session_key || '';
 }
@@ -1238,6 +1290,7 @@ export default function TownConsole({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
   const [pendingModelId, setPendingModelId] = useState('');
+  const [recentlyConfiguredModelId, setRecentlyConfiguredModelId] = useState('');
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [createError, setCreateError] = useState('');
   const [guardResolvingId, setGuardResolvingId] = useState(null);
@@ -1692,7 +1745,7 @@ export default function TownConsole({
     return next;
   }, [catalogModelProviders, providerDirectory]);
 
-  const configuredModels = useMemo(() => {
+  const baseConfiguredModels = useMemo(() => {
     return [...availableModels]
       .map((model) => ({
         ...(() => {
@@ -1720,12 +1773,50 @@ export default function TownConsole({
       ));
   }, [availableModels, catalogModelDirectory, defaultModel, providerDirectory]);
 
+  const lastUsedConfiguredModelId = useMemo(() => {
+    const recentAgents = [...combinedAgents]
+      .filter((agent) => String(agent?.provider || '').trim() && String(agent?.model || '').trim())
+      .sort((a, b) => getAgentRecencyValue(b) - getAgentRecencyValue(a));
+
+    for (const agent of recentAgents) {
+      const matchedModel = baseConfiguredModels.find((model) => matchConfiguredModelToAgent(model, agent));
+      if (matchedModel?.id) {
+        return matchedModel.id;
+      }
+    }
+
+    return '';
+  }, [baseConfiguredModels, combinedAgents]);
+
+  const configuredModels = useMemo(() => {
+    return [...baseConfiguredModels]
+      .map((model) => ({
+        ...model,
+        isNew: model.id === recentlyConfiguredModelId,
+        isLastUsed: model.id === lastUsedConfiguredModelId,
+      }))
+      .sort((a, b) => (
+        Number(Boolean(b.isNew)) - Number(Boolean(a.isNew))
+        || Number(Boolean(b.isLastUsed)) - Number(Boolean(a.isLastUsed))
+        || Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault))
+        || String(a.providerLabel || a.provider || '').localeCompare(String(b.providerLabel || b.provider || ''))
+        || String(a.name || '').localeCompare(String(b.name || ''))
+      ));
+  }, [baseConfiguredModels, lastUsedConfiguredModelId, recentlyConfiguredModelId]);
+
   const filteredModels = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
+    const compactNeedle = normalizeSearchToken(modelSearch);
     if (!needle) return configuredModels;
     return configuredModels.filter((model) => {
       const haystack = `${model.name} ${model.id} ${model.provider} ${model.providerLabel || ''}`.toLowerCase();
-      return haystack.includes(needle);
+      if (haystack.includes(needle)) {
+        return true;
+      }
+      if (!compactNeedle) {
+        return false;
+      }
+      return normalizeSearchToken(haystack).includes(compactNeedle);
     });
   }, [configuredModels, modelSearch]);
 
@@ -1822,6 +1913,7 @@ export default function TownConsole({
     ));
     setDefaultModel(modelId || '');
     setPendingModelId(modelId || '');
+    setRecentlyConfiguredModelId(modelId || '');
     setModelSetupOpen(false);
     setCreateError('');
 

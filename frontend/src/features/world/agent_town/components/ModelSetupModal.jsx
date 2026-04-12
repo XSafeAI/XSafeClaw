@@ -76,6 +76,32 @@ function deriveCustomProviderId(baseUrl, explicitProviderId = '') {
   }
 }
 
+function resolveRelevantProviderIds(authProviderId, authMethodId, authProviders) {
+  const provider = authProviders.find((item) => item.id === authProviderId);
+  if (!provider) return [];
+  const methods = provider.methods || [];
+  const selectedMethod = methods.find((method) => method.id === authMethodId)
+    || (methods.length === 1 ? methods[0] : null);
+  const explicitProviderIds = selectedMethod?.modelProviders;
+  if (Array.isArray(explicitProviderIds) && explicitProviderIds.length > 0) {
+    return explicitProviderIds;
+  }
+  if (authProviderId && !AGGREGATOR_PROVIDERS.has(authProviderId)) {
+    return [authProviderId];
+  }
+  return [];
+}
+
+function getPrefilledApiKey(authProviderId, authMethodId, authProviders, defaults) {
+  const configuredKeys = defaults?.configured_provider_api_keys || {};
+  const providerIds = resolveRelevantProviderIds(authProviderId, authMethodId, authProviders);
+  for (const providerId of providerIds) {
+    const key = String(configuredKeys?.[providerId] || '').trim();
+    if (key) return key;
+  }
+  return '';
+}
+
 function buildInitialForm(defaults = {}) {
   return {
     ...DEFAULT_FORM,
@@ -419,11 +445,13 @@ export default function ModelSetupModal({
                   const provider = availableAuthProviders.find((item) => item.id === id);
                   if (!provider || provider.supported === false) return;
                   const methods = provider.methods || [];
+                  const nextAuthMethod = methods.length === 1 ? methods[0].id : '';
+                  const prefilledApiKey = getPrefilledApiKey(id, nextAuthMethod, availableAuthProviders, defaults);
                   setForm((prev) => ({
                     ...prev,
                     authProvider: id,
-                    authMethod: methods.length === 1 ? methods[0].id : '',
-                    apiKey: '',
+                    authMethod: nextAuthMethod,
+                    apiKey: prefilledApiKey,
                     modelId: '',
                     cfAccountId: '',
                     cfGatewayId: '',
@@ -460,7 +488,18 @@ export default function ModelSetupModal({
                         type="button"
                         className={`tc-model-setup-chip ${form.authMethod === method.id ? 'tc-model-setup-chip-selected' : ''}`}
                         onClick={() => {
-                          setForm((prev) => ({ ...prev, authMethod: method.id, apiKey: '', modelId: '' }));
+                          const prefilledApiKey = getPrefilledApiKey(
+                            form.authProvider,
+                            method.id,
+                            availableAuthProviders,
+                            defaults,
+                          );
+                          setForm((prev) => ({
+                            ...prev,
+                            authMethod: method.id,
+                            apiKey: prefilledApiKey,
+                            modelId: '',
+                          }));
                           setManualModelEntry(false);
                         }}
                       >

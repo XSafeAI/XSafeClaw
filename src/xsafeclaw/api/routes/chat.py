@@ -20,6 +20,8 @@ _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
+_GATEWAY_CONNECT_RETRY_ATTEMPTS = 6
+_GATEWAY_CONNECT_RETRY_DELAY_S = 1.0
 _available_models_cache: dict[str, object] = {
     "expires_at": 0.0,
     "payload": {"models": [], "default_model": ""},
@@ -93,6 +95,64 @@ def _build_available_models_payload_from_onboard_cache() -> dict:
     return {"models": models, "default_model": default_model}
 
 
+def _lookup_model_from_onboard_cache(model_id: str) -> dict | None:
+    target = str(model_id or "").strip()
+    if not target:
+        return None
+
+    try:
+        from .system import _onboard_scan_cache
+    except Exception:
+        return None
+
+    if not isinstance(_onboard_scan_cache, dict):
+        return None
+
+    provider_hint = ""
+    short_id = target
+    if "/" in target:
+        provider_hint, short_id = target.split("/", 1)
+
+    for provider in _onboard_scan_cache.get("model_providers", []) or []:
+        prov_id = str(provider.get("id", "")).strip()
+        for model in provider.get("models", []) or []:
+            candidate = str(model.get("id", "")).strip()
+            if not candidate:
+                continue
+            candidate_short = candidate.split("/", 1)[1] if "/" in candidate else candidate
+            if candidate == target or (prov_id == provider_hint and candidate_short == short_id):
+                return {
+                    "id": target if "/" in target else f"{prov_id}/{candidate_short}",
+                    "name": model.get("name", candidate_short or target),
+                    "provider": prov_id or provider_hint,
+                    "reasoning": bool(model.get("reasoning", False)),
+                }
+
+    return None
+
+
+def _ensure_default_model_visible(payload: dict) -> dict:
+    default_model = str(payload.get("default_model", "") or "").strip()
+    models = list(payload.get("models", []) or [])
+    if not default_model or "/" not in default_model:
+        return {"models": models, "default_model": default_model}
+
+    if any(str(model.get("id", "")).strip() == default_model for model in models):
+        return {"models": models, "default_model": default_model}
+
+    fallback = _lookup_model_from_onboard_cache(default_model)
+    if not fallback:
+        provider, short_id = default_model.split("/", 1)
+        fallback = {
+            "id": default_model,
+            "name": short_id,
+            "provider": provider,
+            "reasoning": False,
+        }
+
+    return {"models": [fallback, *models], "default_model": default_model}
+
+
 def _build_available_models_payload_from_config() -> dict:
     """Fallback to configured models from ~/.openclaw/openclaw.json."""
     if not _CONFIG_PATH.exists():
@@ -131,7 +191,7 @@ def _build_available_models_payload_from_config() -> dict:
     if not default_model and len(models) == 1:
         default_model = models[0]["id"]
 
-    return {"models": models, "default_model": default_model}
+    return _ensure_default_model_visible({"models": models, "default_model": default_model})
 
 
 def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
@@ -406,6 +466,32 @@ def _ws_is_open(ws: object) -> bool:
 _gateway_sessions: dict[str, GatewayClient] = {}
 
 
+async def _connect_gateway_with_retries() -> GatewayClient:
+    """Connect to the OpenClaw gateway, tolerating short daemon reload windows."""
+    last_error: Exception | None = None
+
+    for attempt in range(1, _GATEWAY_CONNECT_RETRY_ATTEMPTS + 1):
+        client = GatewayClient()
+        try:
+            await client.connect()
+            return client
+        except Exception as exc:
+            last_error = exc if isinstance(exc, Exception) else Exception(str(exc))
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+            if attempt < _GATEWAY_CONNECT_RETRY_ATTEMPTS:
+                await asyncio.sleep(_GATEWAY_CONNECT_RETRY_DELAY_S)
+
+    detail = (
+        f"Failed to connect to OpenClaw gateway after {_GATEWAY_CONNECT_RETRY_ATTEMPTS} attempts: "
+        f"{last_error}. The gateway may still be restarting."
+    )
+    raise HTTPException(status_code=503, detail=detail)
+
+
 async def _get_or_create_client(session_key: str) -> GatewayClient:
     """Get existing client or create a fresh one if missing/dead."""
     client = _gateway_sessions.get(session_key)
@@ -413,15 +499,7 @@ async def _get_or_create_client(session_key: str) -> GatewayClient:
         return client
 
     # Client missing or WebSocket closed — create a new connection
-    client = GatewayClient()
-    try:
-        await client.connect()
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to connect to OpenClaw gateway: {str(e)}. Is the gateway running?",
-        )
-
+    client = await _connect_gateway_with_retries()
     _gateway_sessions[session_key] = client
     return client
 

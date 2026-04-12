@@ -118,6 +118,9 @@ if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
         basename = path.rsplit("/", 1)[-1]
         if "." in basename:
             return Response(status_code=404)
+        dedicated = STATIC_DIR / f"{path}.html"
+        if dedicated.is_file():
+            return FileResponse(dedicated)
         return FileResponse(STATIC_DIR / "index.html")
 else:
     @app.get("/", tags=["Root"])

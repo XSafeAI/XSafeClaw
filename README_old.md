@@ -79,31 +79,24 @@ XSafeClaw's guard system protects users through a two-layer defense:
 
 2. **Tool-call interception** — Every tool call passes through a `before_tool_call` hook. If the guard model deems it unsafe, the call is held in a pending queue for human review.
 
-```text
-+---------------------------+
-| Agent wants to run a tool |
-+---------------------------+
-              |
-              v
-+-------------------------+
-| Guard model evaluates   |
-+-------------------------+
-              |
-      +-------+--------+
-      |                |
-      | Safe           | Unsafe
-      v                v
-+----------------+   +------------------------+
-| Execute tool   |   | Hold for human review |
-+----------------+   +------------------------+
-                               |
-                    +----------+----------+
-                    |                     |
-                    | Approve             | Reject
-                    v                     v
-             +----------------+   +-------------------------+
-             | Execute tool   |   | Block and notify agent |
-             +----------------+   +-------------------------+
+```
+Agent wants to run a tool
+        │
+        ▼
+  Guard Model evaluates
+        │
+   ┌────┴────┐
+   │         │
+  Safe     Unsafe
+   │         │
+   ▼         ▼
+ Execute   Hold for human review
+           ┌────┴────┐
+           │         │
+        Approve    Reject
+           │         │
+           ▼         ▼
+        Execute   Block + notify agent
 ```
 
 When rejected (or timed out after 5 min), the agent is instructed to **stop all subsequent actions**, **inform the user about the risk**, and **wait for explicit confirmation**.
@@ -112,25 +105,26 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    Browser["Browser (:6874)"]
-    Browser --> API
+```
+                     Browser (:6874)
+                       │
+           ┌───────────┴───────────┐
+           │     FastAPI Server    │
+           ├───────────────────────┤
+           │   Guard Service       │◄── AgentDoG model
+           │   File Watcher        │◄── ~/.openclaw/ JSONL sessions
+           │   Asset Scanner       │◄── File/software/hardware scanning
+           └───────────┬───────────┘
+                       │
+              ┌────────┴────────┐
+              │                 │
+         SQLite DB        OpenClaw Sessions
+       ~/.xsafeclaw/       ~/.openclaw/
 
-    subgraph Server[" FastAPI Server "]
-        API["Web UI + API"]
-        API --> Watcher["File Watcher"]
-        API --> Scanner["Asset Scanner"]
-        API --> Guard["Guard Service"]
-    end
-
-    Sessions["~/.openclaw/ JSONL sessions"] --> Watcher
-    Scanner -.-> Targets["Files / software / hardware"]
-    Watcher --> DB[("SQLite DB (~/.xsafeclaw/)")]
-    Guard -.-> Model["AgentDoG model"]
-
-    Agent["OpenClaw Agent"] -->|before_tool_call hook| Plugin["safeclaw-guard plugin"]
-    Plugin -->|POST /api/guard/tool-check| Guard
+           OpenClaw Agent
+               │ before_tool_call hook
+               ▼
+       safeclaw-guard plugin ──► POST /api/guard/tool-check
 ```
 
 | Layer | Technology |

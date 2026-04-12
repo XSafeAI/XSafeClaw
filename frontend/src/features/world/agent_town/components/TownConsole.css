@@ -552,6 +552,14 @@
   appearance: none;
 }
 
+.tc-model-option-head {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 4px 6px;
+}
+
 .tc-model-option:hover {
   transform: translateX(1px);
 }
@@ -568,33 +576,50 @@
 
 .tc-model-option-name {
   display: block;
+  flex: 1 1 88px;
+  min-width: 0;
   color: #fff0d1;
   font-family: var(--px-font);
   font-size: 8px;
   line-height: 1.15;
-  margin-bottom: 2px;
-  transform: translateY(-2px);
+  margin-bottom: 0;
+  transform: translateY(-1px);
 }
 
-.tc-model-option-meta {
-  display: block;
-  color: #d2c2a5;
-  font-size: 11px;
-  line-height: 1.3;
-  opacity: 0.92;
-}
-
-.tc-model-option-foot {
-  margin-top: 6px;
-  display: flex;
-  align-items: center;
+.tc-model-option-flags {
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 5px;
-  width: 100%;
+  justify-content: flex-start;
+  gap: 4px;
+  flex: 0 1 auto;
 }
 
-.tc-model-option-provider,
-.tc-model-option-badge,
+.tc-model-option-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 16px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-family: var(--px-font);
+  font-size: 7px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.tc-model-option-flag-new {
+  color: #ffe4a8;
+  background: rgba(204, 126, 34, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(255, 208, 132, 0.2);
+}
+
+.tc-model-option-flag-last-used {
+  color: #c8e4ff;
+  background: rgba(69, 111, 196, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(152, 198, 255, 0.2);
+}
+
 .tc-roster-serial,
 .tc-roster-link {
   display: inline-flex;
@@ -607,31 +632,6 @@
   font-size: 7px;
   letter-spacing: 0.3px;
   text-transform: uppercase;
-}
-
-.tc-model-option-provider {
-  color: #f5dfb2;
-  background: rgba(255, 223, 170, 0.08);
-}
-
-.tc-model-option-badge {
-  color: #d3c7ff;
-  background: rgba(119, 93, 208, 0.2);
-}
-
-.tc-model-option-badge-ready {
-  color: #b8f5d0;
-  background: rgba(70, 180, 120, 0.18);
-}
-
-.tc-model-option-badge-setup {
-  color: #ffd89a;
-  background: rgba(205, 138, 52, 0.18);
-}
-
-.tc-model-option-badge-default {
-  color: #9fd8ff;
-  background: rgba(80, 135, 220, 0.2);
 }
 
 .tc-model-option-expand {
