@@ -726,6 +726,7 @@ export default function CrewTab({
   filteredModels,
   pendingModelId,
   onPickModel,
+  onOpenModelSetup,
   onCreateAgent,
   creatingAgent,
   createError,
@@ -870,34 +871,54 @@ export default function CrewTab({
               />
               <div className="tc-model-list">
                 {filteredModels.length === 0 ? (
-                  <div className="tc-model-empty">No model matched this search.</div>
+                  <div className="tc-model-empty">No configured model matched this search.</div>
                 ) : (
-                  filteredModels.map((model) => (
-                    <button
-                      key={model.id}
-                      type="button"
-                      className={`tc-model-option ${pendingModelId === model.id ? 'tc-model-option-selected' : ''}`}
-                      onClick={() => onPickModel(model.id)}
-                    >
-                      <span className="tc-model-option-name">{model.name}</span>
-                      <span className="tc-model-option-meta">{model.id}</span>
-                      <span className="tc-model-option-foot">
-                        <span className="tc-model-option-provider">{model.provider}</span>
-                        <span className="tc-model-option-badge">{model.reasoning ? 'REASON' : 'STD'}</span>
-                      </span>
-                    </button>
-                  ))
+                  filteredModels.map((model) => {
+                    const isSelected = pendingModelId === model.id;
+                    return (
+                      <div
+                        key={model.id}
+                        className={`tc-model-entry ${isSelected ? 'tc-model-entry-selected' : ''}`}
+                      >
+                        <button
+                          type="button"
+                          className="tc-model-option"
+                          onClick={() => onPickModel(model.id)}
+                          aria-pressed={isSelected}
+                        >
+                          <span className="tc-model-option-name">{model.name}</span>
+                        </button>
+                        {isSelected ? (
+                          <div className="tc-model-option-expand">
+                            <div className="tc-model-option-expand-row">
+                              <span className="tc-model-option-expand-label">Provider</span>
+                              <span className="tc-model-option-expand-value">{model.providerLabel || model.provider}</span>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })
                 )}
               </div>
-              <button
-                type="button"
-                className="tc-summon-confirm"
-                onClick={onCreateAgent}
-                disabled={!pendingModelId || creatingAgent}
-              >
-                {creatingAgent ? 'Summoning...' : 'Create Agent'}
-              </button>
-              {createError ? <div className="tc-inline-error">{createError}</div> : null}
+              <div className="tc-model-drawer-actions">
+                <button
+                  type="button"
+                  className="tc-summon-secondary"
+                  onClick={onOpenModelSetup}
+                >
+                  Configure New Model
+                </button>
+                <button
+                  type="button"
+                  className="tc-summon-confirm"
+                  onClick={onCreateAgent}
+                  disabled={!pendingModelId || creatingAgent}
+                >
+                  {creatingAgent ? 'Summoning...' : 'Create Agent'}
+                </button>
+                {createError ? <div className="tc-inline-error">{createError}</div> : null}
+              </div>
             </div>
           ) : null}
         </section>

@@ -7,8 +7,10 @@ import {
   MOCK_MODEL_PROVIDERS,
   normalizeTownData,
 } from '../data/mockData';
+import { systemAPI } from '../../../../services/api';
 import ControlTab from './ControlTab';
 import CrewTab from './CrewTab';
+import ModelSetupModal from './ModelSetupModal';
 
 const TAB_META = [
   { id: 'crew', label: 'Agents' },
@@ -37,6 +39,16 @@ function makeId() {
 
 function shortId(value) {
   return String(value || '').slice(0, 8);
+}
+
+function normalizeInputModes(input) {
+  if (Array.isArray(input)) {
+    return input.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  if (typeof input === 'string') {
+    return input.split('+').map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 function normalizeSessionIdentity(value) {
@@ -1209,6 +1221,13 @@ export default function TownConsole({
   const [pendingApprovals, setPendingApprovals] = useState([]);
   const [availableModels, setAvailableModels] = useState([]);
   const [defaultModel, setDefaultModel] = useState('');
+  const [catalogAuthProviders, setCatalogAuthProviders] = useState([]);
+  const [catalogModelProviders, setCatalogModelProviders] = useState([]);
+  const [onboardDefaults, setOnboardDefaults] = useState(null);
+  const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
+  const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
+  const [modelCatalogError, setModelCatalogError] = useState('');
+  const [modelSetupOpen, setModelSetupOpen] = useState(false);
   const [draftAgents, setDraftAgents] = useState([]);
   const [selectedFilter, setSelectedFilter] = useState('working');
   const [selectedIdentity, setSelectedIdentity] = useState('');
@@ -1241,16 +1260,93 @@ export default function TownConsole({
     }
   }, []);
 
+  const loadAvailableModels = useCallback(async () => {
+    if (USE_AGENT_TOWN_MOCK) {
+      setAvailableModels(MOCK_MODEL_PROVIDERS.flatMap((provider) =>
+        (provider.models || []).map((model) => ({
+          id: model.id,
+          name: model.name || model.id,
+          provider: provider.name || provider.id,
+          reasoning: Boolean(model.reasoning),
+        }))
+      ));
+      setDefaultModel(MOCK_MODEL_PROVIDERS[0]?.models?.[0]?.id || '');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/chat/available-models', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(`Available models request failed: ${response.status}`);
+      }
+      const json = await response.json();
+      const nextModels = Array.isArray(json.models) ? json.models : [];
+      setAvailableModels((prev) => (nextModels.length === 0 && prev.length > 0 ? prev : nextModels));
+      setDefaultModel((prev) => json.default_model || prev || nextModels[0]?.id || '');
+    } catch (err) {
+      console.warn('[TownConsole] available-models fetch error:', err);
+    }
+  }, []);
+
+  const loadModelCatalog = useCallback(async (force = false) => {
+    if (USE_AGENT_TOWN_MOCK) {
+      setCatalogAuthProviders([]);
+      setCatalogModelProviders(MOCK_MODEL_PROVIDERS.map((provider) => ({
+        id: provider.id,
+        name: provider.name || provider.id,
+        models: (provider.models || []).map((model) => ({
+          id: model.id,
+          name: model.name || model.id,
+          contextWindow: model.contextWindow || 0,
+          reasoning: Boolean(model.reasoning),
+          available: true,
+          input: Array.isArray(model.input) ? model.input.join('+') : (model.input || 'text'),
+        })),
+      })));
+      setOnboardDefaults({
+        mode: 'local',
+        gateway_port: 18789,
+        gateway_bind: 'loopback',
+        gateway_auth_mode: 'token',
+        gateway_token: '',
+        tailscale_mode: 'off',
+        workspace: '~/.openclaw/workspace',
+        install_daemon: true,
+        remote_url: '',
+        remote_token: '',
+        enabled_hooks: [],
+        search_provider: '',
+        search_api_key: '',
+      });
+      setModelCatalogLoaded(true);
+      setModelCatalogError('');
+      return;
+    }
+    if (modelCatalogLoading || (modelCatalogLoaded && !force)) return;
+
+    setModelCatalogLoading(true);
+    setModelCatalogError('');
+    try {
+      const response = await systemAPI.onboardScan();
+      const data = response.data || {};
+      setCatalogAuthProviders(Array.isArray(data.auth_providers) ? data.auth_providers : []);
+      setCatalogModelProviders(Array.isArray(data.model_providers) ? data.model_providers : []);
+      setOnboardDefaults(data.defaults || {});
+      setModelCatalogLoaded(true);
+    } catch (err) {
+      console.warn('[TownConsole] onboard-scan fetch error:', err);
+      setModelCatalogError(err?.response?.data?.detail || err?.message || 'Failed to discover configure-time models.');
+    } finally {
+      setModelCatalogLoading(false);
+    }
+  }, [modelCatalogLoaded, modelCatalogLoading]);
+
   const loadConsoleData = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
       const mock = buildConsoleData(null);
       setTraceData(mock);
       setDashboardEvents(buildMockDashboardEvents(mock.events));
       setPendingApprovals(buildMockPendingApprovals(mock.agents, mock.events));
-      setAvailableModels(MOCK_MODEL_PROVIDERS.flatMap((p) =>
-        (p.models || []).map((m) => ({ id: m.id, name: m.name || m.id, provider: p.name || p.id, reasoning: Boolean(m.reasoning) }))
-      ));
-      setDefaultModel(MOCK_MODEL_PROVIDERS[0]?.models?.[0]?.id || '');
       return;
     }
 
@@ -1290,20 +1386,7 @@ export default function TownConsole({
         console.warn('[TownConsole] pending approvals fetch error:', err);
       });
 
-    const modelsPromise = fetch('/api/chat/available-models', { cache: 'no-store' })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Available models request failed: ${response.status}`);
-        }
-        const json = await response.json();
-        setAvailableModels(Array.isArray(json.models) ? json.models : []);
-        if (json.default_model) setDefaultModel(json.default_model);
-      })
-      .catch((err) => {
-        console.warn('[TownConsole] available-models fetch error:', err);
-      });
-
-    await Promise.allSettled([tracePromise, dashboardEventsPromise, pendingApprovalsPromise, modelsPromise]);
+    await Promise.allSettled([tracePromise, dashboardEventsPromise, pendingApprovalsPromise]);
   }, []);
 
   const onDataChangedRef = useRef(onDataChanged);
@@ -1342,13 +1425,25 @@ export default function TownConsole({
       await loadConsoleData();
     };
 
+    loadAvailableModels();
     load();
     const timer = window.setInterval(load, 10000);
     return () => {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [loadConsoleData]);
+  }, [loadAvailableModels, loadConsoleData]);
+
+  useEffect(() => {
+    if (!modelPickerOpen) return;
+    loadAvailableModels();
+    loadModelCatalog();
+  }, [loadAvailableModels, loadModelCatalog, modelPickerOpen]);
+
+  useEffect(() => {
+    if (!modelSetupOpen) return;
+    loadModelCatalog();
+  }, [loadModelCatalog, modelSetupOpen]);
 
   const { agents: traceAgents, events } = traceData;
 
@@ -1549,23 +1644,90 @@ export default function TownConsole({
     ? aggregateTaskStatusCounts(currentDashboardEvents)
     : { running: 0, pending: 0, completed: 0, error: 0, failed: 0 };
 
-  const allModels = useMemo(() => {
-    return availableModels.map((model) => ({
-      id: model.id,
-      name: model.name || model.id,
-      provider: model.provider || '',
-      reasoning: Boolean(model.reasoning),
-    }));
-  }, [availableModels]);
+  const providerDirectory = useMemo(() => {
+    const next = new Map();
+
+    catalogModelProviders.forEach((provider) => {
+      const providerId = String(provider?.id || '').trim();
+      if (!providerId) return;
+      next.set(providerId, {
+        label: provider?.name || providerId,
+        hint: provider?.hint || '',
+      });
+    });
+
+    catalogAuthProviders.forEach((provider) => {
+      const providerId = String(provider?.id || '').trim();
+      if (!providerId) return;
+      const previous = next.get(providerId) || {};
+      next.set(providerId, {
+        label: provider?.name || previous.label || providerId,
+        hint: provider?.hint || previous.hint || '',
+      });
+    });
+
+    return next;
+  }, [catalogAuthProviders, catalogModelProviders]);
+
+  const catalogModelDirectory = useMemo(() => {
+    const next = new Map();
+
+    catalogModelProviders.forEach((provider) => {
+      const providerId = String(provider?.id || '').trim();
+      const providerInfo = providerDirectory.get(providerId);
+      (provider?.models || []).forEach((model) => {
+        const modelId = String(model?.id || '').trim();
+        if (!modelId) return;
+        next.set(modelId, {
+          provider: providerId,
+          providerLabel: providerInfo?.label || provider?.name || providerId,
+          contextWindow: Number(model?.contextWindow || 0),
+          maxTokens: Number(model?.maxTokens || 0),
+          inputModes: normalizeInputModes(model?.input),
+          reasoning: Boolean(model?.reasoning),
+        });
+      });
+    });
+
+    return next;
+  }, [catalogModelProviders, providerDirectory]);
+
+  const configuredModels = useMemo(() => {
+    return [...availableModels]
+      .map((model) => ({
+        ...(() => {
+          const catalogMeta = catalogModelDirectory.get(model.id);
+          const provider = model.provider || catalogMeta?.provider || String(model.id || '').split('/')[0] || '';
+          const providerInfo = providerDirectory.get(provider);
+          return {
+            id: model.id,
+            name: model.name || model.id,
+            provider,
+            providerLabel: providerInfo?.label || catalogMeta?.providerLabel || provider,
+            providerHint: providerInfo?.hint || '',
+            reasoning: Boolean(model.reasoning || catalogMeta?.reasoning),
+            contextWindow: Number(catalogMeta?.contextWindow || 0),
+            maxTokens: Number(catalogMeta?.maxTokens || 0),
+            inputModes: Array.isArray(catalogMeta?.inputModes) ? catalogMeta.inputModes : [],
+            isDefault: model.id === defaultModel,
+          };
+        })(),
+      }))
+      .sort((a, b) => (
+        Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault))
+        || String(a.providerLabel || a.provider || '').localeCompare(String(b.providerLabel || b.provider || ''))
+        || String(a.name || '').localeCompare(String(b.name || ''))
+      ));
+  }, [availableModels, catalogModelDirectory, defaultModel, providerDirectory]);
 
   const filteredModels = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
-    if (!needle) return allModels;
-    return allModels.filter((model) => {
-      const haystack = `${model.name} ${model.id} ${model.provider}`.toLowerCase();
+    if (!needle) return configuredModels;
+    return configuredModels.filter((model) => {
+      const haystack = `${model.name} ${model.id} ${model.provider} ${model.providerLabel || ''}`.toLowerCase();
       return haystack.includes(needle);
     });
-  }, [allModels, modelSearch]);
+  }, [configuredModels, modelSearch]);
 
   const crewHelpers = useMemo(() => ({
     getAgentIdentity,
@@ -1635,13 +1797,45 @@ export default function TownConsole({
     });
   }, [charNameMap, eventsByAgent, eventsByAgentList, onSelectAgent, tokensByAgent, traceAgentsById]);
 
+  const handlePickModel = useCallback((modelId) => {
+    setPendingModelId((prev) => (prev === modelId ? '' : modelId));
+    setCreateError('');
+  }, []);
+
+  const handleOpenModelSetup = useCallback(() => {
+    setModelSetupOpen(true);
+    setCreateError('');
+  }, []);
+
+  const handleModelConfigured = useCallback(async ({ modelId, modelName, provider, reasoning }) => {
+    const normalizedModel = {
+      id: modelId,
+      name: modelName || modelId,
+      provider: provider || String(modelId || '').split('/')[0] || '',
+      reasoning: Boolean(reasoning),
+    };
+
+    setAvailableModels((prev) => (
+      prev.some((model) => model.id === modelId)
+        ? prev.map((model) => (model.id === modelId ? { ...model, ...normalizedModel } : model))
+        : [normalizedModel, ...prev]
+    ));
+    setDefaultModel(modelId || '');
+    setPendingModelId(modelId || '');
+    setModelSetupOpen(false);
+    setCreateError('');
+
+    await loadAvailableModels();
+    loadModelCatalog(true);
+  }, [loadAvailableModels, loadModelCatalog]);
+
   const handleCreateAgent = useCallback(async () => {
     if (!pendingModelId || creatingAgent) return;
 
     setCreatingAgent(true);
     setCreateError('');
     try {
-      const modelOption = allModels.find((item) => item.id === pendingModelId);
+      const modelOption = configuredModels.find((item) => item.id === pendingModelId);
 
       if (USE_AGENT_TOWN_MOCK) {
         const sessionKey = `chat-mock-${makeId().slice(0, 10)}`;
@@ -1667,7 +1861,7 @@ export default function TownConsole({
       const res = await fetch('/api/chat/start-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ model_override: pendingModelId }),
       });
 
       if (!res.ok) {
@@ -1677,18 +1871,6 @@ export default function TownConsole({
       const json = await res.json();
       const sessionKey = json.session_key;
       if (DEMO_MODE) markDemoSession(sessionKey);
-
-      if (pendingModelId) {
-        try {
-          await fetch('/api/chat/patch-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_key: sessionKey, model: pendingModelId }),
-          });
-        } catch (err) {
-          console.warn('[TownConsole] patch-session model error:', err);
-        }
-      }
       const draftAgent = buildDraftAgent(sessionKey, modelOption);
       const identity = getAgentIdentity(draftAgent);
 
@@ -1705,7 +1887,7 @@ export default function TownConsole({
     } finally {
       setCreatingAgent(false);
     }
-  }, [allModels, creatingAgent, pendingModelId]);
+  }, [configuredModels, creatingAgent, pendingModelId]);
 
   const handleSendTask = useCallback(async () => {
     if (!currentSessionKey || !currentIdentity || sendingIdentity === currentIdentity) return;
@@ -1986,7 +2168,8 @@ export default function TownConsole({
                   onChangeModelSearch={setModelSearch}
                   filteredModels={filteredModels}
                   pendingModelId={pendingModelId}
-                  onPickModel={setPendingModelId}
+                  onPickModel={handlePickModel}
+                  onOpenModelSetup={handleOpenModelSetup}
                   onCreateAgent={handleCreateAgent}
                   creatingAgent={creatingAgent}
                   createError={createError}
@@ -2046,6 +2229,17 @@ export default function TownConsole({
           </div>
         </div>
       </div>
+      <ModelSetupModal
+        open={modelSetupOpen}
+        authProviders={catalogAuthProviders}
+        modelProviders={catalogModelProviders}
+        defaults={onboardDefaults}
+        loading={modelCatalogLoading && !modelCatalogLoaded}
+        loadingError={modelCatalogLoaded ? '' : modelCatalogError}
+        onRetry={() => loadModelCatalog(true)}
+        onClose={() => setModelSetupOpen(false)}
+        onConfigured={handleModelConfigured}
+      />
     </div>
   );
 }

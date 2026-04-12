@@ -13,8 +13,10 @@ from pydantic import BaseModel, Field
 from ...gateway_client import GatewayClient
 
 # Path to OpenClaw sessions directory
+_OPENCLAW_DIR = Path.home() / ".openclaw"
 _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
 _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
@@ -59,6 +61,75 @@ def _build_available_models_payload(raw: dict | list | None, status_raw: dict | 
 
     if not default_model:
         default_model = inferred_default or (models[0]["id"] if len(models) == 1 else "")
+
+    return {"models": models, "default_model": default_model}
+
+
+def _build_available_models_payload_from_onboard_cache() -> dict:
+    """Fallback to the preloaded onboard-scan cache when CLI listing is slow."""
+    try:
+        from .system import _onboard_scan_cache
+    except Exception:
+        return {"models": [], "default_model": ""}
+
+    if not isinstance(_onboard_scan_cache, dict):
+        return {"models": [], "default_model": ""}
+
+    models = []
+    for provider in _onboard_scan_cache.get("model_providers", []) or []:
+        prov_id = provider.get("id", "")
+        for model in provider.get("models", []) or []:
+            model_id = model.get("id", "")
+            if "/" not in model_id:
+                continue
+            models.append({
+                "id": model_id,
+                "name": model.get("name", model_id),
+                "provider": prov_id or model_id.split("/")[0],
+                "reasoning": bool(model.get("reasoning", False)),
+            })
+
+    default_model = _onboard_scan_cache.get("default_model", "") or ""
+    return {"models": models, "default_model": default_model}
+
+
+def _build_available_models_payload_from_config() -> dict:
+    """Fallback to configured models from ~/.openclaw/openclaw.json."""
+    if not _CONFIG_PATH.exists():
+        return {"models": [], "default_model": ""}
+
+    try:
+        config = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"models": [], "default_model": ""}
+
+    providers_cfg = (
+        config.get("models", {})
+        .get("providers", {})
+    )
+    default_model = (
+        config.get("agents", {})
+        .get("defaults", {})
+        .get("model", {})
+        .get("primary", "")
+    ) or ""
+
+    models = []
+    for provider, provider_cfg in providers_cfg.items():
+        for model in provider_cfg.get("models", []) or []:
+            model_id = str(model.get("id", "")).strip()
+            if not model_id:
+                continue
+            full_id = model_id if "/" in model_id else f"{provider}/{model_id}"
+            models.append({
+                "id": full_id,
+                "name": model.get("name", full_id),
+                "provider": provider,
+                "reasoning": bool(model.get("reasoning", False)),
+            })
+
+    if not default_model and len(models) == 1:
+        default_model = models[0]["id"]
 
     return {"models": models, "default_model": default_model}
 
@@ -416,14 +487,17 @@ async def start_session(request: StartSessionRequest | None = None):
     body = request or StartSessionRequest()
     session_key = f"chat-{uuid.uuid4().hex[:12]}"
     client = await _get_or_create_client(session_key)
+    initial_model = body.model_override
+    if initial_model and body.provider_override and "/" not in initial_model:
+        initial_model = f"{body.provider_override.rstrip('/')}/{initial_model.lstrip('/')}"
 
     if body.model_override or body.provider_override or body.label:
         try:
             await client.patch_session(
                 session_key,
                 label=body.label,
-                model_override=body.model_override,
-                provider_override=body.provider_override,
+                model=initial_model,
+                provider_override=body.provider_override if not initial_model else None,
                 verbose_level="on",
             )
         except Exception as exc:
@@ -637,7 +711,17 @@ async def patch_session(request: PatchSessionRequest):
 
 @router.get("/available-models")
 async def available_models():
-    """Return models from configured providers with Windows-friendly fallback."""
+    """Return the saved model deck for Agent Valley.
+
+    Priority:
+      1. Explicit models persisted in ~/.openclaw/openclaw.json
+      2. Live CLI model listing (when no explicit saved models exist)
+      3. Last known good payload
+
+    We intentionally do NOT fall back to onboard-scan's full catalog here,
+    because that list is for discovery/configuration, not for the "already
+    configured models" deck in Agent Valley.
+    """
     from .system import _run_openclaw_json
 
     now = time.monotonic()
@@ -652,6 +736,14 @@ async def available_models():
         cached_payload = _available_models_cache.get("payload")
         if now < expires_at and isinstance(cached_payload, dict):
             return cached_payload
+
+        config_payload = _build_available_models_payload_from_config()
+        if config_payload["models"]:
+            print("[available-models] using configured models from openclaw.json")
+            _available_models_cache["payload"] = config_payload
+            _available_models_cache["last_success"] = config_payload
+            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+            return config_payload
 
         raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
         status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None

@@ -1646,6 +1646,7 @@ async def onboard_scan():
             pass
 
     gw = current_config.get("gateway", {})
+    remote_cfg = gw.get("remote", {}) if isinstance(gw.get("remote"), dict) else {}
     agents = current_config.get("agents", {}).get("defaults", {})
     hooks_cfg = current_config.get("hooks", {}).get("internal", {}).get("entries", {})
     search_cfg = current_config.get("tools", {}).get("web", {}).get("search", {})
@@ -1658,14 +1659,14 @@ async def onboard_scan():
     primary_model = agents.get("model", {}).get("primary", "")
     if primary_model:
         config_summary.append(f"model: {primary_model}")
-    gw_mode = gw.get("mode")
+    gw_mode = gw.get("mode") or ("remote" if remote_cfg.get("url") else "local")
     if gw_mode:
         config_summary.append(f"gateway.mode: {gw_mode}")
     if gw.get("port"):
         config_summary.append(f"gateway.port: {gw['port']}")
     if gw.get("bind"):
         config_summary.append(f"gateway.bind: {gw['bind']}")
-    remote_url = gw.get("remote", {}).get("url")
+    remote_url = remote_cfg.get("url")
     if remote_url:
         config_summary.append(f"gateway.remote.url: {remote_url}")
 
@@ -1681,12 +1682,16 @@ async def onboard_scan():
         "config_exists": _CONFIG_PATH.exists(),
         "config_summary": config_summary,
         "defaults": {
+            "mode": gw_mode,
             "gateway_port": gw.get("port", 18789),
             "gateway_bind": gw.get("bind", "loopback"),
             "gateway_auth_mode": gw.get("auth", {}).get("mode", "token"),
             "gateway_token": gw.get("auth", {}).get("token", ""),
             "tailscale_mode": gw.get("tailscale", {}).get("mode", "off"),
             "workspace": agents.get("workspace", str(_OPENCLAW_DIR / "workspace")),
+            "install_daemon": True,
+            "remote_url": remote_cfg.get("url", ""),
+            "remote_token": remote_cfg.get("token", ""),
             "enabled_hooks": [k for k, v in hooks_cfg.items() if v.get("enabled")],
             "search_provider": search_cfg.get("provider", ""),
             "search_api_key": search_cfg.get("apiKey", ""),
@@ -2191,6 +2196,11 @@ async def onboard_config(body: OnboardConfigRequest):
 
     # Invalidate onboard-scan cache so next request picks up new config
     _onboard_scan_cache.clear()
+    try:
+        from .chat import _available_models_cache
+        _available_models_cache["expires_at"] = 0.0
+    except Exception:
+        pass
 
     workspace = str(Path(body.workspace).expanduser())
     return {

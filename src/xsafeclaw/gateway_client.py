@@ -730,21 +730,26 @@ class GatewayClient:
         model: str | None = None,
         thinking_level: str | None = None,
     ) -> dict | None:
-        """Patch session metadata such as model overrides and thinking level.
+        """Patch session metadata such as model selection and thinking level.
 
-        `model` uses the combined "provider/model" format supported by
-        sessions.patch (preferred over separate model_override / provider_override).
+        Newer gateway builds accept the combined ``model="provider/model"``
+        shape, while some older call sites still pass ``model_override`` /
+        ``provider_override``. Normalize to ``model`` whenever possible so the
+        client stays compatible with both code paths.
         """
         params: dict[str, Any] = {"key": session_key}
         if label:
             params["label"] = label
-        if model:
-            params["model"] = model
-        elif model_override or provider_override:
-            if model_override:
-                params["modelOverride"] = model_override
-            if provider_override:
-                params["providerOverride"] = provider_override
+        combined_model = model
+        if not combined_model and model_override:
+            combined_model = model_override
+            if provider_override and "/" not in model_override:
+                combined_model = f"{provider_override.rstrip('/')}/{model_override.lstrip('/')}"
+        if combined_model:
+            params["model"] = combined_model
+        elif provider_override:
+            # Keep a narrow fallback for legacy provider-only overrides.
+            params["providerOverride"] = provider_override
         if verbose_level:
             params["verboseLevel"] = verbose_level
         if thinking_level is not None:
