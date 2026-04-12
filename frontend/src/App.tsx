@@ -25,7 +25,6 @@ const queryClient = new QueryClient({
 type CheckState = 'pending' | 'setup' | 'configure' | 'ok';
 
 const EXEMPT_PATHS = ['/setup', '/configure'];
-const STATUS_FALLBACK_MS = 3200;
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
@@ -33,45 +32,47 @@ function AppRoutes() {
   const location = useLocation();
 
   useEffect(() => {
-    const fallbackTimer = window.setTimeout(() => {
-      setCheckState((current) => (current === 'pending' ? 'ok' : current));
-    }, STATUS_FALLBACK_MS);
+    let cancelled = false;
 
     (async () => {
       try {
-        const res = await systemAPI.status();
+        const res = await Promise.race([
+          systemAPI.status(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('timeout')), 3000)
+          ),
+        ]);
+        if (cancelled) return;
         const d = res.data as any;
-        const currentPath = window.location.pathname;
 
         if (!d.openclaw_installed) {
           setCheckState('setup');
-          if (!EXEMPT_PATHS.includes(currentPath)) {
-            navigate('/setup', { replace: true });
-          }
         } else if (!d.config_exists) {
           setCheckState('configure');
-          if (!EXEMPT_PATHS.includes(currentPath)) {
-            navigate('/configure', { replace: true });
-          }
         } else {
           setCheckState('ok');
         }
       } catch {
-        setCheckState('ok');
-      } finally {
-        window.clearTimeout(fallbackTimer);
+        if (!cancelled) setCheckState('ok');
       }
     })();
 
-    return () => window.clearTimeout(fallbackTimer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    if (EXEMPT_PATHS.includes(location.pathname)) return;
-    if (checkState === 'setup') navigate('/setup', { replace: true });
-    else if (checkState === 'configure') navigate('/configure', { replace: true });
+    if (checkState === 'pending') return;
+    const currentPath = location.pathname;
+    if (EXEMPT_PATHS.includes(currentPath)) return;
+
+    if (checkState === 'setup') {
+      navigate('/setup', { replace: true });
+    } else if (checkState === 'configure') {
+      navigate('/configure', { replace: true });
+    }
   }, [checkState, location.pathname, navigate]);
+
+  if (checkState === 'pending') return null;
 
   return (
     <Routes>

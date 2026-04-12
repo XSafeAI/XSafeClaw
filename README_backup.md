@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="assets/logo.png" alt="XSafeClaw Logo">
+<img src="assets/logo.png" alt="XSafeClaw Logo" width="180" />
 
 [中文文档](README_zh.md)
 
@@ -16,16 +16,6 @@ Real-time monitoring, security guard, and red team testing for OpenClaw AI agent
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 </div>
-
----
-
-## Promotional video
-
-<p align="center">
-  <a href="https://www.youtube.com/watch?v=YOUR_VIDEO_ID" title="XSafeClaw overview">
-    <img src="assets/cover.png" alt="Watch the XSafeClaw overview video">
-  </a>
-</p>
 
 ---
 
@@ -79,31 +69,24 @@ XSafeClaw's guard system protects users through a two-layer defense:
 
 2. **Tool-call interception** — Every tool call passes through a `before_tool_call` hook. If the guard model deems it unsafe, the call is held in a pending queue for human review.
 
-```text
-+---------------------------+
-| Agent wants to run a tool |
-+---------------------------+
-              |
-              v
-+-------------------------+
-| Guard model evaluates   |
-+-------------------------+
-              |
-      +-------+--------+
-      |                |
-      | Safe           | Unsafe
-      v                v
-+----------------+   +------------------------+
-| Execute tool   |   | Hold for human review |
-+----------------+   +------------------------+
-                               |
-                    +----------+----------+
-                    |                     |
-                    | Approve             | Reject
-                    v                     v
-             +----------------+   +-------------------------+
-             | Execute tool   |   | Block and notify agent |
-             +----------------+   +-------------------------+
+```
+Agent wants to run a tool
+        │
+        ▼
+  Guard Model evaluates
+        │
+   ┌────┴────┐
+   │         │
+  Safe     Unsafe
+   │         │
+   ▼         ▼
+ Execute   Hold for human review
+           ┌────┴────┐
+           │         │
+        Approve    Reject
+           │         │
+           ▼         ▼
+        Execute   Block + notify agent
 ```
 
 When rejected (or timed out after 5 min), the agent is instructed to **stop all subsequent actions**, **inform the user about the risk**, and **wait for explicit confirmation**.
@@ -112,23 +95,26 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    Browser["Browser UI (:6874)"] --> API["FastAPI Web UI + API"]
+```
+                     Browser (:6874)
+                       │
+           ┌───────────┴───────────┐
+           │     FastAPI Server    │
+           ├───────────────────────┤
+           │   Guard Service       │◄── AgentDoG model
+           │   File Watcher        │◄── ~/.openclaw/ JSONL sessions
+           │   Asset Scanner       │◄── File/software/hardware scanning
+           └───────────┬───────────┘
+                       │
+              ┌────────┴────────┐
+              │                 │
+         SQLite DB        OpenClaw Sessions
+       ~/.xsafeclaw/       ~/.openclaw/
 
-    subgraph Server["FastAPI Server"]
-        API --> Guard["Guard Service"]
-        API --> Scanner["Asset Scanner"]
-        Sessions["OpenClaw Sessions\n~/.openclaw/ JSONL sessions"] --> Watcher["File Watcher"]
-        API --> DB["SQLite DB\n~/.xsafeclaw/"]
-        Watcher --> DB
-    end
-
-    Guard -.-> Model["AgentDoG model"]
-    Scanner -.-> Targets["Files / software / hardware"]
-
-    Agent["OpenClaw Agent"] -->|before_tool_call hook| Plugin["safeclaw-guard plugin"]
-    Plugin -->|POST /api/guard/tool-check| Guard
+           OpenClaw Agent
+               │ before_tool_call hook
+               ▼
+       safeclaw-guard plugin ──► POST /api/guard/tool-check
 ```
 
 | Layer | Technology |
@@ -143,8 +129,6 @@ Full API docs available at `http://localhost:6874/docs` when running.
 ---
 
 ## Installation
-
-For detailed installation procedures, see the **[installation guide](docs/installation.pdf)**.
 
 > Requires Python 3.11+. The frontend is pre-built and bundled — no Node.js needed for production.
 
