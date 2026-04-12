@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_PORT=6874
-FRONTEND_PORT=3003
+FRONTEND_PORT=3022
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 LOG_DIR="$PROJECT_DIR/.logs"
 

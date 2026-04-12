@@ -874,10 +874,6 @@ export default function AgentJourney({ data, onClose, onDeleteAgent }) {
         else finishRef.current();
       }}>×</button>
 
-      <button className="journey-delete-agent" onClick={() => {
-        if (window.confirm('Delete this agent and its session?')) onDeleteAgent?.(data?.agent);
-      }}>Delete Agent</button>
-
       <div className="journey-hint">
         <span>↑ Scroll to change direction ↓</span>
       </div>

@@ -11,8 +11,8 @@ const LS_KEY = 'xsafeclaw:locale';
 function getInitialLocale(): Locale {
   const saved = localStorage.getItem(LS_KEY);
   if (saved === 'en' || saved === 'zh') return saved;
-  const lang = navigator.language;
-  return lang.startsWith('zh') ? 'zh' : 'en';
+  // Default to Chinese for first visit; users can switch language in the UI (persisted).
+  return 'zh';
 }
 
 interface I18nContextValue {

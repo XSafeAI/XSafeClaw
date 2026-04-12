@@ -189,7 +189,7 @@ export default function Setup() {
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
       <div className="w-full max-w-xl">
         <div className="flex flex-col items-center gap-3 mb-8">
-          <img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 rounded-xl shadow-lg shadow-accent/25" />
+          <img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 object-contain rounded-xl shadow-lg shadow-accent/25" />
           <div className="text-center">
             <p className="text-[22px] font-bold text-text-primary tracking-tight">{t.setup.title}</p>
             <p className="text-[13px] text-text-muted mt-0.5">{t.setup.subtitle}</p>

@@ -36,7 +36,7 @@ export default function Layout() {
       <aside className="w-56 flex-shrink-0 bg-sidebar border-r border-border flex flex-col h-screen sticky top-0">
         {/* Logo */}
         <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
-          <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 rounded-lg shadow-lg shadow-accent/20" />
+          <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 object-contain" />
           <div className="flex items-center gap-2">
             <span className="text-[15px] font-bold text-text-primary tracking-tight">{t.layout.brand}</span>
             <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">V0.1.1</span>

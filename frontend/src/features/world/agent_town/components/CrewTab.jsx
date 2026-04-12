@@ -740,6 +740,7 @@ export default function CrewTab({
   onAddImages,
   onRemoveImage,
   fileInputRef,
+  onTaskDetailChange,
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
   const chatEndRef = useRef(null);
@@ -771,6 +772,10 @@ export default function CrewTab({
   useEffect(() => () => {
     if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    onTaskDetailChange?.(!!selectedLedgerTask);
+  }, [selectedLedgerTask, onTaskDetailChange]);
 
   useEffect(() => {
     if (!selectedLedgerTask) return undefined;
@@ -826,7 +831,13 @@ export default function CrewTab({
   }, [selectedLedgerTask]);
 
   const detailTask = detailEventData || selectedLedgerTask?.task || null;
-  const detailStatusId = mapStageTaskStatus(detailTask?.status || selectedLedgerTask?.task?.status);
+  const liveEvent = selectedLedgerTask?.task
+    ? currentEvents.find((e) => e.id === selectedLedgerTask.task.id)
+    : null;
+  const liveStatus = liveEvent?.status || selectedLedgerTask?.task?.status;
+  const detailStatusId = liveStatus === 'pending'
+    ? 'pending'
+    : mapStageTaskStatus(detailTask?.status || liveStatus);
   const sessionIdValue = currentAgent?.id || '---';
   const sessionKeyValue = helpers.getAgentSessionKey(currentAgent) || currentAgent?.session_key || '---';
   const handleCopyField = async (field, value) => {
@@ -1086,13 +1097,12 @@ export default function CrewTab({
                             {item.guard_verdict ? <span className="cd-pending-tag cd-pending-tag-verdict">{item.guard_verdict}</span> : null}
                           </div>
                           {(() => {
-                            const eff = getEffectiveRisk(item);
-                            if (!eff) return null;
+                            const eff = getEffectiveRisk(item) || {};
                             return (
                               <div className="cd-pending-risk-row">
-                                {eff.risk_source ? <span className="cd-pending-tag cd-pending-tag-risk">{eff.risk_source}</span> : null}
-                                {eff.failure_mode ? <span className="cd-pending-tag cd-pending-tag-failure">{eff.failure_mode}</span> : null}
-                                {eff.real_world_harm ? <span className="cd-pending-tag cd-pending-tag-harm">{eff.real_world_harm}</span> : null}
+                                <span className="cd-pending-tag cd-pending-tag-risk"><b>Risk Source</b> {eff.risk_source || 'None'}</span>
+                                <span className="cd-pending-tag cd-pending-tag-failure"><b>Failure Mode</b> {eff.failure_mode || 'None'}</span>
+                                <span className="cd-pending-tag cd-pending-tag-harm"><b>Real World Harm</b> {eff.real_world_harm || 'None'}</span>
                               </div>
                             );
                           })()}

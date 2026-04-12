@@ -37,57 +37,53 @@ export function removeDemoSession(sessionKey) {
 // ── Background music ──
 export const MUSIC_TRACKS = [
   {
-    id: 'home',
-    label: 'Home',
-    fileName: 'toby fox - UNDERTALE Soundtrack - 12 Home.mp3',
-    url: '/music/toby fox - UNDERTALE Soundtrack - 12 Home.mp3',
-  },
-  {
-    id: 'undertale',
-    label: 'Undertale',
-    fileName: 'toby fox - UNDERTALE Soundtrack - 71 Undertale.mp3',
-    url: '/music/toby fox - UNDERTALE Soundtrack - 71 Undertale.mp3',
-  },
-  {
     id: 'bright-steps',
     label: 'Bright Steps',
-    fileName: '欢快1.mp3',
-    url: '/music/欢快1.mp3',
+    fileName: 'bright-steps.mp3',
+    url: '/music/bright-steps.mp3',
   },
   {
     id: 'golden-parade',
     label: 'Golden Parade',
-    fileName: '欢快2.mp3',
-    url: '/music/欢快2.mp3',
+    fileName: 'golden-parade.mp3',
+    url: '/music/golden-parade.mp3',
   },
   {
     id: 'quiet-breeze',
     label: 'Quiet Breeze',
-    fileName: '舒缓1.mp3',
-    url: '/music/舒缓1.mp3',
+    fileName: 'quiet-breeze.mp3',
+    url: '/music/quiet-breeze.mp3',
   },
   {
     id: 'evening-glow',
     label: 'Evening Glow',
-    fileName: '舒缓2.mp3',
-    url: '/music/舒缓2.mp3',
+    fileName: 'evening-glow.mp3',
+    url: '/music/evening-glow.mp3',
+  },
+  {
+    id: 'royal-court',
+    label: 'Royal Court',
+    fileName: 'royal-court.mp3',
+    url: '/music/royal-court.mp3',
   },
 ];
 
 // ── Asset paths (relative to public/) ──
 export const CHAR_BASE = '/character_assets/';
-export const EXCL_URL  = '/emotes/Exclamation_emote_16x16.png';
 
 // ── Map configuration ──
 /** All skins load from the same Tiled pack; PNGs + `Map_demo` previews live under `public/Map-opensorce/`. */
 const MAP_OPENSOURCE_BASE = '/Map-opensorce';
 const MAP_DEMO = `${MAP_OPENSOURCE_BASE}/Map_demo`;
 
+export const MAP_ASSETS_BASE = 'http://xsafeclaw.ai/assets/Map-opensorce';
+
 export const MAP_MODE       = 'tiled';       // 'static' | 'tiled'
 export const MAP_VARIANTS = [
   {
     id: 'map1',
     label: 'Classic',
+    bundled: true,
     description: 'Office floor with screen + dashboard overlays and stage NPC layer.',
     mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
     previewImage: `${MAP_DEMO}/Map1.png`,
@@ -113,6 +109,7 @@ export const MAP_VARIANTS = [
   {
     id: 'map2',
     label: 'Cyberpunk',
+    bundled: false,
     description: 'Neon skin; same walkable layout, `filed_npc` crowd layer.',
     mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
     previewImage: `${MAP_DEMO}/Map2.png`,
@@ -136,6 +133,7 @@ export const MAP_VARIANTS = [
   {
     id: 'map3',
     label: 'Mechanical',
+    bundled: false,
     description: 'Industrial palette with extra door cover collision.',
     mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
     previewImage: `${MAP_DEMO}/Map3.png`,
@@ -159,6 +157,7 @@ export const MAP_VARIANTS = [
   {
     id: 'map4',
     label: 'Imperial',
+    bundled: false,
     description: 'Chinese palace mood — courtyards, vermilion columns, gilded eaves.',
     mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
     previewImage: `${MAP_DEMO}/Map4.png`,
@@ -193,6 +192,7 @@ export const MAP_VARIANTS = [
   {
     id: 'map5',
     label: 'Baroque',
+    bundled: false,
     description: 'European palace interior — marble floors, arches, and ornate gilding.',
     mapUrl: `${MAP_OPENSOURCE_BASE}/Map_opensource.tmj`,
     previewImage: `${MAP_DEMO}/Map5.png`,
@@ -277,7 +277,7 @@ export function buildStableCharNameMap(agents) {
 export const MEETING_DIST     = 40;   // pixel distance to trigger
 export const MEETING_TIME     = 4;    // seconds NPCs chat
 export const MEETING_COOLDOWN = 60;   // seconds before the same pair can chat again
-export const BUBBLE_MAX_CHARS = 96;
+export const BUBBLE_MAX_CHARS = 60;
 
 // ── Walk zones (static mode patrol paths) ──
 export const WALK_ZONES = [

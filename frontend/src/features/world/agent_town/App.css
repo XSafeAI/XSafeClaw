@@ -40,7 +40,9 @@ body {
    ═══════════════════════════════════ */
 .loading {
   position: fixed; inset: 0; z-index: 999;
-  background: var(--bg);
+  background:
+    linear-gradient(180deg, rgba(18, 16, 22, 0.86), rgba(12, 10, 16, 0.92)),
+    url('/intro/process_background.png') center / cover no-repeat;
   display: flex; align-items: center; justify-content: center;
   transition: opacity 0.4s ease;
 }
@@ -48,27 +50,29 @@ body {
 .loadingTitle {
   font-family: var(--px-font);
   font-size: 14px;
-  color: var(--accent);
+  color: #f0d898;
   margin-bottom: 20px;
   letter-spacing: 2px;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 .loadingBar {
   width: 240px; height: 8px;
-  background: #ece8df;
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 4px;
   overflow: hidden;
   margin: 0 auto 12px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 224, 177, 0.18);
 }
 .loadingFill {
   height: 100%; width: 0;
-  background: linear-gradient(90deg, var(--accent), var(--primary));
+  background: linear-gradient(90deg, #c89840, #8b7cf7);
   border-radius: 4px;
   transition: width 0.2s;
+  box-shadow: 0 0 8px rgba(200, 152, 64, 0.4);
 }
 .loadingText {
   font-size: 10px;
-  color: var(--muted);
+  color: rgba(240, 228, 200, 0.6);
   font-family: var(--px-font);
 }
 
@@ -420,12 +424,8 @@ body.agent-town-page-cursor.cursor-grab-full *,
   animation: hudIconShake 2.4s steps(2) infinite;
 }
 
-.town-hud-home .town-hud-icon {
-  color: #c4a97d;
-}
-
-.town-hud-home:hover .town-hud-icon {
-  color: #ffd088;
+.town-hud-home {
+  width: 52px;
 }
 
 @keyframes hudIconFloat {

@@ -902,13 +902,12 @@ function TasksTab({
                   </div>
                   <div className="tc-task-snippet">{promptSnippet}</div>
                   {(() => {
-                    const eff = getEffectiveRisk(item);
-                    if (!eff) return null;
+                    const eff = getEffectiveRisk(item) || {};
                     return (
                       <div className="tc-task-risk-row">
-                        {eff.risk_source ? <span className="tc-task-risk-tag tc-task-risk-tag-risk">{eff.risk_source}</span> : null}
-                        {eff.failure_mode ? <span className="tc-task-risk-tag tc-task-risk-tag-failure">{eff.failure_mode}</span> : null}
-                        {eff.real_world_harm ? <span className="tc-task-risk-tag tc-task-risk-tag-harm">{eff.real_world_harm}</span> : null}
+                        <span className="tc-task-risk-tag tc-task-risk-tag-risk"><b>Risk Source</b> {eff.risk_source || 'None'}</span>
+                        <span className="tc-task-risk-tag tc-task-risk-tag-failure"><b>Failure Mode</b> {eff.failure_mode || 'None'}</span>
+                        <span className="tc-task-risk-tag tc-task-risk-tag-harm"><b>Real World Harm</b> {eff.real_world_harm || 'None'}</span>
                       </div>
                     );
                   })()}
@@ -1069,18 +1068,14 @@ function TasksTab({
                 </div>
 
                 {(() => {
-                  const eff = getEffectiveRisk(selectedTask.item);
-                  const hasRisk = eff?.risk_source || eff?.failure_mode || eff?.real_world_harm;
-                  if (!hasRisk && !selectedTask.item.guard_verdict && !selectedTask.item.tool_name) return null;
+                  const eff = getEffectiveRisk(selectedTask.item) || {};
                   return (
                     <div className="tc-task-detail-alert tc-task-detail-risk-box">
                       <div className="tc-task-detail-context-title">GUARD RISK DETAIL</div>
                       <div className="tc-task-detail-risk-grid">
-                        <TaskDetailFact label="Guard Verdict" value={selectedTask.item.guard_verdict || 'unsafe'} tone="danger" />
-                        <TaskDetailFact label="Blocked Tool" value={selectedTask.item.tool_name || 'tool-call'} tone="tool" />
-                        {eff?.risk_source ? <TaskDetailFact label="Risk Source" value={eff.risk_source} tone="warn" /> : null}
-                        {eff?.failure_mode ? <TaskDetailFact label="Failure Mode" value={eff.failure_mode} tone="danger" wide /> : null}
-                        {eff?.real_world_harm ? <TaskDetailFact label="Real World Harm" value={eff.real_world_harm} tone="danger" wide /> : null}
+                        <TaskDetailFact label="Risk Source" value={eff.risk_source || 'None'} tone="warn" />
+                        <TaskDetailFact label="Failure Mode" value={eff.failure_mode || 'None'} tone="danger" />
+                        <TaskDetailFact label="Real World Harm" value={eff.real_world_harm || 'None'} tone="danger" />
                       </div>
                     </div>
                   );
@@ -1200,6 +1195,11 @@ export default function TownConsole({
   onToggleMusic,
   musicVolume = 0.4,
   onChangeMusicVolume,
+  sceneNpcDisplayMode = 'all',
+  onChangeSceneNpcDisplayMode,
+  sceneNpcDisplayCap = 12,
+  onChangeSceneNpcDisplayCap,
+  minSceneNpcDisplayCap = 1,
   onDeleteAgent,
   onDataChanged,
 }) {
@@ -2001,6 +2001,7 @@ export default function TownConsole({
                   onAddImages={addImages}
                   onRemoveImage={removeImage}
                   fileInputRef={fileInputRef}
+                  onTaskDetailChange={setTaskDetailOpen}
                 />
               ) : null}
 
@@ -2016,6 +2017,12 @@ export default function TownConsole({
                   onToggleMusic={onToggleMusic}
                   musicVolume={musicVolume}
                   onChangeMusicVolume={onChangeMusicVolume}
+                  sceneNpcDisplayMode={sceneNpcDisplayMode}
+                  onChangeSceneNpcDisplayMode={onChangeSceneNpcDisplayMode}
+                  sceneNpcDisplayCap={sceneNpcDisplayCap}
+                  onChangeSceneNpcDisplayCap={onChangeSceneNpcDisplayCap}
+                  minSceneNpcDisplayCap={countsByFilter.pending || 0}
+                  maxSceneNpcDisplayCap={(countsByFilter.working || 0) + (countsByFilter.pending || 0)}
                   guardEnabled={guardEnabled}
                   onToggleGuard={onToggleGuard}
                 />

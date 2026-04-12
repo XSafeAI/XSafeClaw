@@ -1,6 +1,6 @@
 [project]
-name = "xsafeclaw"
-version = "0.1.0"
+name = "xsafeclaw-test"
+version = "0.1.11"
 description = "XSafeClaw - Keeping Your Claw Safe. Real-time monitoring and security for OpenClaw AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-xsafeclaw = "xsafeclaw.cli:app"
+xsafeclaw-test = "xsafeclaw.cli:app"
 
 [project.optional-dependencies]
 dev = [

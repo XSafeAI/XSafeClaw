@@ -23,6 +23,8 @@ export default function App() {
   const [activeMusicId, setActiveMusicId] = useState(MUSIC_TRACKS[0]?.id || '');
   const [musicEnabled, setMusicEnabled] = useState(true);
   const [musicVolume, setMusicVolume] = useState(0.42);
+  const [sceneNpcDisplayMode, setSceneNpcDisplayMode] = useState('all');
+  const [sceneNpcDisplayCap, setSceneNpcDisplayCap] = useState(12);
   const [cursorState, setCursorState] = useState('normal');
   const [canvasRefreshTrigger, setCanvasRefreshTrigger] = useState(0);
   const audioRef = useRef(null);
@@ -302,11 +304,11 @@ export default function App() {
         <a
           className="town-hud-btn town-hud-home"
           href="/monitor"
-          title="Back to Monitor  [H]"
+          title="Back to Backend  [H]"
         >
           <span className="town-hud-pip" />
           <span className="town-hud-icon">⌂</span>
-          <span className="town-hud-label">HOME</span>
+          <span className="town-hud-label">Backend</span>
         </a>
       </nav>
 
@@ -359,6 +361,10 @@ export default function App() {
               onToggleMusic={handleToggleMusic}
               musicVolume={musicVolume}
               onChangeMusicVolume={setMusicVolume}
+              sceneNpcDisplayMode={sceneNpcDisplayMode}
+              onChangeSceneNpcDisplayMode={setSceneNpcDisplayMode}
+              sceneNpcDisplayCap={sceneNpcDisplayCap}
+              onChangeSceneNpcDisplayCap={setSceneNpcDisplayCap}
               onDeleteAgent={handleDeleteAgent}
               onDataChanged={() => setCanvasRefreshTrigger((n) => n + 1)}
             />

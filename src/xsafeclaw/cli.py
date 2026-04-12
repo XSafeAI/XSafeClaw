@@ -1,5 +1,8 @@
 """XSafeClaw CLI — `xsafeclaw start` to launch the server."""
 
+import json
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -20,6 +23,24 @@ def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _open_browser_landing(host: str, port: int) -> None:
+    """Open `/configure` when OpenClaw is missing or unconfigured; else home (→ Agent Valley)."""
+    base = f"http://{host}:{port}"
+    try:
+        req = urllib.request.Request(
+            f"{base}/api/system/status",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        if not data.get("openclaw_installed") or not data.get("config_exists"):
+            webbrowser.open(f"{base}/configure")
+        else:
+            webbrowser.open(base)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        webbrowser.open(base)
+
+
 @app.command()
 def start(
     port: int = typer.Option(6874, "--port", "-p", help="Server port"),
@@ -38,7 +59,8 @@ def start(
 
     if not no_browser:
         import threading
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+
+        threading.Timer(1.5, lambda: _open_browser_landing(host, port)).start()
 
     uvicorn.run(
         "xsafeclaw.api.main:app",

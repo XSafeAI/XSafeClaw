@@ -83,7 +83,7 @@
   image-rendering: pixelated;
   opacity: 0;
   pointer-events: none;
-  mix-blend-mode: screen;
+  mix-blend-mode: multiply;
   animation-name: intro-cloud-in, intro-cloud-drift;
   animation-duration: 820ms, var(--cloud-loop-duration, 14s);
   animation-timing-function: cubic-bezier(0.16, 0.8, 0.22, 1), ease-in-out;
@@ -102,7 +102,7 @@
   --cloud-start-x: -1.4vw;
   --cloud-start-y: 3.4vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.22;
+  --cloud-opacity: 0.42;
   --cloud-enter-delay: 0.58s;
   --cloud-drift-x: 0.9vw;
   --cloud-drift-y: 0.4vh;
@@ -117,7 +117,7 @@
   --cloud-start-x: -0.8vw;
   --cloud-start-y: 2.6vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.18;
+  --cloud-opacity: 0.36;
   --cloud-enter-delay: 0.72s;
   --cloud-drift-x: 0.7vw;
   --cloud-drift-y: 0.35vh;
@@ -132,7 +132,7 @@
   --cloud-start-x: -0.8vw;
   --cloud-start-y: 3vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.20;
+  --cloud-opacity: 0.40;
   --cloud-enter-delay: 0.86s;
   --cloud-drift-x: 0.8vw;
   --cloud-drift-y: 0.4vh;
@@ -147,7 +147,7 @@
   --cloud-start-x: 0.6vw;
   --cloud-start-y: 2.8vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.20;
+  --cloud-opacity: 0.38;
   --cloud-enter-delay: 0.94s;
   --cloud-drift-x: 0.7vw;
   --cloud-drift-y: 0.35vh;
@@ -162,7 +162,7 @@
   --cloud-start-x: 0.9vw;
   --cloud-start-y: 2.8vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.20;
+  --cloud-opacity: 0.38;
   --cloud-enter-delay: 1.02s;
   --cloud-drift-x: 0.65vw;
   --cloud-drift-y: 0.3vh;
@@ -177,7 +177,7 @@
   --cloud-start-x: 0.4vw;
   --cloud-start-y: 2.1vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.26;
+  --cloud-opacity: 0.44;
   --cloud-enter-delay: 1.08s;
   --cloud-drift-x: 0.45vw;
   --cloud-drift-y: 0.26vh;
@@ -192,7 +192,7 @@
   --cloud-start-x: 0.5vw;
   --cloud-start-y: 2.8vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.36;
+  --cloud-opacity: 0.50;
   --cloud-enter-delay: 1.12s;
   --cloud-drift-x: 0.5vw;
   --cloud-drift-y: 0.28vh;
@@ -207,108 +207,13 @@
   --cloud-start-x: 0.35vw;
   --cloud-start-y: 2.4vh;
   --cloud-end-y: 0vh;
-  --cloud-opacity: 0.28;
+  --cloud-opacity: 0.44;
   --cloud-enter-delay: 1.2s;
   --cloud-drift-x: 0.35vw;
   --cloud-drift-y: 0.22vh;
   --cloud-loop-duration: 12.8s;
 }
 
-/* ── depth clouds: div + background-image, mix-blend-mode: multiply ──
-   multiply: white(1,1,1) × bg = bg  →  white backgrounds are invisible
-   only colored cloud bodies show as a visible tint/haze layer              */
-
-/* Layer 0 — Cloud2 wide base (z-index 15) */
-.intro-screen__cloud--depth-band-left {
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 15;
-  height: clamp(120px, 17vh, 220px);
-  background-image: url('/intro/Cloud/Cloud2.png');
-  background-position: bottom center;
-  background-size: 120% auto;
-  background-repeat: no-repeat;
-  object-fit: unset;
-  mix-blend-mode: multiply;
-  --cloud-start-x: 0;
-  --cloud-start-y: 4vh;
-  --cloud-end-y: 0vh;
-  --cloud-opacity: 0.82;
-  --cloud-enter-delay: 0.58s;
-  --cloud-drift-x: 0.8vw;
-  --cloud-drift-y: 0.28vh;
-  --cloud-loop-duration: 16.0s;
-}
-
-/* Layer 1 — Cloud3 dark blue offset (z-index 17) */
-.intro-screen__cloud--depth-right-back {
-  left: -8%;
-  right: 0;
-  bottom: 0;
-  z-index: 17;
-  height: clamp(100px, 14vh, 190px);
-  background-image: url('/intro/Cloud/Cloud3.png');
-  background-position: bottom center;
-  background-size: 130% auto;
-  background-repeat: no-repeat;
-  object-fit: unset;
-  mix-blend-mode: multiply;
-  --cloud-start-x: 0;
-  --cloud-start-y: 3.8vh;
-  --cloud-end-y: 0vh;
-  --cloud-opacity: 0.78;
-  --cloud-enter-delay: 0.66s;
-  --cloud-drift-x: -1.0vw;
-  --cloud-drift-y: 0.32vh;
-  --cloud-loop-duration: 13.4s;
-}
-
-/* Layer 2 — Cloud1 right-heavy (z-index 20) */
-.intro-screen__cloud--depth-right-mid {
-  left: 15%;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
-  height: clamp(90px, 13vh, 170px);
-  background-image: url('/intro/Cloud/Cloud1.png');
-  background-position: bottom right;
-  background-size: 110% auto;
-  background-repeat: no-repeat;
-  object-fit: unset;
-  mix-blend-mode: multiply;
-  --cloud-start-x: 0;
-  --cloud-start-y: 3.4vh;
-  --cloud-end-y: 0vh;
-  --cloud-opacity: 0.72;
-  --cloud-enter-delay: 0.74s;
-  --cloud-drift-x: -0.6vw;
-  --cloud-drift-y: 0.24vh;
-  --cloud-loop-duration: 12.0s;
-}
-
-/* Layer 3 — Cloud1_2 wispy full width (z-index 22) */
-.intro-screen__cloud--depth-right-front {
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 22;
-  height: clamp(80px, 11vh, 150px);
-  background-image: url('/intro/Cloud/Cloud1_2.png');
-  background-position: bottom center;
-  background-size: 140% auto;
-  background-repeat: no-repeat;
-  object-fit: unset;
-  mix-blend-mode: multiply;
-  --cloud-start-x: 0;
-  --cloud-start-y: 3.0vh;
-  --cloud-end-y: 0vh;
-  --cloud-opacity: 0.65;
-  --cloud-enter-delay: 0.82s;
-  --cloud-drift-x: 0.5vw;
-  --cloud-drift-y: 0.20vh;
-  --cloud-loop-duration: 10.8s;
-}
 
 .intro-screen__friends-shell {
   position: absolute;
@@ -340,11 +245,11 @@
 
 .intro-screen__friends {
   position: absolute;
-  inset: 0;
+  right: 0;
+  bottom: 0;
   z-index: 1;
   width: 100%;
-  height: 100%;
-  object-fit: contain;
+  height: auto;
   image-rendering: pixelated;
   filter:
     drop-shadow(1px 0 0 rgba(7, 10, 14, 0.92))
@@ -378,11 +283,11 @@
   align-items: center;
   justify-content: flex-start;
   padding: 2rem;
-  padding-top: clamp(3.25rem, 11vh, 6.5rem);
+  padding-top: clamp(5rem, 13vh, 8rem);
 }
 
 .intro-screen__logo {
-  width: min(66vw, 720px);
+  width: min(76vw, 850px);
   max-width: 100%;
   opacity: 0;
   transform: translate3d(0, -8vh, 0) scale(0.92);
@@ -537,8 +442,9 @@
 }
 
 /* ═══════════════════════════════════════════════════════════
-   DEPTH CLOUD SYSTEM — independent from intro-screen__cloud
-   Uses separate animation, no inheritance conflicts
+   DEPTH CLOUD SYSTEM — CSS gradient bands, no PNG white-bg issue
+   mix-blend-mode: screen brightens sky below character layer
+   Ellipse centers placed at 105%+ so clouds rise from bottom edge
    ═══════════════════════════════════════════════════════════ */
 
 .intro-screen__depth-cloud {
@@ -549,9 +455,7 @@
   pointer-events: none;
   user-select: none;
   opacity: 0;
-  mix-blend-mode: multiply;
-  background-position: bottom center;
-  background-repeat: no-repeat;
+  mix-blend-mode: screen;
   animation-name: depth-cloud-in, depth-cloud-drift;
   animation-timing-function: cubic-bezier(0.16, 0.8, 0.22, 1), ease-in-out;
   animation-fill-mode: forwards, none;
@@ -560,70 +464,71 @@
 }
 
 @keyframes depth-cloud-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: var(--dc-opacity, 0.8); transform: translateY(0); }
+  from { opacity: 0; transform: translateY(28px); }
+  to   { opacity: var(--dc-opacity, 0.65); transform: translateY(0); }
 }
 
 @keyframes depth-cloud-drift {
   from { transform: translateY(0) translateX(0); }
-  to   { transform: translateY(var(--dc-drift-y, 3px)) translateX(var(--dc-drift-x, 4px)); }
+  to   { transform: translateY(var(--dc-drift-y, 3px)) translateX(var(--dc-drift-x, 5px)); }
 }
 
-/* Layer A — Cloud2 wide base (z-index 15) */
+/* Layer A — widest, tallest back band (z-index 15) */
 .intro-screen__depth-cloud--a {
   z-index: 15;
-  height: clamp(120px, 17vh, 200px);
-  background-image: url('/intro/Cloud/Cloud2.png');
-  background-size: 120% auto;
-  --dc-opacity: 0.82;
-  animation-duration: 900ms, 16s;
-  animation-delay: 0.58s, 1.68s;
-  --dc-drift-x: 8px;
-  --dc-drift-y: 3px;
+  height: clamp(160px, 28vh, 340px);
+  background:
+    radial-gradient(ellipse 140% 80% at 22% 108%, rgba(245, 250, 255, 0.94) 0%, rgba(220, 238, 255, 0.72) 20%, rgba(190, 218, 252, 0.38) 46%, transparent 66%),
+    radial-gradient(ellipse 100% 72% at 58% 110%, rgba(238, 247, 255, 0.88) 0%, rgba(212, 234, 255, 0.64) 24%, rgba(182, 212, 250, 0.28) 50%, transparent 65%),
+    radial-gradient(ellipse 72% 60% at 88% 107%, rgba(232, 244, 255, 0.78) 0%, rgba(205, 228, 252, 0.52) 28%, transparent 56%);
+  --dc-opacity: 0.68;
+  animation-duration: 960ms, 20s;
+  animation-delay: 0.58s, 1.64s;
+  --dc-drift-x: 12px;
+  --dc-drift-y: 4px;
 }
 
-/* Layer B — Cloud3 dark blue (z-index 17) */
+/* Layer B — offset left, second band (z-index 17) */
 .intro-screen__depth-cloud--b {
-  left: -6%;
-  right: 0;
   z-index: 17;
-  height: clamp(100px, 14vh, 180px);
-  background-image: url('/intro/Cloud/Cloud3.png');
-  background-size: 130% auto;
-  --dc-opacity: 0.78;
-  animation-duration: 900ms, 13s;
-  animation-delay: 0.66s, 1.76s;
-  --dc-drift-x: -10px;
+  height: clamp(130px, 22vh, 270px);
+  background:
+    radial-gradient(ellipse 120% 78% at 12% 110%, rgba(238, 248, 255, 0.90) 0%, rgba(210, 232, 255, 0.68) 22%, rgba(178, 210, 250, 0.32) 48%, transparent 65%),
+    radial-gradient(ellipse 95% 68% at 48% 108%, rgba(232, 244, 255, 0.84) 0%, rgba(205, 228, 252, 0.60) 26%, rgba(172, 206, 248, 0.26) 52%, transparent 64%),
+    radial-gradient(ellipse 80% 62% at 82% 108%, rgba(225, 241, 255, 0.76) 0%, rgba(198, 222, 250, 0.50) 30%, transparent 58%);
+  --dc-opacity: 0.62;
+  animation-duration: 960ms, 16s;
+  animation-delay: 0.62s, 1.68s;
+  --dc-drift-x: -14px;
+  --dc-drift-y: 5px;
+}
+
+/* Layer C — mid height, right-weighted (z-index 20) */
+.intro-screen__depth-cloud--c {
+  z-index: 20;
+  height: clamp(110px, 18vh, 220px);
+  background:
+    radial-gradient(ellipse 110% 74% at 35% 110%, rgba(242, 249, 255, 0.86) 0%, rgba(215, 236, 255, 0.62) 24%, rgba(185, 215, 252, 0.28) 50%, transparent 62%),
+    radial-gradient(ellipse 90% 65% at 72% 108%, rgba(235, 246, 255, 0.82) 0%, rgba(208, 230, 254, 0.58) 26%, rgba(178, 210, 250, 0.24) 52%, transparent 60%);
+  --dc-opacity: 0.56;
+  animation-duration: 960ms, 14s;
+  animation-delay: 0.66s, 1.72s;
+  --dc-drift-x: -8px;
   --dc-drift-y: 3px;
 }
 
-/* Layer C — Cloud1 right-heavy (z-index 20) */
-.intro-screen__depth-cloud--c {
-  left: 15%;
-  right: 0;
-  z-index: 20;
-  height: clamp(90px, 13vh, 160px);
-  background-image: url('/intro/Cloud/Cloud1.png');
-  background-position: bottom right;
-  background-size: 110% auto;
-  --dc-opacity: 0.72;
-  animation-duration: 900ms, 12s;
-  animation-delay: 0.74s, 1.84s;
-  --dc-drift-x: -6px;
-  --dc-drift-y: 2px;
-}
-
-/* Layer D — Cloud1_2 wispy top layer (z-index 22) */
+/* Layer D — front wispy band, tallest visual overlap (z-index 22) */
 .intro-screen__depth-cloud--d {
   z-index: 22;
-  height: clamp(80px, 11vh, 140px);
-  background-image: url('/intro/Cloud/Cloud1_2.png');
-  background-size: 140% auto;
-  --dc-opacity: 0.65;
-  animation-duration: 900ms, 11s;
-  animation-delay: 0.82s, 1.92s;
-  --dc-drift-x: 5px;
-  --dc-drift-y: 2px;
+  height: clamp(90px, 15vh, 180px);
+  background:
+    radial-gradient(ellipse 130% 70% at 42% 112%, rgba(248, 252, 255, 0.88) 0%, rgba(222, 240, 255, 0.65) 22%, rgba(192, 220, 254, 0.30) 48%, transparent 62%),
+    radial-gradient(ellipse 75% 60% at 80% 109%, rgba(240, 249, 255, 0.80) 0%, rgba(215, 236, 255, 0.55) 26%, transparent 54%);
+  --dc-opacity: 0.50;
+  animation-duration: 960ms, 12s;
+  animation-delay: 0.70s, 1.76s;
+  --dc-drift-x: 7px;
+  --dc-drift-y: 3px;
 }
 
 @media (max-width: 900px) {
@@ -632,7 +537,7 @@
   }
 
   .intro-screen__logo {
-    width: min(84vw, 620px);
+    width: min(88vw, 700px);
   }
 
   .intro-screen__friends-shell {
@@ -683,21 +588,20 @@
     width: min(14vw, 96px);
   }
 
-  .intro-screen__cloud--depth-band-left {
-    height: clamp(60px, 10vh, 110px);
+  .intro-screen__depth-cloud--a {
+    height: clamp(90px, 16vh, 180px);
   }
 
-  .intro-screen__cloud--depth-right-back {
+  .intro-screen__depth-cloud--b {
+    height: clamp(75px, 13vh, 140px);
+  }
+
+  .intro-screen__depth-cloud--c {
+    height: clamp(60px, 11vh, 115px);
+  }
+
+  .intro-screen__depth-cloud--d {
     height: clamp(50px, 9vh, 95px);
-  }
-
-  .intro-screen__cloud--depth-right-mid {
-    left: 10%;
-    height: clamp(45px, 8vh, 85px);
-  }
-
-  .intro-screen__cloud--depth-right-front {
-    height: clamp(40px, 7vh, 75px);
   }
 }
 
@@ -708,6 +612,7 @@
   .intro-screen__light-rays,
   .intro-screen__lower-shade,
   .intro-screen__cloud,
+  .intro-screen__depth-cloud,
   .intro-screen__friends-shell,
   .intro-screen__friends-glow,
   .intro-screen__friends--frame-a,
@@ -716,12 +621,9 @@
     animation: none !important;
   }
 
-  .intro-screen__cloud--depth-band-left,
-  .intro-screen__cloud--depth-right-back,
-  .intro-screen__cloud--depth-right-mid,
-  .intro-screen__cloud--depth-right-front {
-    opacity: var(--cloud-opacity, 0.6);
-    transform: translate3d(0, 0, 0) scale(var(--cloud-scale, 1));
+  .intro-screen__depth-cloud {
+    opacity: var(--dc-opacity, 0.85);
+    transform: none;
   }
 
   .intro-screen__backdrop {

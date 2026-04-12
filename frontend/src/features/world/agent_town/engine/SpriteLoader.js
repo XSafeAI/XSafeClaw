@@ -1,5 +1,5 @@
 import * as PIXI from 'pixi.js';
-import { FW, FH, CHAR_BASE, CHAR_NAMES, EXCL_URL } from '../config/constants';
+import { FW, FH, CHAR_BASE, CHAR_NAMES } from '../config/constants';
 
 /**
  * Loads all character sprite sheets and builds frame maps.
@@ -14,16 +14,13 @@ export default class SpriteLoader {
   constructor() {
     /** @type {Record<string, CharFrames>} */
     this.charFrames = {};
-    /** @type {PIXI.Texture[]} */
-    this.emoteFrames = [];
   }
 
   /** Load all character sheets. onProgress(0-1) for UI feedback. */
   async load(onProgress) {
     PIXI.BaseTexture.defaultOptions.scaleMode = PIXI.SCALE_MODES.NEAREST;
 
-    // Core assets (must load)
-    const coreUrls = [EXCL_URL];
+    const coreUrls = [];
     const optionalUrls = [];
 
     for (const name of CHAR_NAMES) {
@@ -41,7 +38,6 @@ export default class SpriteLoader {
     onProgress?.(1);
 
     this._buildFrames();
-    this._buildEmoteFrames();
   }
 
   _buildFrames() {
@@ -101,12 +97,4 @@ export default class SpriteLoader {
     }
   }
 
-  _buildEmoteFrames() {
-    try {
-      const bt = PIXI.BaseTexture.from(EXCL_URL);
-      bt.scaleMode = PIXI.SCALE_MODES.NEAREST;
-      for (let i = 0; i < 4; i++)
-        this.emoteFrames.push(new PIXI.Texture(bt, new PIXI.Rectangle(i * 16, 0, 16, 16)));
-    } catch (_) {}
-  }
 }
