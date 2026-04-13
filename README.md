@@ -9,7 +9,7 @@
 
 **Build, Monitor, and Secure Your Agents**
 
-[XSafeClaw: The Open-Source Agent Safety Platform from Fudan University](https://xsafeclaw.ai)
+[An Open-Source Agent Safety Platform](https://xsafeclaw.ai)
 
 Real-time agent monitoring, security guardrails, and red-team testing for building reliable and safe AI agents.
 
