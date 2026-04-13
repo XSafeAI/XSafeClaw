@@ -185,7 +185,15 @@
 }
 
 .tc-crew-sidebar {
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(240, 187, 96, 0.3) transparent;
+}
+.tc-crew-sidebar::-webkit-scrollbar { width: 6px; }
+.tc-crew-sidebar::-webkit-scrollbar-thumb {
+  background: rgba(240, 187, 96, 0.3);
+  border-radius: 999px;
 }
 
 .tc-ornate-panel {
@@ -506,9 +514,7 @@
 }
 
 .tc-model-list {
-  height: 90px;
-  max-height: 90px;
-  min-height: 90px;
+  max-height: 240px;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
@@ -3466,6 +3472,7 @@
   line-height: 1.7;
 }
 
+/* 地图卡：保持 5 列不变，统一放大卡片本体并让预览区占据主体 */
 /* 地图卡：保持 5 列不变，统一放大卡片本体并让预览区占据主体 */
 .tc-map-option-grid {
   display: grid;
