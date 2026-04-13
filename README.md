@@ -2,13 +2,16 @@
 
 <div align="center">
 
+
 <img src="assets/logo.png" alt="XSafeClaw Logo">
 
 [中文文档](README_zh.md)
 
-**Keeping Your Claw Safe.**
+**Build, Monitor, and Secure Your Agents**
 
-Real-time monitoring, security guard, and red team testing for OpenClaw AI agents.
+[XSafeClaw: The Open-Source Agent Safety Platform from Fudan University](https://xsafeclaw.ai)
+
+Real-time agent monitoring, security guardrails, and red-team testing for building reliable and safe AI agents.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
@@ -19,13 +22,14 @@ Real-time monitoring, security guard, and red team testing for OpenClaw AI agent
 
 ---
 
-## 🎬 Introduction Video
+## 🎬 Introducing XSafeClaw
 
 <p align="center">
-  <a href="https://youtu.be/HIqwFVeuiKs" title="XSafeClaw overview">
-    <img src="assets/cover.png" alt="Watch the XSafeClaw overview video">
+  <a href="https://youtu.be/HIqwFVeuiKs" title="XSafeClaw Introduction Video">
+    <img src="assets/cover.png" alt="Introducing XSafeClaw: The Open-Source Agent Safety Platform from Fudan University">
   </a>
 </p>
+
 
 ---
 
@@ -33,9 +37,9 @@ Real-time monitoring, security guard, and red team testing for OpenClaw AI agent
 
 <sub>Release notes and project milestones.</sub>
 
-| | Date | Update |
-|:-:|:-----|:-------|
-| 🚀 | 2026-04-13 | **v1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
+|      | Date       | Update                                                       |
+| :--: | :--------- | :----------------------------------------------------------- |
+|  🚀   | 2026-04-13 | **v 0.1.7 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
 
 ---
 
@@ -43,14 +47,14 @@ Real-time monitoring, security guard, and red team testing for OpenClaw AI agent
 
 XSafeClaw is a security-focused companion platform for [OpenClaw](https://openclaw.ai) AI agents. It monitors agent activity in real time, intercepts unsafe tool calls before they execute, scans system assets for risk, and provides automated red team testing — all from a single `xsafeclaw start` command.
 
-| Module | Description |
-|:--|:--|
-| **Claw Monitor** | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning |
-| **Safe Chat** | Secure gateway to chat with your OpenClaw agent with built-in guard protection |
-| **Asset Shield** | File system scanning with risk classification (L0–L3), software audit, hardware inventory |
+| Module               | Description                                                  |
+| :------------------- | :----------------------------------------------------------- |
+| **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning |
+| **Safe Chat**        | Secure gateway to chat with your OpenClaw agent with built-in guard protection |
+| **Asset Shield**     | File system scanning with risk classification (L0–L3), software audit, hardware inventory |
 | **Guard (AgentDoG)** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval |
-| **Agent Office** | PixiJS-powered 2D visualization of all agents' status and activities |
-| **Onboard Setup** | Interactive wizard to install and configure OpenClaw CLI |
+| **Agent Office**     | PixiJS-powered 2D visualization of all agents' status and activities |
+| **Onboard Setup**    | Interactive wizard to install and configure OpenClaw CLI     |
 
 ---
 
@@ -129,12 +133,12 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
        safeclaw-guard plugin ──► POST /api/guard/tool-check
 ```
 
-| Layer | Technology |
-|:--|:--|
-| Backend | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS 4 |
-| Database | SQLite (via aiosqlite) |
-| Guard Model | AgentDoG (configurable base URL & model) |
+| Layer       | Technology                                        |
+| :---------- | :------------------------------------------------ |
+| Backend     | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn |
+| Frontend    | React 19, TypeScript, Vite, Tailwind CSS 4        |
+| Database    | SQLite (via aiosqlite)                            |
+| Guard Model | AgentDoG (configurable base URL & model)          |
 
 Full API docs available at `http://localhost:6874/docs` when running.
 
@@ -191,13 +195,13 @@ Then add to `~/.openclaw/openclaw.json`:
 
 XSafeClaw works out of the box with sensible defaults. Copy `.env.example` to `.env` to customize:
 
-| Variable | Default | Description |
-|:--|:--|:--|
-| `API_PORT` | `6874` | Server port |
-| `API_HOST` | `0.0.0.0` | Bind address |
+| Variable                | Default                            | Description                |
+| :---------------------- | :--------------------------------- | :------------------------- |
+| `API_PORT`              | `6874`                             | Server port                |
+| `API_HOST`              | `0.0.0.0`                          | Bind address               |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session directory |
-| `GUARD_BASE_URL` | *(auto-detected)* | Guard model API base URL |
-| `GUARD_BASE_MODEL` | *(auto-detected)* | Guard model ID |
+| `GUARD_BASE_URL`        | *(auto-detected)*                  | Guard model API base URL   |
+| `GUARD_BASE_MODEL`      | *(auto-detected)*                  | Guard model ID             |
 
 If guard variables are not set, XSafeClaw reads model configuration from `~/.openclaw/openclaw.json` automatically. See `.env.example` for the full list.
 
@@ -269,7 +273,7 @@ XSafeClaw is open-sourced under the MIT License for academic research and person
 ## 👥 Contributors
 
 <a href="https://github.com/XSafeAI/XSafeClaw/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=XSafeAI/XSafeClaw&v=1" />
+  <img src="https://contrib.rocks/image?repo=XSafeAI/XSafeClaw" />
 </a>
 
 We welcome contributions of all kinds — bug reports, feature requests, documentation, and code.
