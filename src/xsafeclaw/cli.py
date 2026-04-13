@@ -24,7 +24,7 @@ def _ensure_data_dir() -> None:
 
 
 def _open_browser_landing(host: str, port: int) -> None:
-    """Open `/configure` when OpenClaw is missing or unconfigured; else home (→ Agent Valley)."""
+    """Open `/setup` if OpenClaw CLI is missing, `/configure` if installed but not configured; else home."""
     base = f"http://{host}:{port}"
     try:
         req = urllib.request.Request(
@@ -33,7 +33,9 @@ def _open_browser_landing(host: str, port: int) -> None:
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
-        if not data.get("openclaw_installed") or not data.get("config_exists"):
+        if not data.get("openclaw_installed"):
+            webbrowser.open(f"{base}/setup")
+        elif not data.get("config_exists"):
             webbrowser.open(f"{base}/configure")
         else:
             webbrowser.open(base)

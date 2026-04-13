@@ -1426,7 +1426,7 @@ wheels = [
 
 [[package]]
 name = "xsafeclaw"
-version = "0.1.6"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

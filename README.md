@@ -19,30 +19,32 @@ Real-time monitoring, security guard, and red team testing for OpenClaw AI agent
 
 ---
 
-## Promotional video
+## 🎬 Introduction Video
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=YOUR_VIDEO_ID" title="XSafeClaw overview">
+  <a href="https://youtu.be/HIqwFVeuiKs" title="XSafeClaw overview">
     <img src="assets/cover.png" alt="Watch the XSafeClaw overview video">
   </a>
 </p>
 
 ---
 
-## News
+## 📰 News
 
-| Date | Update |
-|---|---|
-| 🚀 YYYY-MM-DD | **v1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
+<sub>Release notes and project milestones.</sub>
+
+| | Date | Update |
+|:-:|:-----|:-------|
+| 🚀 | 2026-04-13 | **v1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
 
 ---
 
-## What is XSafeClaw?
+## 🔍 What is XSafeClaw?
 
 XSafeClaw is a security-focused companion platform for [OpenClaw](https://openclaw.ai) AI agents. It monitors agent activity in real time, intercepts unsafe tool calls before they execute, scans system assets for risk, and provides automated red team testing — all from a single `xsafeclaw start` command.
 
 | Module | Description |
-|---|---|
+|:--|:--|
 | **Claw Monitor** | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning |
 | **Safe Chat** | Secure gateway to chat with your OpenClaw agent with built-in guard protection |
 | **Asset Shield** | File system scanning with risk classification (L0–L3), software audit, hardware inventory |
@@ -52,7 +54,7 @@ XSafeClaw is a security-focused companion platform for [OpenClaw](https://opencl
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 pip install xsafeclaw
@@ -71,7 +73,7 @@ xsafeclaw start --no-browser --reload    # headless dev mode
 
 ---
 
-## Guard: How It Works
+## 🛡️ Guard: How It Works
 
 XSafeClaw's guard system protects users through a two-layer defense:
 
@@ -79,62 +81,56 @@ XSafeClaw's guard system protects users through a two-layer defense:
 
 2. **Tool-call interception** — Every tool call passes through a `before_tool_call` hook. If the guard model deems it unsafe, the call is held in a pending queue for human review.
 
-```text
-+---------------------------+
-| Agent wants to run a tool |
-+---------------------------+
-              |
-              v
-+-------------------------+
-| Guard model evaluates   |
-+-------------------------+
-              |
-      +-------+--------+
-      |                |
-      | Safe           | Unsafe
-      v                v
-+----------------+   +------------------------+
-| Execute tool   |   | Hold for human review |
-+----------------+   +------------------------+
-                               |
-                    +----------+----------+
-                    |                     |
-                    | Approve             | Reject
-                    v                     v
-             +----------------+   +-------------------------+
-             | Execute tool   |   | Block and notify agent |
-             +----------------+   +-------------------------+
+```
+Agent wants to run a tool
+        │
+        ▼
+  Guard Model evaluates
+        │
+   ┌────┴────┐
+   │         │
+  Safe     Unsafe
+   │         │
+   ▼         ▼
+ Execute   Hold for human review
+           ┌────┴────┐
+           │         │
+        Approve    Reject
+           │         │
+           ▼         ▼
+        Execute   Block + notify agent
 ```
 
 When rejected (or timed out after 5 min), the agent is instructed to **stop all subsequent actions**, **inform the user about the risk**, and **wait for explicit confirmation**.
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
-```mermaid
-flowchart TB
-    Browser["Browser (:6874)"]
-    Browser --> API
+```
+                     Browser (:6874)
+                       │
+           ┌───────────┴───────────┐
+           │     FastAPI Server    │
+           ├───────────────────────┤
+           │   Guard Service       │◄── AgentDoG model
+           │   File Watcher        │◄── ~/.openclaw/ JSONL sessions
+           │   Asset Scanner       │◄── File/software/hardware scanning
+           └───────────┬───────────┘
+                       │
+              ┌────────┴────────┐
+              │                 │
+         SQLite DB        OpenClaw Sessions
+       ~/.xsafeclaw/       ~/.openclaw/
 
-    subgraph Server[" FastAPI Server "]
-        API["Web UI + API"]
-        API --> Watcher["File Watcher"]
-        API --> Scanner["Asset Scanner"]
-        API --> Guard["Guard Service"]
-    end
-
-    Watcher -.-> Sessions["~/.openclaw/ JSONL sessions"]
-    Scanner -.-> Targets["Files / software / hardware"]
-    Watcher --> DB[("SQLite DB (~/.xsafeclaw/)")]
-    Guard -.-> Model["AgentDoG model"]
-
-    Agent["OpenClaw Agent"] -->|before_tool_call hook| Plugin["safeclaw-guard plugin"]
-    Plugin -->|POST /api/guard/tool-check| Guard
+           OpenClaw Agent
+               │ before_tool_call hook
+               ▼
+       safeclaw-guard plugin ──► POST /api/guard/tool-check
 ```
 
 | Layer | Technology |
-|---|---|
+|:--|:--|
 | Backend | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS 4 |
 | Database | SQLite (via aiosqlite) |
@@ -144,10 +140,11 @@ Full API docs available at `http://localhost:6874/docs` when running.
 
 ---
 
-## Installation
+## 📦 Installation
 
 For detailed installation procedures, see the **[installation guide](docs/installation.pdf)**.
 
+> [!TIP]
 > Requires Python 3.11+. The frontend is pre-built and bundled — no Node.js needed for production.
 
 ```bash
@@ -166,7 +163,7 @@ git clone https://github.com/XSafeAI/XSafeClaw.git
 cd XSafeClaw && pip install -e ".[dev]"
 ```
 
-### Install the Guard Plugin
+### 🔌 Install the Guard Plugin
 
 To enable real-time tool-call interception in OpenClaw:
 
@@ -190,12 +187,12 @@ Then add to `~/.openclaw/openclaw.json`:
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 XSafeClaw works out of the box with sensible defaults. Copy `.env.example` to `.env` to customize:
 
 | Variable | Default | Description |
-|---|---|---|
+|:--|:--|:--|
 | `API_PORT` | `6874` | Server port |
 | `API_HOST` | `0.0.0.0` | Bind address |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session directory |
@@ -206,7 +203,7 @@ If guard variables are not set, XSafeClaw reads model configuration from `~/.ope
 
 ---
 
-## Development
+## 🔧 Development
 
 Prerequisites: Python 3.11+, Node.js 18+, [uv](https://docs.astral.sh/uv/) (recommended)
 
@@ -226,13 +223,13 @@ cd frontend && npm run build     # outputs to src/xsafeclaw/static/
 
 ---
 
-## Star History
+## ⭐ Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=XSafeAI/XSafeClaw&type=Date)](https://star-history.com/#XSafeAI/XSafeClaw&Date)
 
 ---
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 - [**OpenClaw**](https://github.com/openclaw/openclaw) — The personal AI assistant platform that XSafeClaw is designed to protect. OpenClaw's open plugin architecture makes our guard integration possible.
 - [**AgentDoG**](https://github.com/AI45Lab/AgentDoG) — The diagnostic guardrail framework for AI agent safety. XSafeClaw's guard module is powered by AgentDoG's trajectory-level risk assessment and fine-grained safety taxonomy.
@@ -241,13 +238,14 @@ cd frontend && npm run build     # outputs to src/xsafeclaw/static/
 
 ---
 
-## Disclaimer
+## ⚠️ Disclaimer
 
-XSafeClaw is a research tool intended for **improving the safety of AI agent systems**. The red team testing features are designed exclusively for defensive security research and evaluation purposes. **Do not use this tool to cause harm or engage in any malicious activities.**
+> [!CAUTION]
+> XSafeClaw is a research tool intended for **improving the safety of AI agent systems**. The red team testing features are designed exclusively for defensive security research and evaluation purposes. **Do not use this tool to cause harm or engage in any malicious activities.**
 
 ---
 
-## Commercial Use
+## 💼 Commercial Use
 
 XSafeClaw is open-sourced under the MIT License for academic research and personal use. For **commercial licensing, enterprise deployment, or collaboration**, please contact:
 
@@ -255,7 +253,20 @@ XSafeClaw is open-sourced under the MIT License for academic research and person
 
 ---
 
-## Contributors
+## 📋 TODO
+
+- [ ] Red team testing module with automated attack simulation
+- [ ] Multi-agent guard coordination and cross-session risk correlation
+- [ ] Guard model fine-tuning pipeline with custom safety policies
+- [ ] Plugin marketplace for community-contributed guard extensions
+- [ ] Export security reports (PDF / JSON)
+- [ ] Docker one-command deployment
+- [ ] API authentication and rate limiting
+- [ ] Webhook notifications for high-risk events
+
+---
+
+## 👥 Contributors
 
 <a href="https://github.com/XSafeAI/XSafeClaw/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=XSafeAI/XSafeClaw" />
@@ -265,6 +276,6 @@ We welcome contributions of all kinds — bug reports, feature requests, documen
 
 ---
 
-## License
+## 📄 License
 
 [MIT](LICENSE)

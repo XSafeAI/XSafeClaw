@@ -1485,11 +1485,11 @@ def _load_scan_from_disk() -> tuple[dict, str]:
 
 async def _build_onboard_scan_data() -> dict:
     """Execute all openclaw CLI scans and assemble the full onboard-scan response."""
-    models_task = _run_openclaw_json(["models", "list", "--all"], timeout=120)
-    status_task = _run_openclaw_json(["models", "status"])
-    channels_task = _run_openclaw_json(["channels", "list"], timeout=60)
-    skills_task = _run_openclaw_json(["skills", "list"])
-    hooks_task = _run_openclaw_json(["hooks", "list"])
+    models_task = _run_openclaw_json(["models", "list", "--all"], timeout=500)
+    status_task = _run_openclaw_json(["models", "status"], timeout=500)
+    channels_task = _run_openclaw_json(["channels", "list"], timeout=500)
+    skills_task = _run_openclaw_json(["skills", "list"], timeout=500)
+    hooks_task = _run_openclaw_json(["hooks", "list"], timeout=500)
 
     models_raw, status_raw, channels_raw, skills_raw, hooks_raw = await asyncio.gather(
         models_task, status_task, channels_task, skills_task, hooks_task,
@@ -2364,7 +2364,7 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
     if changed:
         tmp = _CONFIG_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.rename(_CONFIG_PATH)
+        tmp.replace(_CONFIG_PATH)
         try:
             _CONFIG_PATH.touch()
         except OSError:
@@ -2702,7 +2702,7 @@ async def onboard_config(body: OnboardConfigRequest):
             stdin=asyncio.subprocess.DEVNULL,
             env=env,
         )
-        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=500)
         output = stdout_bytes.decode("utf-8", errors="replace").strip()
 
         if proc.returncode != 0:
