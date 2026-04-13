@@ -269,7 +269,7 @@ XSafeClaw is open-sourced under the MIT License for academic research and person
 ## 👥 Contributors
 
 <a href="https://github.com/XSafeAI/XSafeClaw/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=XSafeAI/XSafeClaw" />
+  <img src="https://contrib.rocks/image?repo=XSafeAI/XSafeClaw&v=1" />
 </a>
 
 We welcome contributions of all kinds — bug reports, feature requests, documentation, and code.
