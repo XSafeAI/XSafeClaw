@@ -261,18 +261,6 @@ XSafeClaw is open-sourced under the MIT License for academic research and person
 
 **Email:** xingjunma@fudan.edu.cn
 
----
-
-## 📋 TODO
-
-- [ ] Red team testing module with automated attack simulation
-- [ ] Multi-agent guard coordination and cross-session risk correlation
-- [ ] Guard model fine-tuning pipeline with custom safety policies
-- [ ] Plugin marketplace for community-contributed guard extensions
-- [ ] Export security reports (PDF / JSON)
-- [ ] Docker one-command deployment
-- [ ] API authentication and rate limiting
-- [ ] Webhook notifications for high-risk events
 
 ---
 
