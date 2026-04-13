@@ -1,9 +1,8 @@
-# XSafeClaw
 
 <div align="center">
 
 
-<img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
+<img src="assets/claw-logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
 
 [中文文档](README_zh.md)
 
