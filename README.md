@@ -227,12 +227,21 @@ cd frontend && npm run build     # outputs to src/xsafeclaw/static/
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/?repos=XSafeAI%2FXSafeClaw&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=XSafeAI/XSafeClaw&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=XSafeAI/XSafeClaw&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=XSafeAI/XSafeClaw&type=date&legend=top-left" />
- </picture>
+<a href="https://app.repohistory.com/star-history?repo=XSafeAI/XSafeClaw">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://app.repohistory.com/api/svg?repo=XSafeAI/XSafeClaw&type=Date&background=0D1117&color=f86262"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset="https://app.repohistory.com/api/svg?repo=XSafeAI/XSafeClaw&type=Date&background=FFFFFF&color=f86262"
+    />
+    <img
+      alt="Star History Chart"
+      src="https://app.repohistory.com/api/svg?repo=XSafeAI/XSafeClaw&type=Date&background=FFFFFF&color=f86262"
+    />
+  </picture>
 </a>
 
 ---
