@@ -229,7 +229,13 @@ cd frontend && npm run build     # outputs to src/xsafeclaw/static/
 
 ## ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=XSafeAI/XSafeClaw&type=Date)](https://star-history.com/#XSafeAI/XSafeClaw&Date)
+<a href="https://www.star-history.com/?repos=XSafeAI%2FXSafeClaw&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=XSafeAI/XSafeClaw&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=XSafeAI/XSafeClaw&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=XSafeAI/XSafeClaw&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ---
 
