@@ -760,6 +760,10 @@ class GatewayClient:
 
         return await self._request("sessions.patch", params)
 
+    async def list_models(self) -> dict | list:
+        """Return the gateway's current runtime-allowed model catalog."""
+        return await self._request("models.list", {})
+
     async def load_history(self, session_key: str, limit: int = 50) -> list:
         """Load chat history via chat.history WebSocket API."""
         result = await self._request("chat.history", {

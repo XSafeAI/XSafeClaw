@@ -83,6 +83,11 @@ const INITIAL: FormData = {
   customProviderId: '', customCompatibility: 'openai',
 };
 
+const AGGREGATOR_PROVIDERS = new Set([
+  'openrouter', 'kilocode', 'litellm', 'ai-gateway', 'cloudflare-ai-gateway',
+  'opencode', 'synthetic', 'together', 'huggingface', 'venice', 'skip',
+]);
+
 /* ─── Progress Bar ─── */
 function StepProgress({ current, skipped, labels }: { current: number; skipped: Set<number>; labels: string[] }) {
   return (
@@ -311,10 +316,6 @@ function AuthProviderStep({ form, setForm, authProviders, modelProviders, showKe
   const hasMultipleMethods = methods.length > 1;
   const effectiveMethod = form.authMethod || (methods.length === 1 ? methods[0]?.id : '');
   const keyUrl = PROVIDER_KEY_URLS[form.authProvider] || '';
-  const AGGREGATOR_PROVIDERS = new Set([
-    'openrouter', 'kilocode', 'litellm', 'ai-gateway', 'cloudflare-ai-gateway',
-    'opencode', 'synthetic', 'together', 'huggingface', 'venice', 'skip',
-  ]);
   const selectedMethod = methods.find(m => m.id === effectiveMethod);
   const explicitIds = selectedMethod?.modelProviders;
   const inferredIds = explicitIds
@@ -352,15 +353,17 @@ function AuthProviderStep({ form, setForm, authProviders, modelProviders, showKe
             const prov = authProviders.find(p => p.id === id);
             if (!prov?.supported && id !== 'skip') return;
             const provMethods = prov?.methods || [];
+            const nextAuthMethod = provMethods.length === 1 ? provMethods[0].id : '';
             setForm({
               ...form,
               authProvider: id,
-              authMethod: provMethods.length === 1 ? provMethods[0].id : '',
+              authMethod: nextAuthMethod,
               apiKey: '', modelId: '',
               cfAccountId: '', cfGatewayId: '', litellmBaseUrl: 'http://localhost:4000',
               vllmBaseUrl: 'http://127.0.0.1:8000/v1', vllmModelId: '',
               customBaseUrl: '', customModelId: '', customProviderId: '', customCompatibility: 'openai',
             });
+            setManual(false);
           }}
         />
       </div>
@@ -373,7 +376,12 @@ function AuthProviderStep({ form, setForm, authProviders, modelProviders, showKe
           </label>
           <div className="space-y-1.5">
             {methods.map(m => (
-              <button key={m.id} onClick={() => setForm({ ...form, authMethod: m.id, apiKey: '', modelId: '' })}
+              <button
+                key={m.id}
+                onClick={() => {
+                  setForm({ ...form, authMethod: m.id, apiKey: '', modelId: '' });
+                  setManual(false);
+                }}
                 className={`w-full text-left px-4 py-3 rounded-xl border-2 text-[13px] transition-all
                   ${form.authMethod === m.id ? 'border-accent bg-accent/5 font-semibold text-text-primary' : 'border-border text-text-secondary hover:border-accent/30'}`}>
                 {m.label}
@@ -1151,7 +1159,16 @@ export default function Configure() {
           {step === 2 && <ConfigStep form={form} setForm={setForm} configSummary={configSummary} />}
           {step === 3 && <SetupTypeStep form={form} setForm={setForm} />}
           {step === 4 && <WorkspaceStep form={form} setForm={setForm} />}
-          {step === 5 && <AuthProviderStep form={form} setForm={setForm} authProviders={authProviders} modelProviders={modelProviders} showKey={showApiKey} setShowKey={setShowApiKey} />}
+          {step === 5 && (
+            <AuthProviderStep
+              form={form}
+              setForm={setForm}
+              authProviders={authProviders}
+              modelProviders={modelProviders}
+              showKey={showApiKey}
+              setShowKey={setShowApiKey}
+            />
+          )}
           {step === 6 && <GatewayStep form={form} setForm={setForm} />}
           {step === 7 && <ChannelsStep form={form} setForm={setForm} channels={channels} />}
           {step === 8 && <SearchStep form={form} setForm={setForm} searchProviders={searchProviders} />}

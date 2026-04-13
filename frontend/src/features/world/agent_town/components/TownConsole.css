@@ -697,6 +697,9 @@
 
 .tc-summon-confirm {
   padding: 8px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tc-summon-secondary {
@@ -5073,6 +5076,12 @@
   gap: 10px;
   color: #f0e2c6;
   font-size: 12px;
+}
+
+.tc-model-setup-state-hint {
+  font-size: 10px;
+  color: #a89878;
+  margin-top: -4px;
 }
 
 .tc-model-setup-spinner,

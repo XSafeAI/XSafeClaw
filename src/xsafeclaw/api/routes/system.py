@@ -1456,6 +1456,31 @@ _onboard_scan_cache: dict = {}
 _onboard_scan_version: str = ""
 _onboard_scan_task: Optional[asyncio.Task] = None
 _onboard_scan_lock = asyncio.Lock()
+_ONBOARD_SCAN_DISK_CACHE = _OPENCLAW_DIR / "xsafeclaw-model-catalog-cache.json"
+
+
+def _save_scan_to_disk(data: dict, version: str = "") -> None:
+    try:
+        payload = {**data, "_cache_version": version}
+        tmp = _ONBOARD_SCAN_DISK_CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.rename(_ONBOARD_SCAN_DISK_CACHE)
+    except Exception:
+        pass
+
+
+def _load_scan_from_disk() -> tuple[dict, str]:
+    """Return (data, cached_version). Both empty if no valid cache."""
+    if not _ONBOARD_SCAN_DISK_CACHE.exists():
+        return {}, ""
+    try:
+        raw = json.loads(_ONBOARD_SCAN_DISK_CACHE.read_text("utf-8"))
+        if not isinstance(raw, dict):
+            return {}, ""
+        cached_version = str(raw.pop("_cache_version", ""))
+        return raw, cached_version
+    except Exception:
+        return {}, ""
 
 
 async def _build_onboard_scan_data() -> dict:
@@ -1573,44 +1598,90 @@ async def _build_onboard_scan_data() -> dict:
     }
 
 
+def _count_scan_models(data: dict) -> int:
+    return sum(len(p.get("models", [])) for p in data.get("model_providers", []))
+
+
 async def _preload_onboard_scan() -> None:
     """Background task: preload onboard-scan data and cache it."""
     global _onboard_scan_cache, _onboard_scan_version
     try:
         version = _get_openclaw_version_sync()
         if not version:
+            print("⚠️  Model list: cannot detect OpenClaw version, skipping scan")
             return
+
+        # Already warm in memory for this version — nothing to do.
         if _onboard_scan_cache and _onboard_scan_version == version:
+            print(f"✅ Model list: {_count_scan_models(_onboard_scan_cache)} models ready (version {version})")
             return
-        print("🔄 Preloading onboard-scan data in background...")
+
+        # Cold start — try disk cache first for instant availability.
+        if not _onboard_scan_cache:
+            disk_data, disk_ver = _load_scan_from_disk()
+            if disk_data and disk_data.get("model_providers"):
+                n = _count_scan_models(disk_data)
+                if disk_ver == version:
+                    _onboard_scan_cache = disk_data
+                    _onboard_scan_version = version
+                    print(f"✅ Model list: {n} models loaded from disk cache (version {version})")
+                    return
+                else:
+                    _onboard_scan_cache = disk_data
+                    print(f"📂 Model list: {n} models loaded from disk cache (stale v{disk_ver}, need v{version}), refreshing...")
+            else:
+                print(f"📂 Model list: no disk cache found, scanning from scratch...")
+
+        # Full CLI scan (slow, ~90s)
+        print(f"🔄 Model list: scanning all providers via OpenClaw CLI...")
         data = await _build_onboard_scan_data()
-        _onboard_scan_cache = data
-        _onboard_scan_version = version
-        mp_count = len(data.get("model_providers", []))
-        print(f"✅ Onboard-scan preloaded ({mp_count} model providers cached)")
+        new_count = _count_scan_models(data)
+        old_count = _count_scan_models(_onboard_scan_cache)
+
+        if new_count >= old_count or new_count >= 200:
+            _onboard_scan_cache = data
+            _onboard_scan_version = version
+            _save_scan_to_disk(data, version)
+            mp = len(data.get("model_providers", []))
+            print(f"✅ Model list: {new_count} models across {mp} providers (version {version}, saved to disk)")
+        else:
+            print(f"⚠️  Model list: scan returned {new_count} models (less than cached {old_count}), keeping cache")
+
+    except asyncio.CancelledError:
+        print("⏹️  Model list: background scan cancelled")
     except Exception as exc:
-        print(f"⚠️  Onboard-scan preload failed: {exc}")
+        print(f"⚠️  Model list: scan failed: {exc}")
 
 
-def trigger_onboard_scan_preload() -> None:
+def trigger_onboard_scan_preload(force: bool = False) -> None:
     """Fire-and-forget: start preloading if not already running.
 
     Safe to call from sync context (e.g. after install completes).
+    When *force* is True the cached version stamp is cleared first so
+    the preload actually re-runs even if the OpenClaw version hasn't changed.
     """
-    global _onboard_scan_task
+    global _onboard_scan_task, _onboard_scan_version
+    if force:
+        _onboard_scan_version = ""
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         return
     if _onboard_scan_task and not _onboard_scan_task.done():
-        return
+        if not force:
+            return
+        _onboard_scan_task.cancel()
     _onboard_scan_task = loop.create_task(_preload_onboard_scan())
 
 
 @router.get("/onboard-scan")
-async def onboard_scan():
+async def onboard_scan(refresh: bool = False):
     """Scan the local environment for available providers, channels, skills, hooks via openclaw CLI."""
     global _onboard_scan_cache, _onboard_scan_version, _onboard_scan_task
+
+    if refresh:
+        _onboard_scan_cache.clear()
+        _onboard_scan_version = ""
 
     version = _get_openclaw_version_sync()
 
@@ -1633,6 +1704,7 @@ async def onboard_scan():
             if version:
                 _onboard_scan_cache = data
                 _onboard_scan_version = version
+                _save_scan_to_disk(data, version)
 
     model_providers = data.get("model_providers", [])
     auth_profiles = data.get("auth_profiles", [])
@@ -1654,13 +1726,6 @@ async def onboard_scan():
     agents = current_config.get("agents", {}).get("defaults", {})
     hooks_cfg = current_config.get("hooks", {}).get("internal", {}).get("entries", {})
     search_cfg = current_config.get("tools", {}).get("web", {}).get("search", {})
-    models_cfg = current_config.get("models", {}).get("providers", {})
-    configured_provider_api_keys = {
-        provider_id: str((provider_cfg or {}).get("apiKey", "")).strip()
-        for provider_id, provider_cfg in models_cfg.items()
-        if str((provider_cfg or {}).get("apiKey", "")).strip()
-    }
-
     # Build config summary lines (mirrors summarizeExistingConfig in source)
     config_summary: list[str] = []
     ws_val = agents.get("workspace")
@@ -1705,7 +1770,6 @@ async def onboard_scan():
             "enabled_hooks": [k for k, v in hooks_cfg.items() if v.get("enabled")],
             "search_provider": search_cfg.get("provider", ""),
             "search_api_key": search_cfg.get("apiKey", ""),
-            "configured_provider_api_keys": configured_provider_api_keys,
         },
     }
 
@@ -1728,25 +1792,18 @@ async def onboard_defaults():
     gw = current.get("gateway", {})
     agents = current.get("agents", {}).get("defaults", {})
     hooks_cfg = current.get("hooks", {}).get("internal", {}).get("entries", {})
-    models_cfg = current.get("models", {}).get("providers", {})
-
     # Detect current provider
     current_provider = ""
-    current_api_key = ""
     current_model = ""
     primary_model = agents.get("model", {}).get("primary", "")
     if "/" in primary_model:
         current_provider = primary_model.split("/")[0]
         current_model = primary_model.split("/", 1)[1]
-    if current_provider and current_provider in models_cfg:
-        prov_cfg = models_cfg[current_provider]
-        current_api_key = prov_cfg.get("apiKey", "")
 
     enabled_hooks = [k for k, v in hooks_cfg.items() if v.get("enabled")]
 
     defaults = {
         "provider": current_provider,
-        "api_key": current_api_key,
         "model_id": current_model,
         "gateway_port": gw.get("port", 18789),
         "gateway_bind": gw.get("bind", "loopback"),
@@ -1945,7 +2002,6 @@ def _normalize_full_model_id(model_id: str, provider_hint: str = "") -> str:
         return f"{lookup[0]}/{target}"
     return target
 
-
 def _load_explicit_model_ids() -> list[str]:
     if not _EXPLICIT_MODELS_PATH.exists():
         return []
@@ -2012,6 +2068,42 @@ def _set_explicit_model_ids(model_ids: list[str]) -> bool:
         json.dumps({"explicitModels": normalized}, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    return True
+
+
+def _strip_legacy_xsafeclaw_config(config: dict) -> bool:
+    legacy = config.get("xsafeclaw")
+    if legacy is None:
+        return False
+
+    if isinstance(legacy, dict):
+        legacy_explicit_models = legacy.get("explicitModels")
+        if isinstance(legacy_explicit_models, list):
+            _set_explicit_model_ids([str(model_id or "").strip() for model_id in legacy_explicit_models])
+
+    config.pop("xsafeclaw", None)
+    return True
+
+
+def sanitize_legacy_openclaw_config() -> bool:
+    """Migrate/remove legacy XSafeClaw-only keys from openclaw.json."""
+    if not _CONFIG_PATH.exists():
+        return False
+    try:
+        config = json.loads(_CONFIG_PATH.read_text("utf-8"))
+    except Exception:
+        return False
+
+    if not isinstance(config, dict):
+        return False
+
+    changed = _strip_legacy_xsafeclaw_config(config)
+    if not changed:
+        return False
+
+    tmp = _CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(_CONFIG_PATH)
     return True
 
 
@@ -2084,8 +2176,7 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         return
 
     changed = False
-    if "xsafeclaw" in config:
-        config.pop("xsafeclaw", None)
+    if _strip_legacy_xsafeclaw_config(config):
         changed = True
 
     # Auth-method → (config provider key, baseUrl)
@@ -2274,6 +2365,10 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         tmp = _CONFIG_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.rename(_CONFIG_PATH)
+        try:
+            _CONFIG_PATH.touch()
+        except OSError:
+            pass
 
 
 async def _auto_approve_devices() -> None:
@@ -2370,6 +2465,159 @@ async def feishu_test(body: FeishuTestRequest):
             }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@router.get("/provider-has-key")
+async def provider_has_key(provider: str = ""):
+    """Return whether a provider already has a saved API key (no key content exposed)."""
+    provider = provider.strip()
+    if not provider:
+        return {"has_key": False}
+
+    _AGENT_STATE_DIR = _OPENCLAW_DIR / "agents" / "main" / "agent"
+
+    # Check auth-profiles.json
+    profiles_path = _AGENT_STATE_DIR / "auth-profiles.json"
+    if profiles_path.exists():
+        try:
+            profiles_data = json.loads(profiles_path.read_text("utf-8"))
+            for _pid, profile in (profiles_data.get("profiles") or {}).items():
+                if not isinstance(profile, dict):
+                    continue
+                if profile.get("provider") == provider and str(profile.get("key", "")).strip():
+                    return {"has_key": True}
+        except Exception:
+            pass
+
+    # Check openclaw.json models.providers.<provider>.apiKey
+    if _CONFIG_PATH.exists():
+        try:
+            config = json.loads(_CONFIG_PATH.read_text("utf-8"))
+            prov_cfg = config.get("models", {}).get("providers", {}).get(provider, {})
+            if isinstance(prov_cfg, dict) and str(prov_cfg.get("apiKey", "")).strip():
+                return {"has_key": True}
+        except Exception:
+            pass
+
+    return {"has_key": False}
+
+
+class QuickModelConfigRequest(BaseModel):
+    provider: str
+    api_key: str = ""
+    model_id: str
+
+
+@router.post("/quick-model-config")
+async def quick_model_config(body: QuickModelConfigRequest):
+    """Fast-path model configuration that skips the slow full onboard CLI.
+
+    Writes the API key via a minimal `openclaw onboard` invocation (key-only,
+    skipping health checks / daemon / UI) and patches the model into
+    openclaw.json directly.  Falls back to the full onboard path if anything
+    unexpected happens.
+    """
+    if not body.model_id or not body.provider:
+        raise HTTPException(status_code=400, detail="provider and model_id are required")
+
+    openclaw_path = _find_openclaw()
+    if not openclaw_path:
+        raise HTTPException(status_code=500, detail="openclaw binary not found")
+
+    env = _build_env()
+
+    # --- 1. Write API key via a minimal CLI call (only if key provided) ---
+    cli_output = ""
+    if body.api_key:
+        _, method_cli_flags = _get_auth_providers_and_flags()
+        cli_flag = method_cli_flags.get(body.provider)
+        if cli_flag:
+            current: dict = {}
+            if _CONFIG_PATH.exists():
+                try:
+                    current = json.loads(_CONFIG_PATH.read_text("utf-8"))
+                except Exception:
+                    pass
+            gw = current.get("gateway", {})
+            args: list[str] = [
+                openclaw_path, "onboard", "--non-interactive", "--accept-risk",
+                cli_flag, body.api_key,
+                "--gateway-port", str(gw.get("port", 18789)),
+                "--gateway-bind", gw.get("bind", "loopback"),
+                "--gateway-auth", gw.get("auth", {}).get("mode", "token"),
+                "--no-install-daemon",
+                "--skip-channels", "--skip-skills",
+                "--skip-search", "--skip-health", "--skip-ui",
+            ]
+            gw_token = gw.get("auth", {}).get("token", "")
+            if gw_token:
+                args += ["--gateway-token", gw_token]
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=env,
+                )
+                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+                cli_output = stdout_bytes.decode("utf-8", errors="replace").strip()
+                if proc.returncode != 0:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"openclaw key setup failed (exit {proc.returncode}):\n{cli_output}",
+                    )
+            except asyncio.TimeoutError:
+                raise HTTPException(status_code=500, detail="openclaw key setup timed out")
+
+    # --- 2. Patch model into openclaw.json directly ---
+    full_body = OnboardConfigRequest(
+        provider=body.provider,
+        api_key=body.api_key,
+        model_id=body.model_id,
+    )
+    _patch_config_extras(full_body)
+
+    # --- 3. Invalidate model cache + touch to trigger gateway hot-reload ---
+    try:
+        from .chat import _available_models_cache
+        _available_models_cache["expires_at"] = 0.0
+    except Exception:
+        pass
+    try:
+        _CONFIG_PATH.touch()
+    except OSError:
+        pass
+
+    # Refresh onboard-scan cache in background (don't block the response)
+    trigger_onboard_scan_preload(force=True)
+
+    # Wait briefly for gateway to pick up the new model so the frontend
+    # can skip its own polling loop entirely.
+    model_ready = False
+    if body.model_id:
+        from .chat import _runtime_catalog_match
+        from ...gateway_client import GatewayClient
+        for _attempt in range(5):
+            await asyncio.sleep(0.8)
+            try:
+                client = GatewayClient()
+                await asyncio.wait_for(client.connect(), timeout=5)
+                raw = await asyncio.wait_for(client.list_models(), timeout=5)
+                await client.disconnect()
+                catalog = raw.get("models", []) if isinstance(raw, dict) else raw
+                found, _ = _runtime_catalog_match(catalog, body.model_id)
+                if found:
+                    model_ready = True
+                    break
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+    return {"success": True, "fast_path": True, "model_ready": model_ready, "output": cli_output}
 
 
 @router.post("/onboard-config")
@@ -2480,13 +2728,19 @@ async def onboard_config(body: OnboardConfigRequest):
     # ── Auto-approve pending device pairing requests ─────────────────
     await _auto_approve_devices()
 
-    # Invalidate onboard-scan cache so next request picks up new config
-    _onboard_scan_cache.clear()
     try:
         from .chat import _available_models_cache
         _available_models_cache["expires_at"] = 0.0
     except Exception:
         pass
+
+    try:
+        _CONFIG_PATH.touch()
+    except OSError:
+        pass
+
+    # Refresh onboard-scan cache in background (don't block the response)
+    trigger_onboard_scan_preload(force=True)
 
     workspace = str(Path(body.workspace).expanduser())
     return {

@@ -728,7 +728,8 @@ export default function CrewTab({
   onPickModel,
   onOpenModelSetup,
   onCreateAgent,
-  creatingAgent,
+  createAgentDisabled,
+  createAgentLabel,
   createError,
   taskStatusMeta,
   pendingApprovals = [],
@@ -925,9 +926,9 @@ export default function CrewTab({
                   type="button"
                   className="tc-summon-confirm"
                   onClick={onCreateAgent}
-                  disabled={!pendingModelId || creatingAgent}
+                  disabled={createAgentDisabled}
                 >
-                  {creatingAgent ? 'Summoning...' : 'Create Agent'}
+                  {createAgentLabel}
                 </button>
                 {createError ? <div className="tc-inline-error">{createError}</div> : null}
               </div>

@@ -124,7 +124,7 @@ flowchart TB
         API --> Guard["Guard Service"]
     end
 
-    Sessions["~/.openclaw/ JSONL sessions"] --> Watcher
+    Watcher -.-> Sessions["~/.openclaw/ JSONL sessions"]
     Scanner -.-> Targets["Files / software / hardware"]
     Watcher --> DB[("SQLite DB (~/.xsafeclaw/)")]
     Guard -.-> Model["AgentDoG model"]

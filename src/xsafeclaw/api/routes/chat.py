@@ -194,6 +194,67 @@ def _build_available_models_payload_from_config() -> dict:
     return _ensure_default_model_visible({"models": models, "default_model": default_model})
 
 
+def _runtime_model_ref_candidates(entry: dict) -> list[str]:
+    refs: list[str] = []
+    key = str(entry.get("key", "")).strip()
+    if key:
+        refs.append(key)
+
+    provider = str(entry.get("provider", "")).strip()
+    model_id = str(entry.get("id", "")).strip()
+    if provider and model_id:
+        refs.append(model_id if "/" in model_id else f"{provider}/{model_id}")
+        if "/" in model_id and not model_id.lower().startswith(f"{provider.lower()}/"):
+            refs.append(f"{provider}/{model_id}")
+    elif model_id and "/" in model_id:
+        refs.append(model_id)
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for ref in refs:
+        lowered = ref.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(ref)
+    return normalized
+
+
+_PROVIDER_ALIASES: dict[str, str] = {
+    "modelstudio": "qwen",
+}
+
+
+def _normalize_provider(provider: str) -> str:
+    return _PROVIDER_ALIASES.get(provider, provider)
+
+
+def _runtime_catalog_match(models: list[dict], target_model_id: str) -> tuple[bool, str | None]:
+    target = str(target_model_id or "").strip().lower()
+    if not target:
+        return False, None
+
+    provider_hint = ""
+    short_id = target
+    if "/" in target:
+        provider_hint, short_id = target.split("/", 1)
+    norm_hint = _normalize_provider(provider_hint)
+
+    for entry in models:
+        for ref in _runtime_model_ref_candidates(entry):
+            candidate = ref.strip()
+            candidate_lower = candidate.lower()
+            if candidate_lower == target:
+                return True, candidate
+            if "/" in candidate_lower:
+                candidate_provider, candidate_short = candidate_lower.split("/", 1)
+                if norm_hint and _normalize_provider(candidate_provider) == norm_hint and candidate_short == short_id:
+                    return True, candidate
+                if not norm_hint and candidate_short == short_id:
+                    return True, candidate
+    return False, None
+
+
 def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     """
     Read chat history from OpenClaw's local .jsonl storage.
@@ -509,6 +570,13 @@ async def _get_or_create_client(session_key: str) -> GatewayClient:
 class StartSessionResponse(BaseModel):
     session_key: str
     status: str = "connected"
+
+
+class ModelReadinessResponse(BaseModel):
+    model_id: str
+    ready: bool
+    visible_model_id: str | None = None
+    reason: str | None = None
 
 
 class StartSessionRequest(BaseModel):
@@ -845,3 +913,46 @@ async def available_models():
         _available_models_cache["payload"] = empty_payload
         _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
         return empty_payload
+
+
+@router.get("/model-readiness", response_model=ModelReadinessResponse)
+async def model_readiness(
+    model_id: str = Query(..., description="Model in provider/model format"),
+):
+    """Check whether the running gateway currently accepts a model selection."""
+    target_model_id = str(model_id or "").strip()
+    if not target_model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+
+    client: GatewayClient | None = None
+    try:
+        client = await _connect_gateway_with_retries()
+        raw = await client.list_models()
+        models = raw.get("models", []) if isinstance(raw, dict) else raw
+        matched, visible_model_id = _runtime_catalog_match(
+            models if isinstance(models, list) else [],
+            target_model_id,
+        )
+        return ModelReadinessResponse(
+            model_id=target_model_id,
+            ready=matched,
+            visible_model_id=visible_model_id,
+        )
+    except HTTPException as exc:
+        return ModelReadinessResponse(
+            model_id=target_model_id,
+            ready=False,
+            reason=str(exc.detail),
+        )
+    except Exception as exc:
+        return ModelReadinessResponse(
+            model_id=target_model_id,
+            ready=False,
+            reason=str(exc),
+        )
+    finally:
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass

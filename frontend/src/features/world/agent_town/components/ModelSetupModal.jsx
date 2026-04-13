@@ -76,31 +76,7 @@ function deriveCustomProviderId(baseUrl, explicitProviderId = '') {
   }
 }
 
-function resolveRelevantProviderIds(authProviderId, authMethodId, authProviders) {
-  const provider = authProviders.find((item) => item.id === authProviderId);
-  if (!provider) return [];
-  const methods = provider.methods || [];
-  const selectedMethod = methods.find((method) => method.id === authMethodId)
-    || (methods.length === 1 ? methods[0] : null);
-  const explicitProviderIds = selectedMethod?.modelProviders;
-  if (Array.isArray(explicitProviderIds) && explicitProviderIds.length > 0) {
-    return explicitProviderIds;
-  }
-  if (authProviderId && !AGGREGATOR_PROVIDERS.has(authProviderId)) {
-    return [authProviderId];
-  }
-  return [];
-}
-
-function getPrefilledApiKey(authProviderId, authMethodId, authProviders, defaults) {
-  const configuredKeys = defaults?.configured_provider_api_keys || {};
-  const providerIds = resolveRelevantProviderIds(authProviderId, authMethodId, authProviders);
-  for (const providerId of providerIds) {
-    const key = String(configuredKeys?.[providerId] || '').trim();
-    if (key) return key;
-  }
-  return '';
-}
+const API_KEY_MASK = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
 
 function buildInitialForm(defaults = {}) {
   return {
@@ -255,6 +231,7 @@ export default function ModelSetupModal({
   const [showKey, setShowKey] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+  const [providerHasExistingKey, setProviderHasExistingKey] = useState(false);
 
   const availableAuthProviders = useMemo(
     () => authProviders.filter((provider) => provider.id !== 'skip'),
@@ -331,40 +308,56 @@ export default function ModelSetupModal({
         configuredModelId = `${deriveCustomProviderId(form.customBaseUrl, form.customProviderId)}/${form.customModelId.trim()}`;
       }
 
-      // Preserve the current gateway / workspace defaults while only updating provider credentials and model.
-      await systemAPI.onboardConfig({
-        mode: defaults?.mode || 'local',
-        provider: effectiveProvider,
-        api_key: form.apiKey,
-        model_id: configuredModelId,
-        gateway_port: defaults?.gateway_port ?? form.gatewayPort,
-        gateway_bind: defaults?.gateway_bind || form.gatewayBind,
-        gateway_auth_mode: defaults?.gateway_auth_mode || form.gatewayAuthMode,
-        gateway_token: defaults?.gateway_token || form.gatewayToken,
-        workspace: defaults?.workspace || form.workspace,
-        install_daemon: defaults?.install_daemon ?? form.installDaemon,
-        tailscale_mode: defaults?.tailscale_mode || form.tailscaleMode,
-        search_provider: defaults?.search_provider || form.searchProvider,
-        search_api_key: defaults?.search_api_key || form.searchApiKey,
-        remote_url: defaults?.remote_url || form.remoteUrl,
-        remote_token: defaults?.remote_token || form.remoteToken,
-        hooks: Array.isArray(defaults?.enabled_hooks) ? defaults.enabled_hooks : form.hooks,
-        cf_account_id: form.cfAccountId,
-        cf_gateway_id: form.cfGatewayId,
-        litellm_base_url: form.litellmBaseUrl,
-        vllm_base_url: form.vllmBaseUrl,
-        vllm_model_id: form.vllmModelId,
-        custom_base_url: form.customBaseUrl,
-        custom_model_id: form.customModelId,
-        custom_provider_id: form.customProviderId,
-        custom_compatibility: form.customCompatibility,
-      });
+      const realApiKey = form.apiKey === API_KEY_MASK ? '' : form.apiKey;
+
+      const isSimpleSetup = form.authProvider !== 'vllm'
+        && form.authProvider !== 'custom'
+        && form.authProvider !== 'cloudflare-ai-gateway';
+
+      let modelReady = false;
+      if (isSimpleSetup) {
+        const res = await systemAPI.quickModelConfig({
+          provider: effectiveProvider,
+          api_key: realApiKey,
+          model_id: configuredModelId,
+        });
+        modelReady = Boolean(res.data?.model_ready);
+      } else {
+        await systemAPI.onboardConfig({
+          mode: defaults?.mode || 'local',
+          provider: effectiveProvider,
+          api_key: realApiKey,
+          model_id: configuredModelId,
+          gateway_port: defaults?.gateway_port ?? form.gatewayPort,
+          gateway_bind: defaults?.gateway_bind || form.gatewayBind,
+          gateway_auth_mode: defaults?.gateway_auth_mode || form.gatewayAuthMode,
+          gateway_token: defaults?.gateway_token || form.gatewayToken,
+          workspace: defaults?.workspace || form.workspace,
+          install_daemon: defaults?.install_daemon ?? form.installDaemon,
+          tailscale_mode: defaults?.tailscale_mode || form.tailscaleMode,
+          search_provider: defaults?.search_provider || form.searchProvider,
+          search_api_key: defaults?.search_api_key || form.searchApiKey,
+          remote_url: defaults?.remote_url || form.remoteUrl,
+          remote_token: defaults?.remote_token || form.remoteToken,
+          hooks: Array.isArray(defaults?.enabled_hooks) ? defaults.enabled_hooks : form.hooks,
+          cf_account_id: form.cfAccountId,
+          cf_gateway_id: form.cfGatewayId,
+          litellm_base_url: form.litellmBaseUrl,
+          vllm_base_url: form.vllmBaseUrl,
+          vllm_model_id: form.vllmModelId,
+          custom_base_url: form.customBaseUrl,
+          custom_model_id: form.customModelId,
+          custom_provider_id: form.customProviderId,
+          custom_compatibility: form.customCompatibility,
+        });
+      }
 
       await onConfigured?.({
         modelId: configuredModelId,
         modelName: selectedModel?.name || configuredModelId,
         provider: configuredModelId.split('/')[0] || '',
         reasoning: Boolean(selectedModel?.reasoning),
+        modelReady,
       });
     } catch (err) {
       setSubmitError(safeErrorMessage(err, 'Failed to configure this model.'));
@@ -418,7 +411,8 @@ export default function ModelSetupModal({
           {loading ? (
             <div className="tc-model-setup-state">
               <Loader2 className="tc-model-setup-spinner" />
-              <span>Loading configure data...</span>
+              <span>Loading model catalog...</span>
+              <span className="tc-model-setup-state-hint">First load after upgrade may take longer</span>
             </div>
           ) : loadingError ? (
             <div className="tc-inline-error tc-model-setup-error-panel">
@@ -446,12 +440,12 @@ export default function ModelSetupModal({
                   if (!provider || provider.supported === false) return;
                   const methods = provider.methods || [];
                   const nextAuthMethod = methods.length === 1 ? methods[0].id : '';
-                  const prefilledApiKey = getPrefilledApiKey(id, nextAuthMethod, availableAuthProviders, defaults);
+                  setProviderHasExistingKey(false);
                   setForm((prev) => ({
                     ...prev,
                     authProvider: id,
                     authMethod: nextAuthMethod,
-                    apiKey: prefilledApiKey,
+                    apiKey: '',
                     modelId: '',
                     cfAccountId: '',
                     cfGatewayId: '',
@@ -464,6 +458,13 @@ export default function ModelSetupModal({
                     customCompatibility: DEFAULT_FORM.customCompatibility,
                   }));
                   setManualModelEntry(false);
+                  systemAPI.providerHasKey(id).then((res) => {
+                    const hasKey = Boolean(res.data?.has_key);
+                    setProviderHasExistingKey(hasKey);
+                    if (hasKey) {
+                      setForm((prev) => prev.authProvider === id && !prev.apiKey ? { ...prev, apiKey: API_KEY_MASK } : prev);
+                    }
+                  }).catch(() => {});
                 }}
                 renderOption={(option, selected) => (
                   <div className="tc-model-setup-option-copy">
@@ -488,16 +489,10 @@ export default function ModelSetupModal({
                         type="button"
                         className={`tc-model-setup-chip ${form.authMethod === method.id ? 'tc-model-setup-chip-selected' : ''}`}
                         onClick={() => {
-                          const prefilledApiKey = getPrefilledApiKey(
-                            form.authProvider,
-                            method.id,
-                            availableAuthProviders,
-                            defaults,
-                          );
                           setForm((prev) => ({
                             ...prev,
                             authMethod: method.id,
-                            apiKey: prefilledApiKey,
+                            apiKey: prev.apiKey === API_KEY_MASK ? API_KEY_MASK : '',
                             modelId: '',
                           }));
                           setManualModelEntry(false);
@@ -523,15 +518,24 @@ export default function ModelSetupModal({
                   </label>
                   <div className="tc-model-setup-secret">
                     <input
-                      type={showKey ? 'text' : 'password'}
+                      type={form.apiKey === API_KEY_MASK ? 'password' : showKey ? 'text' : 'password'}
                       value={form.apiKey}
-                      onChange={(event) => setForm((prev) => ({ ...prev, apiKey: event.target.value }))}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        if (form.apiKey === API_KEY_MASK && next !== API_KEY_MASK) {
+                          setForm((prev) => ({ ...prev, apiKey: next.replace(API_KEY_MASK, '') }));
+                        } else {
+                          setForm((prev) => ({ ...prev, apiKey: next }));
+                        }
+                      }}
                       placeholder="Paste your API key"
                       className="tc-model-setup-input"
                     />
-                    <button type="button" className="tc-model-setup-secret-toggle" onClick={() => setShowKey((prev) => !prev)}>
-                      {showKey ? <EyeOff className="tc-model-setup-secret-icon" /> : <Eye className="tc-model-setup-secret-icon" />}
-                    </button>
+                    {form.apiKey !== API_KEY_MASK ? (
+                      <button type="button" className="tc-model-setup-secret-toggle" onClick={() => setShowKey((prev) => !prev)}>
+                        {showKey ? <EyeOff className="tc-model-setup-secret-icon" /> : <Eye className="tc-model-setup-secret-icon" />}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               ) : null}
@@ -759,7 +763,7 @@ export default function ModelSetupModal({
             disabled={loading || submitting || !!currentValidationError}
           >
             {submitting ? <Loader2 className="tc-model-setup-apply-spinner" /> : <Key className="tc-model-setup-apply-icon" />}
-            <span>{submitting ? 'Applying...' : 'Apply In Agent Valley'}</span>
+            <span>{submitting ? 'Applying...' : 'Add New Model'}</span>
           </button>
         </div>
       </section>

@@ -41,6 +41,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     
     # Startup
     print("🚀 Starting XSafeClaw Application...")
+
+    from .routes.system import sanitize_legacy_openclaw_config
+    if sanitize_legacy_openclaw_config():
+        print("🧹 Removed legacy XSafeClaw config keys from openclaw.json")
     
     # Initialize database
     await init_db()

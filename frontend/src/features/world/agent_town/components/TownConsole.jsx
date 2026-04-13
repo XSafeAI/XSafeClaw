@@ -1293,6 +1293,7 @@ export default function TownConsole({
   const [recentlyConfiguredModelId, setRecentlyConfiguredModelId] = useState('');
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [createError, setCreateError] = useState('');
+  const [modelValidationMap, setModelValidationMap] = useState({});
   const [guardResolvingId, setGuardResolvingId] = useState(null);
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
   const [pendingImagesMap, setPendingImagesMap] = useState({});
@@ -1300,6 +1301,15 @@ export default function TownConsole({
   const stopRequestedRef = useRef(false);
   const mockReplyTimeoutRef = useRef(null);
   const fileInputRef = useRef(null);
+  const modelValidationJobsRef = useRef(new Map());
+  const modelValidationMapRef = useRef({});
+  const pendingModelIdRef = useRef('');
+  const recentlyConfiguredModelIdRef = useRef('');
+  const didAutoSelectModelRef = useRef(false);
+
+  modelValidationMapRef.current = modelValidationMap;
+  pendingModelIdRef.current = pendingModelId;
+  recentlyConfiguredModelIdRef.current = recentlyConfiguredModelId;
 
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024;
@@ -1311,6 +1321,15 @@ export default function TownConsole({
       window.clearTimeout(mockReplyTimeoutRef.current);
       mockReplyTimeoutRef.current = null;
     }
+    for (const job of modelValidationJobsRef.current.values()) {
+      job.cancelled = true;
+      job.controller?.abort();
+      if (job.timeoutId) {
+        window.clearTimeout(job.timeoutId);
+        job.timeoutId = null;
+      }
+    }
+    modelValidationJobsRef.current.clear();
   }, []);
 
   const loadAvailableModels = useCallback(async () => {
@@ -1334,7 +1353,29 @@ export default function TownConsole({
       }
       const json = await response.json();
       const nextModels = Array.isArray(json.models) ? json.models : [];
-      setAvailableModels((prev) => (nextModels.length === 0 && prev.length > 0 ? prev : nextModels));
+      setAvailableModels((prev) => {
+        if (nextModels.length === 0 && prev.length > 0) return prev;
+
+        const merged = new Map(nextModels.map((model) => [model.id, model]));
+        const localValidationIds = new Set(
+          Object.entries(modelValidationMapRef.current)
+            .filter(([, state]) => state?.status === 'checking' || state?.status === 'ready')
+            .map(([modelId]) => modelId),
+        );
+
+        prev.forEach((model) => {
+          const keepLocalModel = (
+            model.id === pendingModelIdRef.current
+            || model.id === recentlyConfiguredModelIdRef.current
+            || localValidationIds.has(model.id)
+          );
+          if (keepLocalModel && !merged.has(model.id)) {
+            merged.set(model.id, model);
+          }
+        });
+
+        return Array.from(merged.values());
+      });
       setDefaultModel((prev) => json.default_model || prev || nextModels[0]?.id || '');
     } catch (err) {
       console.warn('[TownConsole] available-models fetch error:', err);
@@ -1820,6 +1861,15 @@ export default function TownConsole({
     });
   }, [configuredModels, modelSearch]);
 
+  const pendingModelOption = useMemo(() => (
+    configuredModels.find((model) => model.id === pendingModelId)
+    || availableModels.find((model) => model.id === pendingModelId)
+    || null
+  ), [availableModels, configuredModels, pendingModelId]);
+
+  const createAgentDisabled = !pendingModelId || !pendingModelOption || creatingAgent;
+  const createAgentLabel = creatingAgent ? 'Summoning...' : 'Create Agent';
+
   const crewHelpers = useMemo(() => ({
     getAgentIdentity,
     getAgentSessionKey,
@@ -1888,7 +1938,156 @@ export default function TownConsole({
     });
   }, [charNameMap, eventsByAgent, eventsByAgentList, onSelectAgent, tokensByAgent, traceAgentsById]);
 
+  const startModelValidation = useCallback((modelId, modelName = '') => {
+    const targetModelId = String(modelId || '').trim();
+    if (!targetModelId) return Promise.resolve(false);
+
+    const label = String(modelName || '').trim() || targetModelId;
+    const currentState = modelValidationMapRef.current[targetModelId];
+    if (currentState?.status === 'ready') {
+      return Promise.resolve(true);
+    }
+
+    if (USE_AGENT_TOWN_MOCK) {
+      setModelValidationMap((prev) => ({
+        ...prev,
+        [targetModelId]: { status: 'ready', label, lastError: '' },
+      }));
+      return Promise.resolve(true);
+    }
+
+    const runningJob = modelValidationJobsRef.current.get(targetModelId);
+    if (runningJob?.promise) {
+      return runningJob.promise;
+    }
+
+    const job = {
+      cancelled: false,
+      controller: null,
+      timeoutId: null,
+      promise: null,
+    };
+
+    const waitForNextAttempt = (delayMs) => new Promise((resolve) => {
+      if (job.cancelled) {
+        resolve();
+        return;
+      }
+      job.timeoutId = window.setTimeout(() => {
+        job.timeoutId = null;
+        resolve();
+      }, delayMs);
+    });
+
+    setModelValidationMap((prev) => ({
+      ...prev,
+      [targetModelId]: { status: 'checking', label, lastError: '' },
+    }));
+
+    job.promise = (async () => {
+      let attempt = 0;
+
+      while (!job.cancelled) {
+        const controller = new AbortController();
+        job.controller = controller;
+        try {
+          const response = await fetch(`/api/chat/model-readiness?model_id=${encodeURIComponent(targetModelId)}`, {
+            cache: 'no-store',
+            signal: controller.signal,
+          });
+          const payload = await response.json().catch(() => null);
+          if (job.cancelled) return false;
+
+          if (response.ok && payload?.ready) {
+            setModelValidationMap((prev) => ({
+              ...prev,
+              [targetModelId]: { status: 'ready', label, lastError: '' },
+            }));
+            await loadAvailableModels();
+            return true;
+          }
+
+          const message = attempt >= 2
+            ? (payload?.reason || payload?.detail || '')
+            : '';
+          setModelValidationMap((prev) => {
+            const previous = prev[targetModelId];
+            if (previous?.status === 'ready') return prev;
+            return {
+              ...prev,
+              [targetModelId]: {
+                status: 'checking',
+                label: previous?.label || label,
+                lastError: message,
+              },
+            };
+          });
+        } catch (err) {
+          if (job.cancelled || isAbortError(err)) return false;
+          const message = attempt >= 2 && err instanceof Error ? err.message : '';
+          setModelValidationMap((prev) => {
+            const previous = prev[targetModelId];
+            if (previous?.status === 'ready') return prev;
+            return {
+              ...prev,
+              [targetModelId]: {
+                status: 'checking',
+                label: previous?.label || label,
+                lastError: message,
+              },
+            };
+          });
+        } finally {
+          job.controller = null;
+        }
+
+        attempt += 1;
+        const delay = attempt < 5 ? 1000 : attempt < 10 ? 2000 : 4000;
+        await waitForNextAttempt(delay);
+      }
+
+      return false;
+    })().finally(() => {
+      job.controller?.abort();
+      job.controller = null;
+      if (job.timeoutId) {
+        window.clearTimeout(job.timeoutId);
+        job.timeoutId = null;
+      }
+      if (modelValidationJobsRef.current.get(targetModelId) === job) {
+        modelValidationJobsRef.current.delete(targetModelId);
+      }
+    });
+
+    modelValidationJobsRef.current.set(targetModelId, job);
+    return job.promise;
+  }, [loadAvailableModels]);
+
+  useEffect(() => {
+    const currentSelectionStillExists = pendingModelId
+      ? configuredModels.some((model) => model.id === pendingModelId)
+      : false;
+    if (currentSelectionStillExists) {
+      return;
+    }
+
+    const fallbackModelId = lastUsedConfiguredModelId || defaultModel || configuredModels[0]?.id || '';
+    if (!fallbackModelId) {
+      return;
+    }
+
+    if (!pendingModelId && didAutoSelectModelRef.current) {
+      return;
+    }
+
+    didAutoSelectModelRef.current = true;
+    setPendingModelId(fallbackModelId);
+  }, [configuredModels, defaultModel, lastUsedConfiguredModelId, pendingModelId]);
+
+  // Model readiness is now checked at Create Agent click time, not via background polling.
+
   const handlePickModel = useCallback((modelId) => {
+    didAutoSelectModelRef.current = true;
     setPendingModelId((prev) => (prev === modelId ? '' : modelId));
     setCreateError('');
   }, []);
@@ -1898,7 +2097,7 @@ export default function TownConsole({
     setCreateError('');
   }, []);
 
-  const handleModelConfigured = useCallback(async ({ modelId, modelName, provider, reasoning }) => {
+  const handleModelConfigured = useCallback(async ({ modelId, modelName, provider, reasoning, modelReady }) => {
     const normalizedModel = {
       id: modelId,
       name: modelName || modelId,
@@ -1912,21 +2111,36 @@ export default function TownConsole({
         : [normalizedModel, ...prev]
     ));
     setDefaultModel(modelId || '');
+    didAutoSelectModelRef.current = true;
     setPendingModelId(modelId || '');
     setRecentlyConfiguredModelId(modelId || '');
     setModelSetupOpen(false);
     setCreateError('');
-
-    await loadAvailableModels();
-    loadModelCatalog(true);
-  }, [loadAvailableModels, loadModelCatalog]);
+  }, []);
 
   const handleCreateAgent = useCallback(async () => {
-    if (!pendingModelId || creatingAgent) return;
+    if (!pendingModelId || !pendingModelOption || creatingAgent) return;
 
     setCreatingAgent(true);
     setCreateError('');
     try {
+      // Quick readiness check — don't block the button, but catch unready models early.
+      try {
+        const readinessRes = await fetch(
+          `/api/chat/model-readiness?model_id=${encodeURIComponent(pendingModelId)}`,
+          { cache: 'no-store' },
+        );
+        const readiness = await readinessRes.json().catch(() => null);
+        if (readinessRes.ok && readiness && !readiness.ready) {
+          const reason = readiness.reason || 'Model is still being prepared by the gateway. Try again in a few seconds.';
+          setCreateError(reason);
+          setCreatingAgent(false);
+          return;
+        }
+      } catch {
+        // Readiness check failed — proceed anyway, start-session will catch real errors.
+      }
+
       const modelOption = configuredModels.find((item) => item.id === pendingModelId);
 
       if (USE_AGENT_TOWN_MOCK) {
@@ -1979,7 +2193,7 @@ export default function TownConsole({
     } finally {
       setCreatingAgent(false);
     }
-  }, [configuredModels, creatingAgent, pendingModelId]);
+  }, [configuredModels, creatingAgent, pendingModelId, pendingModelOption]);
 
   const handleSendTask = useCallback(async () => {
     if (!currentSessionKey || !currentIdentity || sendingIdentity === currentIdentity) return;
@@ -2263,7 +2477,8 @@ export default function TownConsole({
                   onPickModel={handlePickModel}
                   onOpenModelSetup={handleOpenModelSetup}
                   onCreateAgent={handleCreateAgent}
-                  creatingAgent={creatingAgent}
+                  createAgentDisabled={createAgentDisabled}
+                  createAgentLabel={createAgentLabel}
                   createError={createError}
                   taskStatusMeta={TASK_STATUS_META}
                   pendingApprovals={pendingApprovals}

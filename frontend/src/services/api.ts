@@ -370,6 +370,12 @@ export const systemAPI = {
       '/system/feishu-test',
       { app_id: appId, app_secret: appSecret, domain },
     ),
+
+  quickModelConfig: (data: { provider: string; api_key?: string; model_id: string }) =>
+    api.post<{ success: boolean; fast_path: boolean; output?: string }>('/system/quick-model-config', data),
+
+  providerHasKey: (provider: string) =>
+    api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
 };
 
 export const skillsAPI = {

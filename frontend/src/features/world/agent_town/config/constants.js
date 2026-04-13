@@ -9,7 +9,7 @@ export const NPC_SCALE = 3.9;
 export const USE_AGENT_TOWN_MOCK = false;
 
 // ── Demo mode (env var, default ON) ──
-export const DEMO_MODE = (import.meta.env.VITE_DEMO_MODE ?? 'true') === 'true';
+export const DEMO_MODE = (import.meta.env.VITE_DEMO_MODE ?? 'false') === 'true';
 export const DEMO_CHAR_NAME = 'Lucy';
 const _demoSessionKeys = new Set(JSON.parse(localStorage.getItem('_demo_sessions') || '[]'));
 function _normKey(k) {
