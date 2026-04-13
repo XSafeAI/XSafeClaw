@@ -259,7 +259,7 @@ cd frontend && npm run build     # outputs to src/xsafeclaw/static/
 
 XSafeClaw is open-sourced under the MIT License for academic research and personal use. For **commercial licensing, enterprise deployment, or collaboration**, please contact:
 
-**Email:** xingjunma@fudan.edu.cn
+**Email:** xingjunma&#64;fudan.edu.cn
 
 
 ---
