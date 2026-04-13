@@ -210,6 +210,11 @@ If guard variables are not set, XSafeClaw reads model configuration from `~/.ope
 Prerequisites: Python 3.11+, Node.js 18+, [uv](https://docs.astral.sh/uv/) (recommended)
 
 ```bash
+# Install uv project manager (if you don't already have it) 
+curl -LsSf https://astral.sh/uv/install.sh | sh   
+```
+
+```bash
 git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw
 
 # Backend

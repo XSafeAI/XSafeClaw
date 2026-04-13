@@ -208,6 +208,12 @@ XSafeClaw 默认配置开箱即用。如需自定义，将 `.env.example` 复制
 前提条件：Python 3.11+、Node.js 18+、[uv](https://docs.astral.sh/uv/)（推荐）
 
 ```bash
+# 安装 uv（如尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+# winget install --id=astral-sh.uv -e              # Windows
+```
+
+```bash
 git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw
 
 # 后端
