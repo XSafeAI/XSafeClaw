@@ -37,7 +37,7 @@ Real-time agent monitoring, security guardrails, and red-team testing for buildi
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
-|  🚀   | 2026-04-13 | **v 0.1.7 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
+|  🚀   | 2026-04-13 | **v 1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
 
 ---
 
