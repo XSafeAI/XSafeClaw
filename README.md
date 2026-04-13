@@ -1,22 +1,28 @@
+[English](README.md) · [中文文档](README_zh.md)
 
-<div align="center">
-
-
-<img src="assets/claw_logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
-
-
-**Build, Monitor, and Secure Your Agents**
-
-[An Open-Source Agent Safety Platform](https://xsafeclaw.ai)
-
-Real-time agent monitoring, security guardrails, and red-team testing for building reliable and safe AI agents.
-
+# XSafeClaw
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![React 19](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+<div align="center">
+<img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
+
+
+**Build, Monitor, and Secure Your Agents**
 </div>
+
+> AI agents are not just new software. They are software that can be talked into doing dangerous things. As agents move from chatbots to active systems that browse the web, execute code, and operate inside real workflows, we have handed language models the keys to our infrastructure before figuring out how to keep them on the rails.
+>
+> This breaks traditional security assumptions entirely. In conventional systems, behavior is defined in code. In agents, behavior emerges at runtime from instructions, retrieved content, memory, and long decision loops. An attacker no longer needs to exploit a bug. They can manipulate the agent's reasoning, redirect its trajectory, or turn small permissions into larger ones over time. Prompt injection, tool misuse, and silent privilege escalation are not edge cases. They are structural properties of the execution model. Most teams only discover this when reading logs after the fact. That is forensics, not security.
+>
+> **XSafeClaw** is built for that reality. It is an open-source defense platform that treats agent security as a live control problem, not a postmortem exercise. In the agent era, capability without defense is not progress. It is unmanaged exposure.
+
+🚀 <a href="#-quick-start">Get Started</a> &nbsp;·&nbsp;
+📖 <a href="docs/installation.pdf">Documentation</a> &nbsp;·&nbsp;
+🌐 <a href="https://xsafeclaw.ai">Project Website</a> &nbsp;·&nbsp;
+▶️ <a href="https://youtu.be/HIqwFVeuiKs">YouTube Demo</a>
 
 ---
 
@@ -67,11 +73,15 @@ Browser opens automatically at `http://127.0.0.1:6874`. If OpenClaw is not yet i
 
 Common options:
 
+
+
 ```bash
 xsafeclaw start --port 8080              # custom port
 xsafeclaw start --host 0.0.0.0           # accessible from LAN
 xsafeclaw start --no-browser --reload    # headless dev mode
 ```
+
+<p align="center"><img src="assets/comon_option.png" width="580" /></p>
 
 ---
 
@@ -208,6 +218,11 @@ If guard variables are not set, XSafeClaw reads model configuration from `~/.ope
 ## 🔧 Development
 
 Prerequisites: Python 3.11+, Node.js 18+, [uv](https://docs.astral.sh/uv/) (recommended)
+
+```bash
+# Install uv project manager (if you don't already have it) 
+curl -LsSf https://astral.sh/uv/install.sh | sh   
+```
 
 ```bash
 git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw

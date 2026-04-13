@@ -1,29 +1,37 @@
+[English](README.md) · [中文文档](README_zh.md)
+
 # XSafeClaw
 
 <div align="center">
 
 <img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
 
-[English](README.md)
-
-**守护你的 Claw 安全。**
-
-面向 OpenClaw AI 智能体的实时监控、安全守卫与红队测试平台。
-
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![React 19](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+**构建、监控并保护你的智能体**
 </div>
+
+> AI 智能体不只是新软件，它们是可以被「说服」去做危险事情的软件。随着智能体从聊天机器人演变为能够浏览网页、执行代码、接入真实工作流的主动系统，我们在还没想好如何「上锁」之前，就已经把基础设施的钥匙交给了语言模型。
+>
+> 这从根本上打破了传统安全假设。在常规系统中，行为由代码定义；在智能体中，行为在运行时由指令、检索内容、记忆和长链路决策循环动态涌现。攻击者不再需要利用漏洞，他们可以操纵智能体的推理、重定向其执行轨迹，或将小权限逐步扩大。提示注入、工具滥用、静默权限提升不是边缘情况，而是执行模型的结构性属性。大多数团队只在事后读日志时才发现问题——那是取证，不是安全。
+>
+> **XSafeClaw** 正是为此而生。它是一个开源智能体防御平台，将智能体安全视为实时控制问题，而非事后复盘。在智能体时代，没有防御的能力不是进步，而是未受管理的暴露风险。
+
+🚀 <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
+📖 <a href="docs/installation.pdf">安装文档</a> &nbsp;·&nbsp;
+🌐 <a href="https://xsafeclaw.ai">项目官网</a> &nbsp;·&nbsp;
+▶️ <a href="https://youtu.be/HIqwFVeuiKs">演示视频</a>
 
 ---
 
-## 🎬 宣传视频
+## 🎬 XSafeClaw 介绍
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=YOUR_VIDEO_ID" title="XSafeClaw 概览">
-    <img src="assets/cover.png" alt="观看 XSafeClaw 概览视频">
+  <a href="https://youtu.be/HIqwFVeuiKs" title="XSafeClaw 介绍视频">
+    <img src="assets/cover.png" alt="XSafeClaw：来自复旦大学的开源智能体安全平台">
   </a>
 </p>
 
@@ -206,6 +214,12 @@ XSafeClaw 默认配置开箱即用。如需自定义，将 `.env.example` 复制
 ## 🔧 开发
 
 前提条件：Python 3.11+、Node.js 18+、[uv](https://docs.astral.sh/uv/)（推荐）
+
+```bash
+# 安装 uv（如尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+# winget install --id=astral-sh.uv -e              # Windows
+```
 
 ```bash
 git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw
