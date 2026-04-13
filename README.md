@@ -44,7 +44,7 @@ Real-time agent monitoring, security guardrails, and red-team testing for buildi
 
 ## 🔍 What is XSafeClaw?
 
-XSafeClaw is a security-focused companion platform for [OpenClaw](https://openclaw.ai) AI agents. It monitors agent activity in real time, intercepts unsafe tool calls before they execute, scans system assets for risk, and provides automated red team testing — all from a single `xsafeclaw start` command.
+XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command.
 
 | Module               | Description                                                  |
 | :------------------- | :----------------------------------------------------------- |
