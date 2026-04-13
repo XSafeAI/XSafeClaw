@@ -457,6 +457,9 @@ async def config_reset(body: ConfigResetRequest):
     if _CONFIG_PATH.exists():
         _CONFIG_PATH.unlink()
         deleted.append(str(_CONFIG_PATH))
+    if _EXPLICIT_MODELS_PATH.exists():
+        _EXPLICIT_MODELS_PATH.unlink()
+        deleted.append(str(_EXPLICIT_MODELS_PATH))
 
     if body.scope in ("config+creds+sessions", "full"):
         for p in [
@@ -1037,6 +1040,7 @@ AVAILABLE_CHANNELS = [
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 
 # ── Dynamic auth-provider scanning ───────────────────────────────────────────
 # Reads each extension's openclaw.plugin.json at runtime so the provider list
@@ -1927,6 +1931,149 @@ def _ensure_selected_model_entry(config: dict, model_id: str) -> bool:
     return True
 
 
+def _normalize_full_model_id(model_id: str, provider_hint: str = "") -> str:
+    target = str(model_id or "").strip()
+    if not target:
+        return ""
+    if "/" in target:
+        return target
+    if provider_hint:
+        return f"{provider_hint}/{target}"
+
+    lookup = _lookup_catalog_model(target)
+    if lookup and lookup[0]:
+        return f"{lookup[0]}/{target}"
+    return target
+
+
+def _load_explicit_model_ids() -> list[str]:
+    if not _EXPLICIT_MODELS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(_EXPLICIT_MODELS_PATH.read_text("utf-8"))
+    except Exception:
+        return []
+
+    raw_ids = payload.get("explicitModels", []) if isinstance(payload, dict) else payload
+    if not isinstance(raw_ids, list):
+        return []
+
+    explicit_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_id in raw_ids:
+        full_id = _normalize_full_model_id(str(raw_id or "").strip())
+        if not full_id or "/" not in full_id or full_id in seen:
+            continue
+        seen.add(full_id)
+        explicit_ids.append(full_id)
+    return explicit_ids
+
+
+def _collect_explicit_model_ids(config: dict, *, ignore_provider: str = "") -> list[str]:
+    explicit_ids = _load_explicit_model_ids()
+    if explicit_ids:
+        return explicit_ids
+
+    explicit_ids = []
+    seen: set[str] = set()
+    providers_cfg = (
+        config.get("models", {})
+        .get("providers", {})
+    )
+    for provider_key, provider_cfg in providers_cfg.items():
+        if ignore_provider and provider_key == ignore_provider:
+            continue
+        for model in provider_cfg.get("models", []) or []:
+            if not isinstance(model, dict):
+                continue
+            full_id = _normalize_full_model_id(model.get("id", ""), provider_key)
+            if not full_id or "/" not in full_id or full_id in seen:
+                continue
+            seen.add(full_id)
+            explicit_ids.append(full_id)
+
+    return explicit_ids
+
+
+def _set_explicit_model_ids(model_ids: list[str]) -> bool:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for model_id in model_ids:
+        full_id = _normalize_full_model_id(model_id)
+        if not full_id or "/" not in full_id or full_id in seen:
+            continue
+        seen.add(full_id)
+        normalized.append(full_id)
+
+    if _load_explicit_model_ids() == normalized:
+        return False
+    _EXPLICIT_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _EXPLICIT_MODELS_PATH.write_text(
+        json.dumps({"explicitModels": normalized}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
+def _prune_configured_models_to_explicit_ids(config: dict, explicit_model_ids: list[str]) -> bool:
+    normalized_ids: list[str] = []
+    explicit_set: set[str] = set()
+    for model_id in explicit_model_ids:
+        full_id = _normalize_full_model_id(model_id)
+        if not full_id or "/" not in full_id or full_id in explicit_set:
+            continue
+        explicit_set.add(full_id)
+        normalized_ids.append(full_id)
+
+    changed = False
+    models_cfg = config.setdefault("models", {})
+    providers_cfg = models_cfg.setdefault("providers", {})
+
+    for provider_key, provider_cfg in providers_cfg.items():
+        models = provider_cfg.get("models")
+        if not isinstance(models, list):
+            if any(model_id.startswith(f"{provider_key}/") for model_id in explicit_set):
+                provider_cfg["models"] = []
+                changed = True
+            continue
+
+        kept_models = []
+        for model in models:
+            if not isinstance(model, dict):
+                changed = True
+                continue
+            full_id = _normalize_full_model_id(model.get("id", ""), provider_key)
+            if full_id in explicit_set:
+                kept_models.append(model)
+            else:
+                changed = True
+
+        if kept_models != models:
+            provider_cfg["models"] = kept_models
+            changed = True
+
+    for model_id in normalized_ids:
+        if _ensure_selected_model_entry(config, model_id):
+            changed = True
+
+    agents = config.setdefault("agents", {})
+    defaults = agents.setdefault("defaults", {})
+    existing_defaults_models = defaults.get("models")
+    next_defaults_models: dict[str, dict] = {}
+    for model_id in normalized_ids:
+        existing_entry = (
+            existing_defaults_models.get(model_id)
+            if isinstance(existing_defaults_models, dict)
+            else None
+        )
+        next_defaults_models[model_id] = existing_entry if isinstance(existing_entry, dict) else {}
+    if existing_defaults_models != next_defaults_models:
+        defaults["models"] = next_defaults_models
+        changed = True
+
+    return changed
+
+
 def _patch_config_extras(body: OnboardConfigRequest) -> None:
     """Merge fields not supported by --non-interactive into openclaw.json."""
     if not _CONFIG_PATH.exists():
@@ -1937,6 +2084,9 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         return
 
     changed = False
+    if "xsafeclaw" in config:
+        config.pop("xsafeclaw", None)
+        changed = True
 
     # Auth-method → (config provider key, baseUrl)
     _BASE_URL_OVERRIDES: dict[str, tuple[str, str]] = {
@@ -2051,11 +2201,17 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
 
     # Model ID override (CLI picks the provider default; user may want a specific model)
     if body.model_id:
-        if _ensure_selected_model_entry(config, body.model_id):
+        normalized_model_id = _normalize_full_model_id(body.model_id)
+        target_provider = normalized_model_id.split("/", 1)[0] if "/" in normalized_model_id else ""
+        explicit_model_ids = _collect_explicit_model_ids(config, ignore_provider=target_provider)
+        explicit_model_ids.append(normalized_model_id or body.model_id)
+        if _set_explicit_model_ids(explicit_model_ids):
+            changed = True
+        if _prune_configured_models_to_explicit_ids(config, explicit_model_ids):
             changed = True
         agents = config.setdefault("agents", {})
         defaults = agents.setdefault("defaults", {})
-        defaults.setdefault("model", {})["primary"] = body.model_id
+        defaults.setdefault("model", {})["primary"] = normalized_model_id or body.model_id
         changed = True
 
     # Channels — Feishu (full config mirroring source onboarding adapter)
