@@ -5,8 +5,15 @@ import {
   FolderOpen, FileText, Loader2, Play, Layers,
   RefreshCw, ChevronRight, ChevronDown, Zap, Server,
   Search, Lock, Check, X, ShieldCheck, ShieldAlert,
+  ArrowUp,
 } from 'lucide-react';
-import { assetsAPI, type SoftwareItem } from '../services/api';
+import {
+  assetsAPI,
+  type DirectoryBrowseResult,
+  type ProtectedPathEntry,
+  type ProtectedPathOperation,
+  type SoftwareItem,
+} from '../services/api';
 import { useI18n } from '../i18n';
 
 /* ==================== Types ==================== */
@@ -55,8 +62,10 @@ const safetyStatusConfig = {
 };
 
 type TabId = 'scan' | 'software' | 'hardware' | 'safety';
+type BrowseTarget = 'scan' | 'safety' | 'deny';
 
 const OPERATIONS = ['read', 'write', 'delete', 'modify', 'create'] as const;
+const PATH_GUARD_OPERATIONS: ProtectedPathOperation[] = ['read', 'modify', 'delete'];
 
 /* ==================== Helpers ==================== */
 function formatUptime(s: number) {
@@ -77,6 +86,56 @@ function formatBytes(bytes: number | null | undefined): string {
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0, s = bytes;
   while (s >= 1024 && i < u.length - 1) { s /= 1024; i++; }
   return `${s.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+}
+
+function getBrowseSeparator(path: string): '\\' | '/' {
+  return path.includes('\\') ? '\\' : '/';
+}
+
+function trimBrowsePath(path: string, rootPath: string): string {
+  const separator = getBrowseSeparator(rootPath || path);
+  const normalizedRoot = rootPath && rootPath !== separator
+    ? rootPath.replace(/[\\/]+$/, '')
+    : rootPath;
+  const normalizedPath = path && path !== separator
+    ? path.replace(/[\\/]+$/, '')
+    : path;
+
+  if (!normalizedRoot) return normalizedPath || path;
+  return normalizedPath === normalizedRoot ? rootPath : normalizedPath || path;
+}
+
+function joinBrowsePath(basePath: string, segment: string, separator: '\\' | '/'): string {
+  if (!basePath) return segment;
+  if (basePath === separator) return `${separator}${segment}`;
+  if (/^[A-Za-z]:[\\/]?$/.test(basePath)) return `${basePath.replace(/[\\/]+$/, '')}${separator}${segment}`;
+  if (/^(\\\\|\/\/)[^\\/]+[\\/][^\\/]+[\\/]?$/.test(basePath)) return `${basePath.replace(/[\\/]+$/, '')}${separator}${segment}`;
+  return `${basePath.replace(/[\\/]+$/, '')}${separator}${segment}`;
+}
+
+function buildBrowseCrumbs(currentPath: string, rootPath: string) {
+  if (!currentPath || !rootPath) return [];
+
+  const separator = getBrowseSeparator(rootPath);
+  const trimmedRoot = trimBrowsePath(rootPath, rootPath);
+  const trimmedCurrent = trimBrowsePath(currentPath, rootPath);
+
+  if (trimmedCurrent === trimmedRoot) return [];
+
+  let relative = trimmedCurrent.slice(trimmedRoot.length);
+  if (relative.startsWith('\\') || relative.startsWith('/')) {
+    relative = relative.slice(1);
+  }
+
+  const segments = relative.split(/[\\/]+/).filter(Boolean);
+  let cursor = rootPath;
+  return segments.map((segment) => {
+    cursor = joinBrowsePath(cursor, segment, separator);
+    return {
+      label: segment,
+      path: cursor,
+    };
+  });
 }
 
 /* ==================== Sub Components ==================== */
@@ -147,6 +206,11 @@ export default function Assets() {
     DENIED: t.assets.safety.denied,
     CONFIRM: t.assets.safety.confirm,
   };
+  const pathGuardOperationLabels: Record<ProtectedPathOperation, string> = {
+    read: t.assets.safety.guardRead,
+    modify: t.assets.safety.guardModify,
+    delete: t.assets.safety.guardDelete,
+  };
 
   const [activeTab, setActiveTab] = useState<TabId>('scan');
 
@@ -158,6 +222,14 @@ export default function Assets() {
   const [scanResult, setScanResult] = useState<ScanResult | null>(() => cacheGet(CACHE_KEYS.fileScanResult));
   const [scanning, setScanning] = useState(false);
   const [scanPath, setScanPath] = useState(() => cacheGet<string>(CACHE_KEYS.fileScanPath) ?? '');
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browseTarget, setBrowseTarget] = useState<BrowseTarget>('scan');
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browsePath, setBrowsePath] = useState('');
+  const [browseParentPath, setBrowseParentPath] = useState<string | null>(null);
+  const [browseRootPath, setBrowseRootPath] = useState('');
+  const [browseEntries, setBrowseEntries] = useState<DirectoryBrowseResult['entries']>([]);
+  const [browseError, setBrowseError] = useState('');
   const [expandedLevels, setExpandedLevels] = useState<Set<number>>(new Set());
   const [scanProgress, setScanProgress] = useState<{ scanned: number; ignored: number }>(
     () => cacheGet(CACHE_KEYS.fileScanProgress) ?? { scanned: 0, ignored: 0 },
@@ -179,7 +251,8 @@ export default function Assets() {
   const [safetyChecking, setSafetyChecking] = useState(false);
   const [safetyHistory, setSafetyHistory] = useState<SafetyResult[]>([]);
   const [denyPath, setDenyPath] = useState('');
-  const [denylist, setDenylist] = useState<string[]>([]);
+  const [denyOps, setDenyOps] = useState<ProtectedPathOperation[]>(['read', 'modify', 'delete']);
+  const [denylist, setDenylist] = useState<ProtectedPathEntry[]>([]);
   const [denyLoading, setDenyLoading] = useState(false);
 
   /* --- Resume in-flight scans on mount --- */
@@ -279,6 +352,54 @@ export default function Assets() {
     finally { setHwLoading(false); }
   }, []);
 
+  const loadBrowse = useCallback(async (path?: string) => {
+    setBrowseLoading(true);
+    setBrowseError('');
+    try {
+      const res = await assetsAPI.browseDirectories(path);
+      setBrowsePath(res.data.current_path);
+      setBrowseParentPath(res.data.parent_path);
+      setBrowseRootPath(res.data.root_path);
+      setBrowseEntries(res.data.entries);
+    } catch (err: any) {
+      setBrowseError(err.response?.data?.detail || t.assets.fileScan.browseError);
+    } finally {
+      setBrowseLoading(false);
+    }
+  }, [t.assets.fileScan.browseError]);
+
+  const openBrowse = useCallback((target: BrowseTarget) => {
+    setBrowseTarget(target);
+    setBrowseOpen(true);
+    const seedPath = (
+      target === 'scan' ? scanPath :
+      target === 'safety' ? safetyPath :
+      denyPath
+    ).trim();
+    loadBrowse(seedPath || undefined);
+  }, [denyPath, loadBrowse, safetyPath, scanPath]);
+
+  const closeBrowse = useCallback(() => {
+    setBrowseOpen(false);
+    setBrowseError('');
+  }, []);
+
+  const selectBrowsePath = useCallback(() => {
+    if (browseTarget === 'scan') {
+      setScanPath(browsePath);
+      cacheSet(CACHE_KEYS.fileScanPath, browsePath);
+    } else if (browseTarget === 'safety') {
+      setSafetyPath(browsePath);
+    } else {
+      setDenyPath(browsePath);
+    }
+    setBrowseOpen(false);
+  }, [browsePath, browseTarget]);
+
+  const browseCrumbs = (() => {
+    return buildBrowseCrumbs(browsePath, browseRootPath);
+  })();
+
   /* --- File Scan --- */
   const runScan = useCallback(async () => {
     setScanProgress({ scanned: 0, ignored: 0 }); setScanResult(null);
@@ -323,36 +444,46 @@ export default function Assets() {
   const loadDenylist = useCallback(async () => {
     try {
       const res = await assetsAPI.getDenylist();
-      setDenylist(res.data.paths);
+      setDenylist(res.data.entries);
     } catch (e) {
       console.error('load denylist failed', e);
     }
   }, []);
 
   const addDeny = useCallback(async () => {
-    if (!denyPath.trim()) return;
+    if (!denyPath.trim() || denyOps.length === 0) return;
     setDenyLoading(true);
     try {
-      const res = await assetsAPI.addDenyPath(denyPath.trim());
-      setDenylist(res.data.paths);
+      const res = await assetsAPI.addDenyPath(denyPath.trim(), denyOps);
+      setDenylist(res.data.entries);
       setDenyPath('');
     } catch (e) {
       alert('添加失败，请重试');
     } finally {
       setDenyLoading(false);
     }
-  }, [denyPath]);
+  }, [denyOps, denyPath]);
 
   const removeDeny = useCallback(async (path: string) => {
     setDenyLoading(true);
     try {
       const res = await assetsAPI.removeDenyPath(path);
-      setDenylist(res.data.paths);
+      setDenylist(res.data.entries);
     } catch (e) {
       alert('移除失败，请重试');
     } finally {
       setDenyLoading(false);
     }
+  }, []);
+
+  const toggleDenyOp = useCallback((operation: ProtectedPathOperation) => {
+    setDenyOps(prev => (
+      prev.includes(operation)
+        ? prev.filter(item => item !== operation)
+        : [...prev, operation].sort(
+            (a, b) => PATH_GUARD_OPERATIONS.indexOf(a) - PATH_GUARD_OPERATIONS.indexOf(b),
+          )
+    ));
   }, []);
 
   useEffect(() => { loadDenylist(); }, [loadDenylist]);
@@ -401,10 +532,17 @@ export default function Assets() {
                   <p className="text-[12px] text-text-muted mb-4">{t.assets.fileScan.desc}</p>
                   <div className="flex gap-2">
                     <div className="relative flex-1">
-                      <FolderOpen className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+                      <button
+                        type="button"
+                        onClick={() => openBrowse('scan')}
+                        title={t.assets.fileScan.browseTrigger}
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-all hover:bg-accent/10 hover:text-accent"
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                      </button>
                       <input type="text" value={scanPath} onChange={e => setScanPath(e.target.value)}
                         placeholder={t.assets.fileScan.pathPlaceholder}
-                        className="w-full pl-10 pr-4 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all" />
+                        className="w-full pl-12 pr-4 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all" />
                     </div>
                     <button onClick={runScan} disabled={scanning}
                       className="px-5 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all flex items-center gap-2 shadow-lg shadow-accent/20">
@@ -545,6 +683,140 @@ export default function Assets() {
           </div>
         )}
 
+        {browseOpen && (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 px-4 py-8 backdrop-blur-sm">
+            <div className="w-full max-w-3xl rounded-2xl border border-border bg-surface-1 shadow-2xl shadow-black/40">
+              <div className="flex items-center justify-between border-b border-border px-6 py-4">
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{t.assets.fileScan.browseTitle}</p>
+                  <p className="mt-1 text-[12px] text-text-muted">{t.assets.fileScan.browseDesc}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeBrowse}
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-text-muted transition-all hover:border-border-active hover:text-text-primary"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-5 p-6">
+                <div className="rounded-xl border border-border bg-surface-0 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">{t.assets.fileScan.currentFolder}</span>
+                    <button
+                      type="button"
+                      onClick={() => browseParentPath && loadBrowse(browseParentPath)}
+                      disabled={!browseParentPath || browseLoading}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-all hover:border-border-active hover:text-text-primary disabled:opacity-40"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                      {t.assets.fileScan.upOneLevel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => loadBrowse(browsePath)}
+                      disabled={browseLoading}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-all hover:border-border-active hover:text-text-primary disabled:opacity-40"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${browseLoading ? 'animate-spin' : ''}`} />
+                      {t.common.refresh}
+                    </button>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => loadBrowse(browseRootPath)}
+                      className="rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-all hover:border-accent/40 hover:text-accent"
+                    >
+                      {browseRootPath || '/'}
+                    </button>
+                    {browseCrumbs.map((crumb) => (
+                      <button
+                        key={crumb.path}
+                        type="button"
+                        onClick={() => loadBrowse(crumb.path)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-all hover:border-accent/40 hover:text-accent"
+                      >
+                        <ChevronRight className="w-3 h-3" />
+                        {crumb.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 rounded-lg border border-border/80 bg-surface-1 px-3 py-2 text-[12px] text-text-secondary break-all">
+                    {browsePath || t.assets.fileScan.pathPlaceholder}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-border bg-surface-0">
+                  <div className="border-b border-border px-4 py-3">
+                    <p className="text-[12px] font-medium text-text-secondary">{t.assets.fileScan.browseHint}</p>
+                  </div>
+                  <div className="max-h-[320px] overflow-y-auto">
+                    {browseLoading ? (
+                      <div className="flex min-h-[220px] items-center justify-center">
+                        <Loader2 className="w-6 h-6 animate-spin text-accent" />
+                      </div>
+                    ) : browseError ? (
+                      <div className="p-6 text-center text-[12px] text-red-400">{browseError}</div>
+                    ) : browseEntries.length === 0 ? (
+                      <div className="p-6 text-center text-[12px] text-text-muted">{t.assets.fileScan.browseEmpty}</div>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {browseEntries.map((entry) => (
+                          <button
+                            key={entry.path}
+                            type="button"
+                            onClick={() => loadBrowse(entry.path)}
+                            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-all hover:bg-surface-2/50"
+                          >
+                            <div className="flex min-w-0 items-center gap-3">
+                              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent/10 text-accent">
+                                <FolderOpen className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="truncate text-[13px] font-medium text-text-primary">
+                                  {entry.name}
+                                  {entry.is_hidden ? <span className="ml-1 text-[11px] text-text-muted">• {t.assets.fileScan.hidden}</span> : null}
+                                </p>
+                                <p className="truncate text-[11px] text-text-muted">{entry.path}</p>
+                              </div>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-text-muted" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[12px] text-text-muted">{t.assets.fileScan.manualHint}</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={closeBrowse}
+                      className="px-4 py-2.5 rounded-lg border border-border text-[13px] font-medium text-text-secondary transition-all hover:border-border-active hover:text-text-primary"
+                    >
+                      {t.common.cancel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={selectBrowsePath}
+                      disabled={!browsePath}
+                      className="px-4 py-2.5 rounded-lg bg-accent text-[13px] font-medium text-white shadow-lg shadow-accent/20 transition-all hover:bg-accent-dim disabled:opacity-40"
+                    >
+                      {t.assets.fileScan.useThisFolder}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ========== Softwares Tab ========== */}
         {activeTab === 'software' && (
           <div className="space-y-5">
@@ -657,10 +929,17 @@ export default function Assets() {
                   <div>
                     <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1.5 block">{t.assets.safety.targetPath}</label>
                     <div className="relative">
-                      <FolderOpen className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+                      <button
+                        type="button"
+                        onClick={() => openBrowse('safety')}
+                        title={t.assets.fileScan.browseTrigger}
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-all hover:bg-accent/10 hover:text-accent"
+                      >
+                        <FolderOpen className="w-4 h-4" />
+                      </button>
                       <input type="text" value={safetyPath} onChange={e => setSafetyPath(e.target.value)}
                         placeholder={t.assets.safety.pathPlaceholder}
-                        className="w-full pl-10 pr-4 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
+                        className="w-full pl-12 pr-4 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
                         onKeyDown={e => e.key === 'Enter' && runSafetyCheck()} />
                     </div>
                   </div>
@@ -694,27 +973,71 @@ export default function Assets() {
                   <div>
                     <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1.5 block">{t.assets.safety.denyPath}</label>
                     <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <button
+                          type="button"
+                          onClick={() => openBrowse('deny')}
+                          title={t.assets.fileScan.browseTrigger}
+                          className="absolute left-2.5 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-all hover:bg-accent/10 hover:text-accent"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                        </button>
                       <input
                         value={denyPath}
                         onChange={e => setDenyPath(e.target.value)}
                         placeholder={t.assets.safety.denyPlaceholder}
-                        className="flex-1 px-3 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
+                        className="w-full pl-12 pr-4 py-2.5 bg-surface-0 border border-border rounded-lg text-[13px] text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
                         onKeyDown={e => e.key === 'Enter' && addDeny()}
                       />
-                      <button onClick={addDeny} disabled={denyLoading || !denyPath.trim()}
+                      </div>
+                      <button onClick={addDeny} disabled={denyLoading || !denyPath.trim() || denyOps.length === 0}
                         className="px-4 py-2.5 bg-accent text-white rounded-lg text-[13px] font-medium hover:bg-accent-dim disabled:opacity-40 transition-all shadow-lg shadow-accent/20">
                         {denyLoading ? t.common.loading : t.common.add}
                       </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-1.5 block">{t.assets.safety.denyOperations}</label>
+                    <p className="text-[11px] text-text-muted mb-2">{t.assets.safety.denyOperationsDesc}</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {PATH_GUARD_OPERATIONS.map((operation) => {
+                        const selected = denyOps.includes(operation);
+                        return (
+                          <button
+                            key={operation}
+                            onClick={() => toggleDenyOp(operation)}
+                            className={`px-3 py-2 rounded-lg text-[12px] font-medium transition-all border ${
+                              selected
+                                ? 'bg-accent/15 text-accent border-accent/40'
+                                : 'bg-surface-0 text-text-muted border-border hover:border-border-active hover:text-text-secondary'
+                            }`}
+                          >
+                            {pathGuardOperationLabels[operation]}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                   <div className="divide-y divide-border rounded-lg border border-border">
                     {denylist.length === 0 && (
                       <div className="p-4 text-[12px] text-text-muted text-center">{t.assets.safety.denyEmpty}</div>
                     )}
-                    {denylist.map((p) => (
-                      <div key={p} className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2/40">
-                        <span className="text-[12px] font-mono text-text-primary break-all flex-1">{p}</span>
-                        <button onClick={() => removeDeny(p)} disabled={denyLoading}
+                    {denylist.map((entry) => (
+                      <div key={entry.path} className="flex items-start gap-3 px-4 py-3 hover:bg-surface-2/40">
+                        <div className="flex-1 min-w-0">
+                          <span className="text-[12px] font-mono text-text-primary break-all block">{entry.path}</span>
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {entry.operations.map(operation => (
+                              <span
+                                key={`${entry.path}-${operation}`}
+                                className="text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-accent/10 text-accent border-accent/20"
+                              >
+                                {pathGuardOperationLabels[operation]}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <button onClick={() => removeDeny(entry.path)} disabled={denyLoading}
                           className="text-[12px] text-error border border-error/30 px-2 py-1 rounded-lg hover:bg-error/10 disabled:opacity-40">
                           {t.common.remove}
                         </button>

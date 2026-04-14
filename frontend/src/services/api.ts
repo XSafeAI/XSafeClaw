@@ -18,6 +18,26 @@ const api = axios.create({
   },
 });
 
+export type ProtectedPathOperation = 'read' | 'modify' | 'delete';
+
+export interface ProtectedPathEntry {
+  path: string;
+  operations: ProtectedPathOperation[];
+}
+
+export interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+  is_hidden: boolean;
+}
+
+export interface DirectoryBrowseResult {
+  current_path: string;
+  parent_path: string | null;
+  root_path: string;
+  entries: DirectoryBrowseEntry[];
+}
+
 // Sessions API
 export const sessionsAPI = {
   list: (params?: { page?: number; page_size?: number }) =>
@@ -75,6 +95,9 @@ export const assetsAPI = {
   startScan: (data: { path?: string; max_depth?: number; scan_system_root?: boolean }) =>
     api.post('/assets/scan', data),
 
+  browseDirectories: (path?: string) =>
+    api.get<DirectoryBrowseResult>('/assets/browse', { params: { path } }),
+
   /** Poll file scan progress */
   scanProgress: (scanId: string) =>
     api.get('/assets/scan/progress', { params: { scan_id: scanId } }),
@@ -108,13 +131,16 @@ export const assetsAPI = {
 
   // Denylist (user-protected paths)
   getDenylist: () =>
-    api.get<{ paths: string[] }>('/assets/denylist'),
+    api.get<{ entries: ProtectedPathEntry[]; paths: string[] }>('/assets/denylist'),
 
-  addDenyPath: (path: string) =>
-    api.post<{ paths: string[] }>('/assets/denylist', { path }),
+  addDenyPath: (path: string, operations: ProtectedPathOperation[]) =>
+    api.post<{ entries: ProtectedPathEntry[]; paths: string[] }>('/assets/denylist', {
+      path,
+      operations,
+    }),
 
   removeDenyPath: (path: string) =>
-    api.delete<{ paths: string[] }>('/assets/denylist', { params: { path } }),
+    api.delete<{ entries: ProtectedPathEntry[]; paths: string[] }>('/assets/denylist', { params: { path } }),
 };
 
 export interface SoftwareItem {
@@ -159,6 +185,53 @@ export interface RiskTestPreviewResult {
   cases: RiskTestCaseItem[];
 }
 
+export interface RiskSignalItem {
+  key: string;
+  label: string;
+}
+
+export interface PersistedRiskRuleItem {
+  id: string;
+  category_key: string;
+  category: string;
+  severity: string;
+  intent: string;
+  keywords: string[];
+  blocked_tools: string[];
+  risk_signals: string[];
+  reason: string;
+  created_at: number;
+  enabled: boolean;
+}
+
+export interface PersistedRiskRuleCreateRequest {
+  category_key: string;
+  category: string;
+  severity: string;
+  intent: string;
+  keywords: string[];
+  blocked_tools: string[];
+  risk_signals: string[];
+  reason: string;
+}
+
+export interface RiskTestExecuteResult {
+  session_key: string;
+  prompt: string;
+  state: string;
+  response_text: string;
+  usage: Record<string, any> | null;
+  stop_reason: string | null;
+  dry_run: boolean;
+  verdict: string;
+  analysis: string;
+  risk_signals: RiskSignalItem[];
+  tool_attempt_count: number;
+  tool_attempts: Record<string, any>[];
+  rule_written: boolean;
+  persisted_rule: PersistedRiskRuleItem | null;
+}
+
 export const riskTestAPI = {
   styles: (locale: 'zh' | 'en') =>
     api.get<RiskTestStyleItem[]>('/risk-test/styles', { params: { locale } }),
@@ -168,6 +241,18 @@ export const riskTestAPI = {
 
   preview: (intent: string, styles?: string[], locale: 'zh' | 'en' = 'zh') =>
     api.post<RiskTestPreviewResult>('/risk-test/preview', { intent, styles, locale }),
+
+  execute: (prompt: string, locale: 'zh' | 'en' = 'zh') =>
+    api.post<RiskTestExecuteResult>('/risk-test/execute', { prompt, locale }),
+
+  rules: () =>
+    api.get<PersistedRiskRuleItem[]>('/risk-test/rules'),
+
+  createRule: (rule: PersistedRiskRuleCreateRequest) =>
+    api.post<PersistedRiskRuleItem>('/risk-test/rules', rule),
+
+  removeRule: (ruleId: string) =>
+    api.delete<PersistedRiskRuleItem[]>(`/risk-test/rules/${ruleId}`),
 };
 
 // Red Team API

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -10,13 +11,16 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ...config import settings
 from ...gateway_client import GatewayClient
+from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 
 # Path to OpenClaw sessions directory
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
 _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
@@ -35,6 +39,34 @@ def _get_available_models_lock() -> asyncio.Lock:
     if _available_models_lock is None:
         _available_models_lock = asyncio.Lock()
     return _available_models_lock
+
+
+def _build_risk_rule_chat_block_message(message: str, reason: str) -> str:
+    is_zh = bool(re.search(r"[\u4e00-\u9fff]", message))
+    if is_zh:
+        return (
+            "该指令已写入长期防护规则，XSafeClaw 已在发送给智能体前直接阻止。"
+            f"\n\n拦截原因：{reason}"
+        )
+    return (
+        "This instruction has been written into a persistent protection rule, so XSafeClaw blocked it before it reached the agent."
+        f"\n\nBlock reason: {reason}"
+    )
+
+
+def _risk_rule_message_precheck(message: str) -> str | None:
+    rules = load_risk_rules(_RISK_RULES_FILE)
+    if not rules:
+        return None
+
+    matched_rule = match_risk_rule_text(message, rules)
+    if not matched_rule:
+        return None
+
+    return _build_risk_rule_chat_block_message(
+        message,
+        build_risk_rule_block_reason(matched_rule),
+    )
 
 
 def _build_available_models_payload(raw: dict | list | None, status_raw: dict | list | None) -> dict:
@@ -663,6 +695,16 @@ async def send_message(request: SendMessageRequest):
     Send a message to the OpenClaw agent and wait for the full response.
     Automatically reconnects if the session client was lost (e.g. server reload).
     """
+    blocked_response = _risk_rule_message_precheck(request.message)
+    if blocked_response:
+        return SendMessageResponse(
+            run_id="",
+            state="final",
+            response_text=blocked_response,
+            usage=None,
+            stop_reason="blocked_by_persistent_rule",
+        )
+
     client = await _get_or_create_client(request.session_key)
 
     try:
@@ -701,6 +743,22 @@ async def send_message_stream(request: SendMessageRequest):
     SSE event format:  data: {"type": "delta"|"final"|"error"|"aborted"|"timeout", "text": "..."}
     Stream ends with:  data: [DONE]
     """
+    blocked_response = _risk_rule_message_precheck(request.message)
+    if blocked_response:
+        async def blocked_event_generator():
+            yield f"data: {json.dumps({'type': 'final', 'text': blocked_response}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            blocked_event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     client = await _get_or_create_client(request.session_key)
 
     # Convert image attachments to OpenClaw's format
