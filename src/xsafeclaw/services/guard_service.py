@@ -34,6 +34,13 @@ import logging
 import httpx
 
 from ..config import settings
+from ..path_protection import (
+    build_block_reason,
+    extract_exec_operations,
+    load_rules,
+    match_protected_scope,
+)
+from ..risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule
 
 logger = logging.getLogger(__name__)
 
@@ -274,48 +281,45 @@ def clear_results() -> None:
 
 
 def _denylist_precheck(tool_name: str, params: dict[str, Any]) -> str | None:
-    """Block any exec targeting a user denylisted path."""
+    """Block exec calls that hit a user-protected path for the matched operation."""
     if tool_name != "exec":
         return None
     cmd = params.get("command") or params.get("cmd") or ""
     if not isinstance(cmd, str) or not cmd.strip():
-        return None
-    try:
-        import shlex
-        parts = shlex.split(cmd)
-    except Exception:
-        return None
-    if not parts:
         return None
 
     denylist = _load_denylist()
     if not denylist:
         return None
 
-    def is_denied(path: Path) -> bool:
-        try:
-            rp = path.expanduser().resolve()
-        except Exception:
-            return False
-        for d in denylist:
-            dp = Path(d)
-            try:
-                rp.relative_to(dp)
-                return True
-            except ValueError:
-                continue
-        return False
+    for operation, target in extract_exec_operations(cmd):
+        protected_root = match_protected_scope(target, operation, denylist)
+        if protected_root:
+            return build_block_reason(target, operation, protected_root)
 
-    for p in parts[1:]:
-        if p.startswith("-"):
-            continue
-        try:
-            target = Path(p)
-        except Exception:
-            continue
-        if is_denied(target):
-            return f"路径被用户保护，操作已阻断：{target}"
+    return None
 
+
+async def _risk_rule_precheck(
+    tool_name: str,
+    params: dict[str, Any],
+    session_key: str,
+) -> str | None:
+    """Block risky tool calls based on persisted dry-run findings."""
+    if session_key.startswith("risk-test-"):
+        return (
+            "风险测试当前处于 dry-run / 预演模式。"
+            "所有工具调用都会被直接阻止，请只输出步骤描述、风险判断或拒绝结果。"
+        )
+
+    rules = _load_risk_rules()
+    if not rules:
+        return None
+
+    session_trajectory = await _fetch_session_trajectory(session_key) if session_key else ""
+    matched_rule = match_risk_rule(session_trajectory, tool_name, params, rules)
+    if matched_rule:
+        return build_risk_rule_block_reason(matched_rule)
     return None
 
 
@@ -665,16 +669,16 @@ _PENDING_TIMEOUT = 300  # 5 minutes max wait
 _guard_enabled: bool = True
 _DENYLIST_FILE = settings.data_dir / "denylist.json"
 _DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+_RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
+_RISK_RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _load_denylist() -> set[str]:
-    if not _DENYLIST_FILE.exists():
-        return set()
-    try:
-        paths = json.loads(_DENYLIST_FILE.read_text())
-        return {str(Path(p).expanduser().resolve()) for p in paths if isinstance(p, str)}
-    except Exception:
-        return set()
+def _load_denylist() -> dict[str, set[str]]:
+    return load_rules(_DENYLIST_FILE)
+
+
+def _load_risk_rules() -> list[dict[str, Any]]:
+    return load_risk_rules(_RISK_RULES_FILE)
 
 
 def is_guard_enabled() -> bool:
@@ -767,6 +771,10 @@ async def check_tool_call(
       action: "allow" | "block"
       reason: str (only when blocked)
     """
+    risk_rule_reason = await _risk_rule_precheck(tool_name, params, session_key)
+    if risk_rule_reason:
+        return {"action": "block", "reason": risk_rule_reason}
+
     deny_reason = _denylist_precheck(tool_name, params)
     if deny_reason:
         return {"action": "block", "reason": deny_reason}

@@ -1,6 +1,8 @@
 """API routes for Asset Scanning."""
 
 import asyncio
+import os
+import stat
 import threading
 import uuid
 from pathlib import Path
@@ -17,6 +19,15 @@ except ImportError:
     SafetyGuard = None
 
 from xsafeclaw.config import settings
+from xsafeclaw.path_protection import (
+    PROTECTED_OPERATION_ORDER,
+    build_block_reason,
+    load_rules,
+    match_protected_rule,
+    normalize_rule_input,
+    save_rules,
+    serialize_rules,
+)
 
 # --------------- Software scan task store ---------------
 # {scan_id: { status, result, error }}
@@ -105,8 +116,25 @@ class AssetListResponse(BaseModel):
 
 
 class DenyEntry(BaseModel):
-    """User-defined denylist entry."""
+    """User-defined path protection rule."""
     path: str
+    operations: list[str] = Field(
+        default_factory=lambda: list(PROTECTED_OPERATION_ORDER),
+        description="Protected operations: read | modify | delete",
+    )
+
+
+class BrowseEntry(BaseModel):
+    name: str
+    path: str
+    is_hidden: bool = False
+
+
+class BrowseResponse(BaseModel):
+    current_path: str
+    parent_path: str | None = None
+    root_path: str
+    entries: list[BrowseEntry]
 
 
 def _build_scan_response(scanner: "AssetScanner", assets: list, per_level_limit: int = 200) -> dict:
@@ -258,20 +286,80 @@ def _cleanup_old_tasks(keep_id: str):
 
 
 # ----------------------- Denylist helpers ----------------------- #
-def _load_denylist() -> set[str]:
-    if not _DENYLIST_FILE.exists():
-        return set()
+def _load_denylist() -> dict[str, set[str]]:
+    return load_rules(_DENYLIST_FILE)
+
+
+def _save_denylist(paths: dict[str, set[str]]) -> None:
+    save_rules(_DENYLIST_FILE, paths)
+
+
+def _resolve_browse_path(raw_path: str | None) -> Path:
+    if raw_path and raw_path.strip():
+        candidate = Path(raw_path).expanduser()
+    else:
+        candidate = Path.home()
+
+    resolved = candidate.resolve(strict=False)
+    if resolved.exists() and resolved.is_file():
+        resolved = resolved.parent
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {candidate}")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {candidate}")
+    return resolved
+
+
+def _is_hidden_directory(path: Path) -> bool:
+    if path.name.startswith("."):
+        return True
+
+    if os.name == "nt":
+        try:
+            attributes = path.stat().st_file_attributes
+        except (AttributeError, OSError):
+            return False
+        return bool(attributes & stat.FILE_ATTRIBUTE_HIDDEN)
+
+    return False
+
+
+def _root_path_for_directory(path: Path) -> str:
+    anchor = path.anchor
+    if anchor:
+        return anchor
+    return str(path)
+
+
+@router.get("/browse", response_model=BrowseResponse)
+async def browse_directories(path: str | None = Query(None, description="Directory to browse")) -> Any:
+    """List child directories for the shared folder picker used across asset forms."""
+    current = _resolve_browse_path(path)
+
     try:
-        import json
-        paths = json.loads(_DENYLIST_FILE.read_text())
-        return {str(Path(p).expanduser().resolve()) for p in paths if isinstance(p, str)}
-    except Exception:
-        return set()
+        children = []
+        for child in current.iterdir():
+            if not child.is_dir():
+                continue
+            children.append(
+                {
+                    "name": child.name or str(child),
+                    "path": str(child.resolve()),
+                    "is_hidden": _is_hidden_directory(child),
+                }
+            )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {current}") from exc
 
-
-def _save_denylist(paths: set[str]) -> None:
-    import json
-    _DENYLIST_FILE.write_text(json.dumps(sorted(paths), ensure_ascii=False, indent=2))
+    children.sort(key=lambda item: (item["is_hidden"], item["name"].lower()))
+    parent = current.parent if current.parent != current else None
+    return {
+        "current_path": str(current),
+        "parent_path": str(parent) if parent else None,
+        "root_path": _root_path_for_directory(current),
+        "entries": children,
+    }
 
 
 @router.get("/hardware", response_model=HardwareScanResponse)
@@ -568,11 +656,12 @@ async def check_safety(request: SafetyCheckRequest) -> Any:
     """
     Check whether a file operation is safe before executing it.
 
-    Uses a four-priority logic:
-    1. Software asset protection (install_location + related_paths) → DENIED
-    2. System / credential paths (LEVEL 0 / 1) → DENIED
-    3. User data (LEVEL 2) + destructive operation → CONFIRM
-    4. Safe / temp zone (LEVEL 3) → ALLOWED
+    Uses a five-priority logic:
+    1. User-defined path protection rules → DENIED
+    2. Software asset protection (install_location + related_paths) → DENIED
+    3. System / credential paths (LEVEL 0 / 1) → DENIED
+    4. User data (LEVEL 2) + destructive operation → CONFIRM
+    5. Safe / temp zone (LEVEL 3) → ALLOWED
 
     **Note**: The software whitelist (`software.json`) is loaded from the
     current working directory on first call. Run `POST /software/scan` and
@@ -589,6 +678,18 @@ async def check_safety(request: SafetyCheckRequest) -> Any:
         _safety_guard = SafetyGuard(str(software_json) if software_json.exists() else "software.json")
 
     try:
+        protected_root = match_protected_rule(
+            request.path,
+            request.operation,
+            _load_denylist(),
+        )
+        if protected_root:
+            return SafetyCheckResponse(
+                status="DENIED",
+                risk_level=0,
+                reason=build_block_reason(request.path, request.operation, protected_root),
+            )
+
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: _safety_guard.check_safety(request.path, request.operation),
@@ -633,25 +734,42 @@ async def reload_software_whitelist() -> dict:
 
 @router.get("/denylist")
 async def list_denylist() -> dict:
-    """Return all user-defined protected paths."""
-    return {"paths": sorted(_load_denylist())}
+    """Return all user-defined path protection rules."""
+    rules = _load_denylist()
+    entries = serialize_rules(rules)
+    return {
+        "entries": entries,
+        "paths": [entry["path"] for entry in entries],
+    }
 
 
 @router.post("/denylist")
 async def add_deny_path(body: DenyEntry) -> dict:
-    """Add a path to the denylist (blocked for all operations)."""
-    resolved = str(Path(body.path).expanduser().resolve())
-    paths = _load_denylist()
-    paths.add(resolved)
-    _save_denylist(paths)
-    return {"paths": sorted(paths)}
+    """Add or update a path protection rule."""
+    try:
+        resolved, operations = normalize_rule_input(body.path, body.operations)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rules = _load_denylist()
+    rules[resolved] = set(operations)
+    _save_denylist(rules)
+    entries = serialize_rules(rules)
+    return {
+        "entries": entries,
+        "paths": [entry["path"] for entry in entries],
+    }
 
 
 @router.delete("/denylist")
 async def remove_deny_path(path: str = Query(..., description="Path to remove from denylist")) -> dict:
     resolved = str(Path(path).expanduser().resolve())
-    paths = _load_denylist()
-    if resolved in paths:
-        paths.remove(resolved)
-        _save_denylist(paths)
-    return {"paths": sorted(paths)}
+    rules = _load_denylist()
+    if resolved in rules:
+        del rules[resolved]
+        _save_denylist(rules)
+    entries = serialize_rules(rules)
+    return {
+        "entries": entries,
+        "paths": [entry["path"] for entry in entries],
+    }
