@@ -221,6 +221,7 @@ export default function Assets() {
   /* --- File Scan (restore from cache) --- */
   const [scanResult, setScanResult] = useState<ScanResult | null>(() => cacheGet(CACHE_KEYS.fileScanResult));
   const [scanning, setScanning] = useState(false);
+  const [scanStopping, setScanStopping] = useState(false);
   const [scanPath, setScanPath] = useState(() => cacheGet<string>(CACHE_KEYS.fileScanPath) ?? '');
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseTarget, setBrowseTarget] = useState<BrowseTarget>('scan');
@@ -259,6 +260,7 @@ export default function Assets() {
   const stopFilePolling = useCallback(() => {
     if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
     setScanning(false);
+    setScanStopping(false);
     cacheDel(CACHE_KEYS.fileScanId);
     fileScanIdRef.current = null;
   }, []);
@@ -277,10 +279,12 @@ export default function Assets() {
         if (prog.data.status === 'completed' && prog.data.result) {
           clearInterval(pollingRef.current!); pollingRef.current = null;
           const result = prog.data.result as ScanResult;
-          setScanResult(result); setScanning(false);
+          setScanResult(result); setScanning(false); setScanStopping(false);
           cacheSet(CACHE_KEYS.fileScanResult, result);
           cacheDel(CACHE_KEYS.fileScanId);
           fileScanIdRef.current = null;
+        } else if (prog.data.status === 'cancelled') {
+          stopFilePolling();
         } else if (prog.data.status === 'failed') {
           stopFilePolling();
         }
@@ -291,6 +295,29 @@ export default function Assets() {
         }
       }
     }, 800);
+  }, [stopFilePolling]);
+
+  const stopFileScan = useCallback(async () => {
+    const scanId = fileScanIdRef.current;
+    if (!scanId) {
+      stopFilePolling();
+      return;
+    }
+
+    setScanStopping(true);
+    try {
+      const res = await assetsAPI.stopScan(scanId);
+      if (['completed', 'failed', 'cancelled'].includes(res.data.status)) {
+        stopFilePolling();
+      }
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        stopFilePolling();
+        return;
+      }
+      setScanStopping(false);
+      alert(err.response?.data?.detail || 'Stop failed');
+    }
   }, [stopFilePolling]);
 
   const stopSoftPolling = useCallback(() => {
@@ -402,6 +429,7 @@ export default function Assets() {
 
   /* --- File Scan --- */
   const runScan = useCallback(async () => {
+    setScanStopping(false);
     setScanProgress({ scanned: 0, ignored: 0 }); setScanResult(null);
     cacheDel(CACHE_KEYS.fileScanResult);
     cacheSet(CACHE_KEYS.fileScanPath, scanPath);
@@ -562,9 +590,9 @@ export default function Assets() {
                       </div>
                       <div className="flex-1"><p className="text-sm font-semibold text-text-primary">{t.assets.fileScan.inProgress}</p>
                         <p className="text-[11px] text-text-muted">{t.assets.fileScan.classifying}</p></div>
-                      <button onClick={stopFilePolling}
-                        className="px-3 py-1.5 bg-red-500/15 text-red-400 border border-red-500/30 rounded-lg text-[12px] font-medium hover:bg-red-500/25 transition-all flex items-center gap-1.5">
-                        <X className="w-3.5 h-3.5" />{t.common.stop}
+                      <button onClick={stopFileScan} disabled={scanStopping}
+                        className="px-3 py-1.5 bg-red-500/15 text-red-400 border border-red-500/30 rounded-lg text-[12px] font-medium hover:bg-red-500/25 transition-all flex items-center gap-1.5 disabled:opacity-60">
+                        {scanStopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}{t.common.stop}
                       </button>
                     </div>
                     <div className="w-full bg-surface-0 rounded-full h-2 overflow-hidden mb-4">

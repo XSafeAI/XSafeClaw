@@ -98,6 +98,10 @@ export const assetsAPI = {
   browseDirectories: (path?: string) =>
     api.get<DirectoryBrowseResult>('/assets/browse', { params: { path } }),
 
+  /** Request cancellation for an async file scan */
+  stopScan: (scanId: string) =>
+    api.post('/assets/scan/stop', { scan_id: scanId }),
+
   /** Poll file scan progress */
   scanProgress: (scanId: string) =>
     api.get('/assets/scan/progress', { params: { scan_id: scanId } }),

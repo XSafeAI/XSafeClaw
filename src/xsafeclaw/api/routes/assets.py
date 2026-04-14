@@ -14,9 +14,12 @@ from pydantic import BaseModel, Field
 # Import from internal asset_scanner module
 try:
     from xsafeclaw.asset_scanner import AssetScanner, SafetyGuard
+    from xsafeclaw.asset_scanner.scanner import ScanCancelledError
 except ImportError:
     AssetScanner = None
     SafetyGuard = None
+    class ScanCancelledError(Exception):
+        """Fallback cancellation error when asset scanner imports are unavailable."""
 
 from xsafeclaw.config import settings
 from xsafeclaw.path_protection import (
@@ -41,7 +44,7 @@ _DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
 router = APIRouter()
 
 # --------------- In-memory scan task store ---------------
-# {scan_id: { status, scanner, scanned_count, ignored_count, error, result }}
+# {scan_id: { status, scanner, error, result }}
 _scan_tasks: dict[str, dict] = {}
 
 
@@ -52,6 +55,12 @@ class ScanRequest(BaseModel):
     path: str | None = Field(None, description="Specific path to scan (default: full system scan)")
     max_depth: int | None = Field(None, ge=1, le=500, description="Maximum scan depth")
     scan_system_root: bool = Field(True, description="Whether to scan system root directory")
+
+
+class StopScanRequest(BaseModel):
+    """Request schema for stopping an in-flight scan."""
+
+    scan_id: str = Field(..., min_length=1, description="Scan task ID")
 
 
 class AssetDetail(BaseModel):
@@ -206,8 +215,11 @@ def _run_scan_sync(scan_id: str, request_path: str | None, max_depth: int, scan_
             )
         task["result"] = _build_scan_response(scanner, assets)
         task["status"] = "completed"
+    except ScanCancelledError as e:
+        task["status"] = "cancelled"
+        task["error"] = str(e)
     except Exception as e:
-        task["status"] = "failed"
+        task["status"] = "cancelled" if getattr(scanner, "stop_requested", False) else "failed"
         task["error"] = str(e)
 
 
@@ -244,6 +256,31 @@ async def scan_assets(request: ScanRequest) -> Any:
     return {"scan_id": scan_id, "status": "running", "message": "Scan started"}
 
 
+@router.post("/scan/stop")
+async def stop_scan(request: StopScanRequest) -> Any:
+    """Request cancellation of an in-flight asset scan."""
+    task = _scan_tasks.get(request.scan_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Scan task not found")
+
+    status = task["status"]
+    if status in ("completed", "failed", "cancelled"):
+        return {
+            "scan_id": request.scan_id,
+            "status": status,
+            "message": f"Scan already {status}",
+        }
+
+    scanner: AssetScanner = task["scanner"]
+    scanner.request_stop()
+    task["status"] = "cancel_requested"
+    return {
+        "scan_id": request.scan_id,
+        "status": "cancel_requested",
+        "message": "Stop requested",
+    }
+
+
 @router.get("/scan/progress")
 async def scan_progress(scan_id: str = Query(..., description="Scan task ID")) -> Any:
     """
@@ -271,6 +308,11 @@ async def scan_progress(scan_id: str = Query(..., description="Scan task ID")) -
         resp["result"] = task["result"]
         # Clean up old tasks to avoid memory leak (keep last 5)
         _cleanup_old_tasks(scan_id)
+    elif task["status"] == "cancel_requested":
+        resp["message"] = "Stop requested"
+    elif task["status"] == "cancelled":
+        resp["message"] = task["error"] or "Scan cancelled"
+        _cleanup_old_tasks(scan_id)
     elif task["status"] == "failed":
         resp["error"] = task["error"]
         _cleanup_old_tasks(scan_id)
@@ -280,7 +322,10 @@ async def scan_progress(scan_id: str = Query(..., description="Scan task ID")) -
 
 def _cleanup_old_tasks(keep_id: str):
     """Remove old completed/failed tasks, keep at most 5."""
-    finished = [k for k, v in _scan_tasks.items() if v["status"] in ("completed", "failed") and k != keep_id]
+    finished = [
+        k for k, v in _scan_tasks.items()
+        if v["status"] in ("completed", "failed", "cancelled") and k != keep_id
+    ]
     for old_id in finished[:-4]:  # keep the 4 most recent + current
         _scan_tasks.pop(old_id, None)
 

@@ -35,6 +35,10 @@ IGNORE_PATTERNS = {
 }
 
 
+class ScanCancelledError(Exception):
+    """Raised when an in-flight asset scan is cancelled."""
+
+
 class AssetScanner:
     """
     Scans local system assets and assesses security risks.
@@ -170,6 +174,7 @@ class AssetScanner:
 
         # 线程安全锁
         self._lock = threading.Lock()
+        self._cancel_event = threading.Event()
 
         # 大文件阈值（100MB）
         self.large_file_threshold = 100 * 1024 * 1024
@@ -179,6 +184,20 @@ class AssetScanner:
 
         print(f"AssetScanner initialized for {self.os_type}")
         print(f"Home directory: {self.home_directory}")
+
+    def request_stop(self) -> None:
+        """Request the current scan to stop as soon as possible."""
+        self._cancel_event.set()
+
+    @property
+    def stop_requested(self) -> bool:
+        """Whether the current scan has been asked to stop."""
+        return self._cancel_event.is_set()
+
+    def _ensure_not_cancelled(self) -> None:
+        """Abort the current scan when a stop has been requested."""
+        if self.stop_requested:
+            raise ScanCancelledError("Scan cancelled by user")
 
     def _detect_os(self) -> str:
         """
@@ -1478,6 +1497,7 @@ class AssetScanner:
             tuple: (asset, child_paths, ignored_info)
         """
         try:
+            self._ensure_not_cancelled()
             # 检查路径是否存在
             if not current_path.exists():
                 return None, [], None
@@ -1500,6 +1520,7 @@ class AssetScanner:
             # 收集子路径
             child_paths = []
             if current_path.is_dir():
+                self._ensure_not_cancelled()
                 try:
                     for item in current_path.iterdir():
                         if item not in visited:
@@ -1516,6 +1537,8 @@ class AssetScanner:
 
             return asset, child_paths, None
 
+        except ScanCancelledError:
+            raise
         except Exception as e:
             print(f"  错误: 扫描 {current_path} 时出错: {e}")
             return None, [], None
@@ -1543,6 +1566,7 @@ class AssetScanner:
 
         try:
             for root, dirs, files in os.walk(root_path, topdown=True, followlinks=False):
+                self._ensure_not_cancelled()
                 current_root = Path(root)
 
                 # ========== macOS 特殊处理：剪枝黑名单目录 ==========
@@ -1623,6 +1647,7 @@ class AssetScanner:
 
                 # ========== 处理当前目录 ==========
                 try:
+                    self._ensure_not_cancelled()
                     # 创建当前目录的资产项
                     dir_asset = self._create_asset_item(current_root)
                     if dir_asset:
@@ -1640,6 +1665,7 @@ class AssetScanner:
 
                 # ========== 处理当前目录下的文件 ==========
                 for filename in files:
+                    self._ensure_not_cancelled()
                     file_path = current_root / filename
 
                     # 检查是否应该忽略
@@ -1675,6 +1701,8 @@ class AssetScanner:
                     if progress_counter % 5000 == 0:
                         print(f"\r已扫描: {self.scanned_count} 个项目...", end="", flush=True)
 
+        except ScanCancelledError:
+            raise
         except PermissionError:
             print(f"\n  ⚠️  权限不足，无法访问: {root_path}")
         except Exception as e:
@@ -1708,6 +1736,7 @@ class AssetScanner:
         # 使用线程池进行并发扫描
         with ThreadPoolExecutor(max_workers=4) as executor:
             while queue:
+                self._ensure_not_cancelled()
                 # 批量处理当前层级的所有项目
                 current_batch = []
                 batch_size = min(len(queue), 50)  # 每批最多处理50个项目
@@ -1742,6 +1771,7 @@ class AssetScanner:
                     }
 
                     for future in as_completed(futures):
+                        self._ensure_not_cancelled()
                         path, depth = futures[future]
                         try:
                             asset, child_paths, ignored_info = future.result()
@@ -1765,6 +1795,8 @@ class AssetScanner:
                                     if child_path not in visited:
                                         queue.append((child_path, depth + 1))
 
+                        except ScanCancelledError:
+                            raise
                         except Exception as e:
                             print(f"  错误: 处理 {path} 时出错: {e}")
 
@@ -1813,6 +1845,8 @@ class AssetScanner:
         self.ignored_count = 0
         self.ignored_items = []
         self.ignored_size = 0
+        if self.stop_requested:
+            raise ScanCancelledError("Scan cancelled before start")
 
         all_assets = []
 
@@ -1843,6 +1877,7 @@ class AssetScanner:
                         print(f"  检测到 {len(partitions)} 个分区")
 
                         for partition in partitions:
+                            self._ensure_not_cancelled()
                             try:
                                 root_path = Path(partition.mountpoint)
                                 print(f"\n  正在扫描分区: {partition.mountpoint} ({partition.fstype})")
@@ -1852,16 +1887,21 @@ class AssetScanner:
 
                                 print(f"  ✓ 分区 {partition.mountpoint} 扫描完成: 发现 {len(partition_assets)} 个资产")
 
+                            except ScanCancelledError:
+                                raise
                             except PermissionError:
                                 print(f"  ⚠️  权限不足，无法访问分区: {partition.mountpoint}")
                             except Exception as e:
                                 print(f"  ⚠️  扫描分区 {partition.mountpoint} 时出错: {e}")
 
+                    except ScanCancelledError:
+                        raise
                     except Exception as e:
                         print(f"  ⚠️  获取分区列表失败: {e}")
 
                 # ========== macOS/Linux 系统：扫描根目录 ==========
                 else:
+                    self._ensure_not_cancelled()
                     root_path = Path("/")
                     print(f"  正在扫描根目录: {root_path}")
 
@@ -1870,6 +1910,8 @@ class AssetScanner:
                         all_assets.extend(root_assets)
                         print(f"  ✓ 根目录扫描完成: 发现 {len(root_assets)} 个资产")
 
+                    except ScanCancelledError:
+                        raise
                     except PermissionError:
                         print(f"  ⚠️  权限不足，无法访问系统根目录")
                     except Exception as e:
@@ -1878,6 +1920,7 @@ class AssetScanner:
             else:
                 # 仅扫描用户主目录
                 print(f"[用户主目录扫描] 扫描用户主目录...")
+                self._ensure_not_cancelled()
                 home_assets = self._scan_path_walk(self.home_directory)
                 all_assets.extend(home_assets)
                 print(f"  ✓ 用户主目录扫描完成: 发现 {len(home_assets)} 个资产")
