@@ -361,10 +361,14 @@ class AssetScanner:
             bool: 如果包含子目录返回 True，否则返回 False
         """
         try:
+            self._ensure_not_cancelled()
             for item in path.iterdir():
+                self._ensure_not_cancelled()
                 if item.is_dir():
                     return True
             return False
+        except ScanCancelledError:
+            raise
         except (PermissionError, OSError):
             return False
 
@@ -380,14 +384,20 @@ class AssetScanner:
         """
         total_size = 0
         try:
+            self._ensure_not_cancelled()
             for item in path.iterdir():
+                self._ensure_not_cancelled()
                 try:
                     # 检查是否为符号链接，如果是则跳过
                     if not item.is_symlink() and item.is_file():
                         total_size += item.stat().st_size
+                except ScanCancelledError:
+                    raise
                 except (PermissionError, OSError):
                     # 忽略无法访问的文件
                     continue
+        except ScanCancelledError:
+            raise
         except (PermissionError, OSError):
             # 无法访问该目录
             pass
@@ -411,28 +421,37 @@ class AssetScanner:
         total_size = 0
 
         try:
+            self._ensure_not_cancelled()
             # 如果是文件，直接返回文件大小
             if path.is_file():
                 return path.stat().st_size
 
             # 如果是目录，递归计算
             if path.is_dir():
+                self._ensure_not_cancelled()
                 try:
                     with os.scandir(path) as entries:
                         for entry in entries:
+                            self._ensure_not_cancelled()
                             try:
                                 if entry.is_file(follow_symlinks=False):
                                     total_size += entry.stat(follow_symlinks=False).st_size
                                 elif entry.is_dir(follow_symlinks=False):
                                     # 递归计算子目录
                                     total_size += self._get_tree_size(Path(entry.path))
+                            except ScanCancelledError:
+                                raise
                             except (PermissionError, OSError):
                                 # 忽略无法访问的文件/目录
                                 continue
+                except ScanCancelledError:
+                    raise
                 except (PermissionError, OSError):
                     # 无法访问该目录
                     pass
 
+        except ScanCancelledError:
+            raise
         except Exception:
             # 其他错误，返回0
             pass
@@ -864,6 +883,7 @@ class AssetScanner:
             AssetItem: Created asset item with risk assessment, or None if error
         """
         try:
+            self._ensure_not_cancelled()
             stat_info = path.stat()
 
             # Determine file type
@@ -961,6 +981,7 @@ class AssetScanner:
                 file_size = stat_info.st_size
                 direct_size = stat_info.st_size
             elif path.is_dir():
+                self._ensure_not_cancelled()
                 # 计算直接文件大小（不递归，不包括子目录）
                 direct_size = self._get_direct_size(path)
 
@@ -998,6 +1019,8 @@ class AssetScanner:
                 direct_size=direct_size
             )
 
+        except ScanCancelledError:
+            raise
         except PermissionError:
             # 权限错误 - 记录但不打印（避免输出过多）
             # 这些已经在 _scan_path_bfs 中被记录

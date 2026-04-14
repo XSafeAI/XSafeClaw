@@ -10,10 +10,13 @@ from xsafeclaw.asset_scanner.scanner import ScanCancelledError
 class SlowCancelableScanner:
     """Deterministic fake scanner that can be cancelled mid-flight."""
 
+    instances = []
+
     def __init__(self):
         self.scanned_count = 0
         self.ignored_count = 0
         self._stop_requested = False
+        self.__class__.instances.append(self)
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -31,6 +34,7 @@ class SlowCancelableScanner:
 
 def test_file_scan_stop_cancels_backend_work(monkeypatch):
     """Stopping a scan should cancel the worker, not just client polling."""
+    SlowCancelableScanner.instances = []
     monkeypatch.setattr(assets, "AssetScanner", SlowCancelableScanner)
     assets._scan_tasks.clear()
 
@@ -63,4 +67,41 @@ def test_file_scan_stop_cancels_backend_work(monkeypatch):
     assert progress_after["status"] == "cancelled"
     assert progress_after["scanned_count"] == stopped_count
 
+    assets._scan_tasks.clear()
+
+
+def test_file_scan_start_does_not_spawn_second_active_worker(monkeypatch):
+    """Starting a new scan while one is active should reuse the current task."""
+    SlowCancelableScanner.instances = []
+    monkeypatch.setattr(assets, "AssetScanner", SlowCancelableScanner)
+    assets._scan_tasks.clear()
+
+    first = asyncio.run(assets.scan_assets(
+        assets.ScanRequest(path="E:/tmp", scan_system_root=False),
+    ))
+    first_id = first["scan_id"]
+
+    deadline = time.monotonic() + 1
+    while assets._scan_tasks[first_id]["scanner"].scanned_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    second = asyncio.run(assets.scan_assets(
+        assets.ScanRequest(path="E:/tmp", scan_system_root=False),
+    ))
+
+    assert second["scan_id"] == first_id
+    assert second["status"] == "running"
+    assert second["message"] == "A scan is already in progress"
+    assert len(SlowCancelableScanner.instances) == 1
+
+    asyncio.run(assets.stop_scan(assets.StopScanRequest(scan_id=first_id)))
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        progress = asyncio.run(assets.scan_progress(first_id))
+        if progress["status"] == "cancelled":
+            break
+        time.sleep(0.01)
+
+    assert progress["status"] == "cancelled"
     assets._scan_tasks.clear()

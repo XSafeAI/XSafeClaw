@@ -432,10 +432,103 @@ function CardShowcase({ agentId, charName, status }) {
   );
 }
 
+const AGENT_CARD_BASE_WIDTH = 620;
+const AGENT_CARD_BASE_HEIGHT = 860;
+const AGENT_CARD_MIN_SCALE = 0.72;
+const AGENT_CARD_MAX_SCALE = 1.2;
+const AGENT_CARD_MARGIN = 24;
+const AGENT_CARD_MAX_TRANSPARENCY = 45;
+const AGENT_CARD_INTERACTIVE_SELECTOR = 'button, input, textarea, select, a, label, [role="button"], [data-no-drag="true"]';
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getViewportMetrics() {
+  if (typeof window === 'undefined') {
+    return { width: AGENT_CARD_BASE_WIDTH, height: AGENT_CARD_BASE_HEIGHT };
+  }
+  return {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+}
+
+function getScaleBounds(viewport) {
+  const fitScale = Math.min(
+    AGENT_CARD_MAX_SCALE,
+    Math.max(0.48, (viewport.width - AGENT_CARD_MARGIN * 2) / AGENT_CARD_BASE_WIDTH),
+    Math.max(0.48, (viewport.height - AGENT_CARD_MARGIN * 2) / AGENT_CARD_BASE_HEIGHT),
+  );
+
+  return {
+    minScale: Math.min(AGENT_CARD_MIN_SCALE, fitScale),
+    maxScale: fitScale,
+  };
+}
+
+function clampDialogFrame(frame, viewport = getViewportMetrics()) {
+  const bounds = getScaleBounds(viewport);
+  const nextScale = clamp(frame?.scale ?? bounds.maxScale, bounds.minScale, bounds.maxScale);
+  const width = AGENT_CARD_BASE_WIDTH * nextScale;
+  const height = AGENT_CARD_BASE_HEIGHT * nextScale;
+  const minLeft = AGENT_CARD_MARGIN;
+  const maxLeft = Math.max(AGENT_CARD_MARGIN, viewport.width - width - AGENT_CARD_MARGIN);
+  const minTop = AGENT_CARD_MARGIN;
+  const maxTop = Math.max(AGENT_CARD_MARGIN, viewport.height - height - AGENT_CARD_MARGIN);
+
+  return {
+    left: clamp(frame?.left ?? minLeft, minLeft, maxLeft),
+    top: clamp(frame?.top ?? minTop, minTop, maxTop),
+    scale: nextScale,
+  };
+}
+
+function createDefaultDialogFrame(viewport = getViewportMetrics()) {
+  const bounds = getScaleBounds(viewport);
+  const scale = Math.min(1, bounds.maxScale);
+  const width = AGENT_CARD_BASE_WIDTH * scale;
+  const height = AGENT_CARD_BASE_HEIGHT * scale;
+
+  return {
+    left: Math.max(AGENT_CARD_MARGIN, (viewport.width - width) / 2),
+    top: Math.max(AGENT_CARD_MARGIN, (viewport.height - height) / 2),
+    scale,
+  };
+}
+
+function getResizeVector(direction) {
+  switch (direction) {
+    case 'ne':
+      return { dirX: 1, dirY: -1 };
+    case 'sw':
+      return { dirX: -1, dirY: 1 };
+    case 'nw':
+      return { dirX: -1, dirY: -1 };
+    case 'se':
+    default:
+      return { dirX: 1, dirY: 1 };
+  }
+}
+
+function getDirectionalScaleLimit(anchorX, anchorY, dirX, dirY, viewport) {
+  const widthLimit = dirX > 0
+    ? (viewport.width - AGENT_CARD_MARGIN - anchorX) / AGENT_CARD_BASE_WIDTH
+    : (anchorX - AGENT_CARD_MARGIN) / AGENT_CARD_BASE_WIDTH;
+  const heightLimit = dirY > 0
+    ? (viewport.height - AGENT_CARD_MARGIN - anchorY) / AGENT_CARD_BASE_HEIGHT
+    : (anchorY - AGENT_CARD_MARGIN) / AGENT_CARD_BASE_HEIGHT;
+
+  return Math.max(0.48, Math.min(widthLimit, heightLimit));
+}
+
 export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
   if (!data) return null;
 
   const { agent, charName, state, event, events = [], isPending, totalTokens = 0 } = data;
+  const [dialogFrame, setDialogFrame] = useState(() => createDefaultDialogFrame());
+  const [transparencyPct, setTransparencyPct] = useState(0);
+  const [activeInteraction, setActiveInteraction] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -452,6 +545,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
   const [pendingImages, setPendingImages] = useState([]);
   const [fetchedTokens, setFetchedTokens] = useState(0);
   const fileInputRef = useRef(null);
+  const interactionRef = useRef(null);
 
   useEffect(() => {
     if (totalTokens > 0 || USE_AGENT_TOWN_MOCK || !agent?.id) return;
@@ -854,15 +948,192 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
     }
   }, [agent, displayMessages, finalizeStoppedMessage, input, pendingImages, sending, sessionKey]);
 
+  useEffect(() => {
+    interactionRef.current = null;
+    setActiveInteraction(null);
+    setTransparencyPct(0);
+    setDialogFrame(createDefaultDialogFrame());
+  }, [agent?.id]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setDialogFrame((prev) => clampDialogFrame(prev));
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    const finishInteraction = (pointerId) => {
+      const current = interactionRef.current;
+      if (!current || current.pointerId !== pointerId) return;
+      interactionRef.current = null;
+      setActiveInteraction(null);
+    };
+
+    const handlePointerMove = (event) => {
+      const current = interactionRef.current;
+      if (!current || current.pointerId !== event.pointerId) return;
+
+      if (current.type === 'move') {
+        const nextLeft = current.startLeft + (event.clientX - current.startX);
+        const nextTop = current.startTop + (event.clientY - current.startY);
+        setDialogFrame(clampDialogFrame({
+          left: nextLeft,
+          top: nextTop,
+          scale: current.startScale,
+        }));
+        return;
+      }
+
+      if (current.type !== 'resize') return;
+
+      const viewport = getViewportMetrics();
+      const { dirX, dirY } = getResizeVector(current.direction);
+      const dx = event.clientX - current.anchorX;
+      const dy = event.clientY - current.anchorY;
+      const projectionBase = (current.startWidth ** 2) + (current.startHeight ** 2);
+      const projectedFactor = projectionBase > 0
+        ? ((dx * dirX * current.startWidth) + (dy * dirY * current.startHeight)) / projectionBase
+        : 1;
+      const bounds = getScaleBounds(viewport);
+      const directionalMax = getDirectionalScaleLimit(current.anchorX, current.anchorY, dirX, dirY, viewport);
+      const maxScale = Math.min(bounds.maxScale, directionalMax);
+      const minScale = Math.min(bounds.minScale, maxScale);
+      const nextScale = clamp(current.startScale * projectedFactor, minScale, maxScale);
+      const width = AGENT_CARD_BASE_WIDTH * nextScale;
+      const height = AGENT_CARD_BASE_HEIGHT * nextScale;
+
+      setDialogFrame({
+        left: dirX > 0 ? current.anchorX : current.anchorX - width,
+        top: dirY > 0 ? current.anchorY : current.anchorY - height,
+        scale: nextScale,
+      });
+    };
+
+    const handlePointerUp = (event) => {
+      finishInteraction(event.pointerId);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+    };
+  }, []);
+
+  const startMove = useCallback((event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    interactionRef.current = {
+      type: 'move',
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startLeft: dialogFrame.left,
+      startTop: dialogFrame.top,
+      startScale: dialogFrame.scale,
+    };
+    setActiveInteraction('move');
+  }, [dialogFrame.left, dialogFrame.scale, dialogFrame.top]);
+
+  const handleTitlePointerDown = useCallback((event) => {
+    if (event.target.closest(AGENT_CARD_INTERACTIVE_SELECTOR)) return;
+    startMove(event);
+  }, [startMove]);
+
+  const startResize = useCallback((direction, event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const width = AGENT_CARD_BASE_WIDTH * dialogFrame.scale;
+    const height = AGENT_CARD_BASE_HEIGHT * dialogFrame.scale;
+    let anchorX = dialogFrame.left;
+    let anchorY = dialogFrame.top;
+
+    if (direction === 'ne') {
+      anchorY += height;
+    } else if (direction === 'sw') {
+      anchorX += width;
+    } else if (direction === 'nw') {
+      anchorX += width;
+      anchorY += height;
+    }
+
+    interactionRef.current = {
+      type: 'resize',
+      direction,
+      pointerId: event.pointerId,
+      anchorX,
+      anchorY,
+      startScale: dialogFrame.scale,
+      startWidth: width,
+      startHeight: height,
+    };
+    setActiveInteraction(`resize-${direction}`);
+  }, [dialogFrame.left, dialogFrame.scale, dialogFrame.top]);
+
+  const dialogWidth = AGENT_CARD_BASE_WIDTH * dialogFrame.scale;
+  const dialogHeight = AGENT_CARD_BASE_HEIGHT * dialogFrame.scale;
+  const dialogWindowClassName = [
+    'agent-card-window',
+    activeInteraction === 'move' ? 'is-dragging' : '',
+    activeInteraction?.startsWith('resize-') ? 'is-resizing' : '',
+    activeInteraction ? `is-${activeInteraction}` : '',
+  ].filter(Boolean).join(' ');
+  const dialogWindowStyle = {
+    left: `${dialogFrame.left}px`,
+    top: `${dialogFrame.top}px`,
+    width: `${dialogWidth}px`,
+    height: `${dialogHeight}px`,
+  };
+  const dialogCardStyle = {
+    transform: `scale(${dialogFrame.scale})`,
+    opacity: 1 - (transparencyPct / 100),
+  };
+
   return (
     <div className="card-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`agent-card ${isPending ? 'card-pending' : ''}`} onClick={(e) => e.stopPropagation()}>
-        <button type="button" className="agent-card-close" onClick={onClose}>
-          CLOSE
-        </button>
+      <div className={dialogWindowClassName} style={dialogWindowStyle} onClick={(e) => e.stopPropagation()}>
+        <div className="agent-card-handle agent-card-handle-move agent-card-handle-edge agent-card-handle-edge-top" onPointerDown={startMove} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-move agent-card-handle-edge agent-card-handle-edge-right" onPointerDown={startMove} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-move agent-card-handle-edge agent-card-handle-edge-bottom" onPointerDown={startMove} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-move agent-card-handle-edge agent-card-handle-edge-left" onPointerDown={startMove} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-corner agent-card-handle-corner-nw" onPointerDown={(event) => startResize('nw', event)} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-corner agent-card-handle-corner-ne" onPointerDown={(event) => startResize('ne', event)} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-corner agent-card-handle-corner-sw" onPointerDown={(event) => startResize('sw', event)} aria-hidden="true" />
+        <div className="agent-card-handle agent-card-handle-corner agent-card-handle-corner-se" onPointerDown={(event) => startResize('se', event)} aria-hidden="true" />
 
-        <div className="agent-card-grid">
-          <section className="tc-ornate-panel agent-card-summary-panel">
+        <div className={`agent-card agent-card-scaled ${isPending ? 'card-pending' : ''}`} style={dialogCardStyle}>
+          <button type="button" className="agent-card-close" onClick={onClose}>
+            CLOSE
+          </button>
+
+          <div className="agent-card-toolbar" data-no-drag="true">
+            <label className="agent-card-opacity-control" htmlFor={`agent-card-opacity-${agent.id || 'dialog'}`}>
+              <span className="agent-card-opacity-label">Transparency</span>
+              <input
+                id={`agent-card-opacity-${agent.id || 'dialog'}`}
+                className="agent-card-opacity-slider"
+                type="range"
+                min="0"
+                max={AGENT_CARD_MAX_TRANSPARENCY}
+                step="1"
+                value={transparencyPct}
+                onChange={(event) => setTransparencyPct(Number(event.target.value))}
+              />
+              <span className="agent-card-opacity-value">{transparencyPct}%</span>
+            </label>
+          </div>
+
+          <div className="agent-card-grid">
+            <section className="tc-ornate-panel agent-card-summary-panel" onPointerDown={handleTitlePointerDown}>
             <div className="agent-card-summary-bar">
               <div className="agent-card-summary-primary">
                 <div className="agent-card-avatar-frame agent-card-avatar-frame-compact">
@@ -988,8 +1259,8 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
             </section>
           ) : null}
 
-          <section className="agent-dialog-panel">
-            <div className="agent-dialog-head">
+            <section className="agent-dialog-panel">
+              <div className="agent-dialog-head" onPointerDown={handleTitlePointerDown}>
               <div className="agent-dialog-head-copy">
                 <div className="agent-dialog-overline">Bound Session</div>
                 <h3 className="agent-dialog-title">Conversation</h3>
@@ -1106,7 +1377,8 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
                 </button>
               </div>
             </div>
-          </section>
+            </section>
+          </div>
         </div>
       </div>
     </div>
