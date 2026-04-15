@@ -81,7 +81,7 @@ xsafeclaw start --host 0.0.0.0           # accessible from LAN
 xsafeclaw start --no-browser --reload    # headless dev mode
 ```
 
-<p align="center"><img src="assets/comon_option.png" width="580" /></p>
+<!-- <p align="center"><img src="assets/comon_option.png" width="580" /></p> -->
 
 ---
 
