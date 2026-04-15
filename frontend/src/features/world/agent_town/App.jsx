@@ -219,6 +219,38 @@ export default function App() {
       .app-layout * {
         cursor: ${cursorRule} !important;
       }
+
+      .agent-card-handle-move,
+      .agent-card-handle-move * {
+        cursor: move !important;
+      }
+
+      .agent-card-handle-corner-nw,
+      .agent-card-handle-corner-nw *,
+      .agent-card-handle-corner-se,
+      .agent-card-handle-corner-se *,
+      .agent-card-window.is-resize-nw,
+      .agent-card-window.is-resize-nw *,
+      .agent-card-window.is-resize-se,
+      .agent-card-window.is-resize-se * {
+        cursor: nwse-resize !important;
+      }
+
+      .agent-card-handle-corner-ne,
+      .agent-card-handle-corner-ne *,
+      .agent-card-handle-corner-sw,
+      .agent-card-handle-corner-sw *,
+      .agent-card-window.is-resize-ne,
+      .agent-card-window.is-resize-ne *,
+      .agent-card-window.is-resize-sw,
+      .agent-card-window.is-resize-sw * {
+        cursor: nesw-resize !important;
+      }
+
+      .agent-card-window.is-dragging,
+      .agent-card-window.is-dragging * {
+        cursor: move !important;
+      }
     `;
 
     return () => {

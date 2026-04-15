@@ -14,9 +14,12 @@ from pydantic import BaseModel, Field
 # Import from internal asset_scanner module
 try:
     from xsafeclaw.asset_scanner import AssetScanner, SafetyGuard
+    from xsafeclaw.asset_scanner.scanner import ScanCancelledError
 except ImportError:
     AssetScanner = None
     SafetyGuard = None
+    class ScanCancelledError(Exception):
+        """Fallback cancellation error when asset scanner imports are unavailable."""
 
 from xsafeclaw.config import settings
 from xsafeclaw.path_protection import (
@@ -41,7 +44,7 @@ _DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
 router = APIRouter()
 
 # --------------- In-memory scan task store ---------------
-# {scan_id: { status, scanner, scanned_count, ignored_count, error, result }}
+# {scan_id: { status, scanner, error, result, thread }}
 _scan_tasks: dict[str, dict] = {}
 
 
@@ -52,6 +55,12 @@ class ScanRequest(BaseModel):
     path: str | None = Field(None, description="Specific path to scan (default: full system scan)")
     max_depth: int | None = Field(None, ge=1, le=500, description="Maximum scan depth")
     scan_system_root: bool = Field(True, description="Whether to scan system root directory")
+
+
+class StopScanRequest(BaseModel):
+    """Request schema for stopping an in-flight scan."""
+
+    scan_id: str = Field(..., min_length=1, description="Scan task ID")
 
 
 class AssetDetail(BaseModel):
@@ -206,9 +215,61 @@ def _run_scan_sync(scan_id: str, request_path: str | None, max_depth: int, scan_
             )
         task["result"] = _build_scan_response(scanner, assets)
         task["status"] = "completed"
-    except Exception as e:
-        task["status"] = "failed"
+    except ScanCancelledError as e:
+        task["status"] = "cancelled"
         task["error"] = str(e)
+    except Exception as e:
+        task["status"] = "cancelled" if getattr(scanner, "stop_requested", False) else "failed"
+        task["error"] = str(e)
+    finally:
+        print(
+            "[asset-scan] finished "
+            f"scan_id={scan_id} status={task['status']} "
+            f"scanned={scanner.scanned_count} ignored={scanner.ignored_count}"
+        )
+
+
+def _task_thread_alive(task: dict) -> bool:
+    """Whether the worker thread recorded on the task is still alive."""
+    thread = task.get("thread")
+    return isinstance(thread, threading.Thread) and thread.is_alive()
+
+
+def _normalize_scan_task_state(scan_id: str, task: dict) -> None:
+    """Keep task status aligned with the worker thread state."""
+    status = task["status"]
+    if status in ("completed", "failed", "cancelled"):
+        return
+
+    if _task_thread_alive(task):
+        return
+
+    scanner = task["scanner"]
+    if getattr(scanner, "stop_requested", False):
+        task["status"] = "cancelled"
+        task["error"] = task.get("error") or "Scan cancelled by user"
+    elif task.get("result") is not None:
+        task["status"] = "completed"
+    elif task.get("error"):
+        task["status"] = "failed"
+    else:
+        task["status"] = "failed"
+        task["error"] = "Scan worker exited unexpectedly"
+
+    print(
+        "[asset-scan] reconciled "
+        f"scan_id={scan_id} status={task['status']} "
+        f"scanned={scanner.scanned_count} ignored={scanner.ignored_count}"
+    )
+
+
+def _find_active_scan() -> tuple[str, dict] | tuple[None, None]:
+    """Return the currently active file scan if one is still alive."""
+    for scan_id, task in _scan_tasks.items():
+        _normalize_scan_task_state(scan_id, task)
+        if task["status"] in ("running", "cancel_requested") and _task_thread_alive(task):
+            return scan_id, task
+    return None, None
 
 
 @router.post("/scan")
@@ -223,6 +284,19 @@ async def scan_assets(request: ScanRequest) -> Any:
             detail="Asset Scanner module not available. Please check installation.",
         )
 
+    active_scan_id, active_task = _find_active_scan()
+    if active_scan_id and active_task:
+        print(
+            "[asset-scan] start ignored "
+            f"existing_scan_id={active_scan_id} status={active_task['status']} "
+            f"scanned={active_task['scanner'].scanned_count}"
+        )
+        return {
+            "scan_id": active_scan_id,
+            "status": active_task["status"],
+            "message": "A scan is already in progress",
+        }
+
     scan_id = uuid.uuid4().hex[:12]
     scanner = AssetScanner()
 
@@ -231,6 +305,7 @@ async def scan_assets(request: ScanRequest) -> Any:
         "scanner": scanner,
         "result": None,
         "error": None,
+        "thread": None,
     }
 
     # Launch scan in a background thread (non-blocking)
@@ -239,9 +314,52 @@ async def scan_assets(request: ScanRequest) -> Any:
         args=(scan_id, request.path, request.max_depth or 200, request.scan_system_root),
         daemon=True,
     )
+    _scan_tasks[scan_id]["thread"] = thread
     thread.start()
 
+    print(
+        "[asset-scan] started "
+        f"scan_id={scan_id} path={request.path or '<system>'} "
+        f"scan_system_root={request.scan_system_root}"
+    )
+
     return {"scan_id": scan_id, "status": "running", "message": "Scan started"}
+
+
+@router.post("/scan/stop")
+async def stop_scan(request: StopScanRequest) -> Any:
+    """Request cancellation of an in-flight asset scan."""
+    task = _scan_tasks.get(request.scan_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Scan task not found")
+
+    _normalize_scan_task_state(request.scan_id, task)
+    status = task["status"]
+    if status in ("completed", "failed", "cancelled"):
+        return {
+            "scan_id": request.scan_id,
+            "status": status,
+            "message": f"Scan already {status}",
+        }
+    if status == "cancel_requested":
+        return {
+            "scan_id": request.scan_id,
+            "status": status,
+            "message": "Stop already requested",
+        }
+
+    scanner: AssetScanner = task["scanner"]
+    scanner.request_stop()
+    task["status"] = "cancel_requested"
+    print(
+        "[asset-scan] stop requested "
+        f"scan_id={request.scan_id} scanned={scanner.scanned_count} ignored={scanner.ignored_count}"
+    )
+    return {
+        "scan_id": request.scan_id,
+        "status": "cancel_requested",
+        "message": "Stop requested",
+    }
 
 
 @router.get("/scan/progress")
@@ -258,6 +376,7 @@ async def scan_progress(scan_id: str = Query(..., description="Scan task ID")) -
     if task is None:
         raise HTTPException(status_code=404, detail="Scan task not found")
 
+    _normalize_scan_task_state(scan_id, task)
     scanner: AssetScanner = task["scanner"]
 
     resp: dict[str, Any] = {
@@ -265,11 +384,18 @@ async def scan_progress(scan_id: str = Query(..., description="Scan task ID")) -
         "status": task["status"],
         "scanned_count": scanner.scanned_count,
         "ignored_count": scanner.ignored_count,
+        "stop_requested": getattr(scanner, "stop_requested", False),
+        "thread_alive": _task_thread_alive(task),
     }
 
     if task["status"] == "completed":
         resp["result"] = task["result"]
         # Clean up old tasks to avoid memory leak (keep last 5)
+        _cleanup_old_tasks(scan_id)
+    elif task["status"] == "cancel_requested":
+        resp["message"] = "Stop requested"
+    elif task["status"] == "cancelled":
+        resp["message"] = task["error"] or "Scan cancelled"
         _cleanup_old_tasks(scan_id)
     elif task["status"] == "failed":
         resp["error"] = task["error"]
@@ -280,7 +406,10 @@ async def scan_progress(scan_id: str = Query(..., description="Scan task ID")) -
 
 def _cleanup_old_tasks(keep_id: str):
     """Remove old completed/failed tasks, keep at most 5."""
-    finished = [k for k, v in _scan_tasks.items() if v["status"] in ("completed", "failed") and k != keep_id]
+    finished = [
+        k for k, v in _scan_tasks.items()
+        if v["status"] in ("completed", "failed", "cancelled") and k != keep_id
+    ]
     for old_id in finished[:-4]:  # keep the 4 most recent + current
         _scan_tasks.pop(old_id, None)
 
