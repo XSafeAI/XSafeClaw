@@ -1,13 +1,15 @@
 /**
- * Setup page — detect and install OpenClaw CLI.
- * If npm/Node.js is missing, auto-downloads Node.js first.
+ * Setup page — detect and install an agent framework (OpenClaw or Hermes).
+ * If no framework is found, the user chooses which one to install.
+ * - OpenClaw: auto-installed via npm (Node.js bootstrapped if needed).
+ * - Hermes: manual install guide (pip install).
  * After installation completes, redirects to /configure for onboard wizard.
  */
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   CheckCircle, Download, Loader2, XCircle, ChevronRight, AlertTriangle, Terminal,
-  ArrowDownToLine,
+  ArrowDownToLine, Box, Code2,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
@@ -15,9 +17,13 @@ import { useI18n } from '../i18n';
 type Stage =
   | 'checking'
   | 'not_installed'
+  | 'hermes_guide'
+  | 'hermes_verifying'
   | 'downloading_node'
   | 'installing'
-  | 'install_failed';
+  | 'installing_hermes'
+  | 'install_failed'
+  | 'install_hermes_failed';
 
 interface LogLine { id: number; text: string; kind: 'output' | 'info' | 'success' | 'error'; }
 let _lid = 0;
@@ -88,6 +94,7 @@ export default function Setup() {
   const [stage, setStage] = useState<Stage>('checking');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
+  const [hermesError, setHermesError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
 
   const addLog = (text: string, kind: LogLine['kind'] = 'output') => {
@@ -99,7 +106,8 @@ export default function Setup() {
     (async () => {
       try {
         const res = await systemAPI.status();
-        if (res.data.openclaw_installed) {
+        const d = res.data as any;
+        if (d.openclaw_installed || d.hermes_installed) {
           navigate('/configure', { replace: true });
         } else {
           setStage('not_installed');
@@ -110,7 +118,7 @@ export default function Setup() {
     })();
   }, [navigate]);
 
-  const handleInstall = async () => {
+  const handleInstallOpenClaw = async () => {
     setStage('installing');
     setLogs([]);
     setNodeStatus(null);
@@ -154,6 +162,7 @@ export default function Setup() {
             } else if (d.type === 'done') {
               if (d.success) {
                 addLog(t.setup.installComplete, 'success');
+                try { localStorage.setItem('xsafeclaw_setup_platform', 'openclaw'); } catch { /* ignore */ }
                 setTimeout(() => navigate('/configure', { replace: true }), 1000);
               } else {
                 addLog(`npm exited with code ${d.exit_code}`, 'error');
@@ -174,6 +183,71 @@ export default function Setup() {
     }
   };
 
+  const handleInstallHermes = async () => {
+    setStage('installing_hermes');
+    setLogs([]);
+
+    abortRef.current = new AbortController();
+    try {
+      const resp = await fetch('/api/system/install-hermes', { method: 'POST', signal: abortRef.current.signal });
+      const reader = resp.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop() ?? '';
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          try {
+            const d = JSON.parse(line.slice(5).trim());
+            if (d.type === 'output' && d.text) {
+              addLog(d.text);
+            } else if (d.type === 'done') {
+              if (d.success) {
+                addLog((t.setup as any).hermesInstallComplete ?? 'Hermes installation complete!', 'success');
+                try { localStorage.setItem('xsafeclaw_setup_platform', 'hermes'); } catch { /* ignore */ }
+                setTimeout(() => navigate('/configure', { replace: true }), 1000);
+              } else {
+                addLog(`pip exited with code ${d.exit_code}`, 'error');
+                setStage('install_hermes_failed');
+              }
+            } else if (d.type === 'error') {
+              addLog(d.message, 'error');
+              setStage('install_hermes_failed');
+            }
+          } catch {}
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        addLog(String(err), 'error');
+        setStage('install_hermes_failed');
+      }
+    }
+  };
+
+  const handleVerifyHermes = async () => {
+    setStage('hermes_verifying');
+    setHermesError('');
+    try {
+      const res = await systemAPI.status();
+      const d = res.data as any;
+      if (d.hermes_installed) {
+        navigate('/configure', { replace: true });
+      } else {
+        setHermesError((t.setup as any).hermesNotDetected ?? 'Hermes not detected');
+        setStage('hermes_guide');
+      }
+    } catch {
+      setHermesError((t.setup as any).hermesNotDetected ?? 'Hermes not detected');
+      setStage('hermes_guide');
+    }
+  };
+
   const steps = [
     { id: 1, label: t.setup.steps.detect },
     { id: 2, label: t.setup.steps.environment },
@@ -182,8 +256,11 @@ export default function Setup() {
 
   const stepActive =
     stage === 'checking' || stage === 'not_installed' ? 1
-    : stage === 'downloading_node' ? 2
+    : stage === 'hermes_guide' || stage === 'hermes_verifying' || stage === 'downloading_node' ? 2
     : 3;
+
+  const isHermesInstalling = stage === 'installing_hermes';
+  const isHermesFailed = stage === 'install_hermes_failed';
 
   return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
@@ -207,40 +284,137 @@ export default function Setup() {
             </div>
           )}
 
-          {/* Not installed — prompt to start */}
+          {/* Not installed — choose framework */}
           {stage === 'not_installed' && (
             <div className="flex flex-col gap-6">
               <div className="flex items-start gap-4 p-4 bg-warning/10 border border-warning/30 rounded-xl">
                 <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-semibold text-text-primary">{t.setup.notFound}</p>
-                  <p className="text-[12px] text-text-muted mt-1">
-                    {t.setup.notFoundDesc}
-                  </p>
+                  <p className="text-[12px] text-text-muted mt-1">{t.setup.notFoundDesc}</p>
                 </div>
               </div>
-              <button onClick={handleInstall}
-                className="w-full flex items-center justify-center gap-2.5 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
-                <Download className="w-4 h-4" /> {t.setup.installBtn} <ChevronRight className="w-4 h-4" />
-              </button>
+
+              <p className="text-[13px] font-semibold text-text-primary text-center">
+                {(t.setup as any).chooseTitle}
+              </p>
+
+              <div className="grid grid-cols-2 gap-4">
+                {/* OpenClaw card */}
+                <button
+                  onClick={handleInstallOpenClaw}
+                  className="flex flex-col items-center gap-3 p-5 bg-surface-2 hover:bg-surface-2/80 border border-border hover:border-accent/50 rounded-xl transition-all group"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-sky-500/15 flex items-center justify-center">
+                    <Box className="w-6 h-6 text-sky-400" />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors">
+                      {(t.setup as any).openclawName}
+                    </p>
+                    <p className="text-[11px] text-text-muted mt-1 leading-relaxed">
+                      {(t.setup as any).openclawDesc}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-accent font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Download className="w-3 h-3" /> {t.setup.installBtn} <ChevronRight className="w-3 h-3" />
+                  </div>
+                </button>
+
+                {/* Hermes card */}
+                <button
+                  onClick={handleInstallHermes}
+                  className="flex flex-col items-center gap-3 p-5 bg-surface-2 hover:bg-surface-2/80 border border-border hover:border-violet-500/50 rounded-xl transition-all group"
+                >
+                  <div className="w-12 h-12 rounded-xl bg-violet-500/15 flex items-center justify-center">
+                    <Code2 className="w-6 h-6 text-violet-400" />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-semibold text-text-primary group-hover:text-violet-400 transition-colors">
+                      {(t.setup as any).hermesName}
+                    </p>
+                    <p className="text-[11px] text-text-muted mt-1 leading-relaxed">
+                      {(t.setup as any).hermesDesc}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-violet-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Download className="w-3 h-3" /> {(t.setup as any).hermesGuideTitle} <ChevronRight className="w-3 h-3" />
+                  </div>
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Downloading / installing Node.js */}
+          {/* Hermes install guide */}
+          {(stage === 'hermes_guide' || stage === 'hermes_verifying') && (
+            <div className="flex flex-col gap-5">
+              <div className="flex items-start gap-4 p-4 bg-violet-500/10 border border-violet-500/30 rounded-xl">
+                <Code2 className="w-5 h-5 text-violet-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{(t.setup as any).hermesGuideTitle}</p>
+                  <p className="text-[12px] text-text-muted mt-1">{(t.setup as any).hermesGuideDesc}</p>
+                </div>
+              </div>
+
+              <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
+                <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
+                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
+                </p>
+                <div className="space-y-1.5 font-mono text-[12px]">
+                  <p className="text-text-secondary">
+                    <span className="text-text-muted select-none"># </span>
+                    <span className="text-sky-400">{(t.setup as any).commentHermes}</span>
+                  </p>
+                  <p className="text-emerald-400 select-all">pip install hermes-agent</p>
+                  <p className="text-text-secondary mt-2">
+                    <span className="text-text-muted select-none"># </span>
+                    <span className="text-sky-400">GitHub</span>
+                  </p>
+                  <p className="text-emerald-400 select-all">https://github.com/hermes-agent/hermes</p>
+                </div>
+              </div>
+
+              {hermesError && (
+                <div className="flex items-start gap-3 p-3 bg-red-500/10 border border-red-500/30 rounded-xl">
+                  <XCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                  <p className="text-[12px] text-red-400">{hermesError}</p>
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setHermesError(''); setStage('not_installed'); }}
+                  className="flex-1 py-2.5 border border-border hover:bg-surface-2 text-text-secondary font-medium rounded-xl transition-all text-sm"
+                >
+                  {t.setup.steps.detect}
+                </button>
+                <button
+                  onClick={handleVerifyHermes}
+                  disabled={stage === 'hermes_verifying'}
+                  className="flex-[2] flex items-center justify-center gap-2 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-violet-600/25"
+                >
+                  {stage === 'hermes_verifying' ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> {(t.setup as any).hermesVerifying}</>
+                  ) : (
+                    <><CheckCircle className="w-4 h-4" /> {(t.setup as any).hermesVerifyBtn}</>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Downloading / installing Node.js (OpenClaw path) */}
           {stage === 'downloading_node' && nodeStatus && (
             <div className="flex flex-col gap-5">
               <div className="flex items-start gap-4 p-4 bg-sky-500/10 border border-sky-500/30 rounded-xl">
                 <ArrowDownToLine className="w-5 h-5 text-sky-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-semibold text-text-primary">{t.setup.nodeSetup}</p>
-                  <p className="text-[12px] text-text-muted mt-1">
-                    {t.setup.nodeSetupDesc}
-                  </p>
+                  <p className="text-[12px] text-text-muted mt-1">{t.setup.nodeSetupDesc}</p>
                 </div>
               </div>
 
               <div className="bg-surface-2 border border-border rounded-xl p-5 space-y-4">
-                {/* Resolving version */}
                 <div className="flex items-center gap-3">
                   {nodeStatus.step === 'resolving' ? (
                     <Loader2 className="w-4 h-4 text-accent animate-spin flex-shrink-0" />
@@ -252,7 +426,6 @@ export default function Setup() {
                   </span>
                 </div>
 
-                {/* Downloading */}
                 {nodeStatus.step !== 'resolving' && (
                   <div className="space-y-2">
                     <div className="flex items-center gap-3">
@@ -276,7 +449,6 @@ export default function Setup() {
                   </div>
                 )}
 
-                {/* Extracting */}
                 {(nodeStatus.step === 'extracting' || nodeStatus.step === 'done') && (
                   <div className="flex items-center gap-3">
                     {nodeStatus.step === 'extracting' ? (
@@ -291,7 +463,6 @@ export default function Setup() {
                 )}
               </div>
 
-              {/* Terminal log underneath for verbose output */}
               {logs.length > 0 && <TerminalLog lines={logs} waitingText={t.setup.waiting} />}
             </div>
           )}
@@ -310,7 +481,21 @@ export default function Setup() {
             </div>
           )}
 
-          {/* Failed */}
+          {/* Installing Hermes via pip */}
+          {isHermesInstalling && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-3">
+                <Loader2 className="w-5 h-5 text-violet-400 animate-spin flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{(t.setup as any).hermesInstalling}</p>
+                  <p className="text-[12px] text-text-muted">{(t.setup as any).hermesInstallingDesc}</p>
+                </div>
+              </div>
+              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
+            </div>
+          )}
+
+          {/* OpenClaw install failed */}
           {stage === 'install_failed' && (
             <div className="flex flex-col gap-4">
               <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
@@ -334,8 +519,42 @@ export default function Setup() {
                 </div>
               </div>
 
-              <button onClick={() => { setLogs([]); setNodeStatus(null); handleInstall(); }}
+              <button onClick={() => { setLogs([]); setNodeStatus(null); setStage('not_installed'); }}
                 className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
+                {t.setup.retryInstall}
+              </button>
+            </div>
+          )}
+
+          {/* Hermes install failed */}
+          {isHermesFailed && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+                <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
+                  <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
+                </div>
+              </div>
+              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
+
+              <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
+                <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
+                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
+                </p>
+                <div className="space-y-1.5 font-mono text-[12px]">
+                  <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
+                  <p className="text-emerald-400 select-all">pip install hermes-agent</p>
+                  <p className="text-text-secondary mt-2">
+                    <span className="text-text-muted select-none"># </span>
+                    <span className="text-sky-400">GitHub</span>
+                  </p>
+                  <p className="text-emerald-400 select-all">https://github.com/hermes-agent/hermes</p>
+                </div>
+              </div>
+
+              <button onClick={() => { setLogs([]); setStage('not_installed'); }}
+                className="w-full py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-violet-600/25">
                 {t.setup.retryInstall}
               </button>
             </div>

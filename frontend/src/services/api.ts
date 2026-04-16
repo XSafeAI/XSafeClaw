@@ -374,19 +374,29 @@ export const guardAPI = {
   setEnabled: (enabled: boolean) => api.post<{ enabled: boolean }>('/guard/enabled', { enabled }),
 };
 
-// System API (openclaw install / onboard / status)
+// System API (agent install / onboard / status)
 export const systemAPI = {
-  /** Check whether openclaw CLI is installed. */
+  /** Check whether an agent framework (OpenClaw or Hermes) is installed. */
   status: () =>
     api.get<{
+      platform: string;
       openclaw_installed: boolean;
+      hermes_installed?: boolean;
       openclaw_version: string | null;
       daemon_running: boolean;
       openclaw_path: string | null;
+      hermes_path?: string | null;
+      config_exists?: boolean;
+      hermes_api_port?: number;
+      hermes_config_path?: string;
+      hermes_home?: string;
     }>("/system/status", { timeout: 2500 }),
 
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',
+
+  /** SSE URL for pip install hermes stream (use with fetch). */
+  installHermesUrl: () => '/api/system/install-hermes',
 
   /** Start onboard process, returns proc_id. */
   onboardStart: () =>
@@ -465,6 +475,12 @@ export const systemAPI = {
 
   providerHasKey: (provider: string) =>
     api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
+
+  hermesApiKeyStatus: () =>
+    api.get<{ configured: boolean }>('/system/hermes-api-key-status'),
+
+  saveHermesApiKey: (apiKey: string) =>
+    api.post<{ success: boolean; configured: boolean }>('/system/hermes-api-key', { api_key: apiKey }),
 };
 
 export const skillsAPI = {

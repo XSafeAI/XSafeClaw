@@ -1,4 +1,4 @@
-"""API routes for OpenClaw agent chat sessions."""
+"""API routes for agent chat sessions (OpenClaw + Hermes)."""
 
 import asyncio
 import json
@@ -13,13 +13,21 @@ from pydantic import BaseModel, Field
 
 from ...config import settings
 from ...gateway_client import GatewayClient
+from ...hermes_client import HermesClient
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 
-# Path to OpenClaw sessions directory
+# ── Platform-aware paths ──────────────────────────────────────────────────
 _OPENCLAW_DIR = Path.home() / ".openclaw"
-_SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
-_SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
-_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_HERMES_DIR = settings.hermes_home
+
+if settings.is_hermes:
+    _SESSIONS_DIR = settings.hermes_sessions_dir
+    _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+    _CONFIG_PATH = settings.hermes_config_path
+else:
+    _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
+    _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
@@ -186,15 +194,44 @@ def _ensure_default_model_visible(payload: dict) -> dict:
 
 
 def _build_available_models_payload_from_config() -> dict:
-    """Fallback to configured models from ~/.openclaw/openclaw.json."""
+    """Fallback to configured models from platform config file.
+
+    Reads ``~/.openclaw/openclaw.json`` (OpenClaw) or
+    ``~/.hermes/config.yaml`` (Hermes).
+    """
     if not _CONFIG_PATH.exists():
         return {"models": [], "default_model": ""}
 
     try:
-        config = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = _CONFIG_PATH.read_text(encoding="utf-8")
+        if settings.is_hermes:
+            import yaml
+            config = yaml.safe_load(raw) or {}
+        else:
+            config = json.loads(raw)
     except Exception:
         return {"models": [], "default_model": ""}
 
+    if settings.is_hermes:
+        # Hermes config.yaml: model is a single string like "provider/model"
+        # or a bare name like "hermes-agent".
+        default_model = str(config.get("model", "")).strip()
+        models = []
+        if default_model:
+            if "/" in default_model:
+                provider, short = default_model.split("/", 1)
+            else:
+                provider = "hermes"
+                short = default_model
+            models.append({
+                "id": default_model,
+                "name": short,
+                "provider": provider,
+                "reasoning": False,
+            })
+        return _ensure_default_model_visible({"models": models, "default_model": default_model})
+
+    # OpenClaw config
     providers_cfg = (
         config.get("models", {})
         .get("providers", {})
@@ -226,6 +263,24 @@ def _build_available_models_payload_from_config() -> dict:
     return _ensure_default_model_visible({"models": models, "default_model": default_model})
 
 
+def _extract_runtime_model_list(raw: dict | list | None) -> list[dict]:
+    """Extract model entries from gateway (OpenClaw) or API server (Hermes).
+
+    OpenClaw gateway returns ``{"models": [...]}``, while the Hermes API
+    server uses the OpenAI-compatible ``{"data": [...]}``.
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        models = raw.get("models")
+        if isinstance(models, list) and models:
+            return models
+        data = raw.get("data")
+        if isinstance(data, list):
+            return data
+    return []
+
+
 def _runtime_model_ref_candidates(entry: dict) -> list[str]:
     refs: list[str] = []
     key = str(entry.get("key", "")).strip()
@@ -239,6 +294,8 @@ def _runtime_model_ref_candidates(entry: dict) -> list[str]:
         if "/" in model_id and not model_id.lower().startswith(f"{provider.lower()}/"):
             refs.append(f"{provider}/{model_id}")
     elif model_id and "/" in model_id:
+        refs.append(model_id)
+    elif model_id:
         refs.append(model_id)
 
     seen: set[str] = set()
@@ -289,14 +346,19 @@ def _runtime_catalog_match(models: list[dict], target_model_id: str) -> tuple[bo
 
 def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     """
-    Read chat history from OpenClaw's local .jsonl storage.
+    Read chat history from agent session JSONL storage.
 
-    OpenClaw stores sessions in:
-      ~/.openclaw/agents/main/sessions/sessions.json  (key → sessionId mapping)
-      ~/.openclaw/agents/main/sessions/<sessionId>.jsonl  (message log)
+    Supports two layouts:
 
-    The chat.history WebSocket API only returns the active LLM context window,
-    NOT the full persisted log. We read the files directly instead.
+    **OpenClaw** — wrapped entries::
+
+        ~/.openclaw/agents/main/sessions/sessions.json  (key → sessionId mapping)
+        ~/.openclaw/agents/main/sessions/<sessionId>.jsonl
+
+    **Hermes** — flat entries (standard OpenAI chat format)::
+
+        ~/.hermes/sessions/sessions.json  (key → sessionId mapping)
+        ~/.hermes/sessions/<sessionId>.jsonl
     """
     if not _SESSIONS_JSON.exists():
         return []
@@ -316,7 +378,7 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     if not session_info:
         return []
 
-    session_id = session_info.get("sessionId")
+    session_id = session_info.get("sessionId") or session_info.get("session_id")
     if not session_id:
         return []
 
@@ -327,10 +389,7 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     import re
 
     messages = []
-    # Pending tool calls: { toolCallId → {tool_id, tool_name, args, timestamp, entry_id} }
-    # These are emitted as tool_call messages once we find the matching toolResult.
     pending_tool_calls: dict[str, dict] = {}
-    # Tool calls inserted before the NEXT assistant text message
     queued_tool_calls: list[dict] = []
 
     try:
@@ -343,14 +402,24 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
             except json.JSONDecodeError:
                 continue
 
-            if entry.get("type") != "message":
+            # ── Detect format: wrapped (OpenClaw) vs flat (Hermes) ────
+            if "message" in entry and isinstance(entry.get("message"), dict):
+                # OpenClaw wrapped format
+                if entry.get("type") != "message":
+                    continue
+                msg       = entry["message"]
+                timestamp = entry.get("timestamp")
+                entry_id  = entry.get("id", "")
+            elif "role" in entry:
+                # Hermes flat format
+                msg       = entry
+                timestamp = entry.get("timestamp")
+                entry_id  = entry.get("id", "")
+            else:
                 continue
 
-            msg       = entry.get("message", {})
-            role      = msg.get("role", "")
-            timestamp = entry.get("timestamp")
-            entry_id  = entry.get("id", "")
-            content   = msg.get("content", "")
+            role    = msg.get("role", "")
+            content = msg.get("content", "")
 
             if role == "user":
                 # Flush any queued tool calls before user message (shouldn't happen, but safety)
@@ -405,8 +474,8 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
                     queued_tool_calls = []
                     messages.append({"role": "assistant", "content": text, "timestamp": timestamp, "id": entry_id})
 
-            elif role == "toolResult":
-                tc_id = msg.get("toolCallId", "")
+            elif role in ("toolResult", "tool"):
+                tc_id = msg.get("toolCallId") or msg.get("tool_call_id", "")
                 if tc_id and tc_id in pending_tool_calls:
                     # Extract result text
                     result_content = content
@@ -455,7 +524,7 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
     if not session_info:
         return []
 
-    session_id = session_info.get("sessionId")
+    session_id = session_info.get("sessionId") or session_info.get("session_id")
     if not session_id:
         return []
 
@@ -477,7 +546,11 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
         # Find entries since the LAST user message (i.e., the most recent turn)
         last_user_idx = -1
         for i, e in enumerate(entries):
+            # OpenClaw: {"type":"message","message":{"role":"user",...}}
+            # Hermes:   {"role":"user","content":"..."}
             if e.get("type") == "message" and e.get("message", {}).get("role") == "user":
+                last_user_idx = i
+            elif e.get("role") == "user":
                 last_user_idx = i
 
         if last_user_idx < 0:
@@ -485,18 +558,24 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
 
         recent = entries[last_user_idx + 1:]
 
-        # Collect tool calls: match assistant messages that have tool calls
-        # with the corresponding toolResult messages.
-        tool_calls: dict[str, dict] = {}  # toolCallId → tool_call info
+        tool_calls: dict[str, dict] = {}
 
         for entry in recent:
-            if entry.get("type") != "message":
+            # Resolve msg from wrapped or flat format
+            if "message" in entry and isinstance(entry.get("message"), dict):
+                if entry.get("type") != "message":
+                    continue
+                msg = entry["message"]
+            elif "role" in entry:
+                msg = entry
+            else:
                 continue
-            msg = entry.get("message", {})
+
             role = msg.get("role", "")
 
             if role == "assistant":
                 content = msg.get("content", [])
+                # OpenClaw tool calls: content blocks with type=toolCall
                 if isinstance(content, list):
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "toolCall":
@@ -511,9 +590,23 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
                                     "result":    None,
                                     "is_error":  False,
                                 }
+                # Hermes tool calls: msg.tool_calls list
+                for tc in msg.get("tool_calls", []) or []:
+                    tc_id = tc.get("id", "")
+                    func = tc.get("function", {})
+                    tc_name = func.get("name", "tool")
+                    tc_args = func.get("arguments")
+                    if tc_id:
+                        tool_calls[tc_id] = {
+                            "tool_id":   tc_id,
+                            "tool_name": tc_name,
+                            "args":      tc_args,
+                            "result":    None,
+                            "is_error":  False,
+                        }
 
-            elif role == "toolResult":
-                tc_id = msg.get("toolCallId", "")
+            elif role in ("toolResult", "tool"):
+                tc_id = msg.get("toolCallId") or msg.get("tool_call_id", "")
                 if tc_id and tc_id in tool_calls:
                     result_content = msg.get("content", "")
                     if isinstance(result_content, list):
@@ -525,7 +618,7 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
                     else:
                         result_text = str(result_content)
                     tool_calls[tc_id]["result"]   = result_text
-                    tool_calls[tc_id]["is_error"] = bool(msg.get("isError", False))
+                    tool_calls[tc_id]["is_error"] = bool(msg.get("isError") or msg.get("is_error", False))
 
         # Emit: first a tool_start, then a tool_result for each tool
         events = []
@@ -553,18 +646,27 @@ def _ws_is_open(ws: object) -> bool:
         return True
 
 # --------------- Gateway session store ---------------
-# { session_key: GatewayClient }
+# { session_key: GatewayClient | HermesClient }
 # NOTE: This is in-memory and will reset on server reload.
 # send-message handles the "client missing" case by reconnecting.
-_gateway_sessions: dict[str, GatewayClient] = {}
+_gateway_sessions: dict[str, GatewayClient | HermesClient] = {}
 
 
-async def _connect_gateway_with_retries() -> GatewayClient:
-    """Connect to the OpenClaw gateway, tolerating short daemon reload windows."""
+async def _connect_gateway_with_retries() -> GatewayClient | HermesClient:
+    """Connect to the agent gateway, tolerating short daemon reload windows.
+
+    Returns a ``HermesClient`` when the platform is Hermes, otherwise
+    a ``GatewayClient`` (OpenClaw WebSocket).
+    """
     last_error: Exception | None = None
 
     for attempt in range(1, _GATEWAY_CONNECT_RETRY_ATTEMPTS + 1):
-        client = GatewayClient()
+        if settings.is_hermes:
+            client: GatewayClient | HermesClient = HermesClient(
+                api_key=settings.hermes_api_key or None,
+            )
+        else:
+            client = GatewayClient()
         try:
             await client.connect()
             return client
@@ -578,20 +680,26 @@ async def _connect_gateway_with_retries() -> GatewayClient:
             if attempt < _GATEWAY_CONNECT_RETRY_ATTEMPTS:
                 await asyncio.sleep(_GATEWAY_CONNECT_RETRY_DELAY_S)
 
+    platform_name = "Hermes API server" if settings.is_hermes else "OpenClaw gateway"
     detail = (
-        f"Failed to connect to OpenClaw gateway after {_GATEWAY_CONNECT_RETRY_ATTEMPTS} attempts: "
+        f"Failed to connect to {platform_name} after {_GATEWAY_CONNECT_RETRY_ATTEMPTS} attempts: "
         f"{last_error}. The gateway may still be restarting."
     )
     raise HTTPException(status_code=503, detail=detail)
 
 
-async def _get_or_create_client(session_key: str) -> GatewayClient:
+async def _get_or_create_client(session_key: str) -> GatewayClient | HermesClient:
     """Get existing client or create a fresh one if missing/dead."""
     client = _gateway_sessions.get(session_key)
-    if client is not None and client._ws is not None and _ws_is_open(client._ws):
-        return client
 
-    # Client missing or WebSocket closed — create a new connection
+    if settings.is_hermes:
+        if client is not None and isinstance(client, HermesClient):
+            return client
+    else:
+        if client is not None and isinstance(client, GatewayClient) and client._ws is not None and _ws_is_open(client._ws):
+            return client
+
+    # Client missing or connection dead — create a new connection
     client = await _connect_gateway_with_retries()
     _gateway_sessions[session_key] = client
     return client
@@ -913,13 +1021,44 @@ async def patch_session(request: PatchSessionRequest):
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+async def _build_available_models_from_hermes_api() -> dict:
+    """Query the live Hermes API server for its model catalog.
+
+    Called as a fallback when ``config.yaml`` has no usable model entry.
+    """
+    try:
+        client = HermesClient(api_key=settings.hermes_api_key or None)
+        await client.connect()
+        raw = await client.list_models()
+        await client.disconnect()
+    except Exception:
+        return {"models": [], "default_model": ""}
+
+    models = []
+    for entry in _extract_runtime_model_list(raw):
+        model_id = str(entry.get("id", "")).strip()
+        if not model_id:
+            continue
+        provider = str(entry.get("owned_by", "")).strip() or "hermes"
+        models.append({
+            "id": model_id,
+            "name": model_id,
+            "provider": provider,
+            "reasoning": False,
+        })
+
+    default_model = models[0]["id"] if models else ""
+    return _ensure_default_model_visible({"models": models, "default_model": default_model})
+
+
 @router.get("/available-models")
 async def available_models():
     """Return the saved model deck for Agent Valley.
 
     Priority:
-      1. Explicit models persisted in ~/.openclaw/openclaw.json
-      2. Live CLI model listing (when no explicit saved models exist)
+      1. Explicit models persisted in config file
+      2. (OpenClaw) Live CLI model listing
+         (Hermes)  Live API server model catalog
       3. Last known good payload
 
     We intentionally do NOT fall back to onboard-scan's full catalog here,
@@ -943,30 +1082,39 @@ async def available_models():
 
         config_payload = _build_available_models_payload_from_config()
         if config_payload["models"]:
-            print("[available-models] using configured models from openclaw.json")
+            print("[available-models] using configured models from config file")
             _available_models_cache["payload"] = config_payload
             _available_models_cache["last_success"] = config_payload
             _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
             return config_payload
 
-        raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
-        status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None
-        payload = _build_available_models_payload(raw, status_raw)
+        if settings.is_hermes:
+            hermes_payload = await _build_available_models_from_hermes_api()
+            if hermes_payload["models"]:
+                print("[available-models] using live Hermes API model catalog")
+                _available_models_cache["payload"] = hermes_payload
+                _available_models_cache["last_success"] = hermes_payload
+                _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+                return hermes_payload
+        else:
+            raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
+            status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None
+            payload = _build_available_models_payload(raw, status_raw)
 
-        if payload["models"]:
-            _available_models_cache["payload"] = payload
-            _available_models_cache["last_success"] = payload
-            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
-            return payload
+            if payload["models"]:
+                _available_models_cache["payload"] = payload
+                _available_models_cache["last_success"] = payload
+                _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+                return payload
 
         last_success = _available_models_cache.get("last_success")
         if isinstance(last_success, dict) and last_success.get("models"):
-            print("[available-models] using last known good model list after CLI returned no models")
+            print("[available-models] using last known good model list (live source returned nothing)")
             _available_models_cache["payload"] = last_success
             _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
             return last_success
 
-        print("[available-models] openclaw returned no models and no cached model list is available")
+        print("[available-models] no models found from any source")
         empty_payload = {"models": [], "default_model": ""}
         _available_models_cache["payload"] = empty_payload
         _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
@@ -982,11 +1130,23 @@ async def model_readiness(
     if not target_model_id:
         raise HTTPException(status_code=400, detail="model_id is required")
 
-    client: GatewayClient | None = None
+    client: GatewayClient | HermesClient | None = None
     try:
         client = await _connect_gateway_with_retries()
         raw = await client.list_models()
-        models = raw.get("models", []) if isinstance(raw, dict) else raw
+        models = _extract_runtime_model_list(raw)
+
+        # Hermes manages model routing internally — its runtime catalog only
+        # reports "hermes-agent" regardless of the backend model the user
+        # configured.  As long as the API server is reachable and exposes at
+        # least one model, the gateway is ready to accept requests.
+        if settings.is_hermes and models:
+            return ModelReadinessResponse(
+                model_id=target_model_id,
+                ready=True,
+                visible_model_id=target_model_id,
+            )
+
         matched, visible_model_id = _runtime_catalog_match(
             models if isinstance(models, list) else [],
             target_model_id,

@@ -973,10 +973,226 @@ function ReviewStep({ form, authProviders, submitting }: { form: FormData; authP
   );
 }
 
+const SETUP_PLATFORM_KEY = 'xsafeclaw_setup_platform';
+
+/** Hermes: short wizard (security → status → API key → done). OpenClaw onboard is not used. */
+function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, unknown> }) {
+  const { t } = useI18n();
+  const h = t.configure.hermes;
+  const TOTAL_STEPS = 4;
+  const [step, setStep] = useState(0);
+  const [st, setSt] = useState<Record<string, unknown>>(initialStatus);
+  const [riskAccepted, setRiskAccepted] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [hermesApiKey, setHermesApiKey] = useState('');
+  const [showHermesKey, setShowHermesKey] = useState(false);
+  const [savingKey, setSavingKey] = useState(false);
+  const [keySaveResult, setKeySaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const [keySaveError, setKeySaveError] = useState('');
+  const keyAlreadyConfigured = st.hermes_api_key_configured === true;
+
+  const hermesLabels = [h.steps.security, h.steps.status, h.steps.apiKey, h.steps.done];
+  const hermesSkipped = new Set<number>();
+
+  async function refreshStatus() {
+    setRefreshing(true);
+    try {
+      const res = await systemAPI.status();
+      setSt(res.data as Record<string, unknown>);
+    } catch { /* ignore */ }
+    finally { setRefreshing(false); }
+  }
+
+  async function saveHermesApiKey() {
+    setSavingKey(true);
+    setKeySaveResult('idle');
+    setKeySaveError('');
+    try {
+      await systemAPI.saveHermesApiKey(hermesApiKey.trim());
+      setKeySaveResult('ok');
+      setSt(prev => ({ ...prev, hermes_api_key_configured: !!hermesApiKey.trim() }));
+    } catch (err: any) {
+      setKeySaveResult('fail');
+      setKeySaveError(err?.response?.data?.detail || String(err));
+    } finally {
+      setSavingKey(false);
+    }
+  }
+
+  const canNextHermes = (): boolean => {
+    if (step === 0) return riskAccepted;
+    return true;
+  };
+
+  function goNextHermes() {
+    if (step < TOTAL_STEPS - 1) setStep(step + 1);
+  }
+  function goBackHermes() {
+    if (step > 0) setStep(step - 1);
+  }
+
+  const hermesPath = (st.hermes_path as string) || '—';
+  const version = (st.openclaw_version as string) || '—';
+  const apiPort = (st.hermes_api_port as number) ?? '—';
+  const cfgPath = (st.hermes_config_path as string) || '—';
+  const home = (st.hermes_home as string) || '—';
+  const gwOk = st.daemon_running === true;
+  const cfgExists = st.config_exists === true;
+
+  return (
+    <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
+      <div className="w-full max-w-4xl">
+        <div className="flex flex-col items-center gap-2 mb-6">
+          <img src="/logo.png" alt="XSafeClaw" className="w-12 h-12 object-contain rounded-xl shadow-lg shadow-accent/25" />
+          <p className="text-[15px] font-semibold text-text-primary">{h.pageTitle}</p>
+          <p className="text-[12px] text-text-muted text-center max-w-lg">{h.pageSubtitle}</p>
+        </div>
+        <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
+          <StepProgress current={step} skipped={hermesSkipped} labels={hermesLabels} />
+
+          {step === 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2"><Shield className="w-5 h-5 text-warning" /><h3 className="text-lg font-bold text-text-primary">{h.security.title}</h3></div>
+              <div className="bg-warning/5 border border-warning/20 rounded-xl p-5 text-[12px] text-text-secondary leading-relaxed space-y-2">
+                <p className="font-semibold text-text-primary">{h.security.prompt}</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  {h.security.items.map((item: string, i: number) => <li key={i}>{item}</li>)}
+                </ul>
+                <p className="text-[11px] text-text-muted">{h.security.recommend}</p>
+              </div>
+              <label className="flex items-center gap-3 cursor-pointer p-3 rounded-lg border border-border hover:border-violet-500/30 transition-all">
+                <input type="checkbox" checked={riskAccepted} onChange={e => setRiskAccepted(e.target.checked)} className="w-4 h-4 rounded accent-violet-500" />
+                <span className="text-[13px] font-medium text-text-primary">{h.security.checkbox}</span>
+              </label>
+            </div>
+          )}
+
+          {step === 1 && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h3 className="text-lg font-bold text-text-primary">{h.statusTitle}</h3>
+                  <p className="text-[12px] text-text-muted mt-1">{h.statusDesc}</p>
+                </div>
+                <button type="button" onClick={refreshStatus} disabled={refreshing}
+                  className="flex items-center gap-2 px-3 py-2 text-[12px] font-medium rounded-lg border border-border hover:bg-surface-2 text-text-secondary">
+                  <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} /> {h.refresh}
+                </button>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                {[
+                  [h.labelBinary, hermesPath],
+                  [h.labelVersion, version],
+                  [h.labelHome, home],
+                  [h.labelConfig, cfgPath],
+                  [h.labelApiPort, String(apiPort)],
+                  [h.labelGateway, gwOk ? h.gatewayUp : h.gatewayDown],
+                  [h.labelConfigStatus, cfgExists ? h.configPresent : h.configMissing],
+                ].map(([k, v], i) => (
+                  <div key={i} className="bg-surface-0 border border-border rounded-xl p-3">
+                    <p className="text-[10px] uppercase tracking-wide text-text-muted font-medium">{k}</p>
+                    <p className="text-[12px] text-text-primary font-mono break-all mt-1">{v}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="bg-violet-500/5 border border-violet-500/20 rounded-xl p-4 space-y-2">
+                <p className="text-[12px] font-semibold text-text-primary">{h.envHintTitle}</p>
+                <p className="text-[11px] text-text-muted leading-relaxed">{h.envHintBody}</p>
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2"><Key className="w-5 h-5 text-violet-400" /><h3 className="text-lg font-bold text-text-primary">{h.apiKeyTitle}</h3></div>
+              <p className="text-[13px] text-text-secondary leading-relaxed">{h.apiKeyDesc}</p>
+
+              <div className="bg-surface-0 border border-border rounded-xl p-4 text-[12px] text-text-muted space-y-2 leading-relaxed">
+                <p className="font-semibold text-text-primary">{h.apiKeyGuideTitle}</p>
+                <ol className="list-decimal pl-4 space-y-1">
+                  {h.apiKeyGuideSteps.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                </ol>
+              </div>
+
+              {keyAlreadyConfigured && keySaveResult !== 'ok' && (
+                <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 text-[12px] text-emerald-400">
+                  <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{h.apiKeyAlreadySet}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="text-[12px] font-semibold text-text-primary block mb-1.5">{h.apiKeyLabel}</label>
+                <div className="relative">
+                  <input
+                    type={showHermesKey ? 'text' : 'password'}
+                    value={hermesApiKey}
+                    onChange={e => { setHermesApiKey(e.target.value); setKeySaveResult('idle'); }}
+                    placeholder={keyAlreadyConfigured ? h.apiKeyPlaceholderUpdate : h.apiKeyPlaceholder}
+                    className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 pr-10 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                  />
+                  <button onClick={() => setShowHermesKey(!showHermesKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary">
+                    {showHermesKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-text-muted mt-1.5">{h.apiKeyHint}</p>
+              </div>
+
+              <div className="flex items-center gap-3 flex-wrap">
+                <button type="button" onClick={saveHermesApiKey} disabled={savingKey || !hermesApiKey.trim()}
+                  className="flex items-center gap-1.5 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[12px] font-semibold rounded-lg transition-all">
+                  {savingKey ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Key className="w-3.5 h-3.5" />}
+                  {h.apiKeySaveBtn}
+                </button>
+                {keySaveResult === 'ok' && <span className="text-[12px] text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />{h.apiKeySaved}</span>}
+                {keySaveResult === 'fail' && <span className="text-[12px] text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{keySaveError || h.apiKeySaveFailed}</span>}
+              </div>
+
+              <p className="text-[11px] text-text-muted">{h.apiKeySkipHint}</p>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2"><CheckCircle className="w-5 h-5 text-emerald-400" /><h3 className="text-lg font-bold text-text-primary">{h.doneTitle}</h3></div>
+              <p className="text-[13px] text-text-secondary leading-relaxed">{h.doneDesc}</p>
+              <div className="bg-surface-0 border border-border rounded-xl p-4 space-y-2">
+                <p className="text-[12px] font-semibold text-text-primary">{h.hintTitle}</p>
+                <p className="text-[12px] text-text-muted leading-relaxed">{h.hintBody}</p>
+              </div>
+              <button type="button" onClick={() => window.location.replace('/agent-valley')}
+                className="flex items-center gap-2 px-8 py-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
+                <Settings2 className="w-4 h-4" /> {t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between mt-6 pt-4 border-t border-border">
+            <button type="button" onClick={goBackHermes} disabled={step === 0}
+              className="flex items-center gap-1.5 px-4 py-2 text-[13px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-30 transition-all">
+              <ChevronLeft className="w-4 h-4" /> {t.common.back}
+            </button>
+            {step < TOTAL_STEPS - 1 ? (
+              <button type="button" onClick={goNextHermes} disabled={!canNextHermes()}
+                className="flex items-center gap-1.5 px-6 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[13px] font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
+                {t.common.next} <ChevronRight className="w-4 h-4" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <p className="text-center text-[11px] text-text-muted mt-6">{t.common.poweredBy}</p>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Main ─── */
 export default function Configure() {
   const navigate = useNavigate();
   const { t } = useI18n();
+  const [agentFlow, setAgentFlow] = useState<'loading' | 'openclaw' | 'hermes'>('loading');
+  const [hermesStatusSnapshot, setHermesStatusSnapshot] = useState<Record<string, unknown> | null>(null);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormData>(INITIAL);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -996,6 +1212,28 @@ export default function Configure() {
   useEffect(() => {
     (async () => {
       try {
+        const statusRes = await systemAPI.status();
+        const st = statusRes.data as Record<string, unknown> & {
+          platform?: string;
+          hermes_installed?: boolean;
+        };
+        const pref = typeof localStorage !== 'undefined' ? localStorage.getItem(SETUP_PLATFORM_KEY) : null;
+
+        const useHermes =
+          st.platform === 'hermes'
+          || (pref === 'hermes' && st.hermes_installed === true);
+
+        if (useHermes) {
+          if (typeof localStorage !== 'undefined') localStorage.removeItem(SETUP_PLATFORM_KEY);
+          setHermesStatusSnapshot(st);
+          setAgentFlow('hermes');
+          return;
+        }
+
+        if (typeof localStorage !== 'undefined' && pref === 'openclaw') {
+          localStorage.removeItem(SETUP_PLATFORM_KEY);
+        }
+
         const res = await systemAPI.onboardScan();
         const d = res.data as any;
         setAuthProviders(d.auth_providers || []);
@@ -1018,8 +1256,12 @@ export default function Configure() {
           searchProvider: defs.search_provider || prev.searchProvider,
           searchApiKey: defs.search_api_key || prev.searchApiKey,
         }));
-      } catch { /* ignore */ }
-      setLoading(false);
+        setAgentFlow('openclaw');
+      } catch {
+        setAgentFlow('openclaw');
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [navigate]);
 
@@ -1123,6 +1365,10 @@ export default function Configure() {
   }
 
   if (loading) return <div className="min-h-screen bg-surface-0 flex items-center justify-center"><Loader2 className="w-8 h-8 text-accent animate-spin" /></div>;
+
+  if (agentFlow === 'hermes' && hermesStatusSnapshot) {
+    return <HermesConfigureFlow initialStatus={hermesStatusSnapshot} />;
+  }
 
   if (done) return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">

@@ -1,4 +1,4 @@
-"""System management API – OpenClaw install / onboard / status."""
+"""System management API – OpenClaw / Hermes install / onboard / status."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from ...config import settings
 
 try:
     import fcntl
@@ -83,6 +85,11 @@ _OPENCLAW_EXECUTABLES = (
     if os.name == "nt"
     else ("openclaw",)
 )
+_HERMES_EXECUTABLES = (
+    ("hermes.cmd", "hermes.exe", "hermes.bat", "hermes.ps1", "hermes")
+    if os.name == "nt"
+    else ("hermes",)
+)
 
 
 def _is_runnable_file(path: Path) -> bool:
@@ -137,6 +144,26 @@ def _find_openclaw() -> Optional[str]:
     return shutil.which("openclaw")
 
 
+def _find_hermes() -> Optional[str]:
+    """Locate the hermes binary."""
+    env = _build_env()
+    for d in env.get("PATH", "").split(_PATH_SEP):
+        if not d:
+            continue
+        for executable in _HERMES_EXECUTABLES:
+            candidate = Path(d) / executable
+            if _is_runnable_file(candidate):
+                return str(candidate)
+    return shutil.which("hermes")
+
+
+def _find_agent_binary() -> Optional[str]:
+    """Locate the active platform's binary (``hermes`` or ``openclaw``)."""
+    if settings.is_hermes:
+        return _find_hermes()
+    return _find_openclaw()
+
+
 def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
     """Build a subprocess command that can launch OpenClaw across platforms."""
     suffix = Path(openclaw_path).suffix.lower()
@@ -151,6 +178,11 @@ def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
             *args,
         ]
     return [openclaw_path, *args]
+
+
+def _build_agent_command(agent_path: str, args: list[str]) -> list[str]:
+    """Build a subprocess command for the active platform binary."""
+    return _build_openclaw_command(agent_path, args)
 
 def _find_node_version() -> str:
     """Return the currently accessible Node.js version string."""
@@ -172,13 +204,21 @@ def _find_node_version() -> str:
 
 @router.get("/status")
 async def get_system_status():
-    """Check whether openclaw CLI is installed and whether its daemon is running."""
+    """Check whether the agent CLI is installed and whether its daemon is running."""
     env = _build_env()
+    platform_name = settings.resolved_platform
+
+    if settings.is_hermes:
+        return await _hermes_status(env)
+
+    # ── OpenClaw status ───────────────────────────────────────────────────
     openclaw_path = _find_openclaw()
 
     if not openclaw_path:
         return {
+            "platform": platform_name,
             "openclaw_installed": False,
+            "hermes_installed": _find_hermes() is not None,
             "openclaw_version": None,
             "daemon_running": False,
             "openclaw_path": None,
@@ -186,7 +226,6 @@ async def get_system_status():
             "config_exists": _CONFIG_PATH.exists(),
         }
 
-    # Get version
     version: Optional[str] = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -200,7 +239,9 @@ async def get_system_status():
         version = raw.splitlines()[0] if raw else "unknown"
         if "requires Node" in version or "Upgrade Node" in version:
             return {
+                "platform": platform_name,
                 "openclaw_installed": False,
+                "hermes_installed": _find_hermes() is not None,
                 "openclaw_version": None,
                 "daemon_running": False,
                 "openclaw_path": None,
@@ -211,7 +252,6 @@ async def get_system_status():
     except Exception:
         version = "unknown"
 
-    # Check daemon
     daemon_running = False
     try:
         proc2 = await asyncio.create_subprocess_exec(
@@ -226,13 +266,110 @@ async def get_system_status():
         pass
 
     return {
+        "platform": platform_name,
         "openclaw_installed": True,
+        "hermes_installed": _find_hermes() is not None,
         "openclaw_version": version,
         "daemon_running": daemon_running,
         "openclaw_path": openclaw_path,
         "node_version": _find_node_version(),
         "config_exists": _CONFIG_PATH.exists(),
     }
+
+
+async def _hermes_status(env: dict) -> dict:
+    """Check Hermes installation and gateway status."""
+    hermes_path = _find_hermes()
+    if not hermes_path:
+        return {
+            "platform": "hermes",
+            "openclaw_installed": False,
+            "hermes_installed": False,
+            "openclaw_version": None,
+            "daemon_running": False,
+            "openclaw_path": None,
+            "hermes_path": None,
+            "config_exists": _CONFIG_PATH.exists(),
+            "hermes_api_port": settings.hermes_api_port,
+            "hermes_config_path": str(settings.hermes_config_path),
+            "hermes_home": str(settings.hermes_home),
+            "hermes_api_key_configured": bool(settings.hermes_api_key),
+        }
+
+    version: Optional[str] = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_path, "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        raw = (stdout or stderr).decode().strip()
+        version = raw.splitlines()[0] if raw else "unknown"
+    except Exception:
+        version = "unknown"
+
+    # Check if Hermes API server is running via health endpoint
+    daemon_running = False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"http://127.0.0.1:{settings.hermes_api_port}/health")
+            daemon_running = resp.status_code == 200
+    except Exception:
+        pass
+
+    return {
+        "platform": "hermes",
+        "openclaw_installed": True,
+        "hermes_installed": True,
+        "openclaw_version": version,
+        "daemon_running": daemon_running,
+        "openclaw_path": hermes_path,
+        "hermes_path": hermes_path,
+        "config_exists": _CONFIG_PATH.exists(),
+        "hermes_api_port": settings.hermes_api_port,
+        "hermes_config_path": str(settings.hermes_config_path),
+        "hermes_home": str(settings.hermes_home),
+        "hermes_api_key_configured": bool(settings.hermes_api_key),
+    }
+
+
+# ──────────────────────────────────────────────
+# Hermes API key management
+# ──────────────────────────────────────────────
+
+class _HermesApiKeyRequest(BaseModel):
+    api_key: str = ""
+
+
+@router.get("/hermes-api-key-status")
+async def hermes_api_key_status():
+    """Return whether a Hermes API key is currently configured (never exposes the value)."""
+    return {"configured": bool(settings.hermes_api_key)}
+
+
+@router.post("/hermes-api-key")
+async def save_hermes_api_key(body: _HermesApiKeyRequest):
+    """Persist the Hermes API key into XSafeClaw's .env and reload settings at runtime."""
+    import dotenv
+
+    env_path = Path.cwd() / ".env"
+    if not env_path.exists():
+        example = Path.cwd() / ".env.example"
+        if example.exists():
+            import shutil
+            shutil.copy(example, env_path)
+        else:
+            env_path.write_text("", encoding="utf-8")
+
+    key_value = body.api_key.strip()
+    dotenv.set_key(str(env_path), "HERMES_API_KEY", key_value)
+
+    settings.hermes_api_key = key_value
+
+    return {"success": True, "configured": bool(key_value)}
 
 
 # ──────────────────────────────────────────────
@@ -413,6 +550,68 @@ async def install_openclaw():
         try:
             proc = await asyncio.create_subprocess_exec(
                 npm_path, "install", "-g", "openclaw@latest",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+            await proc.wait()
+            if proc.returncode == 0:
+                yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
+                trigger_onboard_scan_preload()
+            else:
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ──────────────────────────────────────────────
+# Install Hermes  (pip install hermes-agent)
+# ──────────────────────────────────────────────
+
+def _find_pip(env: dict) -> Optional[str]:
+    """Locate pip/pip3 binary using the given environment."""
+    sep = ";" if os.name == "nt" else ":"
+    names = ["pip3", "pip"] if os.name != "nt" else ["pip3.exe", "pip.exe", "pip3", "pip"]
+    for d in env.get("PATH", "").split(sep):
+        for name in names:
+            candidate = Path(d) / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return shutil.which("pip3") or shutil.which("pip")
+
+
+@router.post("/install-hermes")
+async def install_hermes():
+    """Auto-install Hermes Agent via pip. Streams SSE."""
+    env = _build_env()
+
+    async def generate():
+        pip_path = _find_pip(env)
+
+        if not pip_path:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'pip not found. Please install Python 3.11+ and pip first.'})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'output', 'text': f'Using pip: {pip_path}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'output', 'text': 'Running: pip install hermes-agent'})}\n\n"
+        yield f"data: {json.dumps({'type': 'pip_install_start'})}\n\n"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                pip_path, "install", "hermes-agent",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -1039,8 +1238,14 @@ AVAILABLE_CHANNELS = [
 ]
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
-_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
-_EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+_HERMES_DIR = settings.hermes_home
+
+if settings.is_hermes:
+    _CONFIG_PATH = settings.hermes_config_path
+    _EXPLICIT_MODELS_PATH = _HERMES_DIR / "xsafeclaw-explicit-models.json"
+else:
+    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+    _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 
 # ── Dynamic auth-provider scanning ───────────────────────────────────────────
 # Reads each extension's openclaw.plugin.json at runtime so the provider list
@@ -1399,6 +1604,48 @@ def _extract_json_obj(raw: str) -> dict | list:
                         break
         continue
     raise ValueError("No valid JSON found in output")
+
+
+async def _run_agent_json(args: list[str], timeout: int = 30) -> dict | list | None:
+    """Run the active platform's CLI with --json and return parsed output.
+
+    Dispatches to ``_run_openclaw_json`` or ``_run_hermes_json`` depending
+    on the configured platform.
+    """
+    if settings.is_hermes:
+        return await _run_hermes_json(args, timeout=timeout)
+    return await _run_openclaw_json(args, timeout=timeout)
+
+
+async def _run_hermes_json(args: list[str], timeout: int = 30) -> dict | list | None:
+    """Run a hermes CLI command with --json and return parsed output."""
+    hermes_path = _find_hermes()
+    if not hermes_path:
+        print(f"[hermes-json] hermes executable not found for args={args!r}")
+        return None
+    env = _build_env()
+    cmd = _build_agent_command(hermes_path, [*args, "--json"])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout_text = (stdout or b"").decode("utf-8", errors="replace")
+        stderr_text = (stderr or b"").decode("utf-8", errors="replace")
+        raw = "\n".join(part for part in (stdout_text, stderr_text) if part).strip()
+        if not raw:
+            return None
+        try:
+            return _extract_json_obj(raw)
+        except Exception:
+            return None
+    except asyncio.TimeoutError:
+        return None
+    except Exception:
+        return None
 
 
 async def _run_openclaw_json(args: list[str], timeout: int = 30) -> dict | list | None:
@@ -2383,20 +2630,37 @@ async def _auto_approve_devices() -> None:
 
 
 def _install_safeclaw_guard_plugin() -> None:
-    """Copy safeclaw-guard plugin files to ~/.openclaw/extensions/ so OpenClaw loads them."""
-    src_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugins" / "safeclaw-guard"
-    if not src_dir.is_dir():
-        return
-    dst_dir = _OPENCLAW_DIR / "extensions" / "safeclaw-guard"
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for fname in ("index.ts", "openclaw.plugin.json", "package.json"):
-        src_file = src_dir / fname
-        if src_file.exists():
-            shutil.copy2(src_file, dst_dir / fname)
+    """Install the XSafeClaw guard plugin for the active platform.
+
+    - **OpenClaw**: copies TS plugin to ``~/.openclaw/extensions/safeclaw-guard/``
+    - **Hermes**: copies Python plugin to ``~/.hermes/plugins/safeclaw-guard/``
+    """
+    plugins_root = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugins"
+
+    if settings.is_hermes:
+        src_dir = plugins_root / "safeclaw-guard-hermes"
+        if not src_dir.is_dir():
+            return
+        dst_dir = _HERMES_DIR / "plugins" / "safeclaw-guard"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for fname in ("__init__.py", "plugin.yaml"):
+            src_file = src_dir / fname
+            if src_file.exists():
+                shutil.copy2(src_file, dst_dir / fname)
+    else:
+        src_dir = plugins_root / "safeclaw-guard"
+        if not src_dir.is_dir():
+            return
+        dst_dir = _OPENCLAW_DIR / "extensions" / "safeclaw-guard"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for fname in ("index.ts", "openclaw.plugin.json", "package.json"):
+            src_file = src_dir / fname
+            if src_file.exists():
+                shutil.copy2(src_file, dst_dir / fname)
 
 
 def _deploy_safety_files(workspace: str) -> None:
-    """Deploy SAFETY.md and PERMISSION.md into the OpenClaw workspace.
+    """Deploy SAFETY.md and PERMISSION.md into the agent workspace.
 
     Only writes files that don't already exist so user customizations are preserved.
     """
@@ -2597,7 +2861,7 @@ async def quick_model_config(body: QuickModelConfigRequest):
     # can skip its own polling loop entirely.
     model_ready = False
     if body.model_id:
-        from .chat import _runtime_catalog_match
+        from .chat import _extract_runtime_model_list, _runtime_catalog_match
         from ...gateway_client import GatewayClient
         for _attempt in range(5):
             await asyncio.sleep(0.8)
@@ -2606,7 +2870,7 @@ async def quick_model_config(body: QuickModelConfigRequest):
                 await asyncio.wait_for(client.connect(), timeout=5)
                 raw = await asyncio.wait_for(client.list_models(), timeout=5)
                 await client.disconnect()
-                catalog = raw.get("models", []) if isinstance(raw, dict) else raw
+                catalog = _extract_runtime_model_list(raw)
                 found, _ = _runtime_catalog_match(catalog, body.model_id)
                 if found:
                     model_ready = True

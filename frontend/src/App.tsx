@@ -45,7 +45,7 @@ function AppRoutes() {
         if (cancelled) return;
         const d = res.data as any;
 
-        if (!d.openclaw_installed) {
+        if (!d.openclaw_installed && !d.hermes_installed) {
           setCheckState('setup');
         } else if (!d.config_exists) {
           setCheckState('configure');

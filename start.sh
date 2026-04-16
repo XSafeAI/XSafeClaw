@@ -9,6 +9,19 @@ LOG_DIR="$PROJECT_DIR/.logs"
 
 mkdir -p "$LOG_DIR"
 
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Missing backend venv: $VENV_PYTHON"
+    echo "Run once from project root:  bash setup.sh"
+    echo "Or manually:  python3 -m venv .venv && .venv/bin/pip install -e ."
+    exit 1
+fi
+
+if [ ! -d "$PROJECT_DIR/frontend/node_modules" ]; then
+    echo "Missing frontend/node_modules"
+    echo "Run once:  cd frontend && npm install"
+    exit 1
+fi
+
 kill_port() {
     local port=$1
     local pids

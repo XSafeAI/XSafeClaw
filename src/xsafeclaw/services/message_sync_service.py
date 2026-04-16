@@ -19,11 +19,16 @@ from .event_sync_service import EventSyncService
 
 
 class MessageSyncService:
-    """Service for syncing OpenClaw session files to database using Message model."""
+    """Service for syncing agent session files to database using Message model.
+
+    Supports both OpenClaw (``~/.openclaw/agents/main/sessions/``) and
+    Hermes (``~/.hermes/sessions/``) session JSONL directories.  The
+    active directory is selected via ``settings.active_sessions_dir``.
+    """
 
     def __init__(self):
         """Initialize sync service."""
-        self.sessions_dir = Path(settings.OPENCLAW_SESSIONS_DIR)
+        self.sessions_dir = Path(settings.active_sessions_dir)
         self.watcher: SessionFileWatcher | None = None
         self._running = False
         self._sync_task: asyncio.Task | None = None
@@ -637,11 +642,18 @@ class MessageSyncService:
             return data
     
     async def _sync_message(self, db: AsyncSession, session_id: str, entry: JSONLEntry) -> None:
-        """Sync a message entry to database."""
+        """Sync a message entry to database.
+
+        Handles two JSONL layouts:
+        - **OpenClaw**: ``{"type":"message","id":"...","message":{"role":"...","content":[...]}}``
+        - **Hermes**:   ``{"role":"user","content":"..."}`` (flat, no wrapper)
+        """
         message_id = entry.entry_id
         if not message_id:
-            print(f"⚠️  Message entry has no ID, skipping")
-            return
+            # Hermes entries may lack an id; generate a deterministic one
+            import hashlib, json as _json
+            raw_bytes = _json.dumps(entry.raw_data, sort_keys=True, ensure_ascii=False).encode()
+            message_id = hashlib.sha256(raw_bytes).hexdigest()[:24]
         
         # Check if message already exists
         result = await db.execute(
@@ -650,8 +662,12 @@ class MessageSyncService:
         existing_message = result.scalar_one_or_none()
         if existing_message:
             return  # Already synced
-        
-        msg_data = entry.raw_data.get("message", {})
+
+        # Support both wrapped (OpenClaw) and flat (Hermes) formats
+        if "message" in entry.raw_data and isinstance(entry.raw_data.get("message"), dict):
+            msg_data = entry.raw_data["message"]
+        else:
+            msg_data = entry.raw_data
         role = msg_data.get("role", "unknown")
         content = msg_data.get("content", [])
         
@@ -717,8 +733,8 @@ class MessageSyncService:
             for tool_call_item in tool_calls_data:
                 await self._create_tool_call(db, message.id, message_id, tool_call_item, entry.timestamp)
         
-        # Process toolResult message
-        if role == "toolResult":
+        # Process toolResult message (OpenClaw: role="toolResult", Hermes: role="tool")
+        if role in ("toolResult", "tool"):
             await self._update_tool_call_result(db, msg_data, message_id, entry.timestamp)
         
         print(f"✅ Synced {role} message {message_id[:8]}...")
