@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ImageSwitch from './ImageSwitch';
+import { getAgentTownText } from '../i18n';
 
 const LANGUAGE_OPTIONS = [
   { id: 'zh-CN', label: 'Chinese' },
@@ -18,11 +19,6 @@ const AMBIENT_OPTIONS = [
   { id: 'cinematic', label: 'Cinematic FX' },
 ];
 
-const SCENE_DISPLAY_OPTIONS = [
-  { id: 'all', label: 'Working All' },
-  { id: 'capped', label: 'Custom Cap' },
-];
-
 function CircularProgress({ percent, size = 40, stroke = 3 }) {
   const r = (size - stroke) / 2;
   const circ = 2 * Math.PI * r;
@@ -37,27 +33,63 @@ function CircularProgress({ percent, size = 40, stroke = 3 }) {
   );
 }
 
-function useMapSkinStatus() {
-  const [status, setStatus] = useState({});
-  const [downloading, setDownloading] = useState({});
+const mapSkinStore = {
+  status: {},
+  downloading: {},
+  listeners: new Set(),
+  inFlight: new Map(),
+};
 
-  const refresh = useCallback(async () => {
-    try {
-      const res = await fetch('/api/map-skins/status');
-      if (!res.ok) return;
-      const data = await res.json();
-      const map = {};
-      for (const s of data) map[s.id] = s.downloaded;
-      setStatus(map);
-    } catch { /* ignore */ }
-  }, []);
+function mapSkinSnapshot() {
+  return {
+    status: mapSkinStore.status,
+    downloading: mapSkinStore.downloading,
+  };
+}
 
-  useEffect(() => { refresh(); }, [refresh]);
+function emitMapSkinStore() {
+  const snapshot = mapSkinSnapshot();
+  for (const listener of mapSkinStore.listeners) listener(snapshot);
+}
 
-  const download = useCallback(async (mapId) => {
-    setDownloading((prev) => ({ ...prev, [mapId]: { active: true, percent: 0 } }));
+function patchMapSkinStore(patch) {
+  Object.assign(mapSkinStore, patch);
+  emitMapSkinStore();
+}
+
+async function refreshMapSkinStatus() {
+  try {
+    const res = await fetch('/api/map-skins/status', { cache: 'no-store' });
+    if (!res.ok) return false;
+    const data = await res.json();
+    const map = {};
+    for (const s of data) map[s.id] = s.downloaded;
+    patchMapSkinStore({ status: map });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function downloadMapSkin(mapId) {
+  const existing = mapSkinStore.inFlight.get(mapId);
+  if (existing) return existing;
+
+  const task = (async () => {
+    let completed = false;
+    patchMapSkinStore({
+      downloading: {
+        ...mapSkinStore.downloading,
+        [mapId]: { active: true, percent: 0 },
+      },
+    });
+
     try {
       const res = await fetch(`/api/map-skins/download/${mapId}`, { method: 'POST' });
+      if (!res.ok || !res.body) {
+        throw new Error(`download failed: HTTP ${res.status}`);
+      }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -66,28 +98,84 @@ function useMapSkinStatus() {
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split('\n');
-        buf = lines.pop();
+        buf = lines.pop() || '';
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           try {
             const evt = JSON.parse(line.slice(6));
-            if (evt.phase === 'downloading') {
-              setDownloading((prev) => ({ ...prev, [mapId]: { active: true, percent: evt.percent } }));
+            if (evt.phase === 'waiting' || evt.phase === 'start') {
+              patchMapSkinStore({
+                downloading: {
+                  ...mapSkinStore.downloading,
+                  [mapId]: { active: true, percent: mapSkinStore.downloading[mapId]?.percent || 0 },
+                },
+              });
+            } else if (evt.phase === 'downloading') {
+              patchMapSkinStore({
+                downloading: {
+                  ...mapSkinStore.downloading,
+                  [mapId]: { active: true, percent: evt.percent },
+                },
+              });
             } else if (evt.phase === 'done') {
-              setDownloading((prev) => ({ ...prev, [mapId]: { active: false, percent: 100 } }));
-              setStatus((prev) => ({ ...prev, [mapId]: true }));
+              completed = true;
+              patchMapSkinStore({
+                downloading: {
+                  ...mapSkinStore.downloading,
+                  [mapId]: { active: false, percent: 100 },
+                },
+                status: {
+                  ...mapSkinStore.status,
+                  [mapId]: true,
+                },
+              });
             } else if (evt.phase === 'error') {
-              setDownloading((prev) => ({ ...prev, [mapId]: { active: false, percent: 0, error: evt.message } }));
+              throw new Error(evt.message || 'map download failed');
             }
-          } catch { /* skip bad json */ }
+          } catch (err) {
+            if (err instanceof SyntaxError) continue;
+            throw err;
+          }
         }
       }
+      await refreshMapSkinStatus();
+      return completed;
     } catch (err) {
-      setDownloading((prev) => ({ ...prev, [mapId]: { active: false, percent: 0, error: err.message } }));
+      const message = err instanceof Error ? err.message : String(err || 'map download failed');
+      patchMapSkinStore({
+        downloading: {
+          ...mapSkinStore.downloading,
+          [mapId]: { active: false, percent: 0, error: message },
+        },
+      });
+      return false;
+    } finally {
+      mapSkinStore.inFlight.delete(mapId);
     }
+  })();
+
+  mapSkinStore.inFlight.set(mapId, task);
+  return task;
+}
+
+function useMapSkinStatus() {
+  const [snapshot, setSnapshot] = useState(mapSkinSnapshot);
+
+  useEffect(() => {
+    mapSkinStore.listeners.add(setSnapshot);
+    return () => {
+      mapSkinStore.listeners.delete(setSnapshot);
+    };
   }, []);
 
-  return { status, downloading, download, refresh };
+  useEffect(() => { refreshMapSkinStatus(); }, []);
+
+  return {
+    status: snapshot.status,
+    downloading: snapshot.downloading,
+    download: downloadMapSkin,
+    refresh: refreshMapSkinStatus,
+  };
 }
 
 function PixelSelect({
@@ -182,7 +270,7 @@ function PixelSelect({
   );
 }
 
-function OptionChipGroup({ options, value, onChange, comingSoon = false }) {
+function OptionChipGroup({ options, value, onChange, comingSoon = false, comingSoonText = 'Coming Soon' }) {
   const [showToast, setShowToast] = useState(false);
 
   const handleClick = (id) => {
@@ -207,7 +295,7 @@ function OptionChipGroup({ options, value, onChange, comingSoon = false }) {
         </button>
       ))}
       {showToast && (
-        <span className="tc-coming-soon-toast">Coming Soon</span>
+        <span className="tc-coming-soon-toast">{comingSoonText}</span>
       )}
     </div>
   );
@@ -232,6 +320,7 @@ export default function ControlTab({
   maxSceneNpcDisplayCap = 999,
   guardEnabled = false,
   onToggleGuard,
+  townText = getAgentTownText('en'),
 }) {
   const [language, setLanguage] = useState('zh-CN');
   const [density, setDensity] = useState('compact');
@@ -274,21 +363,25 @@ export default function ControlTab({
     [musicTracks],
   );
 
+  const sceneDisplayOptions = useMemo(() => [
+    { id: 'all', label: townText.control.workingAll },
+    { id: 'capped', label: townText.control.customCap },
+  ], [townText]);
+
   return (
     <div className="tc-control-layout">
       <div className="tc-control-main tc-ornate-panel">
-        <div className="tc-panel-microcopy">WORLD / MAP ROUTING</div>
+        <div className="tc-panel-microcopy">{townText.control.worldRouting}</div>
         <div className="tc-control-title-row">
           <div>
-            <div className="tc-control-overline">Scene Deck</div>
-            <h3 className="tc-control-title">Map Switching</h3>
+            <div className="tc-control-overline">{townText.control.sceneDeck}</div>
+            <h3 className="tc-control-title">{townText.control.mapSwitching}</h3>
           </div>
-          <div className="tc-control-badge">LIVE ROUTE</div>
+          <div className="tc-control-badge">{townText.control.liveRoute}</div>
         </div>
 
         <div className="tc-control-description">
-          {`Map_opensource.tmj`} now drives all five world skins. The switch below changes the rendered layer and
-          its matching collision grid so the town keeps the same navigation chain while swapping theme.
+          {townText.control.mapDescription}
         </div>
 
         <div className="tc-map-option-grid">
@@ -302,7 +395,9 @@ export default function ControlTab({
             const handleClick = () => {
               if (isDownloading) return;
               if (needsDownload) {
-                downloadSkin(map.id);
+                downloadSkin(map.id).then((ok) => {
+                  if (ok) onChangeMap(map.id);
+                });
                 return;
               }
               onChangeMap(map.id);
@@ -355,11 +450,11 @@ export default function ControlTab({
                         </div>
                       )}
                       {!needsDownload && (
-                        <div className="tc-map-option-preview-caption">Scene Preview</div>
+                        <div className="tc-map-option-preview-caption">{townText.control.scenePreview}</div>
                       )}
                     </>
                   ) : (
-                    <div className="tc-map-option-preview-empty">Preview offline</div>
+                    <div className="tc-map-option-preview-empty">{townText.control.previewOffline}</div>
                   )}
                 </div>
               </button>
@@ -370,16 +465,16 @@ export default function ControlTab({
 
       <div className="tc-control-side">
         <div className="tc-control-card tc-control-card-compact tc-ornate-panel">
-          <div className="tc-panel-microcopy">RUNTIME / ACTIVE</div>
-          <div className="tc-control-card-title">Current Scene</div>
+          <div className="tc-panel-microcopy">{townText.control.runtimeActive}</div>
+          <div className="tc-control-card-title">{townText.control.currentScene}</div>
           {activeMap ? (
             <div className="tc-control-facts">
               <div className="tc-control-fact">
-                <span>Theme</span>
+                <span>{townText.control.theme}</span>
                 <strong>{activeMap.label}</strong>
               </div>
               <div className="tc-control-fact">
-                <span>Description</span>
+                <span>{townText.control.description}</span>
                 <strong>{activeMap.description}</strong>
               </div>
             </div>
@@ -387,11 +482,11 @@ export default function ControlTab({
         </div>
 
         <div className="tc-control-card tc-control-card-scroll tc-ornate-panel">
-          <div className="tc-panel-microcopy">AUDIO / AMBIENCE</div>
-          <div className="tc-control-card-title">Background Music</div>
+          <div className="tc-panel-microcopy">{townText.control.audioAmbience}</div>
+          <div className="tc-control-card-title">{townText.control.backgroundMusic}</div>
           <div className="tc-control-scroll-area">
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Playback</span>
+              <span className="tc-control-setting-label">{townText.control.playback}</span>
               <div className="tc-control-toggle-row">
                 <ImageSwitch
                   checked={musicEnabled}
@@ -407,17 +502,17 @@ export default function ControlTab({
             </div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Track Select</span>
+              <span className="tc-control-setting-label">{townText.control.trackSelect}</span>
               <PixelSelect
                 options={musicSelectOptions}
                 value={activeMusicId}
                 onChange={onChangeMusic}
-                placeholder="Select track"
+                placeholder={townText.control.selectTrack}
               />
             </div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Volume</span>
+              <span className="tc-control-setting-label">{townText.control.volume}</span>
               <div className="tc-control-slider-row">
                 <input
                   className="tc-control-slider"
@@ -432,20 +527,20 @@ export default function ControlTab({
               </div>
             </div>
 
-            <div className="tc-panel-microcopy">SCENE / DISPLAY</div>
-            <div className="tc-control-card-title">On-map Agents</div>
+            <div className="tc-panel-microcopy">{townText.control.sceneDisplay}</div>
+            <div className="tc-control-card-title">{townText.control.onMapAgents}</div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Render Mode</span>
+              <span className="tc-control-setting-label">{townText.control.renderMode}</span>
               <OptionChipGroup
-                options={SCENE_DISPLAY_OPTIONS}
+                options={sceneDisplayOptions}
                 value={sceneNpcDisplayMode}
                 onChange={(next) => onChangeSceneNpcDisplayMode?.(next)}
               />
             </div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Visible Cap</span>
+              <span className="tc-control-setting-label">{townText.control.visibleCap}</span>
               <input
                 className="tc-scene-cap-input"
                 type="number"
@@ -461,27 +556,27 @@ export default function ControlTab({
               />
               <div className="tc-scene-cap-hint">
                 {sceneNpcDisplayMode === 'capped'
-                  ? `Range: ${safeMin} – ${safeMax} (pending: ${safeMin}, eligible: ${safeMax})`
-                  : 'All qualifying agents are rendered on-map without a custom cap.'}
+                  ? `${townText.control.rangeHint}: ${safeMin} - ${safeMax} (pending: ${safeMin}, eligible: ${safeMax})`
+                  : townText.control.allAgentsHint}
               </div>
             </div>
 
-            <div className="tc-panel-microcopy">UI / PLACEHOLDERS</div>
-            <div className="tc-control-card-title">General Controls</div>
+            <div className="tc-panel-microcopy">{townText.control.uiPlaceholders}</div>
+            <div className="tc-control-card-title">{townText.control.generalControls}</div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Language</span>
-              <OptionChipGroup options={LANGUAGE_OPTIONS} value={language} onChange={setLanguage} comingSoon />
+              <span className="tc-control-setting-label">{townText.control.language}</span>
+              <OptionChipGroup options={LANGUAGE_OPTIONS} value={language} onChange={setLanguage} comingSoon comingSoonText={townText.control.comingSoon} />
             </div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Console Density</span>
-              <OptionChipGroup options={DENSITY_OPTIONS} value={density} onChange={setDensity} comingSoon />
+              <span className="tc-control-setting-label">{townText.control.consoleDensity}</span>
+              <OptionChipGroup options={DENSITY_OPTIONS} value={density} onChange={setDensity} comingSoon comingSoonText={townText.control.comingSoon} />
             </div>
 
             <div className="tc-control-setting">
-              <span className="tc-control-setting-label">Ambient FX</span>
-              <OptionChipGroup options={AMBIENT_OPTIONS} value={ambientFx} onChange={setAmbientFx} comingSoon />
+              <span className="tc-control-setting-label">{townText.control.ambientFx}</span>
+              <OptionChipGroup options={AMBIENT_OPTIONS} value={ambientFx} onChange={setAmbientFx} comingSoon comingSoonText={townText.control.comingSoon} />
             </div>
           </div>
         </div>

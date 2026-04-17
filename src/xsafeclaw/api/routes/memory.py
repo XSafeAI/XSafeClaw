@@ -12,6 +12,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from ...services import memory_scan_service
+from ..runtime_helpers import get_default_instance, unavailable_payload
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,16 @@ def _collect_memory_files() -> list[dict]:
 
 @router.get("/list")
 async def list_memory_files():
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return unavailable_payload(
+            instance=instance,
+            reason="Memory file management is currently only available for OpenClaw workspaces.",
+            key="files",
+        )
     files = _collect_memory_files()
     cached = memory_scan_service.get_all_cached()
 
@@ -129,11 +140,22 @@ async def list_memory_files():
                 scan = {**scan, "status": "outdated"}
             f["scan"] = scan
 
-    return {"files": files}
+    return {"files": files, "unavailable": False}
 
 
 @router.post("/scan-all")
 async def scan_all(body: dict | None = None):
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "results": [],
+            "total": 0,
+            "unavailable": True,
+            "reason": "Memory file scanning is currently only available for OpenClaw workspaces.",
+        }
     body = body or {}
     keys: list[str] | None = body.get("keys")
     force: bool = body.get("force", False)
@@ -156,7 +178,17 @@ async def scan_all(body: dict | None = None):
 
 @router.get("/scan-status")
 async def scan_status():
-    return {"scans": memory_scan_service.get_all_cached()}
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "scans": {},
+            "unavailable": True,
+            "reason": "Memory file scanning is currently only available for OpenClaw workspaces.",
+        }
+    return {"scans": memory_scan_service.get_all_cached(), "unavailable": False}
 
 
 @router.get("/content/{file_key:path}")

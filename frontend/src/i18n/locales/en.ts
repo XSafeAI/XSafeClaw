@@ -213,6 +213,7 @@ export const en = {
     stopVoiceInput: 'Stop voice input',
     voiceUnsupported: 'Voice input not supported in this browser',
     pickModel: 'Pick a model in settings first',
+    nanobotGatewayOffline: 'The nanobot Chat page requires nanobot gateway and the websocket channel. Run this in another terminal: nanobot gateway --port 18790 --verbose. The page will refresh status automatically after it starts.',
     connectFailed: 'Failed to connect to OpenClaw gateway, is it running?',
   },
 

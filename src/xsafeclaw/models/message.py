@@ -1,4 +1,4 @@
-"""Message model representing individual messages in OpenClaw sessions."""
+"""Message model representing individual messages across runtimes."""
 
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -14,17 +14,7 @@ if TYPE_CHECKING:
 
 
 class Message(Base, TimestampMixin):
-    """A single message in an OpenClaw conversation.
-    
-    Represents any message entry from JSONL:
-    - user: User input
-    - assistant: Agent response
-    - toolResult: Tool execution result
-    - system: System messages
-    - etc.
-    
-    Messages form a tree structure via parent_message_id.
-    """
+    """A single message in a monitored runtime conversation."""
 
     __tablename__ = "messages"
 
@@ -40,11 +30,43 @@ class Message(Base, TimestampMixin):
 
     # Message identification (from JSONL)
     message_id: Mapped[str] = mapped_column(
-        String(36), nullable=False, unique=True, index=True, comment="Message ID from JSONL entry"
+        String(255),
+        nullable=False,
+        unique=True,
+        index=True,
+        comment="Internal namespaced message ID",
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(32),
+        default="openclaw",
+        index=True,
+        comment="Runtime platform: openclaw / nanobot",
+    )
+
+    instance_id: Mapped[str] = mapped_column(
+        String(128),
+        default="openclaw-default",
+        index=True,
+        comment="Runtime instance ID",
+    )
+
+    source_session_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="Original runtime session ID/key",
+    )
+
+    source_message_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="Original runtime message ID",
     )
     
     parent_message_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True, comment="Parent message ID (forms a chain)"
+        String(255), nullable=True, index=True, comment="Internal parent message ID (forms a chain)"
     )
 
     # Message metadata
@@ -61,7 +83,7 @@ class Message(Base, TimestampMixin):
         Text, nullable=True, comment="Text content of the message"
     )
     
-    content_json: Mapped[dict | None] = mapped_column(
+    content_json: Mapped[dict | list | None] = mapped_column(
         JSON, nullable=True, comment="Full content structure (for complex content)"
     )
 
@@ -133,6 +155,8 @@ class Message(Base, TimestampMixin):
 
     # Indexes
     __table_args__ = (
+        Index("ix_messages_platform_instance", "platform", "instance_id"),
+        Index("ix_messages_platform_instance_source", "platform", "instance_id", "source_message_id"),
         Index("ix_messages_session_timestamp", "session_id", "timestamp"),
         Index("ix_messages_session_role", "session_id", "role"),
         Index("ix_messages_parent", "parent_message_id"),

@@ -53,8 +53,15 @@ Thumbs.db
 
 # Testing
 .pytest_cache/
+.pytest-tmp/
+pytest-cache-files-*/
 .coverage
 htmlcov/
+.xsafeclaw/
+
+# Downloaded Agent Valley map skins (Map1 and Map_demo are bundled source assets)
+frontend/public/Map-opensorce/Map[2-5].png
+src/xsafeclaw/static/Map-opensorce/Map[2-5].png
 
 # MyPy
 .mypy_cache/

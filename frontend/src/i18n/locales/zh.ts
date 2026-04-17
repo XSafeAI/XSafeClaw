@@ -207,6 +207,7 @@ export const zh: Translations = {
     stopVoiceInput: '停止语音输入',
     voiceUnsupported: '当前浏览器不支持语音输入',
     pickModel: '请先在设置中选择模型',
+    nanobotGatewayOffline: 'nanobot 的 Chat 页面需要 nanobot gateway 和 websocket channel。请在另一个终端运行：nanobot gateway --port 18790 --verbose；启动后页面会自动刷新状态。',
     connectFailed: '无法连接到 OpenClaw 网关，请检查是否正在运行',
   },
 
