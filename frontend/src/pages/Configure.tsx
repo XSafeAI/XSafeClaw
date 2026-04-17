@@ -71,7 +71,7 @@ interface FormData {
 const INITIAL: FormData = {
   mode: 'local', authProvider: '', authMethod: '', apiKey: '', modelFilter: '', modelId: '',
   gatewayPort: 18789, gatewayBind: 'loopback', gatewayAuthMode: 'token', gatewayToken: '',
-  channels: [], hooks: [], workspace: '~/.openclaw/workspace',
+  channels: [], hooks: [], workspace: '',
   installDaemon: true, tailscaleMode: 'off',
   searchProvider: '', searchApiKey: '', remoteUrl: '', remoteToken: '',
   selectedSkills: [], wizardMode: 'quickstart', configAction: 'update', resetScope: '',
@@ -1018,7 +1018,15 @@ export default function Configure() {
           searchProvider: defs.search_provider || prev.searchProvider,
           searchApiKey: defs.search_api_key || prev.searchApiKey,
         }));
-      } catch { /* ignore */ }
+      } catch {
+        try {
+          const st = await systemAPI.status();
+          const dw = (st.data as { default_workspace?: string })?.default_workspace;
+          if (dw) {
+            setForm((prev) => ({ ...prev, workspace: prev.workspace || dw }));
+          }
+        } catch { /* ignore */ }
+      }
       setLoading(false);
     })();
   }, [navigate]);

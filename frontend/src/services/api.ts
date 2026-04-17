@@ -383,6 +383,10 @@ export const systemAPI = {
       openclaw_version: string | null;
       daemon_running: boolean;
       openclaw_path: string | null;
+      node_version?: string;
+      config_exists?: boolean;
+      error?: string;
+      default_workspace?: string;
     }>("/system/status", { timeout: 2500 }),
 
   /** SSE URL for npm install stream (use with fetch). */

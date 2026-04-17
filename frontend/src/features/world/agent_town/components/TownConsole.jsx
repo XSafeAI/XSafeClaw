@@ -1404,7 +1404,7 @@ export default function TownConsole({
         gateway_auth_mode: 'token',
         gateway_token: '',
         tailscale_mode: 'off',
-        workspace: '~/.openclaw/workspace',
+        workspace: '',
         install_daemon: true,
         remote_url: '',
         remote_token: '',
@@ -1430,6 +1430,13 @@ export default function TownConsole({
     } catch (err) {
       console.warn('[TownConsole] onboard-scan fetch error:', err);
       setModelCatalogError(err?.response?.data?.detail || err?.message || 'Failed to discover configure-time models.');
+      try {
+        const st = await systemAPI.status();
+        const dw = st.data?.default_workspace;
+        if (dw) {
+          setOnboardDefaults((prev) => ({ ...prev, workspace: prev.workspace || dw }));
+        }
+      } catch { /* ignore */ }
     } finally {
       setModelCatalogLoading(false);
     }
