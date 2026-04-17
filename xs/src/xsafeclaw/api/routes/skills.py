@@ -1,0 +1,403 @@
+"""Agent skills / tools management API (OpenClaw + Hermes)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from ...config import settings
+from ...services import skill_scan_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+_OPENCLAW_DIR = Path.home() / ".openclaw"
+_HERMES_DIR = settings.hermes_home
+
+if settings.is_hermes:
+    _CONFIG_PATH = settings.hermes_config_path
+else:
+    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _build_env() -> dict:
+    """Build env dict with nvm Node paths."""
+    env = {**os.environ}
+    nvm_versions = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_versions.exists():
+        version_dirs = sorted(
+            [d for d in nvm_versions.iterdir() if d.is_dir()],
+        )
+        if version_dirs:
+            latest_bin = str(version_dirs[-1] / "bin")
+            current_path = env.get("PATH", "")
+            if latest_bin not in current_path:
+                env["PATH"] = latest_bin + ":" + current_path
+    return env
+
+
+def _find_openclaw() -> str | None:
+    """Find the openclaw binary."""
+    found = shutil.which("openclaw")
+    if found:
+        return found
+    nvm_versions = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_versions.exists():
+        for vdir in sorted(nvm_versions.iterdir(), reverse=True):
+            candidate = vdir / "bin" / "openclaw"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
+def _find_hermes() -> str | None:
+    """Find the hermes binary."""
+    return shutil.which("hermes")
+
+
+def _find_agent_binary() -> str | None:
+    """Find the active platform's binary."""
+    if settings.is_hermes:
+        return _find_hermes()
+    return _find_openclaw()
+
+
+def _read_config() -> dict:
+    """Read and parse the platform config file."""
+    if not _CONFIG_PATH.exists():
+        return {}
+    try:
+        raw = _CONFIG_PATH.read_text("utf-8")
+        if settings.is_hermes:
+            import yaml
+            return yaml.safe_load(raw) or {}
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def _write_config(config: dict) -> None:
+    """Write config dict to the platform config file."""
+    if settings.is_hermes:
+        import yaml
+        _HERMES_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(yaml.dump(config, allow_unicode=True, default_flow_style=False), encoding="utf-8")
+        tmp.rename(_CONFIG_PATH)
+    else:
+        _OPENCLAW_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.rename(_CONFIG_PATH)
+
+
+def _build_skill_paths() -> dict[str, str]:
+    """Scan known directories to build a skill_name -> directory_path mapping."""
+    skill_map: dict[str, str] = {}
+
+    scan_bases: list[Path] = []
+
+    if settings.is_hermes:
+        # Hermes: ~/.hermes/skills/
+        scan_bases.append(_HERMES_DIR / "skills")
+    else:
+        # OpenClaw: ~/.openclaw/skills/ + extensions
+        scan_bases.append(_OPENCLAW_DIR / "skills")
+        ext_dir = _OPENCLAW_DIR / "extensions"
+        if ext_dir.is_dir():
+            for ext in ext_dir.iterdir():
+                if ext.is_dir():
+                    skills_sub = ext / "skills"
+                    if skills_sub.is_dir():
+                        scan_bases.append(skills_sub)
+
+        openclaw_bin = _find_openclaw()
+        if openclaw_bin:
+            bin_path = Path(openclaw_bin).resolve()
+            pkg_root = bin_path.parent
+            pkg_candidates = [
+                pkg_root,
+                pkg_root.parent,
+                pkg_root / ".." / "lib" / "node_modules" / "openclaw",
+            ]
+            for pkg in pkg_candidates:
+                pkg = pkg.resolve()
+                skills_dir = pkg / "skills"
+                if skills_dir.is_dir():
+                    scan_bases.append(skills_dir)
+                ext_dir2 = pkg / "extensions"
+                if ext_dir2.is_dir():
+                    for ext in ext_dir2.iterdir():
+                        if ext.is_dir():
+                            skills_sub = ext / "skills"
+                            if skills_sub.is_dir():
+                                scan_bases.append(skills_sub)
+
+    for base in scan_bases:
+        if not base.is_dir():
+            continue
+        for subdir in base.iterdir():
+            if subdir.is_dir() and (subdir / "SKILL.md").exists():
+                skill_map[subdir.name] = str(subdir)
+
+    return skill_map
+
+
+def _extract_json(raw: str) -> dict | list:
+    """Extract the first complete JSON object/array from a string that may
+    contain non-JSON text before or after (e.g. plugin log lines)."""
+    start = -1
+    for i, ch in enumerate(raw):
+        if ch in ("{", "["):
+            start = i
+            break
+    if start == -1:
+        raise ValueError("No JSON object/array found in output")
+
+    bracket = raw[start]
+    close = "}" if bracket == "{" else "]"
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_str:
+                escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == bracket:
+            depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return json.loads(raw[start:i + 1])
+    raise ValueError("Incomplete JSON in output")
+
+
+def _file_sha256(path: Path) -> str:
+    """SHA-256 hex digest of a file, empty string if not exists."""
+    if not path.exists():
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+class SkillUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    api_key: str | None = None
+    env: dict | None = None
+
+
+class ScanAllRequest(BaseModel):
+    keys: list[str] | None = None
+    force: bool = False
+
+
+class ScanOneRequest(BaseModel):
+    force: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/list")
+async def list_skills():
+    """List skills/tools via agent CLI and enrich with config / scan data."""
+    agent_bin = _find_agent_binary()
+    if not agent_bin:
+        platform_name = "hermes" if settings.is_hermes else "openclaw"
+        raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
+
+    env = _build_env()
+
+    # Hermes: ``hermes tools list --json`` / OpenClaw: ``openclaw skills list --json``
+    if settings.is_hermes:
+        cmd = [agent_bin, "tools", "list", "--json"]
+    else:
+        cmd = [agent_bin, "skills", "list", "--json"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to run agent CLI: {exc}")
+
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"skills list failed (exit {result.returncode}): {result.stderr}",
+        )
+
+    try:
+        raw = result.stdout
+        data = _extract_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
+
+    config = _read_config()
+    skills_config = config.get("skills", {})
+    skill_paths = _build_skill_paths()
+    cached_scans = skill_scan_service.get_all_cached()
+
+    skills_list = data.get("skills", []) if isinstance(data, dict) else data
+    for skill in skills_list:
+        key = skill.get("key") or skill.get("name", "")
+        skill_cfg = skills_config.get(key, {})
+
+        skill["configEnabled"] = skill_cfg.get("enabled", True)
+        skill["hasApiKey"] = bool(skill_cfg.get("apiKey"))
+        skill["configEnv"] = skill_cfg.get("env", {})
+        skill["path"] = skill_paths.get(key, "")
+
+        scan_entry = cached_scans.get(key)
+        if scan_entry:
+            skill_dir = skill_paths.get(key)
+            if skill_dir:
+                current_hash = _file_sha256(Path(skill_dir) / "SKILL.md")
+                scanned_hash = scan_entry.get("fileHash", "")
+                if current_hash and scanned_hash and current_hash != scanned_hash:
+                    scan_entry = {**scan_entry, "status": "outdated"}
+            skill["scanStatus"] = scan_entry
+
+    return {"skills": skills_list}
+
+
+@router.get("/check")
+async def check_skills():
+    """Check skill/tool eligibility via agent CLI."""
+    agent_bin = _find_agent_binary()
+    if not agent_bin:
+        platform_name = "hermes" if settings.is_hermes else "openclaw"
+        raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
+
+    env = _build_env()
+
+    if settings.is_hermes:
+        cmd = [agent_bin, "tools", "check", "--json"]
+    else:
+        cmd = [agent_bin, "skills", "check", "--json"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to run agent CLI: {exc}")
+
+    try:
+        raw = result.stdout
+        return _extract_json(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
+
+
+@router.post("/scan-all")
+async def scan_all_skills(body: ScanAllRequest):
+    """Trigger security scan on all (or selected) skills."""
+    skill_paths = _build_skill_paths()
+    if body.keys:
+        skill_paths = {k: v for k, v in skill_paths.items() if k in body.keys}
+    if not skill_paths:
+        return {"results": [], "error": "No matching skills found"}
+    try:
+        results = await skill_scan_service.scan_all_skills(
+            skill_paths=skill_paths,
+            force=body.force,
+        )
+        return {"results": [r.to_dict() for r in results]}
+    except Exception as exc:
+        logger.exception("scan_all_skills failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/scan-status")
+async def scan_status():
+    """Return cached scan status for all skills."""
+    return {"results": skill_scan_service.get_all_cached()}
+
+
+@router.post("/{skill_key}/update")
+async def update_skill(skill_key: str, body: SkillUpdateRequest):
+    """Update skill configuration in platform config file."""
+    config = _read_config()
+    skills = config.setdefault("skills", {})
+    entry = skills.setdefault(skill_key, {})
+
+    if body.enabled is not None:
+        entry["enabled"] = body.enabled
+    if body.api_key is not None:
+        entry["apiKey"] = body.api_key
+    if body.env is not None:
+        entry["env"] = body.env
+
+    _write_config(config)
+    return {"success": True, "skill": skill_key, "config": entry}
+
+
+@router.get("/{skill_key}/content")
+async def get_skill_content(skill_key: str):
+    """Read and return SKILL.md content for a skill."""
+    skill_paths = _build_skill_paths()
+    skill_dir = skill_paths.get(skill_key)
+    if not skill_dir:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_key}' not found")
+
+    skill_md = Path(skill_dir) / "SKILL.md"
+    if not skill_md.exists():
+        raise HTTPException(status_code=404, detail=f"SKILL.md not found for '{skill_key}'")
+
+    try:
+        content = skill_md.read_text("utf-8")
+        stat = skill_md.stat()
+        return {
+            "key": skill_key,
+            "content": content,
+            "path": str(skill_md),
+            "sizeBytes": stat.st_size,
+            "modifiedAt": stat.st_mtime,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read SKILL.md: {exc}")
+
+
+@router.post("/{skill_key}/scan")
+async def scan_skill(skill_key: str, body: ScanOneRequest):
+    """Scan a single skill."""
+    skill_paths = _build_skill_paths()
+    skill_dir = skill_paths.get(skill_key)
+    if not skill_dir:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_key}' not found")
+
+    try:
+        md_path = str(Path(skill_dir) / "SKILL.md")
+        result = await skill_scan_service.scan_skill(skill_key, md_path, force=body.force)
+        return result.to_dict()
+    except Exception as exc:
+        logger.exception("scan_skill failed for %s", skill_key)
+        raise HTTPException(status_code=500, detail=str(exc))

@@ -111,7 +111,9 @@ app.include_router(map_skins.router, prefix="/api/map-skins", tags=["Map Skins"]
 
 # Serve embedded frontend static files (production mode)
 if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
-    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="static-assets")
+    _static_assets = STATIC_DIR / "assets"
+    _static_assets.mkdir(parents=True, exist_ok=True)
+    app.mount("/assets", StaticFiles(directory=_static_assets), name="static-assets")
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa_fallback(request: Request, path: str):

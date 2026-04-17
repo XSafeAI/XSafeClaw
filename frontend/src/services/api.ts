@@ -390,7 +390,7 @@ export const systemAPI = {
       hermes_api_port?: number;
       hermes_config_path?: string;
       hermes_home?: string;
-    }>("/system/status", { timeout: 2500 }),
+    }>("/system/status", { timeout: 8000 }),
 
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',

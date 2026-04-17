@@ -1,0 +1,7 @@
+name: safeclaw-guard
+version: 1.0.0
+description: "XSafeClaw safety guard — intercepts tool calls for risk evaluation and injects safety policy context."
+author: XSafeClaw
+provides_hooks:
+  - pre_tool_call
+  - pre_llm_call
