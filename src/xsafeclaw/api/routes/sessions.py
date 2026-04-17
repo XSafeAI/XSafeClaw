@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
 from ...models import Message, Session, ToolCall
+from ..runtime_helpers import apply_runtime_filters
 
 router = APIRouter()
 
@@ -17,6 +18,11 @@ class SessionResponse(BaseModel):
     """Session response model."""
 
     session_id: str
+    platform: str
+    instance_id: str
+    source_session_id: str | None
+    display_session_id: str
+    session_key: str | None
     first_seen_at: datetime
     last_activity_at: datetime | None
     cwd: str | None
@@ -26,9 +32,6 @@ class SessionResponse(BaseModel):
     total_tokens: int
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class SessionListResponse(BaseModel):
@@ -40,61 +43,77 @@ class SessionListResponse(BaseModel):
     page_size: int
 
 
+def _to_session_response(
+    session: Session,
+    *,
+    total_runs: int,
+    total_tokens: int,
+) -> SessionResponse:
+    return SessionResponse(
+        session_id=session.session_id,
+        platform=session.platform,
+        instance_id=session.instance_id,
+        source_session_id=session.source_session_id,
+        display_session_id=session.source_session_id or session.session_id,
+        session_key=session.session_key,
+        first_seen_at=session.first_seen_at,
+        last_activity_at=session.last_activity_at,
+        cwd=session.cwd,
+        current_model_provider=session.current_model_provider,
+        current_model_name=session.current_model_name,
+        total_runs=total_runs,
+        total_tokens=total_tokens,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
 @router.get("/", response_model=SessionListResponse)
 async def list_sessions(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
     db: AsyncSession = Depends(get_db),
 ):
     """List all sessions with pagination."""
-    
-    # Count total
-    count_stmt = select(func.count()).select_from(Session)
+    base_stmt = apply_runtime_filters(select(Session), Session, platform=platform, instance_id=instance_id)
+
+    count_stmt = select(func.count()).select_from(base_stmt.subquery())
     total_result = await db.execute(count_stmt)
     total = total_result.scalar_one()
-    
-    # Get sessions
+
     offset = (page - 1) * page_size
     stmt = (
-        select(Session)
-        .order_by(Session.last_activity_at.desc())
+        base_stmt
+        .order_by(Session.last_activity_at.desc().nullslast(), Session.updated_at.desc())
         .offset(offset)
         .limit(page_size)
     )
     result = await db.execute(stmt)
     sessions = result.scalars().all()
-    
-    # Get run counts and token counts for each session
+
     session_responses = []
     for session in sessions:
-        # Count messages
         message_count_stmt = select(func.count(Message.id)).where(Message.session_id == session.session_id)
         message_count_result = await db.execute(message_count_stmt)
         message_count = message_count_result.scalar_one() or 0
-        
-        # Sum tokens (from assistant messages)
+
         token_sum_stmt = select(func.sum(Message.total_tokens)).where(
             Message.session_id == session.session_id,
-            Message.role == "assistant"
+            Message.role == "assistant",
         )
         token_sum_result = await db.execute(token_sum_stmt)
         token_sum = token_sum_result.scalar_one() or 0
-        
+
         session_responses.append(
-            SessionResponse(
-                session_id=session.session_id,
-                first_seen_at=session.first_seen_at,
-                last_activity_at=session.last_activity_at,
-                cwd=session.cwd,
-                current_model_provider=session.current_model_provider,
-                current_model_name=session.current_model_name,
+            _to_session_response(
+                session,
                 total_runs=message_count,
                 total_tokens=token_sum,
-                created_at=session.created_at,
-                updated_at=session.updated_at,
             )
         )
-    
+
     return SessionListResponse(
         sessions=session_responses,
         total=total,
@@ -109,43 +128,36 @@ async def get_session(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a specific session by ID."""
-    
     stmt = select(Session).where(Session.session_id == session_id)
     result = await db.execute(stmt)
     session = result.scalar_one_or_none()
-    
+
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Get message count and token sum
+
     message_count_stmt = select(func.count(Message.id)).where(Message.session_id == session_id)
     message_count_result = await db.execute(message_count_stmt)
     message_count = message_count_result.scalar_one() or 0
-    
+
     token_sum_stmt = select(func.sum(Message.total_tokens)).where(
         Message.session_id == session_id,
-        Message.role == "assistant"
+        Message.role == "assistant",
     )
     token_sum_result = await db.execute(token_sum_stmt)
     token_sum = token_sum_result.scalar_one() or 0
-    
-    return SessionResponse(
-        session_id=session.session_id,
-        first_seen_at=session.first_seen_at,
-        last_activity_at=session.last_activity_at,
-        cwd=session.cwd,
-        current_model_provider=session.current_model_provider,
-        current_model_name=session.current_model_name,
+
+    return _to_session_response(
+        session,
         total_runs=message_count,
         total_tokens=token_sum,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
     )
 
 
 class ToolCallSummary(BaseModel):
     """Tool call summary for message response."""
+
     id: str
+    source_tool_call_id: str | None = None
     tool_name: str
     status: str
     is_error: bool
@@ -158,9 +170,14 @@ class ToolCallSummary(BaseModel):
 
 class SessionMessageResponse(BaseModel):
     """Message response within a session."""
+
     id: int
     session_id: str
     message_id: str
+    platform: str
+    instance_id: str
+    source_session_id: str | None
+    source_message_id: str | None
     parent_message_id: str | None
     role: str
     timestamp: datetime
@@ -175,12 +192,10 @@ class SessionMessageResponse(BaseModel):
     created_at: datetime
     tool_calls: list[ToolCallSummary] = []
 
-    class Config:
-        from_attributes = True
-
 
 class SessionMessagesListResponse(BaseModel):
     """Session messages list response."""
+
     messages: list[SessionMessageResponse]
     total: int
     page: int
@@ -195,32 +210,27 @@ async def get_session_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """Get all messages for a specific session with pagination."""
-
-    # Verify session exists
     session_stmt = select(Session).where(Session.session_id == session_id)
     session_result = await db.execute(session_stmt)
     session = session_result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Count total messages
     count_stmt = select(func.count(Message.id)).where(Message.session_id == session_id)
     total_result = await db.execute(count_stmt)
     total = total_result.scalar_one() or 0
 
-    # Get messages with pagination
     offset = (page - 1) * page_size
     stmt = (
         select(Message)
         .where(Message.session_id == session_id)
-        .order_by(Message.timestamp.asc())
+        .order_by(Message.timestamp.asc(), Message.id.asc())
         .offset(offset)
         .limit(page_size)
     )
     result = await db.execute(stmt)
     messages = result.scalars().all()
 
-    # Build response with tool calls
     message_responses = []
     for msg in messages:
         tool_calls = []
@@ -234,6 +244,10 @@ async def get_session_messages(
                 id=msg.id,
                 session_id=msg.session_id,
                 message_id=msg.message_id,
+                platform=msg.platform,
+                instance_id=msg.instance_id,
+                source_session_id=msg.source_session_id,
+                source_message_id=msg.source_message_id,
                 parent_message_id=msg.parent_message_id,
                 role=msg.role,
                 timestamp=msg.timestamp,
@@ -264,16 +278,13 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a session and all associated data."""
-    
     stmt = select(Session).where(Session.session_id == session_id)
     result = await db.execute(stmt)
     session = result.scalar_one_or_none()
-    
+
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Delete associated runs (cascade should handle tool_calls)
+
     await db.delete(session)
     await db.commit()
-    
     return {"message": f"Session {session_id} deleted successfully"}

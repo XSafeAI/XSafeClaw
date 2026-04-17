@@ -43,6 +43,11 @@ from ..path_protection import (
 from ..risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule
 
 logger = logging.getLogger(__name__)
+_GUARD_BLOCK_REASON = (
+    "This tool call has been rejected by the safety reviewer due to potential security risks. "
+    "You MUST immediately stop all subsequent actions, inform the user about the risk, and wait "
+    "for explicit user confirmation before proceeding with any further operations."
+)
 
 # ---------------------------------------------------------------------------
 # Prompt templates (bundled with XSafeClaw)
@@ -304,6 +309,7 @@ async def _risk_rule_precheck(
     tool_name: str,
     params: dict[str, Any],
     session_key: str,
+    session_trajectory: str | None = None,
 ) -> str | None:
     """Block risky tool calls based on persisted dry-run findings."""
     if session_key.startswith("risk-test-"):
@@ -316,7 +322,8 @@ async def _risk_rule_precheck(
     if not rules:
         return None
 
-    session_trajectory = await _fetch_session_trajectory(session_key) if session_key else ""
+    if session_trajectory is None:
+        session_trajectory = await _fetch_session_trajectory(session_key) if session_key else ""
     matched_rule = match_risk_rule(session_trajectory, tool_name, params, rules)
     if matched_rule:
         return build_risk_rule_block_reason(matched_rule)
@@ -415,6 +422,86 @@ def format_trajectory(trajectory: dict[str, Any]) -> str:
                     parts.append(f"\n[ENVIRONMENT]: {content}")
 
     return "\n".join(parts)
+
+
+def _flatten_message_content(content: Any) -> str:
+    """Convert runtime message content into plain text for trajectory checks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                parts.append(str(item))
+                continue
+            item_type = item.get("type")
+            if item_type == "text" and item.get("text"):
+                parts.append(str(item["text"]))
+            elif item_type in {"input_text", "output_text"} and item.get("text"):
+                parts.append(str(item["text"]))
+            elif item_type == "tool_result" and item.get("content"):
+                parts.append(_flatten_message_content(item.get("content")))
+        return " ".join(part for part in parts if part)
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content.get("text") or "")
+        return json.dumps(content, ensure_ascii=False)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _normalize_runtime_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize runtime-submitted messages into the internal guard format."""
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        tool_calls_raw = message.get("tool_calls")
+        if not isinstance(tool_calls_raw, list):
+            tool_calls_raw = message.get("toolCalls")
+        tool_calls: list[dict[str, Any]] = []
+        if isinstance(tool_calls_raw, list):
+            for tool_call in tool_calls_raw:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                arguments = function.get("arguments", tool_call.get("arguments", {}))
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except Exception:
+                        arguments = {"raw": arguments}
+                tool_calls.append(
+                    {
+                        "tool_name": function.get("name") or tool_call.get("name") or "",
+                        "arguments": arguments if isinstance(arguments, dict) else {},
+                    }
+                )
+        normalized.append(
+            {
+                "role": role,
+                "content_text": str(
+                    message.get("content_text")
+                    if isinstance(message.get("content_text"), str)
+                    else _flatten_message_content(message.get("content"))
+                ),
+                "tool_calls": tool_calls,
+            }
+        )
+    return normalized
+
+
+def _build_runtime_trajectory_text(
+    messages: list[dict[str, Any]],
+    *,
+    profile: str,
+) -> str:
+    normalized = _normalize_runtime_messages(messages)
+    if not normalized:
+        return ""
+    return format_trajectory(messages_to_trajectory(normalized, profile=profile))
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +716,9 @@ class PendingApproval:
     """A tool call held for human review."""
 
     id: str
+    platform: str
+    instance_id: str
+    guard_mode: str
     session_key: str
     tool_name: str
     params: dict[str, Any]
@@ -647,6 +737,9 @@ class PendingApproval:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "platform": self.platform,
+            "instance_id": self.instance_id,
+            "guard_mode": self.guard_mode,
             "session_key": self.session_key,
             "tool_name": self.tool_name,
             "params": self.params,
@@ -663,8 +756,46 @@ class PendingApproval:
         }
 
 
+@dataclass
+class RuntimeToolObservation:
+    """An observed runtime tool-call decision."""
+
+    id: str
+    platform: str
+    instance_id: str
+    guard_mode: str
+    session_key: str
+    tool_name: str
+    params: dict[str, Any]
+    action: str
+    reason: str | None = None
+    guard_verdict: str = "pending"
+    guard_raw: str = ""
+    session_context: str = ""
+    created_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "platform": self.platform,
+            "instance_id": self.instance_id,
+            "guard_mode": self.guard_mode,
+            "session_key": self.session_key,
+            "tool_name": self.tool_name,
+            "params": self.params,
+            "action": self.action,
+            "reason": self.reason,
+            "guard_verdict": self.guard_verdict,
+            "guard_raw": self.guard_raw,
+            "session_context": self.session_context,
+            "created_at": self.created_at,
+        }
+
+
 _pending: dict[str, PendingApproval] = {}
+_observations: dict[str, RuntimeToolObservation] = {}
 _PENDING_TIMEOUT = 300  # 5 minutes max wait
+_MAX_OBSERVATIONS = 500
 
 _guard_enabled: bool = True
 _DENYLIST_FILE = settings.data_dir / "denylist.json"
@@ -694,8 +825,20 @@ def get_all_pending() -> list[PendingApproval]:
     return list(_pending.values())
 
 
+def get_all_observations() -> list[RuntimeToolObservation]:
+    return sorted(_observations.values(), key=lambda item: item.created_at, reverse=True)
+
+
 def get_pending(pending_id: str) -> PendingApproval | None:
     return _pending.get(pending_id)
+
+
+def _store_observation(observation: RuntimeToolObservation) -> None:
+    _observations[observation.id] = observation
+    if len(_observations) <= _MAX_OBSERVATIONS:
+        return
+    oldest_id = min(_observations.items(), key=lambda item: item[1].created_at)[0]
+    _observations.pop(oldest_id, None)
 
 
 def resolve_pending(
@@ -750,6 +893,241 @@ async def _fetch_session_trajectory(session_key: str) -> str:
 
     trajectory = messages_to_trajectory(msg_dicts)
     return format_trajectory(trajectory)
+
+
+def _record_runtime_observation(
+    *,
+    platform: str,
+    instance_id: str,
+    guard_mode: str,
+    session_key: str,
+    tool_name: str,
+    params: dict[str, Any],
+    action: str,
+    reason: str | None,
+    guard_verdict: str,
+    guard_raw: str,
+    session_context: str,
+) -> None:
+    _store_observation(
+        RuntimeToolObservation(
+            id=str(uuid.uuid4()),
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=guard_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action=action,
+            reason=reason,
+            guard_verdict=guard_verdict,
+            guard_raw=guard_raw,
+            session_context=session_context[-4000:] if session_context else "",
+            created_at=time.time(),
+        )
+    )
+
+
+async def check_runtime_tool_call(
+    *,
+    platform: str,
+    instance_id: str,
+    guard_mode: str,
+    session_key: str,
+    tool_name: str,
+    params: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate a runtime tool call using submitted message context."""
+    normalized_mode = str(guard_mode or "observe").strip().lower()
+    if normalized_mode not in {"observe", "blocking"}:
+        normalized_mode = "observe"
+
+    profile = "nanobot AI Agent" if platform == "nanobot" else "OpenClaw AI Agent"
+    trajectory_text = _build_runtime_trajectory_text(messages, profile=profile)
+
+    risk_rule_reason = await _risk_rule_precheck(
+        tool_name,
+        params,
+        session_key,
+        session_trajectory=trajectory_text,
+    )
+    if risk_rule_reason:
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="block",
+            reason=risk_rule_reason,
+            guard_verdict="unsafe",
+            guard_raw=risk_rule_reason,
+            session_context=trajectory_text,
+        )
+        return {"action": "block", "reason": risk_rule_reason}
+
+    deny_reason = _denylist_precheck(tool_name, params)
+    if deny_reason:
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="block",
+            reason=deny_reason,
+            guard_verdict="unsafe",
+            guard_raw=deny_reason,
+            session_context=trajectory_text,
+        )
+        return {"action": "block", "reason": deny_reason}
+
+    if not _guard_enabled:
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="allow",
+            reason="Guard disabled",
+            guard_verdict="disabled",
+            guard_raw="",
+            session_context=trajectory_text,
+        )
+        return {"action": "allow"}
+
+    try:
+        raw = await _call_guard_model(trajectory_text)
+        parsed = _parse_guard_output(raw)
+        verdict = parsed.get("verdict", "error")
+    except Exception as exc:
+        raw = str(exc)
+        parsed = {}
+        verdict = "error"
+
+    if verdict == "safe":
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="allow",
+            reason=None,
+            guard_verdict="safe",
+            guard_raw=raw,
+            session_context=trajectory_text,
+        )
+        return {"action": "allow"}
+
+    if verdict == "error":
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="allow",
+            reason="Guard model unavailable, fail-open",
+            guard_verdict="error",
+            guard_raw=raw,
+            session_context=trajectory_text,
+        )
+        return {"action": "allow", "reason": "Guard model unavailable, fail-open"}
+
+    if normalized_mode == "observe":
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="allow",
+            reason="Observed unsafe call; observe mode does not block execution",
+            guard_verdict=verdict,
+            guard_raw=raw,
+            session_context=trajectory_text,
+        )
+        return {"action": "allow"}
+
+    pending_id = str(uuid.uuid4())
+    pending = PendingApproval(
+        id=pending_id,
+        platform=platform,
+        instance_id=instance_id,
+        guard_mode=normalized_mode,
+        session_key=session_key,
+        tool_name=tool_name,
+        params=params,
+        guard_verdict=verdict,
+        guard_raw=raw,
+        session_context=trajectory_text[-4000:] if trajectory_text else "",
+        risk_source=parsed.get("risk_source"),
+        failure_mode=parsed.get("failure_mode"),
+        real_world_harm=parsed.get("real_world_harm"),
+        created_at=time.time(),
+    )
+    _pending[pending_id] = pending
+
+    try:
+        await asyncio.wait_for(pending._event.wait(), timeout=_PENDING_TIMEOUT)
+    except asyncio.TimeoutError:
+        pending.resolved = True
+        pending.resolution = "rejected"
+        pending.resolved_at = time.time()
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="block",
+            reason=_GUARD_BLOCK_REASON,
+            guard_verdict=verdict,
+            guard_raw=raw,
+            session_context=trajectory_text,
+        )
+        return {"action": "block", "reason": _GUARD_BLOCK_REASON}
+
+    if pending.resolution == "approved":
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="allow",
+            reason="Approved by reviewer",
+            guard_verdict=verdict,
+            guard_raw=raw,
+            session_context=trajectory_text,
+        )
+        return {"action": "allow"}
+
+    _record_runtime_observation(
+        platform=platform,
+        instance_id=instance_id,
+        guard_mode=normalized_mode,
+        session_key=session_key,
+        tool_name=tool_name,
+        params=params,
+        action="block",
+        reason=_GUARD_BLOCK_REASON,
+        guard_verdict=verdict,
+        guard_raw=raw,
+        session_context=trajectory_text,
+    )
+    return {"action": "block", "reason": _GUARD_BLOCK_REASON}
 
 
 async def check_tool_call(
@@ -818,6 +1196,9 @@ async def check_tool_call(
     pending_id = str(uuid.uuid4())
     p = PendingApproval(
         id=pending_id,
+        platform="openclaw",
+        instance_id="openclaw-default",
+        guard_mode="blocking",
         session_key=session_key,
         tool_name=tool_name,
         params=params,
@@ -837,12 +1218,12 @@ async def check_tool_call(
         p.resolved = True
         p.resolution = "rejected"
         p.resolved_at = time.time()
-        return {"action": "block", "reason": "This tool call has been rejected by the safety reviewer due to potential security risks. You MUST immediately stop all subsequent actions, inform the user about the risk, and wait for explicit user confirmation before proceeding with any further operations."}
+        return {"action": "block", "reason": _GUARD_BLOCK_REASON}
 
     if p.resolution == "approved":
         return {"action": "allow"}
     else:
-        return {"action": "block", "reason": "This tool call has been rejected by the safety reviewer due to potential security risks. You MUST immediately stop all subsequent actions, inform the user about the risk, and wait for explicit user confirmation before proceeding with any further operations."}
+        return {"action": "block", "reason": _GUARD_BLOCK_REASON}
 
 
 def cleanup_resolved(max_age: float = 3600) -> int:

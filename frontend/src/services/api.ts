@@ -38,6 +38,87 @@ export interface DirectoryBrowseResult {
   entries: DirectoryBrowseEntry[];
 }
 
+export interface RuntimeInstance {
+  instance_id: string;
+  platform: 'openclaw' | 'nanobot';
+  display_name: string;
+  config_path: string | null;
+  workspace_path: string | null;
+  sessions_path: string | null;
+  serve_base_url: string | null;
+  gateway_base_url: string | null;
+  discovery_mode: 'auto' | 'manual';
+  enabled: boolean;
+  is_default: boolean;
+  capabilities: Record<string, boolean>;
+  attach_state: string;
+  health_status: string;
+  meta: Record<string, any>;
+}
+
+export interface SystemStatusResponse {
+  openclaw_installed: boolean;
+  openclaw_version: string | null;
+  nanobot_installed: boolean;
+  nanobot_version: string | null;
+  nanobot_path: string | null;
+  nanobot_config_exists: boolean;
+  daemon_running: boolean;
+  openclaw_path: string | null;
+  node_version: string;
+  config_exists: boolean;
+  has_instances: boolean;
+  requires_setup: boolean;
+  requires_configure: boolean;
+  requires_nanobot_setup: boolean;
+  requires_nanobot_configure: boolean;
+  default_instance: RuntimeInstance | null;
+  instances: RuntimeInstance[];
+  runtime_summary: {
+    total: number;
+    enabled: number;
+    openclaw: number;
+    nanobot: number;
+    chat_ready: number;
+  };
+  error?: string;
+}
+
+export interface RuntimeInstanceHealth {
+  instance_id: string;
+  platform: 'openclaw' | 'nanobot';
+  display_name: string;
+  health_status: string;
+  attach_state: string;
+  chat_ready: boolean;
+}
+
+export interface RuntimeInstanceCapabilitiesResponse {
+  instance_id: string;
+  platform: 'openclaw' | 'nanobot';
+  display_name: string;
+  capabilities: Record<string, boolean>;
+  attach_state: string;
+}
+
+export interface NanobotGuardConfigResponse {
+  instance_id: string;
+  platform: 'nanobot';
+  display_name: string;
+  mode: 'disabled' | 'observe' | 'blocking';
+  enabled: boolean;
+  hook_present: boolean;
+  hook_valid: boolean;
+  class_path: string | null;
+  base_url: string;
+  timeout_s: number;
+  configured_instance_id: string | null;
+  default_base_url?: string;
+  default_timeout_s?: number;
+  instance?: RuntimeInstance;
+  instances?: RuntimeInstance[];
+}
+
 // Sessions API
 export const sessionsAPI = {
   list: (params?: { page?: number; page_size?: number }) =>
@@ -292,8 +373,8 @@ export const redteamAPI = {
 
 // Chat API (direct OpenClaw gateway session)
 export const chatAPI = {
-  startSession: () =>
-    api.post<{ session_key: string; status: string }>('/chat/start-session'),
+  startSession: (data?: { instance_id?: string; label?: string | null; model_override?: string | null; provider_override?: string | null }) =>
+    api.post<{ session_key: string; status: string; instance_id: string; platform: string; instance?: RuntimeInstance }>('/chat/start-session', data ?? {}),
 
   sendMessage: (sessionKey: string, message: string) =>
     api.post<{
@@ -318,11 +399,20 @@ export const chatAPI = {
   patchSession: (sessionKey: string, data: { model?: string | null; thinking_level?: string | null }) =>
     api.post<{ status: string }>('/chat/patch-session', { session_key: sessionKey, ...data }),
 
-  availableModels: () =>
+  availableModels: (instanceId?: string) =>
     api.get<{
       models: { id: string; name: string; provider: string; reasoning: boolean }[];
       default_model: string;
-    }>('/chat/available-models'),
+      instance_id: string;
+      platform: string;
+      supports_session_patch: boolean;
+      instance?: RuntimeInstance;
+    }>('/chat/available-models', { params: instanceId ? { instance_id: instanceId } : {} }),
+
+  modelReadiness: (modelId: string, instanceId?: string) =>
+    api.get<{ model_id: string; ready: boolean; visible_model_id?: string | null; reason?: string | null }>('/chat/model-readiness', {
+      params: instanceId ? { model_id: modelId, instance_id: instanceId } : { model_id: modelId },
+    }),
 };
 
 // Voice / speech-to-text helpers
@@ -377,16 +467,44 @@ export const guardAPI = {
 // System API (openclaw install / onboard / status)
 export const systemAPI = {
   /** Check whether openclaw CLI is installed. */
-  status: () =>
-    api.get<{
-      openclaw_installed: boolean;
-      openclaw_version: string | null;
-      daemon_running: boolean;
-      openclaw_path: string | null;
-    }>("/system/status", { timeout: 2500 }),
+  status: () => api.get<SystemStatusResponse>("/system/status", { timeout: 2500 }),
+
+  instances: () =>
+    api.get<{ instances: RuntimeInstance[]; total: number }>('/system/instances'),
+
+  getInstance: (instanceId: string) =>
+    api.get<{ instance: RuntimeInstance }>(`/system/instances/${instanceId}`),
+
+  getInstanceHealth: (instanceId: string) =>
+    api.get<RuntimeInstanceHealth>(`/system/instances/${instanceId}/health`),
+
+  getInstanceCapabilities: (instanceId: string) =>
+    api.get<RuntimeInstanceCapabilitiesResponse>(`/system/instances/${instanceId}/capabilities`),
+
+  getNanobotGuard: (instanceId: string) =>
+    api.get<NanobotGuardConfigResponse>(`/system/instances/${instanceId}/nanobot-guard`),
+
+  setNanobotGuard: (
+    instanceId: string,
+    payload: { mode: 'disabled' | 'observe' | 'blocking'; base_url?: string | null; timeout_s?: number | null }
+  ) =>
+    api.post<NanobotGuardConfigResponse>(`/system/instances/${instanceId}/nanobot-guard`, payload),
 
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',
+
+  /** Create the default nanobot config/workspace after nanobot is installed. */
+  nanobotInitDefault: () =>
+    api.post<{
+      success: boolean;
+      created: boolean;
+      config_path: string;
+      workspace_path: string;
+      guard?: Record<string, any>;
+      install_command?: string;
+      output?: string;
+      instances?: RuntimeInstance[];
+    }>('/system/nanobot/init-default'),
 
   /** Start onboard process, returns proc_id. */
   onboardStart: () =>
@@ -468,7 +586,7 @@ export const systemAPI = {
 };
 
 export const skillsAPI = {
-  list: () => api.get<{ skills: any[]; error?: string }>('/skills/list'),
+  list: () => api.get<{ skills: any[]; error?: string; unavailable?: boolean; reason?: string }>('/skills/list'),
   check: () => api.get<{ checks: any[] }>('/skills/check'),
   update: (skillKey: string, data: { enabled?: boolean; api_key?: string; env?: Record<string, string> }) =>
     api.post(`/skills/${skillKey}/update`, data),
@@ -483,7 +601,7 @@ export const skillsAPI = {
 };
 
 export const memoryAPI = {
-  list: () => api.get<{ files: any[] }>('/memory/list'),
+  list: () => api.get<{ files: any[]; unavailable?: boolean; reason?: string }>('/memory/list'),
   content: (fileKey: string) =>
     api.get<{ key: string; content: string; sizeBytes: number; modifiedAt: number }>(`/memory/content/${fileKey}`),
   scanAll: (keys?: string[], force?: boolean) =>

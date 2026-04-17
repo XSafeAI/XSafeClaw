@@ -9,14 +9,26 @@ import re
 import select as _select
 import shutil
 import struct
+import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from ..runtime_helpers import get_instance, list_instances, runtime_registry, serialize_instance
+from ...runtime.nanobot import (
+    DEFAULT_XSAFECLAW_GUARD_BASE_URL,
+    DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S,
+    NANOBOT_DEFAULT_CONFIG,
+    read_nanobot_guard_state,
+    update_nanobot_gateway_state,
+    update_nanobot_guard_state,
+)
 
 try:
     import fcntl
@@ -83,6 +95,11 @@ _OPENCLAW_EXECUTABLES = (
     if os.name == "nt"
     else ("openclaw",)
 )
+_NANOBOT_EXECUTABLES = (
+    ("nanobot.cmd", "nanobot.exe", "nanobot.bat", "nanobot.ps1", "nanobot")
+    if os.name == "nt"
+    else ("nanobot",)
+)
 
 
 def _is_runnable_file(path: Path) -> bool:
@@ -137,6 +154,126 @@ def _find_openclaw() -> Optional[str]:
     return shutil.which("openclaw")
 
 
+def _active_python_script_dirs() -> list[Path]:
+    """Return script directories for the Python environment running XSafeClaw."""
+    dirs: list[Path] = []
+    prefixes = [Path(sys.prefix)]
+    executable_dir = Path(sys.executable).resolve().parent
+    prefixes.append(executable_dir)
+
+    for prefix in prefixes:
+        if os.name == "nt":
+            candidates = [prefix / "Scripts", prefix]
+        else:
+            candidates = [prefix / "bin", prefix]
+        for candidate in candidates:
+            if candidate not in dirs:
+                dirs.append(candidate)
+    return dirs
+
+
+def _nanobot_candidate_dirs(env: dict | None = None) -> list[Path]:
+    """Return nanobot search directories, preferring the active Python env."""
+    dirs = _active_python_script_dirs()
+    search_env = env or _build_env()
+    for value in search_env.get("PATH", "").split(_PATH_SEP):
+        if not value:
+            continue
+        candidate = Path(value)
+        if candidate not in dirs:
+            dirs.append(candidate)
+    return dirs
+
+
+def _find_nanobot(*, env: dict | None = None) -> Optional[str]:
+    """Locate the nanobot binary in the active Python environment or PATH."""
+    for d in _nanobot_candidate_dirs(env):
+        if not d:
+            continue
+        for executable in _NANOBOT_EXECUTABLES:
+            candidate = d / executable
+            if _is_runnable_file(candidate):
+                return str(candidate)
+    return shutil.which("nanobot", path=(env or _build_env()).get("PATH"))
+
+
+def _probe_nanobot_cli(
+    nanobot_path: str | None,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 5.0,
+) -> tuple[bool, str | None, str | None]:
+    """Check whether a nanobot executable is the supported nanobot-ai CLI."""
+    if not nanobot_path:
+        return False, None, "nanobot executable not found"
+    try:
+        result = subprocess.run(
+            _build_nanobot_command(nanobot_path, ["--version"]),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env or _build_env(),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as exc:
+        return False, None, str(exc)
+
+    raw = (result.stdout or result.stderr or "").strip()
+    first_line = raw.splitlines()[0] if raw else None
+    if (
+        result.returncode == 0
+        and first_line
+        and "nanobot" in first_line.lower()
+        and "traceback" not in raw.lower()
+    ):
+        return True, first_line, None
+    detail = first_line or f"nanobot exited with code {result.returncode}"
+    return False, None, detail
+
+
+async def _probe_nanobot_cli_async(
+    nanobot_path: str | None,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 5.0,
+) -> tuple[bool, str | None, str | None]:
+    """Async nanobot CLI probe used by status endpoints."""
+    if not nanobot_path:
+        return False, None, "nanobot executable not found"
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_nanobot_command(nanobot_path, ["--version"]),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        return False, None, "nanobot --version timed out"
+    except Exception as exc:
+        return False, None, str(exc)
+
+    raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
+    first_line = raw.splitlines()[0] if raw else None
+    if (
+        proc.returncode == 0
+        and first_line
+        and "nanobot" in first_line.lower()
+        and "traceback" not in raw.lower()
+    ):
+        return True, first_line, None
+    detail = first_line or f"nanobot exited with code {proc.returncode}"
+    return False, None, detail
+
+
 def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
     """Build a subprocess command that can launch OpenClaw across platforms."""
     suffix = Path(openclaw_path).suffix.lower()
@@ -151,6 +288,22 @@ def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
             *args,
         ]
     return [openclaw_path, *args]
+
+
+def _build_nanobot_command(nanobot_path: str, args: list[str]) -> list[str]:
+    """Build a subprocess command that can launch nanobot across platforms."""
+    suffix = Path(nanobot_path).suffix.lower()
+    if suffix == ".ps1":
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            nanobot_path,
+            *args,
+        ]
+    return [nanobot_path, *args]
 
 def _find_node_version() -> str:
     """Return the currently accessible Node.js version string."""
@@ -175,15 +328,64 @@ async def get_system_status():
     """Check whether openclaw CLI is installed and whether its daemon is running."""
     env = _build_env()
     openclaw_path = _find_openclaw()
+    nanobot_path = _find_nanobot(env=env)
+    nanobot_ready, nanobot_version, nanobot_error = await _probe_nanobot_cli_async(
+        nanobot_path,
+        env=env,
+    )
+    instances = await list_instances()
+    enabled_instances = [instance for instance in instances if instance.enabled]
+    default_instance = next((instance for instance in enabled_instances if instance.is_default), None)
+    nanobot_config_exists = NANOBOT_DEFAULT_CONFIG.exists()
+
+    def _status_flags(*, openclaw_installed: bool, config_exists: bool) -> tuple[bool, bool]:
+        if not openclaw_installed:
+            return True, False
+        if not config_exists:
+            return False, True
+        return False, False
+
+    nanobot_installed = nanobot_ready
+    requires_nanobot_setup = not nanobot_installed
+    requires_nanobot_configure = nanobot_installed and not nanobot_config_exists
+    runtime_summary = {
+        "total": len(instances),
+        "enabled": len(enabled_instances),
+        "openclaw": sum(1 for instance in enabled_instances if instance.platform == "openclaw"),
+        "nanobot": sum(1 for instance in enabled_instances if instance.platform == "nanobot"),
+        "chat_ready": sum(
+            1
+            for instance in enabled_instances
+            if instance.capabilities.get("chat") and instance.attach_state in {"chat_ready", "guard_blocking_ready"}
+        ),
+    }
 
     if not openclaw_path:
+        has_instances = bool(enabled_instances)
+        requires_setup, requires_configure = _status_flags(
+            openclaw_installed=False,
+            config_exists=_CONFIG_PATH.exists(),
+        )
         return {
             "openclaw_installed": False,
             "openclaw_version": None,
+            "nanobot_installed": nanobot_installed,
+            "nanobot_version": nanobot_version,
+            "nanobot_error": nanobot_error,
+            "nanobot_path": nanobot_path,
+            "nanobot_config_exists": nanobot_config_exists,
+            "requires_nanobot_setup": requires_nanobot_setup,
+            "requires_nanobot_configure": requires_nanobot_configure,
             "daemon_running": False,
             "openclaw_path": None,
             "node_version": _find_node_version(),
             "config_exists": _CONFIG_PATH.exists(),
+            "has_instances": has_instances,
+            "requires_setup": requires_setup,
+            "requires_configure": requires_configure,
+            "default_instance": serialize_instance(default_instance) if default_instance else None,
+            "instances": [serialize_instance(instance) for instance in instances],
+            "runtime_summary": runtime_summary,
         }
 
     # Get version
@@ -199,14 +401,32 @@ async def get_system_status():
         raw = (stdout or stderr).decode().strip()
         version = raw.splitlines()[0] if raw else "unknown"
         if "requires Node" in version or "Upgrade Node" in version:
+            has_instances = bool(enabled_instances)
+            requires_setup, requires_configure = _status_flags(
+                openclaw_installed=False,
+                config_exists=_CONFIG_PATH.exists(),
+            )
             return {
                 "openclaw_installed": False,
                 "openclaw_version": None,
+                "nanobot_installed": nanobot_installed,
+                "nanobot_version": nanobot_version,
+                "nanobot_error": nanobot_error,
+                "nanobot_path": nanobot_path,
+                "nanobot_config_exists": nanobot_config_exists,
+                "requires_nanobot_setup": requires_nanobot_setup,
+                "requires_nanobot_configure": requires_nanobot_configure,
                 "daemon_running": False,
                 "openclaw_path": None,
                 "node_version": _find_node_version(),
                 "config_exists": _CONFIG_PATH.exists(),
                 "error": "node_version_too_low",
+                "has_instances": has_instances,
+                "requires_setup": requires_setup,
+                "requires_configure": requires_configure,
+                "default_instance": serialize_instance(default_instance) if default_instance else None,
+                "instances": [serialize_instance(instance) for instance in instances],
+                "runtime_summary": runtime_summary,
             }
     except Exception:
         version = "unknown"
@@ -225,13 +445,147 @@ async def get_system_status():
     except Exception:
         pass
 
+    has_instances = bool(enabled_instances)
+    requires_setup, requires_configure = _status_flags(
+        openclaw_installed=True,
+        config_exists=_CONFIG_PATH.exists(),
+    )
     return {
         "openclaw_installed": True,
         "openclaw_version": version,
+        "nanobot_installed": nanobot_installed,
+        "nanobot_version": nanobot_version,
+        "nanobot_error": nanobot_error,
+        "nanobot_path": nanobot_path,
+        "nanobot_config_exists": nanobot_config_exists,
+        "requires_nanobot_setup": requires_nanobot_setup,
+        "requires_nanobot_configure": requires_nanobot_configure,
         "daemon_running": daemon_running,
         "openclaw_path": openclaw_path,
         "node_version": _find_node_version(),
         "config_exists": _CONFIG_PATH.exists(),
+        "has_instances": has_instances,
+        "requires_setup": requires_setup,
+        "requires_configure": requires_configure,
+        "default_instance": serialize_instance(default_instance) if default_instance else None,
+        "instances": [serialize_instance(instance) for instance in instances],
+        "runtime_summary": runtime_summary,
+    }
+
+
+class NanobotGuardConfigRequest(BaseModel):
+    """Update nanobot XSafeClaw hook mode."""
+
+    mode: Literal["disabled", "observe", "blocking"] = "disabled"
+    base_url: str | None = None
+    timeout_s: float | None = Field(default=None, ge=1.0)
+
+
+@router.get("/instances")
+async def get_runtime_instances():
+    """List the fixed discovered runtime instances."""
+    instances = await list_instances()
+    return {
+        "instances": [serialize_instance(instance) for instance in instances],
+        "total": len(instances),
+    }
+
+
+@router.get("/instances/{instance_id}")
+async def get_runtime_instance(instance_id: str):
+    """Fetch one runtime instance."""
+    instance = await get_instance(instance_id)
+    return {"instance": serialize_instance(instance)}
+
+
+@router.get("/instances/{instance_id}/health")
+async def get_runtime_instance_health(instance_id: str):
+    """Fetch one runtime instance's current health status."""
+    instance = await get_instance(instance_id)
+    return {
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+        "display_name": instance.display_name,
+        "health_status": instance.health_status,
+        "attach_state": instance.attach_state,
+        "chat_ready": bool(instance.capabilities.get("chat") and instance.health_status == "healthy"),
+    }
+
+
+@router.get("/instances/{instance_id}/capabilities")
+async def get_runtime_instance_capabilities(instance_id: str):
+    """Fetch one runtime instance's capability matrix."""
+    instance = await get_instance(instance_id)
+    return {
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+        "display_name": instance.display_name,
+        "capabilities": instance.capabilities,
+        "attach_state": instance.attach_state,
+    }
+
+
+@router.get("/instances/{instance_id}/nanobot-guard")
+async def get_nanobot_guard_config(instance_id: str):
+    """Read nanobot's XSafeClaw hook configuration."""
+    instance = await get_instance(instance_id)
+    if instance.platform != "nanobot":
+        raise HTTPException(status_code=400, detail="Only nanobot instances expose nanobot guard config")
+    if not instance.config_path:
+        raise HTTPException(status_code=400, detail="Runtime instance does not have a config_path")
+    guard = read_nanobot_guard_state(instance.config_path)
+    return {
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+        "display_name": instance.display_name,
+        "mode": guard["mode"],
+        "enabled": guard["enabled"],
+        "hook_present": guard["hook_present"],
+        "hook_valid": guard["hook_valid"],
+        "class_path": guard["class_path"],
+        "base_url": guard["base_url"],
+        "timeout_s": guard["timeout_s"],
+        "configured_instance_id": guard["configured_instance_id"],
+        "default_base_url": DEFAULT_XSAFECLAW_GUARD_BASE_URL,
+        "default_timeout_s": DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S,
+        "instance": serialize_instance(instance),
+    }
+
+
+@router.post("/instances/{instance_id}/nanobot-guard")
+async def set_nanobot_guard_config(instance_id: str, body: NanobotGuardConfigRequest):
+    """Write nanobot XSafeClaw hook configuration back into config.json."""
+    instance = await get_instance(instance_id)
+    if instance.platform != "nanobot":
+        raise HTTPException(status_code=400, detail="Only nanobot instances support nanobot guard config")
+    if not instance.config_path:
+        raise HTTPException(status_code=400, detail="Runtime instance does not have a config_path")
+    try:
+        guard = update_nanobot_guard_state(
+            instance.config_path,
+            instance_id=instance.instance_id,
+            mode=body.mode,
+            base_url=body.base_url,
+            timeout_s=body.timeout_s,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    refreshed_instance = await get_instance(instance_id)
+    instances = await list_instances()
+    return {
+        "instance_id": refreshed_instance.instance_id,
+        "platform": refreshed_instance.platform,
+        "mode": guard["mode"],
+        "enabled": guard["enabled"],
+        "hook_present": guard["hook_present"],
+        "hook_valid": guard["hook_valid"],
+        "class_path": guard["class_path"],
+        "base_url": guard["base_url"],
+        "timeout_s": guard["timeout_s"],
+        "configured_instance_id": guard["configured_instance_id"],
+        "instance": serialize_instance(refreshed_instance),
+        "instances": [serialize_instance(item) for item in instances],
     }
 
 
@@ -438,6 +792,100 @@ async def install_openclaw():
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _nanobot_tool_install_command() -> str:
+    """Return the supported developer install command for uv-tool nanobot."""
+    repo_root = Path(__file__).resolve().parents[4]
+    return f'uv tool install nanobot-ai --with-editable "{repo_root}" --force'
+
+
+@router.post("/nanobot/init-default")
+async def init_default_nanobot():
+    """Create/update the default nanobot config and XSafeClaw guard hook."""
+    env = _build_env()
+    nanobot_path = _find_nanobot(env=env)
+    ready, _, error = _probe_nanobot_cli(nanobot_path, env=env)
+    if not ready:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"nanobot CLI is not installed or not usable: {error}",
+                "install_command": _nanobot_tool_install_command(),
+            },
+        )
+
+    workspace = Path.home() / ".nanobot" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    if NANOBOT_DEFAULT_CONFIG.exists():
+        gateway = update_nanobot_gateway_state(NANOBOT_DEFAULT_CONFIG)
+        guard = update_nanobot_guard_state(
+            NANOBOT_DEFAULT_CONFIG,
+            instance_id="nanobot-default",
+            mode="blocking",
+        )
+        instances = await runtime_registry.discover()
+        return {
+            "success": True,
+            "created": False,
+            "config_path": str(NANOBOT_DEFAULT_CONFIG),
+            "workspace_path": str(workspace),
+            "gateway": gateway,
+            "gateway_command": "nanobot gateway --port 18790 --verbose",
+            "guard": guard,
+            "install_command": _nanobot_tool_install_command(),
+            "instances": [serialize_instance(instance) for instance in instances],
+        }
+
+    NANOBOT_DEFAULT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    command = _build_nanobot_command(
+        nanobot_path,
+        [
+            "onboard",
+            "--config",
+            str(NANOBOT_DEFAULT_CONFIG),
+            "--workspace",
+            str(workspace),
+        ],
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        stdin=asyncio.subprocess.DEVNULL,
+        env=env,
+    )
+    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+    output = stdout.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "nanobot onboard failed",
+                "exit_code": proc.returncode,
+                "output": output[-4000:],
+            },
+        )
+
+    gateway = update_nanobot_gateway_state(NANOBOT_DEFAULT_CONFIG)
+    guard = update_nanobot_guard_state(
+        NANOBOT_DEFAULT_CONFIG,
+        instance_id="nanobot-default",
+        mode="blocking",
+    )
+    instances = await runtime_registry.discover()
+    return {
+        "success": True,
+        "created": True,
+        "config_path": str(NANOBOT_DEFAULT_CONFIG),
+        "workspace_path": str(workspace),
+        "output": output[-4000:],
+        "gateway": gateway,
+        "gateway_command": "nanobot gateway --port 18790 --verbose",
+        "guard": guard,
+        "install_command": _nanobot_tool_install_command(),
+        "instances": [serialize_instance(instance) for instance in instances],
+    }
 
 
 # ──────────────────────────────────────────────

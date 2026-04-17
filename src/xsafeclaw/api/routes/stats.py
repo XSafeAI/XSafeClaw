@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
 from ...models import Message, Session, ToolCall
+from ..runtime_helpers import apply_runtime_filters, list_instances, serialize_instance
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,45 +78,79 @@ class DailyStats(BaseModel):
 
 @router.get("/overview", response_model=OverallStats)
 async def get_overall_stats(
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get overall statistics."""
-    
-    # Total sessions
-    session_count_stmt = select(func.count(Session.session_id))
+    session_count_stmt = apply_runtime_filters(
+        select(func.count(Session.session_id)),
+        Session,
+        platform=platform,
+        instance_id=instance_id,
+    )
     session_count = (await db.execute(session_count_stmt)).scalar_one()
     
-    # Total messages
-    message_count_stmt = select(func.count(Message.id))
+    message_count_stmt = apply_runtime_filters(
+        select(func.count(Message.id)),
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
     message_count = (await db.execute(message_count_stmt)).scalar_one()
     
-    # Messages by role
-    assistant_count_stmt = select(func.count(Message.id)).where(Message.role == "assistant")
+    assistant_count_stmt = apply_runtime_filters(
+        select(func.count(Message.id)).where(Message.role == "assistant"),
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
     assistant_count = (await db.execute(assistant_count_stmt)).scalar_one()
     
-    user_count_stmt = select(func.count(Message.id)).where(Message.role == "user")
+    user_count_stmt = apply_runtime_filters(
+        select(func.count(Message.id)).where(Message.role == "user"),
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
     user_count = (await db.execute(user_count_stmt)).scalar_one()
     
-    tool_result_count_stmt = select(func.count(Message.id)).where(Message.role == "toolResult")
+    tool_result_count_stmt = apply_runtime_filters(
+        select(func.count(Message.id)).where(Message.role == "toolResult"),
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
     tool_result_count = (await db.execute(tool_result_count_stmt)).scalar_one()
     
-    # Total tool calls
-    tool_call_count_stmt = select(func.count(ToolCall.id))
+    tool_call_count_stmt = apply_runtime_filters(
+        select(func.count(ToolCall.id)),
+        ToolCall,
+        platform=platform,
+        instance_id=instance_id,
+    )
     tool_call_count = (await db.execute(tool_call_count_stmt)).scalar_one()
     
-    # Token statistics (from assistant messages)
     token_stats_stmt = select(
         func.sum(Message.total_tokens).label("total"),
         func.sum(Message.input_tokens).label("input"),
         func.sum(Message.output_tokens).label("output"),
     ).where(Message.role == "assistant")
+    token_stats_stmt = apply_runtime_filters(
+        token_stats_stmt,
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
     
     token_stats = (await db.execute(token_stats_stmt)).one()
     
-    # Active sessions in last 24h
     yesterday = datetime.now(timezone.utc) - timedelta(hours=24)
-    active_sessions_stmt = select(func.count(Session.session_id)).where(
-        Session.last_activity_at >= yesterday
+    active_sessions_stmt = apply_runtime_filters(
+        select(func.count(Session.session_id)).where(Session.last_activity_at >= yesterday),
+        Session,
+        platform=platform,
+        instance_id=instance_id,
     )
     active_sessions = (await db.execute(active_sessions_stmt)).scalar_one()
     
@@ -135,10 +170,11 @@ async def get_overall_stats(
 
 @router.get("/by-model", response_model=list[ModelStats])
 async def get_stats_by_model(
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get statistics grouped by model."""
-    
     stmt = (
         select(
             Message.provider,
@@ -153,6 +189,7 @@ async def get_stats_by_model(
         .group_by(Message.provider, Message.model_id)
         .order_by(func.count(Message.id).desc())
     )
+    stmt = apply_runtime_filters(stmt, Message, platform=platform, instance_id=instance_id)
     
     result = await db.execute(stmt)
     rows = result.all()
@@ -173,6 +210,8 @@ async def get_stats_by_model(
 @router.get("/daily", response_model=list[DailyStats])
 async def get_daily_stats(
     days: int = Query(7, ge=1, le=90, description="Number of days to look back"),
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get daily statistics for the last N days."""
@@ -195,6 +234,7 @@ async def get_daily_stats(
         .group_by(func.date(Message.timestamp))
         .order_by(func.date(Message.timestamp))
     )
+    stmt = apply_runtime_filters(stmt, Message, platform=platform, instance_id=instance_id)
     
     result = await db.execute(stmt)
     rows = result.all()
@@ -272,32 +312,96 @@ def _compute_cost(tokens: dict, cost_cfg: dict) -> float:
 
 @router.get("/dashboard")
 async def get_dashboard(
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
     db: AsyncSession = Depends(get_db),
 ):
     """Aggregated dashboard: sessions, channels, tokens, cost, model info."""
-    config = _read_openclaw_config()
+    instances = await list_instances()
+    selected_instance = next(
+        (
+            instance
+            for instance in instances
+            if (not instance_id or instance.instance_id == instance_id)
+            and (not platform or instance.platform == platform)
+            and instance.enabled
+        ),
+        next((instance for instance in instances if instance.is_default and instance.enabled), None),
+    )
+    config = _read_openclaw_config() if selected_instance and selected_instance.platform == "openclaw" else {}
 
-    session_count = (await db.execute(select(func.count(Session.session_id)))).scalar_one() or 0
-    message_count = (await db.execute(select(func.count(Message.id)))).scalar_one() or 0
-    assistant_count = (await db.execute(
-        select(func.count(Message.id)).where(Message.role == "assistant")
-    )).scalar_one() or 0
-    user_count = (await db.execute(
-        select(func.count(Message.id)).where(Message.role == "user")
-    )).scalar_one() or 0
-    tool_call_count = (await db.execute(select(func.count(ToolCall.id)))).scalar_one() or 0
+    session_count = (
+        await db.execute(
+            apply_runtime_filters(
+                select(func.count(Session.session_id)),
+                Session,
+                platform=platform,
+                instance_id=instance_id,
+            )
+        )
+    ).scalar_one() or 0
+    message_count = (
+        await db.execute(
+            apply_runtime_filters(
+                select(func.count(Message.id)),
+                Message,
+                platform=platform,
+                instance_id=instance_id,
+            )
+        )
+    ).scalar_one() or 0
+    assistant_count = (
+        await db.execute(
+            apply_runtime_filters(
+                select(func.count(Message.id)).where(Message.role == "assistant"),
+                Message,
+                platform=platform,
+                instance_id=instance_id,
+            )
+        )
+    ).scalar_one() or 0
+    user_count = (
+        await db.execute(
+            apply_runtime_filters(
+                select(func.count(Message.id)).where(Message.role == "user"),
+                Message,
+                platform=platform,
+                instance_id=instance_id,
+            )
+        )
+    ).scalar_one() or 0
+    tool_call_count = (
+        await db.execute(
+            apply_runtime_filters(
+                select(func.count(ToolCall.id)),
+                ToolCall,
+                platform=platform,
+                instance_id=instance_id,
+            )
+        )
+    ).scalar_one() or 0
 
     token_row = (await db.execute(
-        select(
-            func.sum(Message.total_tokens).label("total"),
-            func.sum(Message.input_tokens).label("input"),
-            func.sum(Message.output_tokens).label("output"),
-        ).where(Message.role == "assistant")
+        apply_runtime_filters(
+            select(
+                func.sum(Message.total_tokens).label("total"),
+                func.sum(Message.input_tokens).label("input"),
+                func.sum(Message.output_tokens).label("output"),
+            ).where(Message.role == "assistant"),
+            Message,
+            platform=platform,
+            instance_id=instance_id,
+        )
     )).one()
 
     yesterday = datetime.now(timezone.utc) - timedelta(hours=24)
     active_24h = (await db.execute(
-        select(func.count(Session.session_id)).where(Session.last_activity_at >= yesterday)
+        apply_runtime_filters(
+            select(func.count(Session.session_id)).where(Session.last_activity_at >= yesterday),
+            Session,
+            platform=platform,
+            instance_id=instance_id,
+        )
     )).scalar_one() or 0
 
     tokens = {
@@ -306,10 +410,18 @@ async def get_dashboard(
         "output": token_row.output or 0,
     }
 
-    model_info = _get_model_info(config)
+    if selected_instance and selected_instance.platform != "openclaw":
+        model_info = {
+            "primary": str(selected_instance.meta.get("model") or ""),
+            "provider": str(selected_instance.meta.get("provider") or ""),
+            "modelId": str(selected_instance.meta.get("model") or "").split("/", 1)[-1],
+            "cost": {},
+        }
+    else:
+        model_info = _get_model_info(config)
     cost = _compute_cost(tokens, model_info.get("cost", {}))
 
-    channels = _get_channels_info(config)
+    channels = _get_channels_info(config) if selected_instance and selected_instance.platform == "openclaw" else []
 
     model_stats_stmt = (
         select(
@@ -322,6 +434,12 @@ async def get_dashboard(
         .where(Message.provider.isnot(None))
         .group_by(Message.provider, Message.model_id)
         .order_by(func.count(Message.id).desc())
+    )
+    model_stats_stmt = apply_runtime_filters(
+        model_stats_stmt,
+        Message,
+        platform=platform,
+        instance_id=instance_id,
     )
     model_rows = (await db.execute(model_stats_stmt)).all()
     models = [
@@ -350,4 +468,8 @@ async def get_dashboard(
         "channels": channels,
         "model": model_info,
         "models": models,
+        "runtime": serialize_instance(selected_instance) if selected_instance else None,
+        "features": {
+            "channels": bool(selected_instance and selected_instance.platform == "openclaw"),
+        },
     }

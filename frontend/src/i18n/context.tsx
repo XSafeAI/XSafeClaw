@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { en, type Translations } from './locales/en';
 import { zh } from './locales/zh';
 
@@ -29,6 +29,18 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const setLocale = useCallback((l: Locale) => {
     _setLocale(l);
     localStorage.setItem(LS_KEY, l);
+  }, []);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== LS_KEY) return;
+      if (event.newValue === 'en' || event.newValue === 'zh') {
+        _setLocale(event.newValue);
+      }
+    };
+
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
   return (

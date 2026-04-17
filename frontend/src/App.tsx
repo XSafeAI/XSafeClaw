@@ -45,9 +45,9 @@ function AppRoutes() {
         if (cancelled) return;
         const d = res.data as any;
 
-        if (!d.openclaw_installed) {
+        if (d.requires_setup || !d.openclaw_installed) {
           setCheckState('setup');
-        } else if (!d.config_exists) {
+        } else if (d.requires_configure || !d.config_exists) {
           setCheckState('configure');
         } else {
           setCheckState('ok');
@@ -84,6 +84,7 @@ function AppRoutes() {
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/monitor" element={<Monitor />} />
+        <Route path="/instances" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/assets" element={<Assets />} />
         <Route path="/risk-test" element={<RiskTest />} />
         <Route path="/safety-rehearsal" element={<RiskScanner />} />

@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...services import skill_scan_service
+from ..runtime_helpers import get_default_instance
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,16 @@ class ScanOneRequest(BaseModel):
 @router.get("/list")
 async def list_skills():
     """List skills via openclaw CLI and enrich with config / scan data."""
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "skills": [],
+            "unavailable": True,
+            "reason": "Skill management is currently only available for OpenClaw runtimes.",
+        }
     openclaw_bin = _find_openclaw()
     if not openclaw_bin:
         raise HTTPException(status_code=500, detail="openclaw binary not found")
@@ -253,12 +264,22 @@ async def list_skills():
                     scan_entry = {**scan_entry, "status": "outdated"}
             skill["scanStatus"] = scan_entry
 
-    return {"skills": skills_list}
+    return {"skills": skills_list, "unavailable": False}
 
 
 @router.get("/check")
 async def check_skills():
     """Check skill eligibility via openclaw CLI."""
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "checks": [],
+            "unavailable": True,
+            "reason": "Skill checks are currently only available for OpenClaw runtimes.",
+        }
     openclaw_bin = _find_openclaw()
     if not openclaw_bin:
         raise HTTPException(status_code=500, detail="openclaw binary not found")
@@ -282,6 +303,16 @@ async def check_skills():
 @router.post("/scan-all")
 async def scan_all_skills(body: ScanAllRequest):
     """Trigger security scan on all (or selected) skills."""
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "results": [],
+            "unavailable": True,
+            "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
+        }
     skill_paths = _build_skill_paths()
     if body.keys:
         skill_paths = {k: v for k, v in skill_paths.items() if k in body.keys}
@@ -301,7 +332,17 @@ async def scan_all_skills(body: ScanAllRequest):
 @router.get("/scan-status")
 async def scan_status():
     """Return cached scan status for all skills."""
-    return {"results": skill_scan_service.get_all_cached()}
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "results": {},
+            "unavailable": True,
+            "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
+        }
+    return {"results": skill_scan_service.get_all_cached(), "unavailable": False}
 
 
 @router.post("/{skill_key}/update")

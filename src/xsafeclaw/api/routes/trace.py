@@ -250,6 +250,8 @@ async def get_trace(
             load_only(
                 Session.session_id,
                 Session.session_key,
+                Session.platform,
+                Session.instance_id,
                 Session.channel,
                 Session.first_seen_at,
                 Session.current_model_provider,
@@ -345,6 +347,8 @@ async def get_trace(
             "status": status,
             "first_seen_at": _iso(s.first_seen_at),
             "session_key": session_key,
+            "platform": session_store.get("platform") or s.platform,
+            "instance_id": session_store.get("instance_id") or s.instance_id,
             "channel": session_store.get("channel") or s.channel,
             "dialog_turns_total": dialog_turns_by_session.get(sid, 0),
             "human_interventions_total": human_interventions_total,

@@ -497,6 +497,94 @@
   min-height: 0;
 }
 
+.tc-runtime-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid rgba(239, 193, 106, 0.18);
+  border-radius: 9px;
+  background: rgba(11, 9, 22, 0.32);
+}
+
+.tc-runtime-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #ffe0a4;
+  font-family: var(--px-font);
+  font-size: 8px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.tc-runtime-picker-head small,
+.tc-runtime-hint {
+  color: #bfa985;
+  font-family: var(--ui-font);
+  font-size: 10px;
+  line-height: 1.35;
+  text-transform: none;
+}
+
+.tc-runtime-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.tc-runtime-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 224, 177, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5e2bd;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tc-runtime-option:hover {
+  border-color: rgba(239, 193, 106, 0.32);
+  background: rgba(239, 193, 106, 0.1);
+}
+
+.tc-runtime-option-active {
+  border-color: rgba(239, 193, 106, 0.58);
+  background:
+    linear-gradient(180deg, rgba(239, 193, 106, 0.2), rgba(239, 193, 106, 0.06)),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 226, 174, 0.08);
+}
+
+.tc-runtime-option-offline {
+  border-color: rgba(255, 112, 112, 0.26);
+  color: #ffcabf;
+}
+
+.tc-runtime-option-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--px-font);
+  font-size: 8px;
+}
+
+.tc-runtime-option-meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bfa985;
+  font-size: 9px;
+}
+
 .tc-model-search,
 .tc-chat-input {
   width: 100%;

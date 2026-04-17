@@ -23,6 +23,14 @@ function shortId(value) {
   return String(value || '').slice(0, 8).toUpperCase();
 }
 
+function isNanobotAgent(agent) {
+  return (
+    agent?.platform === 'nanobot'
+    || String(agent?.instance_id || '').startsWith('nanobot')
+    || String(agent?.session_key || '').startsWith('nanobot::')
+  );
+}
+
 function fmtTokens(n) {
   if (!n || n <= 0) return '0';
   if (n < 1000) return String(n);
@@ -546,6 +554,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
   const [fetchedTokens, setFetchedTokens] = useState(0);
   const fileInputRef = useRef(null);
   const interactionRef = useRef(null);
+  const nanobotTextOnly = isNanobotAgent(agent);
 
   useEffect(() => {
     if (totalTokens > 0 || USE_AGENT_TOWN_MOCK || !agent?.id) return;
@@ -579,6 +588,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
     });
 
   const addImages = useCallback(async (files) => {
+    if (nanobotTextOnly) return;
     const arr = Array.from(files).filter((f) => f.type.startsWith('image/'));
     if (arr.length === 0) return;
     const remaining = MAX_IMAGES - pendingImages.length;
@@ -592,7 +602,13 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
     if (results.length > 0) {
       setPendingImages((prev) => [...prev, ...results]);
     }
-  }, [pendingImages.length]);
+  }, [nanobotTextOnly, pendingImages.length]);
+
+  useEffect(() => {
+    if (nanobotTextOnly && pendingImages.length > 0) {
+      setPendingImages([]);
+    }
+  }, [nanobotTextOnly, pendingImages.length]);
 
   const removeImage = useCallback((imgId) => {
     setPendingImages((prev) => prev.filter((img) => img.id !== imgId));
@@ -784,7 +800,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
   const handleSend = useCallback(async () => {
     if (!sessionKey || sending) return;
     const text = input.trim();
-    const imagesToSend = [...pendingImages];
+    const imagesToSend = nanobotTextOnly ? [] : [...pendingImages];
     if (!text && imagesToSend.length === 0) return;
 
     const userMsg = {
@@ -828,7 +844,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
       }
 
       const body = { session_key: sessionKey, message: text || '(see attached image)' };
-      if (imagesToSend.length > 0) {
+      if (imagesToSend.length > 0 && !nanobotTextOnly) {
         body.images = imagesToSend.map((img) => ({
           mime_type: img.mimeType,
           data: img.base64,
@@ -946,7 +962,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
       stopRequestedRef.current = false;
       setSending(false);
     }
-  }, [agent, displayMessages, finalizeStoppedMessage, input, pendingImages, sending, sessionKey]);
+  }, [agent, displayMessages, finalizeStoppedMessage, input, nanobotTextOnly, pendingImages, sending, sessionKey]);
 
   useEffect(() => {
     interactionRef.current = null;
@@ -1309,14 +1325,14 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
                   accept="image/*"
                   multiple
                   style={{ display: 'none' }}
-                  onChange={(e) => { if (e.target.files) addImages(e.target.files); e.target.value = ''; }}
+                  onChange={(e) => { if (e.target.files && !nanobotTextOnly) addImages(e.target.files); e.target.value = ''; }}
                 />
                 <button
                   type="button"
                   className="agent-dialog-img-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={!sessionKey || pendingImages.length >= MAX_IMAGES}
-                  title="Attach image"
+                  disabled={nanobotTextOnly || !sessionKey || pendingImages.length >= MAX_IMAGES}
+                  title={nanobotTextOnly ? 'Nanobot sessions are text-only in Agent Valley.' : 'Attach image'}
                 >
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
@@ -1340,6 +1356,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
                   onPaste={(e) => {
                     const items = e.clipboardData?.items;
                     if (!items) return;
+                    if (nanobotTextOnly) return;
                     const imageFiles = [];
                     for (let i = 0; i < items.length; i++) {
                       if (items[i].type.startsWith('image/')) {

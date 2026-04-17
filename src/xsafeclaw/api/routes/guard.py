@@ -235,12 +235,40 @@ async def tool_check(body: ToolCheckRequest):
     return ToolCheckResponse(**result)
 
 
+class RuntimeToolCheckRequest(BaseModel):
+    platform: str
+    instance_id: str
+    guard_mode: str = "observe"
+    session_key: str = ""
+    tool_name: str
+    params: dict = {}
+    messages: list[dict[str, Any]] = []
+
+
+@router.post("/runtime-tool-check", response_model=ToolCheckResponse)
+async def runtime_tool_check(body: RuntimeToolCheckRequest):
+    """Runtime-native tool-call guard for nanobot/openclaw hook integrations."""
+    result = await guard_service.check_runtime_tool_call(
+        platform=body.platform,
+        instance_id=body.instance_id,
+        guard_mode=body.guard_mode,
+        session_key=body.session_key,
+        tool_name=body.tool_name,
+        params=body.params,
+        messages=body.messages,
+    )
+    return ToolCheckResponse(**result)
+
+
 # ---------------------------------------------------------------------------
 # Pending Approvals — list / resolve / cleanup
 # ---------------------------------------------------------------------------
 
 class PendingApprovalResponse(BaseModel):
     id: str
+    platform: str
+    instance_id: str
+    guard_mode: str
     session_key: str
     tool_name: str
     params: dict
@@ -263,6 +291,39 @@ async def list_pending(resolved: bool | None = Query(None)):
     if resolved is not None:
         items = [i for i in items if i.resolved == resolved]
     return [PendingApprovalResponse(**i.to_dict()) for i in items]
+
+
+class RuntimeToolObservationResponse(BaseModel):
+    id: str
+    platform: str
+    instance_id: str
+    guard_mode: str
+    session_key: str
+    tool_name: str
+    params: dict
+    action: str
+    reason: str | None = None
+    guard_verdict: str
+    guard_raw: str = ""
+    session_context: str = ""
+    created_at: float = 0.0
+
+
+@router.get("/observations", response_model=list[RuntimeToolObservationResponse])
+async def list_observations(
+    platform: str | None = Query(None),
+    instance_id: str | None = Query(None),
+    session_key: str | None = Query(None),
+):
+    """List runtime tool-call observations captured by XSafeClaw hooks."""
+    items = guard_service.get_all_observations()
+    if platform:
+        items = [item for item in items if item.platform == platform]
+    if instance_id:
+        items = [item for item in items if item.instance_id == instance_id]
+    if session_key:
+        items = [item for item in items if item.session_key == session_key]
+    return [RuntimeToolObservationResponse(**item.to_dict()) for item in items]
 
 
 class ResolveRequest(BaseModel):

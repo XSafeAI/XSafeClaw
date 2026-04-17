@@ -8,9 +8,11 @@ import {
   normalizeTownData,
 } from '../data/mockData';
 import { systemAPI } from '../../../../services/api';
+import { useI18n } from '../../../../i18n';
 import ControlTab from './ControlTab';
 import CrewTab from './CrewTab';
 import ModelSetupModal from './ModelSetupModal';
+import { getAgentTownText } from '../i18n';
 
 const TAB_META = [
   { id: 'crew', label: 'Agents' },
@@ -270,21 +272,33 @@ function normalizeHistoryMessage(msg) {
   return null;
 }
 
-function buildDraftAgent(sessionKey, modelOption) {
+function isNanobotAgent(agent) {
+  return (
+    agent?.platform === 'nanobot'
+    || String(agent?.instance_id || '').startsWith('nanobot')
+    || String(agent?.session_key || '').startsWith('nanobot::')
+  );
+}
+
+function buildDraftAgent(sessionKey, modelOption, runtimeInstance = null) {
   const modelRef = modelOption?.id || 'unknown/model';
   const provider = modelOption?.provider || modelRef.split('/')[0] || 'unknown';
   const modelName = modelOption?.name || modelRef.split('/').slice(1).join('/') || modelRef;
+  const platform = runtimeInstance?.platform || 'openclaw';
+  const instanceId = runtimeInstance?.instance_id || 'openclaw-default';
   const suffix = shortId(normalizeSessionIdentity(sessionKey)).toUpperCase();
   return {
     id: `draft:${sessionKey}`,
     session_key: sessionKey,
+    platform,
+    instance_id: instanceId,
     name: `Agent-${suffix}`,
     pid: suffix,
     provider,
     model: modelName,
     status: 'working',
     first_seen_at: new Date().toISOString(),
-    channel: 'webchat',
+    channel: platform === 'nanobot' ? 'nanobot-gateway' : 'webchat',
     dialog_turns_total: 0,
     human_interventions_total: 0,
     activity_heat_24h: new Array(24).fill(0),
@@ -737,6 +751,7 @@ function TasksTab({
   guardEnabled = false,
   onToggleGuard,
   onTaskDetailChange,
+  taskStatusMeta = TASK_STATUS_META,
 }) {
   const [selectedTask, setSelectedTask] = useState(null);
   const [detailMessages, setDetailMessages] = useState([]);
@@ -1038,7 +1053,7 @@ function TasksTab({
                 ? (charNameMap[liveAgent.id] || CHAR_NAMES[index % CHAR_NAMES.length])
                 : CHAR_NAMES[index % CHAR_NAMES.length];
               const statusId = mapDashboardTaskStatus(task.status);
-              const statusMeta = TASK_STATUS_META[statusId] || TASK_STATUS_META.running;
+              const statusMeta = taskStatusMeta[statusId] || taskStatusMeta.running;
 
               return (
                 <button
@@ -1202,7 +1217,7 @@ function TasksTab({
                   <TaskDetailFact label="User Message" value={detailTask?.user_message_id || selectedTask.task.user_message_id || '---'} mono />
                   <TaskDetailFact
                     label="Status"
-                    value={(TASK_STATUS_META[detailStatusId] || TASK_STATUS_META.running).label}
+                    value={(taskStatusMeta[detailStatusId] || taskStatusMeta.running).label}
                     featured
                     tone={taskDetailToneFromStatus(detailStatusId)}
                   />
@@ -1267,10 +1282,14 @@ export default function TownConsole({
   onDeleteAgent,
   onDataChanged,
 }) {
+  const { locale } = useI18n();
+  const townText = getAgentTownText(locale);
   const [activeTab, setActiveTab] = useState('crew');
   const [traceData, setTraceData] = useState(buildConsoleData(null));
   const [dashboardEvents, setDashboardEvents] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [runtimeInstances, setRuntimeInstances] = useState([]);
+  const [selectedRuntimeId, setSelectedRuntimeId] = useState('');
   const [availableModels, setAvailableModels] = useState([]);
   const [defaultModel, setDefaultModel] = useState('');
   const [catalogAuthProviders, setCatalogAuthProviders] = useState([]);
@@ -1314,6 +1333,22 @@ export default function TownConsole({
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024;
 
+  const selectedRuntime = useMemo(() => (
+    runtimeInstances.find((instance) => instance.instance_id === selectedRuntimeId)
+    || runtimeInstances.find((instance) => instance.platform === 'openclaw')
+    || runtimeInstances[0]
+    || null
+  ), [runtimeInstances, selectedRuntimeId]);
+
+  const selectedRuntimeUnavailable = Boolean(
+    selectedRuntime
+    && selectedRuntime.platform === 'nanobot'
+    && selectedRuntime.health_status !== 'healthy',
+  );
+  const runtimeUnavailableMessage = selectedRuntimeUnavailable
+    ? townText.create.nanobotGatewayOffline
+    : '';
+
   useEffect(() => () => {
     streamControllerRef.current?.abort();
     streamControllerRef.current = null;
@@ -1332,6 +1367,44 @@ export default function TownConsole({
     modelValidationJobsRef.current.clear();
   }, []);
 
+  const loadRuntimeInstances = useCallback(async () => {
+    if (USE_AGENT_TOWN_MOCK) {
+      const mockRuntime = {
+        instance_id: 'openclaw-default',
+        platform: 'openclaw',
+        display_name: 'OpenClaw',
+        enabled: true,
+        is_default: true,
+        capabilities: { chat: true, model_list: true },
+        health_status: 'healthy',
+      };
+      setRuntimeInstances([mockRuntime]);
+      setSelectedRuntimeId((prev) => prev || mockRuntime.instance_id);
+      return;
+    }
+
+    try {
+      const response = await systemAPI.instances();
+      const instances = Array.isArray(response?.data?.instances) ? response.data.instances : [];
+      const chatInstances = instances.filter((instance) => (
+        instance?.enabled !== false && instance?.capabilities?.chat
+      ));
+      setRuntimeInstances(chatInstances);
+      setSelectedRuntimeId((prev) => {
+        if (prev && chatInstances.some((instance) => instance.instance_id === prev)) {
+          return prev;
+        }
+        return (
+          chatInstances.find((instance) => instance.platform === 'openclaw')?.instance_id
+          || chatInstances[0]?.instance_id
+          || ''
+        );
+      });
+    } catch (err) {
+      console.warn('[TownConsole] runtime instances fetch error:', err);
+    }
+  }, []);
+
   const loadAvailableModels = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
       setAvailableModels(MOCK_MODEL_PROVIDERS.flatMap((provider) =>
@@ -1347,7 +1420,10 @@ export default function TownConsole({
     }
 
     try {
-      const response = await fetch('/api/chat/available-models', { cache: 'no-store' });
+      const query = selectedRuntimeId
+        ? `?instance_id=${encodeURIComponent(selectedRuntimeId)}`
+        : '';
+      const response = await fetch(`/api/chat/available-models${query}`, { cache: 'no-store' });
       if (!response.ok) {
         throw new Error(`Available models request failed: ${response.status}`);
       }
@@ -1380,7 +1456,7 @@ export default function TownConsole({
     } catch (err) {
       console.warn('[TownConsole] available-models fetch error:', err);
     }
-  }, []);
+  }, [selectedRuntimeId]);
 
   const loadModelCatalog = useCallback(async (force = false) => {
     if (USE_AGENT_TOWN_MOCK) {
@@ -1516,6 +1592,7 @@ export default function TownConsole({
     let disposed = false;
     const load = async () => {
       if (disposed) return;
+      await loadRuntimeInstances();
       await loadConsoleData();
     };
 
@@ -1526,7 +1603,7 @@ export default function TownConsole({
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [loadAvailableModels, loadConsoleData]);
+  }, [loadAvailableModels, loadConsoleData, loadRuntimeInstances]);
 
   useEffect(() => {
     if (!modelPickerOpen) return;
@@ -1684,6 +1761,12 @@ export default function TownConsole({
 
   const currentPendingImages = currentIdentity ? (pendingImagesMap[currentIdentity] || []) : [];
 
+  useEffect(() => {
+    if (!currentIdentity || !isNanobotAgent(currentAgent)) return;
+    if (currentPendingImages.length === 0) return;
+    setPendingImagesMap((prev) => ({ ...prev, [currentIdentity]: [] }));
+  }, [currentAgent, currentIdentity, currentPendingImages.length]);
+
   const fileToBase64 = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1698,6 +1781,7 @@ export default function TownConsole({
 
   const addImages = useCallback(async (files) => {
     if (!currentIdentity) return;
+    if (isNanobotAgent(currentAgent)) return;
     const arr = Array.from(files).filter((f) => f.type.startsWith('image/'));
     if (arr.length === 0) return;
     const current = pendingImagesMap[currentIdentity] || [];
@@ -1715,7 +1799,7 @@ export default function TownConsole({
         [currentIdentity]: [...(prev[currentIdentity] || []), ...results],
       }));
     }
-  }, [currentIdentity, pendingImagesMap]);
+  }, [currentAgent, currentIdentity, pendingImagesMap]);
 
   const removeImage = useCallback((imgId) => {
     if (!currentIdentity) return;
@@ -1867,8 +1951,26 @@ export default function TownConsole({
     || null
   ), [availableModels, configuredModels, pendingModelId]);
 
-  const createAgentDisabled = !pendingModelId || !pendingModelOption || creatingAgent;
-  const createAgentLabel = creatingAgent ? 'Summoning...' : 'Create Agent';
+  const createAgentDisabled = (
+    !selectedRuntime
+    || !pendingModelId
+    || !pendingModelOption
+    || creatingAgent
+    || selectedRuntimeUnavailable
+  );
+  const createAgentLabel = creatingAgent ? townText.create.creating : townText.create.createAgent;
+
+  const taskStatusMeta = useMemo(() => (
+    Object.fromEntries(
+      Object.entries(TASK_STATUS_META).map(([key, meta]) => [
+        key,
+        {
+          ...meta,
+          label: townText.taskStatus[key] || meta.label,
+        },
+      ]),
+    )
+  ), [townText]);
 
   const crewHelpers = useMemo(() => ({
     getAgentIdentity,
@@ -2086,6 +2188,17 @@ export default function TownConsole({
 
   // Model readiness is now checked at Create Agent click time, not via background polling.
 
+  const handleChangeRuntime = useCallback((instanceId) => {
+    if (!instanceId || instanceId === selectedRuntimeId) return;
+    setSelectedRuntimeId(instanceId);
+    setAvailableModels([]);
+    setDefaultModel('');
+    setPendingModelId('');
+    setCreateError('');
+    setModelValidationMap({});
+    didAutoSelectModelRef.current = false;
+  }, [selectedRuntimeId]);
+
   const handlePickModel = useCallback((modelId) => {
     didAutoSelectModelRef.current = true;
     setPendingModelId((prev) => (prev === modelId ? '' : modelId));
@@ -2120,19 +2233,31 @@ export default function TownConsole({
 
   const handleCreateAgent = useCallback(async () => {
     if (!pendingModelId || !pendingModelOption || creatingAgent) return;
+    if (!selectedRuntime) {
+      setCreateError(townText.create.missingRuntime);
+      return;
+    }
+    if (selectedRuntimeUnavailable) {
+      setCreateError(runtimeUnavailableMessage);
+      return;
+    }
 
     setCreatingAgent(true);
     setCreateError('');
     try {
       // Quick readiness check — don't block the button, but catch unready models early.
       try {
+        const readinessQuery = new URLSearchParams({
+          model_id: pendingModelId,
+          instance_id: selectedRuntime.instance_id,
+        });
         const readinessRes = await fetch(
-          `/api/chat/model-readiness?model_id=${encodeURIComponent(pendingModelId)}`,
+          `/api/chat/model-readiness?${readinessQuery.toString()}`,
           { cache: 'no-store' },
         );
         const readiness = await readinessRes.json().catch(() => null);
         if (readinessRes.ok && readiness && !readiness.ready) {
-          const reason = readiness.reason || 'Model is still being prepared by the gateway. Try again in a few seconds.';
+          const reason = readiness.reason || townText.create.modelPreparing;
           setCreateError(reason);
           setCreatingAgent(false);
           return;
@@ -2147,9 +2272,11 @@ export default function TownConsole({
         const sessionKey = `chat-mock-${makeId().slice(0, 10)}`;
         if (DEMO_MODE) markDemoSession(sessionKey);
         const draftAgent = {
-          ...buildDraftAgent(sessionKey, modelOption),
+          ...buildDraftAgent(sessionKey, modelOption, selectedRuntime),
           mock: true,
-          channel: modelOption?.provider === 'Google' ? 'discord' : 'webchat',
+          channel: selectedRuntime.platform === 'nanobot'
+            ? 'nanobot-gateway'
+            : modelOption?.provider === 'Google' ? 'discord' : 'webchat',
         };
         const identity = getAgentIdentity(draftAgent);
 
@@ -2167,7 +2294,10 @@ export default function TownConsole({
       const res = await fetch('/api/chat/start-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_override: pendingModelId }),
+        body: JSON.stringify({
+          instance_id: selectedRuntime.instance_id,
+          model_override: pendingModelId,
+        }),
       });
 
       if (!res.ok) {
@@ -2177,7 +2307,7 @@ export default function TownConsole({
       const json = await res.json();
       const sessionKey = json.session_key;
       if (DEMO_MODE) markDemoSession(sessionKey);
-      const draftAgent = buildDraftAgent(sessionKey, modelOption);
+      const draftAgent = buildDraftAgent(sessionKey, modelOption, json.instance || selectedRuntime);
       const identity = getAgentIdentity(draftAgent);
 
       setDraftAgents((prev) => [draftAgent, ...prev]);
@@ -2189,16 +2319,26 @@ export default function TownConsole({
       setModelSearch('');
       setPendingModelId('');
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : 'Failed to create agent.');
+      setCreateError(err instanceof Error ? err.message : townText.create.failed);
     } finally {
       setCreatingAgent(false);
     }
-  }, [configuredModels, creatingAgent, pendingModelId, pendingModelOption]);
+  }, [
+    configuredModels,
+    creatingAgent,
+    pendingModelId,
+    pendingModelOption,
+    runtimeUnavailableMessage,
+    selectedRuntime,
+    selectedRuntimeUnavailable,
+    townText,
+  ]);
 
   const handleSendTask = useCallback(async () => {
     if (!currentSessionKey || !currentIdentity || sendingIdentity === currentIdentity) return;
     const text = currentInput.trim();
-    const imagesToSend = [...currentPendingImages];
+    const nanobotTextOnly = isNanobotAgent(currentAgent);
+    const imagesToSend = nanobotTextOnly ? [] : [...currentPendingImages];
     if (!text && imagesToSend.length === 0) return;
 
     const userMsg = {
@@ -2233,7 +2373,7 @@ export default function TownConsole({
           msg.id === pendingId
             ? {
                 ...msg,
-                content: 'Stop requested. The interrupt hook is active here now.',
+                content: townText.stage.stopRequested,
                 pending: false,
                 stopped: true,
               }
@@ -2263,7 +2403,7 @@ export default function TownConsole({
       streamControllerRef.current = controller;
 
       const body = { session_key: currentSessionKey, message: text || '(see attached image)' };
-      if (imagesToSend.length > 0) {
+      if (imagesToSend.length > 0 && !nanobotTextOnly) {
         body.images = imagesToSend.map((img) => ({
           mime_type: img.mimeType,
           data: img.base64,
@@ -2402,7 +2542,16 @@ export default function TownConsole({
         }, delay);
       }
     }
-  }, [currentAgent, currentIdentity, currentInput, currentSessionKey, loadConsoleData, sendingIdentity]);
+  }, [
+    currentAgent,
+    currentIdentity,
+    currentInput,
+    currentPendingImages,
+    currentSessionKey,
+    loadConsoleData,
+    sendingIdentity,
+    townText,
+  ]);
 
   const handleStopTask = useCallback(() => {
     if (!sendingIdentity) return;
@@ -2436,7 +2585,7 @@ export default function TownConsole({
                 className={`tc-tab ${activeTab === tab.id ? 'tc-tab-active' : ''}`}
                 onClick={() => setActiveTab(tab.id)}
               >
-                <span className="tc-tab-label">{tab.label}</span>
+                <span className="tc-tab-label">{townText.tabs[tab.id] || tab.label}</span>
               </button>
             ))}
           </div>
@@ -2470,6 +2619,12 @@ export default function TownConsole({
                   onSelectAgent={(agent) => setSelectedIdentity(getAgentIdentity(agent))}
                   modelPickerOpen={modelPickerOpen}
                   onToggleModelPicker={() => setModelPickerOpen((prev) => !prev)}
+                  runtimeInstances={runtimeInstances}
+                  selectedRuntimeId={selectedRuntime?.instance_id || selectedRuntimeId}
+                  selectedRuntime={selectedRuntime}
+                  onChangeRuntime={handleChangeRuntime}
+                  selectedRuntimeUnavailable={selectedRuntimeUnavailable}
+                  runtimeUnavailableMessage={runtimeUnavailableMessage}
                   modelSearch={modelSearch}
                   onChangeModelSearch={setModelSearch}
                   filteredModels={filteredModels}
@@ -2480,7 +2635,7 @@ export default function TownConsole({
                   createAgentDisabled={createAgentDisabled}
                   createAgentLabel={createAgentLabel}
                   createError={createError}
-                  taskStatusMeta={TASK_STATUS_META}
+                  taskStatusMeta={taskStatusMeta}
                   pendingApprovals={pendingApprovals}
                   onResolveGuardPending={handleResolveGuardPending}
                   guardResolvingId={guardResolvingId}
@@ -2492,6 +2647,9 @@ export default function TownConsole({
                   onRemoveImage={removeImage}
                   fileInputRef={fileInputRef}
                   onTaskDetailChange={setTaskDetailOpen}
+                  imagesDisabled={isNanobotAgent(currentAgent)}
+                  imagesDisabledReason={townText.stage.nanobotTextOnly}
+                  townText={townText}
                 />
               ) : null}
 
@@ -2515,6 +2673,7 @@ export default function TownConsole({
                   maxSceneNpcDisplayCap={(countsByFilter.working || 0) + (countsByFilter.pending || 0)}
                   guardEnabled={guardEnabled}
                   onToggleGuard={onToggleGuard}
+                  townText={townText}
                 />
               ) : null}
 
@@ -2530,6 +2689,7 @@ export default function TownConsole({
                   guardEnabled={guardEnabled}
                   onToggleGuard={onToggleGuard}
                   onTaskDetailChange={setTaskDetailOpen}
+                  taskStatusMeta={taskStatusMeta}
                 />
               ) : null}
             </div>

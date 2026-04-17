@@ -1,9 +1,29 @@
 [project]
 name = "xsafeclaw"
 version = "1.0.0"
-description = "XSafeClaw - Keeping Your Claw Safe. Real-time monitoring and security for OpenClaw AI agents."
+description = "XSafeClaw - Real-time monitoring and security for local OpenClaw and nanobot AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = [
+    "agent-security",
+    "ai-safety",
+    "openclaw",
+    "nanobot",
+    "guardrails",
+    "fastapi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
@@ -26,7 +46,16 @@ dependencies = [
 [project.scripts]
 xsafeclaw = "xsafeclaw.cli:app"
 
+[project.urls]
+Homepage = "https://xsafeclaw.ai"
+Repository = "https://github.com/XSafeAI/XSafeClaw"
+Documentation = "https://github.com/XSafeAI/XSafeClaw/blob/main/docs/installation.pdf"
+Issues = "https://github.com/XSafeAI/XSafeClaw/issues"
+
 [project.optional-dependencies]
+nanobot = [
+    "nanobot-ai",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
