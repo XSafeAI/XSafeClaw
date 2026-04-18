@@ -1539,6 +1539,33 @@ export default function TownConsole({
     loadModelCatalog();
   }, [loadModelCatalog, modelSetupOpen]);
 
+  // Cross-surface model-config sync. The Configure page (/configure) and
+  // the Hermes-specific flows in there write a new default model to
+  // ~/.hermes/config.yaml and restart the Hermes gateway. They also
+  // broadcast two signals after a successful save:
+  //   1. ``window`` custom event ``xs-hermes-model-updated``  — same tab
+  //   2. ``localStorage.setItem('xs_hermes_cfg_ping', ...)``   — cross tab
+  //      (``storage`` event fires in *other* tabs on write)
+  // We listen to both here so the model dropdown / default-badge / agent
+  // creation form reflect the new model without a hard refresh. Also
+  // reload the catalog so the "Add new model" picker shows it as
+  // configured.
+  useEffect(() => {
+    const refresh = () => {
+      loadAvailableModels();
+      loadModelCatalog(true);
+    };
+    const onStorage = (event) => {
+      if (event.key === 'xs_hermes_cfg_ping') refresh();
+    };
+    window.addEventListener('xs-hermes-model-updated', refresh);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('xs-hermes-model-updated', refresh);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [loadAvailableModels, loadModelCatalog]);
+
   const { agents: traceAgents, events } = traceData;
 
   useEffect(() => {

@@ -113,21 +113,38 @@ app.include_router(map_skins.router, prefix="/api/map-skins", tags=["Map Skins"]
 if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
     _static_assets = STATIC_DIR / "assets"
     _static_assets.mkdir(parents=True, exist_ok=True)
+    # Hashed asset files under /assets/ are safe to cache aggressively; the
+    # bundler emits a new filename whenever the content changes.
     app.mount("/assets", StaticFiles(directory=_static_assets), name="static-assets")
+
+    # HTML entry points and other non-hashed files must NEVER be cached by the
+    # browser — otherwise a freshly rebuilt bundle won't be picked up until
+    # the user hard-refreshes. The assets/ mount above keeps its own headers.
+    _HTML_NO_CACHE_HEADERS = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa_fallback(request: Request, path: str):
-        """SPA fallback — serve static files or index.html for SPA routes."""
+        """SPA fallback — serve static files or index.html for SPA routes.
+
+        HTML responses are returned with ``Cache-Control: no-store`` so that
+        redeploying the embedded bundle is visible on the next page load
+        without the user having to manually clear the browser cache.
+        """
         file = STATIC_DIR / path
         if file.is_file() and not path.startswith("api"):
-            return FileResponse(file)
+            headers = _HTML_NO_CACHE_HEADERS if file.suffix.lower() in {".html", ".htm"} else None
+            return FileResponse(file, headers=headers)
         basename = path.rsplit("/", 1)[-1]
         if "." in basename:
             return Response(status_code=404)
         dedicated = STATIC_DIR / f"{path}.html"
         if dedicated.is_file():
-            return FileResponse(dedicated)
-        return FileResponse(STATIC_DIR / "index.html")
+            return FileResponse(dedicated, headers=_HTML_NO_CACHE_HEADERS)
+        return FileResponse(STATIC_DIR / "index.html", headers=_HTML_NO_CACHE_HEADERS)
 else:
     @app.get("/", tags=["Root"])
     async def root():

@@ -1,7 +1,0 @@
-{
-  "name": "safeclaw-guard",
-  "version": "1.0.0",
-  "description": "XSafeClaw before_tool_call guard plugin for OpenClaw",
-  "main": "index.ts",
-  "type": "module"
-}

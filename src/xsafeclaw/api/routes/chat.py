@@ -219,15 +219,23 @@ def _build_available_models_payload_from_config() -> dict:
         return {"models": [], "default_model": ""}
 
     if settings.is_hermes:
-        # Hermes config.yaml: model is a single string like "provider/model"
-        # or a bare name like "hermes-agent".
-        default_model = str(config.get("model", "")).strip()
+        # Hermes config.yaml: ``model`` can be a nested dict with a
+        # ``default`` key (e.g. ``model: {default: "anthropic/claude-opus-4.6", provider: "auto"}``)
+        # or a bare string like ``model: "hermes-agent"``.
+        model_cfg = config.get("model", "")
+        if isinstance(model_cfg, dict):
+            default_model = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+            cfg_provider = str(model_cfg.get("provider", "")).strip()
+        else:
+            default_model = str(model_cfg).strip()
+            cfg_provider = ""
+
         models = []
         if default_model:
             if "/" in default_model:
                 provider, short = default_model.split("/", 1)
             else:
-                provider = "hermes"
+                provider = cfg_provider if cfg_provider and cfg_provider != "auto" else "hermes"
                 short = default_model
             models.append({
                 "id": default_model,

@@ -37,5 +37,12 @@ echo "Installing frontend dependencies ..."
 cd "$PROJECT_DIR/frontend"
 npm install
 
+# The backend (port 6874) serves the production bundle from
+# src/xsafeclaw/static/. Without this build step the cached bundle shipped
+# in the repo would be used, which may lag behind frontend/src — e.g. the
+# Setup page would be missing newly added agent-framework cards.
+echo "Building frontend bundle into src/xsafeclaw/static ..."
+npm run build
+
 echo ""
 echo "Done. Start with:  bash start.sh"

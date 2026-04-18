@@ -154,16 +154,41 @@ def _find_openclaw() -> Optional[str]:
 
 
 def _find_hermes() -> Optional[str]:
-    """Locate the hermes binary."""
+    """Locate the hermes binary.
+
+    The official installer symlinks ``hermes`` into ``~/.local/bin`` and
+    the actual venv binary lives at ``~/hermes-agent/venv/bin/hermes``.
+    Non-login shells (systemd, cron, subprocess) often lack these in
+    PATH, so we probe them explicitly.
+    """
     env = _build_env()
-    for d in env.get("PATH", "").split(_PATH_SEP):
+
+    extra_dirs: list[str] = []
+    local_bin = Path.home() / ".local" / "bin"
+    if local_bin.is_dir():
+        extra_dirs.append(str(local_bin))
+    # Official install.sh defaults to ~/.hermes/hermes-agent (older docs mentioned ~/hermes-agent).
+    for venv_bin in (
+        Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin",
+        Path.home() / "hermes-agent" / "venv" / "bin",
+    ):
+        if venv_bin.is_dir():
+            extra_dirs.append(str(venv_bin))
+            break
+
+    search_path = env.get("PATH", "")
+    for d in extra_dirs:
+        if d not in search_path:
+            search_path = d + _PATH_SEP + search_path
+
+    for d in search_path.split(_PATH_SEP):
         if not d:
             continue
         for executable in _HERMES_EXECUTABLES:
             candidate = Path(d) / executable
             if _is_runnable_file(candidate):
                 return str(candidate)
-    return shutil.which("hermes")
+    return shutil.which("hermes", path=search_path)
 
 
 def _find_agent_binary() -> Optional[str]:
@@ -286,10 +311,391 @@ async def get_system_status():
     }
 
 
+async def _hermes_api_reachable() -> bool:
+    """Return True if the Hermes HTTP API server responds on the configured port."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{settings.hermes_api_port}/health"
+            )
+            return resp.status_code == 200
+    except Exception:
+        pass
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{settings.hermes_api_port}/v1/models"
+            )
+            return resp.status_code in (200, 401, 403)
+    except Exception:
+        return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hermes API server lifecycle helpers
+#
+# OpenClaw achieves "configure-and-use" because the ``openclaw onboard`` CLI
+# both writes the config file and signals the running gateway daemon to reload.
+# Hermes has no equivalent: the API server only reads ``~/.hermes/.env`` and
+# ``~/.hermes/config.yaml`` at process startup. To reach parity, any change to
+# those files made by XSafeClaw must be followed by a restart of the Hermes
+# API server + a readiness probe — the same pattern used in the OpenClaw path
+# of ``_quick_model_config_*``.
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _wait_hermes_api_up(timeout_s: float) -> bool:
+    """Poll the Hermes ``/health`` endpoint until it responds or timeout."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if await _hermes_api_reachable():
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
+def _kill_pid_on_port(port: int, grace_s: float = 3.0) -> list[int]:
+    """Terminate any process listening on ``port`` (SIGTERM → SIGKILL).
+
+    Returns the PIDs that were signalled (empty list if none / lsof missing).
+    This is the last-resort fallback when ``hermes api restart`` / ``stop``
+    are not recognised by the installed Hermes CLI version.
+    """
+    import signal as _signal
+    import subprocess as _sp
+    import time as _time
+
+    pids: list[int] = []
+    try:
+        out = _sp.check_output(
+            ["lsof", "-ti", f":{port}"], text=True, stderr=_sp.DEVNULL
+        )
+        pids = [int(x) for x in out.split() if x.strip().isdigit()]
+    except Exception:
+        try:
+            out = _sp.check_output(
+                ["fuser", f"{port}/tcp"], text=True, stderr=_sp.DEVNULL
+            )
+            pids = [int(x) for x in out.split() if x.strip().isdigit()]
+        except Exception:
+            pids = []
+
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except Exception:
+            pass
+
+    steps = max(1, int(grace_s / 0.2))
+    for _ in range(steps):
+        alive: list[int] = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except Exception:
+                pass
+        if not alive:
+            return pids
+        _time.sleep(0.2)
+
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except Exception:
+            pass
+    return pids
+
+
+async def _run_cmd(
+    cmd: list[str], *, env: dict, timeout_s: float = 10.0
+) -> tuple[int, str]:
+    """Run a subprocess, capturing merged stdout+stderr. ``127`` = not found."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        return 127, f"not found: {exc}"
+    except Exception as exc:
+        return 1, f"spawn failed: {exc}"
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return 124, "timeout"
+    return proc.returncode or 0, stdout_bytes.decode("utf-8", errors="replace").strip()
+
+
+async def _find_hermes_user_units(env: dict) -> list[str]:
+    """Return systemd ``--user`` service units whose name contains ``hermes``.
+
+    The official installer's ``hermes setup`` / ``hermes gateway install`` wizard
+    registers one or more user units (e.g. ``hermes-gateway.service``) that
+    own the HTTP listener on ``hermes_api_port``. Restarting *those* is the
+    reliable way to reload ``~/.hermes/.env`` + ``config.yaml`` on installs
+    where the ``hermes api`` CLI subcommand does not exist (as of the upstream
+    fork shipped with ``hermes --help`` lacking ``api``).
+    """
+    rc, out = await _run_cmd(
+        ["systemctl", "--user", "list-unit-files", "--no-pager", "--plain",
+         "--type=service"],
+        env=env,
+        timeout_s=5,
+    )
+    if rc != 0 or not out:
+        return []
+    units: list[str] = []
+    for line in out.splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        unit = parts[0]
+        if not unit.endswith(".service"):
+            continue
+        if "hermes" in unit.lower():
+            units.append(unit)
+    # Prefer units that are currently active (listening) first so we avoid
+    # triggering ones that are intentionally disabled.
+    active: list[str] = []
+    inactive: list[str] = []
+    for unit in units:
+        rc, state = await _run_cmd(
+            ["systemctl", "--user", "is-active", unit], env=env, timeout_s=3
+        )
+        if state.strip() == "active":
+            active.append(unit)
+        else:
+            inactive.append(unit)
+    return active + inactive
+
+
+def _snapshot_listener_cmdline(port: int) -> list[str] | None:
+    """Return ``/proc/<pid>/cmdline`` of a process listening on ``port``.
+
+    Used as a last-resort way to relaunch the same process after we kill it —
+    works for foreground ``hermes gateway`` runs, systemd units, nohup scripts,
+    anything that doesn't hide in a container. Returns ``None`` on Windows or
+    when the PID cannot be resolved.
+    """
+    import subprocess as _sp
+
+    for probe in (["lsof", "-ti", f":{port}"], ["fuser", f"{port}/tcp"]):
+        try:
+            out = _sp.check_output(probe, text=True, stderr=_sp.DEVNULL)
+            pid_str = next((x for x in out.split() if x.strip().isdigit()), "")
+            if not pid_str:
+                continue
+            proc_path = Path(f"/proc/{pid_str}/cmdline")
+            if not proc_path.exists():
+                continue
+            raw = proc_path.read_bytes()
+            if not raw:
+                continue
+            parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\x00") if p]
+            return parts or None
+        except Exception:
+            continue
+    return None
+
+
+async def _restart_hermes_api_server(timeout_s: float = 20.0) -> tuple[bool, str]:
+    """Best-effort restart of the Hermes API listener so it reloads config.
+
+    Different Hermes distributions expose the HTTP API on ``hermes_api_port``
+    through different mechanisms. We try each in order and stop at the first
+    that brings ``/health`` back up:
+
+      1. ``systemctl --user restart <hermes-*.service>`` — the installer's
+         default. Works even when the ``hermes`` CLI has no ``api`` subcommand.
+      2. ``hermes gateway restart`` / ``stop + start`` — the combined
+         messaging-gateway-plus-API entry point on versions where gateway hosts
+         the HTTP listener.
+      3. ``hermes api restart`` / ``stop + start`` — the dedicated lifecycle
+         commands on upstream builds that split API out of gateway.
+      4. Kill the PID on the port and relaunch ``/proc/<pid>/cmdline`` — final
+         fallback for hand-started processes (``nohup hermes gateway`` etc.).
+
+    Returns ``(success, log)``. ``success`` means ``/health`` came back within
+    ``timeout_s`` seconds after the attempted action.
+    """
+    hermes_bin = _find_hermes()
+    env = _build_env()
+    sections: list[str] = []
+
+    # ── 1. systemd user units ─────────────────────────────────────────────
+    try:
+        units = await _find_hermes_user_units(env)
+    except Exception as exc:
+        units = []
+        sections.append(f"systemctl --user probe failed: {exc}")
+    if units:
+        sections.append(f"Detected Hermes systemd user units: {', '.join(units)}")
+        any_success = False
+        for unit in units:
+            rc, out = await _run_cmd(
+                ["systemctl", "--user", "restart", unit], env=env, timeout_s=15
+            )
+            sections.append(f"$ systemctl --user restart {unit}\n[rc={rc}] {out}")
+            if rc == 0:
+                any_success = True
+        if any_success and await _wait_hermes_api_up(min(timeout_s, 10)):
+            return True, "\n\n".join(sections)
+    else:
+        sections.append("No Hermes systemd user units found — skipping systemctl path.")
+
+    # ── 2. hermes gateway subcommands ─────────────────────────────────────
+    if hermes_bin:
+        rc, out = await _run_cmd(
+            [hermes_bin, "gateway", "restart"], env=env, timeout_s=12
+        )
+        sections.append(f"$ hermes gateway restart\n[rc={rc}] {out}")
+        if rc == 0 and await _wait_hermes_api_up(6.0):
+            return True, "\n\n".join(sections)
+
+        rc1, out1 = await _run_cmd([hermes_bin, "gateway", "stop"], env=env, timeout_s=8)
+        sections.append(f"$ hermes gateway stop\n[rc={rc1}] {out1}")
+        rc2, out2 = await _run_cmd([hermes_bin, "gateway", "start"], env=env, timeout_s=8)
+        sections.append(f"$ hermes gateway start\n[rc={rc2}] {out2}")
+        if await _wait_hermes_api_up(6.0):
+            return True, "\n\n".join(sections)
+
+        # ── 3. hermes api subcommands (upstream split) ────────────────────
+        rc, out = await _run_cmd(
+            [hermes_bin, "api", "restart"], env=env, timeout_s=12
+        )
+        sections.append(f"$ hermes api restart\n[rc={rc}] {out}")
+        if rc == 0 and await _wait_hermes_api_up(5.0):
+            return True, "\n\n".join(sections)
+
+        rc1, out1 = await _run_cmd([hermes_bin, "api", "stop"], env=env, timeout_s=8)
+        sections.append(f"$ hermes api stop\n[rc={rc1}] {out1}")
+        rc2, out2 = await _run_cmd([hermes_bin, "api", "start"], env=env, timeout_s=8)
+        sections.append(f"$ hermes api start\n[rc={rc2}] {out2}")
+        if await _wait_hermes_api_up(5.0):
+            return True, "\n\n".join(sections)
+    else:
+        sections.append(
+            "⚠ `hermes` executable not found on PATH / venv. Skipping CLI fallbacks."
+        )
+
+    # ── 4. kill + relaunch captured cmdline ───────────────────────────────
+    port = settings.hermes_api_port
+    captured = _snapshot_listener_cmdline(port)
+    if captured:
+        sections.append(f"Captured listener cmdline on :{port} → {captured}")
+    else:
+        sections.append(f"Could not capture /proc/<pid>/cmdline for :{port}.")
+
+    killed = _kill_pid_on_port(port)
+    sections.append(f"$ kill pid on :{port}\nsignalled: {killed or '(none)'}")
+
+    relaunch_cmd: list[str] | None = None
+    if captured:
+        relaunch_cmd = captured
+    elif hermes_bin:
+        relaunch_cmd = [hermes_bin, "gateway"]
+    if relaunch_cmd:
+        try:
+            await asyncio.create_subprocess_exec(
+                *relaunch_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+            await asyncio.sleep(0.5)
+            sections.append(f"$ {' '.join(relaunch_cmd)} (detached)\n[launched]")
+        except Exception as exc:
+            sections.append(f"$ {' '.join(relaunch_cmd)} (detached)\nfailed: {exc}")
+
+    if await _wait_hermes_api_up(timeout_s):
+        return True, "\n\n".join(sections)
+
+    sections.append(
+        f"⚠ Hermes /health did not respond within {timeout_s:.0f}s after all "
+        "restart attempts. Configuration was persisted to ~/.hermes/.env and "
+        "config.yaml, but the running server still holds the old config. "
+        "Restart Hermes manually (e.g. `systemctl --user restart <unit>`, or "
+        "the script/command you used to start it)."
+    )
+    return False, "\n\n".join(sections)
+
+
+async def _wait_hermes_runtime_ready(
+    model_id: str | None,
+    *,
+    timeout_s: float = 10.0,
+) -> tuple[bool, str | None]:
+    """Poll Hermes ``/v1/models`` until ``model_id`` is in the runtime catalog.
+
+    When ``model_id`` is falsy, only confirms that ``/health`` is reachable.
+    Mirrors the readiness probe used by the OpenClaw fast-path.
+    """
+    from ...hermes_client import HermesClient
+    from .chat import _extract_runtime_model_list, _runtime_catalog_match
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        client: HermesClient | None = None
+        try:
+            client = HermesClient(api_key=settings.hermes_api_key or None)
+            await asyncio.wait_for(client.connect(), timeout=3)
+            if not model_id:
+                return True, None
+            raw = await asyncio.wait_for(client.list_models(), timeout=3)
+            catalog = _extract_runtime_model_list(raw)
+            ok, visible = _runtime_catalog_match(catalog, model_id)
+            if ok:
+                return True, visible
+        except Exception:
+            pass
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        await asyncio.sleep(0.5)
+    return False, None
+
+
 async def _hermes_status(env: dict) -> dict:
-    """Check Hermes installation and gateway status."""
+    """Check Hermes installation and gateway status.
+
+    Hermes may run on the same machine (binary on PATH) or on a remote
+    host that XSafeClaw reaches via its HTTP API.  We treat Hermes as
+    "installed" when *either* the binary is found locally *or* the API
+    server is reachable, so that the Setup page correctly skips to the
+    Configure flow.
+    """
     hermes_path = _find_hermes()
-    if not hermes_path:
+
+    api_reachable = await _hermes_api_reachable()
+
+    hermes_installed = hermes_path is not None or api_reachable
+
+    # Surface whether the HTTP API listener is enabled in ~/.hermes/.env.
+    # Without API_SERVER_ENABLED=true, the gateway boots but /health never
+    # binds. The Configure status page shows this so the user can tell
+    # "gateway not running" from "gateway running but HTTP disabled".
+    api_server_enabled = (
+        _read_dotenv_value(_hermes_env_path(), "API_SERVER_ENABLED").lower() == "true"
+    )
+
+    if not hermes_installed:
         return {
             "platform": "hermes",
             "openclaw_installed": False,
@@ -303,45 +709,42 @@ async def _hermes_status(env: dict) -> dict:
             "hermes_config_path": str(settings.hermes_config_path),
             "hermes_home": str(settings.hermes_home),
             "hermes_api_key_configured": bool(settings.hermes_api_key),
+            "hermes_api_server_enabled": api_server_enabled,
         }
 
     version: Optional[str] = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            hermes_path, "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
-        raw = (stdout or stderr).decode().strip()
-        version = raw.splitlines()[0] if raw else "unknown"
-    except Exception:
-        version = "unknown"
+    if hermes_path:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                hermes_path, "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+            raw = (stdout or stderr).decode().strip()
+            version = raw.splitlines()[0] if raw else "unknown"
+        except Exception:
+            version = "unknown"
+    else:
+        version = "remote"
 
-    # Check if Hermes API server is running via health endpoint
-    daemon_running = False
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=3) as client:
-            resp = await client.get(f"http://127.0.0.1:{settings.hermes_api_port}/health")
-            daemon_running = resp.status_code == 200
-    except Exception:
-        pass
+    config_exists = _CONFIG_PATH.exists() or api_reachable
 
     return {
         "platform": "hermes",
         "openclaw_installed": True,
         "hermes_installed": True,
         "openclaw_version": version,
-        "daemon_running": daemon_running,
+        "daemon_running": api_reachable,
         "openclaw_path": hermes_path,
         "hermes_path": hermes_path,
-        "config_exists": _CONFIG_PATH.exists(),
+        "config_exists": config_exists,
         "hermes_api_port": settings.hermes_api_port,
         "hermes_config_path": str(settings.hermes_config_path),
         "hermes_home": str(settings.hermes_home),
         "hermes_api_key_configured": bool(settings.hermes_api_key),
+        "hermes_api_server_enabled": api_server_enabled,
     }
 
 
@@ -353,17 +756,111 @@ class _HermesApiKeyRequest(BaseModel):
     api_key: str = ""
 
 
-@router.get("/hermes-api-key-status")
-async def hermes_api_key_status():
-    """Return whether a Hermes API key is currently configured (never exposes the value)."""
-    return {"configured": bool(settings.hermes_api_key)}
+def _hermes_env_path() -> Path:
+    """Return the Hermes-side .env path (``~/.hermes/.env``)."""
+    return Path.home() / ".hermes" / ".env"
 
 
-@router.post("/hermes-api-key")
-async def save_hermes_api_key(body: _HermesApiKeyRequest):
-    """Persist the Hermes API key into XSafeClaw's .env and reload settings at runtime."""
+def _upsert_dotenv_line(path: Path, key_name: str, value: str) -> None:
+    """Upsert ``key_name=value`` into a dotenv-style file, creating it as needed.
+
+    Keeps comments/other variables untouched and replaces an existing line
+    (including ones that are commented out in the form ``# API_SERVER_KEY=...``).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = []
+    if path.exists():
+        try:
+            lines = path.read_text("utf-8").splitlines()
+        except Exception:
+            lines = []
+
+    replaced = False
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key_name}=") or stripped.startswith(f"# {key_name}="):
+            new_lines.append(f"{key_name}={value}")
+            replaced = True
+        else:
+            new_lines.append(line)
+
+    if not replaced:
+        new_lines.append(f"{key_name}={value}")
+
+    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+def _read_dotenv_value(path: Path, key_name: str) -> str:
+    """Read the current value of ``key_name`` from a dotenv file. Returns ``""``."""
+    if not path.exists():
+        return ""
+    try:
+        for raw in path.read_text("utf-8").splitlines():
+            stripped = raw.strip()
+            if stripped.startswith("#") or "=" not in stripped:
+                continue
+            k, _, v = stripped.partition("=")
+            if k.strip() == key_name:
+                return v.strip().strip("'\"")
+    except Exception:
+        pass
+    return ""
+
+
+def _ensure_hermes_api_server_env(*, port: int | None = None) -> list[str]:
+    """Ensure ``~/.hermes/.env`` has the HTTP-API-server enable flag set.
+
+    The Hermes HTTP API (OpenAI-compatible ``/health``, ``/v1/models``,
+    ``/v1/chat/completions``) is **not** a standalone command — it is an
+    optional component hosted *inside* ``hermes gateway``.  Per upstream
+    docs (https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server)
+    it only starts when the following env vars are present in ``~/.hermes/.env``:
+
+        API_SERVER_ENABLED=true
+        API_SERVER_KEY=<shared-secret>         # XSafeClaw already writes this
+        # API_SERVER_PORT=8642                 # default, overridden only when changed
+        # API_SERVER_HOST=127.0.0.1            # default, loopback-only
+
+    Without ``API_SERVER_ENABLED=true`` the gateway boots up the messaging
+    components only — and ``curl http://127.0.0.1:8642/health`` times out.
+    XSafeClaw has to write this flag itself, otherwise XSafeClaw ↔ Hermes
+    integration is broken from the very first boot.
+
+    Returns the list of keys that were newly written / changed, so callers
+    can surface them in SSE install logs or status endpoints.
+    """
+    env_path = _hermes_env_path()
+    touched: list[str] = []
+
+    if _read_dotenv_value(env_path, "API_SERVER_ENABLED").lower() != "true":
+        _upsert_dotenv_line(env_path, "API_SERVER_ENABLED", "true")
+        touched.append("API_SERVER_ENABLED")
+
+    # Keep the port explicit in .env when we deviate from 8642 so the user
+    # and ``hermes gateway`` agree on where the listener binds. When set to
+    # the default we leave the key unset (upstream default kicks in).
+    effective_port = port if port is not None else settings.hermes_api_port
+    current_port = _read_dotenv_value(env_path, "API_SERVER_PORT")
+    if effective_port != 8642 and current_port != str(effective_port):
+        _upsert_dotenv_line(env_path, "API_SERVER_PORT", str(effective_port))
+        touched.append("API_SERVER_PORT")
+
+    return touched
+
+
+def _persist_hermes_api_key(key_value: str) -> None:
+    """Write ``key_value`` into both XSafeClaw's .env (HERMES_API_KEY) and
+    Hermes' own .env (API_SERVER_KEY), and update the running settings instance.
+    Passing an empty string clears it on both sides.
+
+    Also enables the Hermes HTTP API server via ``API_SERVER_ENABLED=true``
+    when a non-empty key is written (see ``_ensure_hermes_api_server_env``).
+    """
     import dotenv
 
+    # XSafeClaw side — HERMES_API_KEY used by our own HTTP client.
     env_path = Path.cwd() / ".env"
     if not env_path.exists():
         example = Path.cwd() / ".env.example"
@@ -372,13 +869,376 @@ async def save_hermes_api_key(body: _HermesApiKeyRequest):
             shutil.copy(example, env_path)
         else:
             env_path.write_text("", encoding="utf-8")
-
-    key_value = body.api_key.strip()
     dotenv.set_key(str(env_path), "HERMES_API_KEY", key_value)
-
     settings.hermes_api_key = key_value
 
-    return {"success": True, "configured": bool(key_value)}
+    # Hermes side — API_SERVER_KEY that the Hermes API server enforces.
+    # We mirror it so both sides always match and the user does not have to
+    # hand-edit ~/.hermes/.env. NOTE: Hermes processes need to be restarted to
+    # pick up the new value; the API endpoint surfaces that reminder.
+    _upsert_dotenv_line(_hermes_env_path(), "API_SERVER_KEY", key_value)
+
+    # Without API_SERVER_ENABLED=true the Hermes HTTP listener never binds
+    # and /health never responds — see upstream docs. We set it unconditionally
+    # whenever a key is persisted (idempotent). For the "clear the key"
+    # path (empty value) we leave the enable flag alone so the user can still
+    # run Hermes' API for other frontends.
+    if key_value:
+        _ensure_hermes_api_server_env()
+
+
+@router.get("/hermes-api-key-status")
+async def hermes_api_key_status():
+    """Return whether a Hermes API key is currently configured (never exposes the value)."""
+    configured_here = bool(settings.hermes_api_key)
+    hermes_side = bool(_read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY"))
+    return {
+        "configured": configured_here,
+        "hermes_side_configured": hermes_side,
+        "in_sync": configured_here == hermes_side and (
+            not configured_here
+            or settings.hermes_api_key
+            == _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
+        ),
+    }
+
+
+@router.post("/hermes-api-key")
+async def save_hermes_api_key(body: _HermesApiKeyRequest):
+    """Persist a user-supplied Hermes API key.
+
+    The same value is written to XSafeClaw's ``.env`` (``HERMES_API_KEY``) and
+    Hermes' ``~/.hermes/.env`` (``API_SERVER_KEY``) so the user never has to
+    drop to a terminal to keep them in sync.
+    """
+    key_value = body.api_key.strip()
+    _persist_hermes_api_key(key_value)
+    return {
+        "success": True,
+        "configured": bool(key_value),
+        "hermes_env_path": str(_hermes_env_path()),
+        "requires_hermes_restart": True,
+    }
+
+
+@router.post("/hermes-api-key/generate")
+async def generate_hermes_api_key():
+    """Generate a strong random API key, persist it on both sides, and return
+    the generated value once so the UI can display/copy it.
+    """
+    import secrets
+
+    new_key = secrets.token_urlsafe(32)
+    _persist_hermes_api_key(new_key)
+    return {
+        "success": True,
+        "configured": True,
+        "api_key": new_key,
+        "hermes_env_path": str(_hermes_env_path()),
+        "requires_hermes_restart": True,
+    }
+
+
+@router.get("/hermes-api-key/reveal")
+async def reveal_hermes_api_key():
+    """Return the currently configured Hermes API key value.
+
+    This endpoint is used when a user forgot the key they set earlier. It reads
+    from XSafeClaw's runtime settings first, then falls back to Hermes'
+    ``~/.hermes/.env``. Returns an empty string when no key is set.
+    """
+    value = settings.hermes_api_key or _read_dotenv_value(
+        _hermes_env_path(), "API_SERVER_KEY"
+    )
+    return {
+        "api_key": value,
+        "source": "xsafeclaw" if settings.hermes_api_key else (
+            "hermes" if value else "none"
+        ),
+    }
+
+
+@router.post("/hermes-enable-api-server")
+async def hermes_enable_api_server():
+    """Flip ``API_SERVER_ENABLED=true`` in ``~/.hermes/.env`` and restart
+    the gateway so the HTTP listener on ``hermes_api_port`` actually binds.
+
+    Purpose: the Hermes HTTP API (``/health``, ``/v1/models``,
+    ``/v1/chat/completions``) is implemented *inside* ``hermes gateway`` but
+    guarded by this env flag. Upstream ships it as ``false`` by default, so
+    a fresh install of Hermes looks "running" (``hermes status`` is happy)
+    while XSafeClaw cannot talk to it. See:
+    https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server
+
+    Called from the Configure status page's "Enable API listener" button
+    when ``hermes_api_server_enabled`` is ``false`` in status. Also safe to
+    call repeatedly — writes are idempotent.
+
+    Returns whether ``/health`` came back up after the restart.
+    """
+    touched = _ensure_hermes_api_server_env()
+    # Ensure we have an API_SERVER_KEY too; otherwise /v1/* would 401.
+    existing_key = _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
+    if not existing_key:
+        import secrets
+        _persist_hermes_api_key(secrets.token_urlsafe(32))
+        touched.append("API_SERVER_KEY")
+
+    restarted, restart_detail = await _restart_hermes_api_server(timeout_s=25.0)
+    api_reachable = await _hermes_api_reachable()
+
+    return {
+        "success": True,
+        "env_changes": touched,
+        "hermes_api_server_enabled": True,
+        "restart_attempted": True,
+        "restart_succeeded": restarted,
+        "restart_detail": restart_detail,
+        "api_reachable": api_reachable,
+        "hermes_api_port": settings.hermes_api_port,
+    }
+
+
+class HermesApplyRequest(BaseModel):
+    # Optional: if provided, /v1/models is polled until this id is listed,
+    # giving the frontend a reliable "ready" signal after restart.
+    model_id: Optional[str] = None
+
+
+@router.post("/hermes/apply")
+async def hermes_apply(body: HermesApplyRequest | None = None):
+    """Restart the Hermes API server so it reloads ``~/.hermes/.env`` and
+    ``~/.hermes/config.yaml``, then probe ``/health`` (and optionally
+    ``/v1/models``) to confirm the new configuration is live.
+
+    This is the Hermes counterpart to OpenClaw's implicit gateway reload
+    after ``openclaw onboard``. The quick-model-config endpoint calls it
+    automatically when ``auto_apply=True`` (the default); this standalone
+    endpoint is useful after manual edits of ``~/.hermes/.env`` or when the
+    UI wants to offer an explicit "Apply to Hermes" button.
+    """
+    if not settings.is_hermes:
+        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+
+    api_was_running = await _hermes_api_reachable()
+    restart_ok, output = await _restart_hermes_api_server()
+    model_id = (body.model_id if body else None) or None
+    ready = False
+    visible_model: Optional[str] = None
+    if restart_ok:
+        ready, visible_model = await _wait_hermes_runtime_ready(
+            model_id, timeout_s=10.0
+        )
+
+    return {
+        "success": restart_ok and ready,
+        "restart_ok": restart_ok,
+        "api_was_running": api_was_running,
+        "api_reachable": await _hermes_api_reachable(),
+        "model_id": model_id,
+        "model_ready": bool(model_id) and ready,
+        "visible_model": visible_model,
+        "output": output,
+    }
+
+
+# ──────────────────────────────────────────────
+# Hermes external-bot / messaging-platform config
+# ──────────────────────────────────────────────
+# Hermes' gateway talks to a large number of messaging platforms.  Each one
+# takes a fixed set of credentials that Hermes reads from ``~/.hermes/.env``
+# on startup.  The Configure wizard lets the user paste these credentials
+# from the browser so they don't need a shell.
+#
+# We keep the platform schema on the backend (single source of truth) and
+# expose it via ``GET /system/hermes-bot-platforms``; the frontend renders
+# the fields generically.  Adding a new platform = just append to this dict.
+_HERMES_BOT_PLATFORMS: dict[str, dict] = {
+    "telegram": {
+        "name": "Telegram",
+        "hint": "@BotFather → /newbot. Paste the bot token. Optionally allowlist users.",
+        "docUrl": "https://core.telegram.org/bots/tutorial",
+        "fields": [
+            {"key": "TELEGRAM_BOT_TOKEN", "label": "Bot Token", "required": True, "secret": True,
+             "placeholder": "123456:ABC-..."},
+            {"key": "TELEGRAM_ALLOWED_USERS", "label": "Allowed user IDs (comma-separated, optional)",
+             "required": False, "secret": False, "placeholder": "111111111,222222222"},
+        ],
+    },
+    "discord": {
+        "name": "Discord",
+        "hint": "Discord Developer Portal → New Application → Bot. Paste the bot token.",
+        "docUrl": "https://discord.com/developers/applications",
+        "fields": [
+            {"key": "DISCORD_BOT_TOKEN", "label": "Bot Token", "required": True, "secret": True,
+             "placeholder": "MTEx..."},
+        ],
+    },
+    "slack": {
+        "name": "Slack",
+        "hint": "Slack App (bot scopes) → OAuth & Permissions → Bot User OAuth Token. App-level token enables Socket Mode.",
+        "docUrl": "https://api.slack.com/apps",
+        "fields": [
+            {"key": "SLACK_BOT_TOKEN", "label": "Bot User OAuth Token", "required": True, "secret": True,
+             "placeholder": "xoxb-..."},
+            {"key": "SLACK_APP_TOKEN", "label": "App-Level Token (optional, xapp-...)",
+             "required": False, "secret": True, "placeholder": "xapp-..."},
+        ],
+    },
+    "feishu": {
+        "name": "Feishu / Lark (飞书)",
+        "hint": "开发者后台 → 应用凭证。支持国内飞书与 Lark 国际版。",
+        "docUrl": "https://open.feishu.cn/app",
+        "fields": [
+            {"key": "FEISHU_APP_ID", "label": "App ID", "required": True, "secret": False,
+             "placeholder": "cli_a..."},
+            {"key": "FEISHU_APP_SECRET", "label": "App Secret", "required": True, "secret": True,
+             "placeholder": "..."},
+        ],
+    },
+    "dingtalk": {
+        "name": "DingTalk (钉钉)",
+        "hint": "钉钉开放平台 → 企业内部应用 → AppKey / AppSecret。",
+        "docUrl": "https://open.dingtalk.com/",
+        "fields": [
+            {"key": "DINGTALK_APP_KEY", "label": "AppKey", "required": True, "secret": False,
+             "placeholder": "dingxxxx..."},
+            {"key": "DINGTALK_APP_SECRET", "label": "AppSecret", "required": True, "secret": True,
+             "placeholder": "..."},
+        ],
+    },
+    "wecom": {
+        "name": "WeCom (企业微信)",
+        "hint": "企业微信管理后台 → 应用管理 → 自建应用。",
+        "docUrl": "https://work.weixin.qq.com/",
+        "fields": [
+            {"key": "WECOM_CORP_ID", "label": "CorpID", "required": True, "secret": False,
+             "placeholder": "ww..."},
+            {"key": "WECOM_AGENT_ID", "label": "AgentID", "required": True, "secret": False,
+             "placeholder": "1000002"},
+            {"key": "WECOM_SECRET", "label": "App Secret", "required": True, "secret": True,
+             "placeholder": "..."},
+        ],
+    },
+}
+
+
+@router.get("/hermes-bot-platforms")
+async def hermes_bot_platforms():
+    """Return the schema for every supported Hermes messaging platform.
+
+    The frontend renders each platform generically from ``fields``, so
+    appending a new one here is all that's needed to make it configurable
+    from the Configure wizard.  Also reports which env vars already have
+    a value in ``~/.hermes/.env`` so the UI can surface "already set" hints.
+    """
+    if not settings.is_hermes:
+        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+
+    env_path = _hermes_env_path()
+    configured: dict[str, bool] = {}
+    platforms_out: list[dict] = []
+    for pid, spec in _HERMES_BOT_PLATFORMS.items():
+        fields_out: list[dict] = []
+        any_configured = False
+        for field in spec["fields"]:
+            has_value = bool(_read_dotenv_value(env_path, field["key"]))
+            if has_value:
+                any_configured = True
+            fields_out.append({**field, "configured": has_value})
+        configured[pid] = any_configured
+        platforms_out.append({
+            "id": pid,
+            "name": spec["name"],
+            "hint": spec.get("hint", ""),
+            "docUrl": spec.get("docUrl", ""),
+            "fields": fields_out,
+            "configured": any_configured,
+        })
+
+    return {
+        "platforms": platforms_out,
+        "env_path": str(env_path),
+        "any_configured": any(configured.values()),
+    }
+
+
+class HermesBotConfigRequest(BaseModel):
+    # Platform id as returned by ``/hermes-bot-platforms`` (e.g. ``"telegram"``).
+    platform: str
+    # Map of env-var name → value.  Only keys declared in the platform spec
+    # are accepted; unknown keys are silently dropped.  Empty-string values
+    # clear the corresponding env var.
+    fields: dict[str, str] = Field(default_factory=dict)
+    # When True (default), ``_restart_hermes_api_server`` is triggered after
+    # the write so the gateway picks up the new credentials without the user
+    # touching a shell.  Matches the model-config flow.
+    auto_apply: bool = True
+
+
+@router.post("/hermes-bot-config")
+async def hermes_bot_config(body: HermesBotConfigRequest):
+    """Persist one messaging-platform's credentials into ``~/.hermes/.env``.
+
+    Writes only the keys declared in the platform spec.  If ``auto_apply``
+    is true and the Hermes API is currently reachable, the server is
+    restarted so the gateway re-reads the updated credentials.  Otherwise
+    the configuration is stored but requires a manual restart.
+    """
+    if not settings.is_hermes:
+        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+
+    spec = _HERMES_BOT_PLATFORMS.get(body.platform)
+    if not spec:
+        raise HTTPException(status_code=400, detail=f"Unknown platform: {body.platform}")
+
+    allowed_keys = {f["key"] for f in spec["fields"]}
+    required_keys = {f["key"] for f in spec["fields"] if f.get("required")}
+    supplied = {k: (v or "").strip() for k, v in body.fields.items() if k in allowed_keys}
+
+    # A "save" action must at least populate every required field — otherwise
+    # we'd leave the platform half-configured and Hermes would fail loudly.
+    missing = [k for k in required_keys if not supplied.get(k)]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required field(s) for {body.platform}: {', '.join(missing)}",
+        )
+
+    env_path = _hermes_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for key in allowed_keys:
+        if key in supplied:
+            _upsert_dotenv_line(env_path, key, supplied[key])
+            written.append(key)
+
+    # Apply / restart path, mirroring _quick_model_config_hermes so both
+    # flows give the frontend identical ``applied`` / ``api_reachable``
+    # semantics.
+    output = ""
+    restart_ok = True
+    api_was_running = await _hermes_api_reachable()
+
+    if body.auto_apply and api_was_running:
+        restart_ok, output = await _restart_hermes_api_server()
+    elif body.auto_apply and not api_was_running:
+        restart_ok = False
+        output = (
+            f"Hermes API server on 127.0.0.1:{settings.hermes_api_port} is "
+            "not running. Credentials saved to ~/.hermes/.env — start the "
+            "Hermes gateway/API for the bot to come online."
+        )
+
+    return {
+        "success": True,
+        "platform": body.platform,
+        "written_keys": written,
+        "applied": bool(body.auto_apply and restart_ok and api_was_running),
+        "api_was_running": api_was_running,
+        "api_reachable": await _hermes_api_reachable(),
+        "output": output,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -587,40 +1447,317 @@ async def install_openclaw():
 
 
 # ──────────────────────────────────────────────
-# Install Hermes  (pip install hermes-agent)
+# Install Hermes  (official install script + gateway deps)
 # ──────────────────────────────────────────────
 
-def _find_pip(env: dict) -> Optional[str]:
-    """Locate pip/pip3 binary using the given environment."""
-    sep = ";" if os.name == "nt" else ":"
-    names = ["pip3", "pip"] if os.name != "nt" else ["pip3.exe", "pip.exe", "pip3", "pip"]
-    for d in env.get("PATH", "").split(sep):
-        for name in names:
-            candidate = Path(d) / name
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
-    return shutil.which("pip3") or shutil.which("pip")
+_HERMES_INSTALL_SCRIPT_URL = (
+    "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
+)
+
+
+def _hermes_repo_dir() -> Path:
+    """Resolve install path from official Hermes install.sh (default ~/.hermes/hermes-agent)."""
+    default = Path.home() / ".hermes" / "hermes-agent"
+    legacy = Path.home() / "hermes-agent"
+    if default.is_dir():
+        return default
+    if legacy.is_dir():
+        return legacy
+    return default
+
+
+async def _hermes_bring_up_api(env: dict):
+    """SSE generator: non-interactively bring the Hermes API listener up.
+
+    Yielded events use the same ``data: {json}\\n\\n`` shape as the rest of
+    ``install_hermes`` so the frontend progress stream stays uniform.
+
+    Order of attempts — stops at the first that makes ``/health`` return 200:
+      0. Write ``API_SERVER_ENABLED=true`` (+ port override if needed) to
+         ``~/.hermes/.env``. **Without this flag, ``hermes gateway`` boots
+         only the messaging components and ``/health`` never binds** — this
+         was the root cause of the "health never visible" bug that persisted
+         even after manual ``hermes setup`` / ``restart gateway``.
+         See: https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server
+      1. ``hermes gateway install`` (documented, non-interactive).
+      2. ``systemctl --user daemon-reload`` + ``enable --now`` on every
+         ``hermes-*.service`` we can discover.
+      3. Spawn ``hermes gateway`` detached (``nohup … &``) — works when no
+         systemd user session is available (e.g. ``loginctl enable-linger``
+         not set).  Output is redirected to ``~/.hermes/gateway.log`` so the
+         user can ``tail -f`` it for troubleshooting.
+      4. pty-driven ``hermes setup`` feeding blank lines + EOF — best-effort.
+    """
+    hermes_bin = _find_hermes()
+    port = settings.hermes_api_port
+
+    # ── (0) Enable the HTTP API inside the gateway ────────────────────
+    # Hermes ships with API_SERVER_ENABLED=false by default. Every start of
+    # `hermes gateway` without this flag silently skips the HTTP listener,
+    # which is why curl :8642/health kept failing even after `hermes setup`
+    # and `hermes gateway` restarts.
+    touched = _ensure_hermes_api_server_env(port=port)
+    if touched:
+        keys_list = ", ".join(touched)
+        msg = f"▸ Enabled Hermes HTTP API in ~/.hermes/.env ({keys_list}=…)"
+        yield f"data: {json.dumps({'type': 'output', 'text': msg})}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'output', 'text': '✓ ~/.hermes/.env already has API_SERVER_ENABLED=true'})}\n\n"
+
+    # Ensure an API_SERVER_KEY exists so the first HTTP call is authorized.
+    # If XSafeClaw already has HERMES_API_KEY we mirror that; otherwise a
+    # random key is generated and mirrored back to XSafeClaw's own .env so
+    # the Configure/API-Key page picks it up.
+    existing_key = _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
+    if not existing_key:
+        from secrets import token_urlsafe
+        new_key = token_urlsafe(32)
+        _persist_hermes_api_key(new_key)
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Generated API_SERVER_KEY and mirrored to both .env files'})}\n\n"
+
+    if await _hermes_api_reachable():
+        yield f"data: {json.dumps({'type': 'output', 'text': f'✓ Hermes API already listening on :{port}; no bring-up needed.'})}\n\n"
+        return
+
+    # ── (1) hermes gateway install ────────────────────────────────────
+    if hermes_bin:
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Running: hermes gateway install'})}\n\n"
+        rc, out = await _run_cmd(
+            [hermes_bin, "gateway", "install"], env=env, timeout_s=60
+        )
+        for segment in (out or "").splitlines():
+            if segment.strip():
+                yield f"data: {json.dumps({'type': 'output', 'text': segment})}\n\n"
+        yield f"data: {json.dumps({'type': 'output', 'text': f'gateway install → rc={rc}'})}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'output', 'text': '⚠ `hermes` executable not found on PATH; skipping gateway install.'})}\n\n"
+
+    # ── (2) systemctl --user enable --now <hermes-*.service> ──────────
+    await _run_cmd(["systemctl", "--user", "daemon-reload"], env=env, timeout_s=5)
+    try:
+        units = await _find_hermes_user_units(env)
+    except Exception as exc:
+        units = []
+        yield f"data: {json.dumps({'type': 'output', 'text': f'systemctl --user probe failed: {exc}'})}\n\n"
+
+    if units:
+        _units_str = ", ".join(units)
+        yield f"data: {json.dumps({'type': 'output', 'text': f'Detected systemd user units: {_units_str}'})}\n\n"
+        for unit in units:
+            yield f"data: {json.dumps({'type': 'output', 'text': f'▸ systemctl --user enable --now {unit}'})}\n\n"
+            rc, out = await _run_cmd(
+                ["systemctl", "--user", "enable", "--now", unit],
+                env=env,
+                timeout_s=15,
+            )
+            for segment in (out or "").splitlines():
+                if segment.strip():
+                    yield f"data: {json.dumps({'type': 'output', 'text': segment})}\n\n"
+            yield f"data: {json.dumps({'type': 'output', 'text': f'enable --now {unit} → rc={rc}'})}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'output', 'text': 'No hermes-*.service found under systemctl --user.'})}\n\n"
+
+    if await _wait_hermes_api_up(10.0):
+        return
+
+    # ── (3) Detached `hermes gateway` spawn ───────────────────────────
+    # Works in environments where systemd --user is unavailable / linger is
+    # off (WSL, plain docker, some cloud VMs). We redirect to a log file so
+    # the user can ``tail -f ~/.hermes/gateway.log`` when troubleshooting.
+    if hermes_bin:
+        log_path = settings.hermes_home / "gateway.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        yield f"data: {json.dumps({'type': 'output', 'text': f'▸ Spawning: nohup hermes gateway > {log_path} 2>&1 &'})}\n\n"
+        try:
+            # start_new_session detaches from our controlling terminal so
+            # the child keeps running after this SSE response closes.
+            log_fh = open(log_path, "ab", buffering=0)
+            await asyncio.create_subprocess_exec(
+                hermes_bin, "gateway",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+                close_fds=True,
+            )
+            # don't close log_fh — the child now owns that fd
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ Detached gateway spawn failed: {exc}'})}\n\n"
+        else:
+            if await _wait_hermes_api_up(12.0):
+                yield f"data: {json.dumps({'type': 'output', 'text': f'✓ Detached hermes gateway is serving /health on :{port}'})}\n\n"
+                return
+            yield f"data: {json.dumps({'type': 'output', 'text': f'… detached gateway spawned but /health still silent; see {log_path} for errors.'})}\n\n"
+
+    # ── (4) pty-driven `hermes setup` (best-effort) ───────────────────
+    # The interactive wizard keeps asking questions until it gets EOF or a
+    # final "yes/no" that closes the stream. We allocate a pseudo-TTY so its
+    # input() calls don't raise, and we continuously feed "\n" (accept
+    # default) for 20s before closing. Prompt set varies by version, so we
+    # cap the runtime and never let this stage fail the whole install.
+    if hermes_bin and hasattr(os, "openpty"):
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Falling back to: hermes setup (non-interactive, pty-driven)'})}\n\n"
+        try:
+            import pty as _pty
+            import fcntl as _fcntl
+            import select as _select_mod
+            import termios as _termios
+
+            master_fd, slave_fd = _pty.openpty()
+            try:
+                # Make master non-blocking so our feeder + reader don't stall
+                _flags = _fcntl.fcntl(master_fd, _fcntl.F_GETFL)
+                _fcntl.fcntl(master_fd, _fcntl.F_SETFL, _flags | os.O_NONBLOCK)
+                try:
+                    attrs = _termios.tcgetattr(slave_fd)
+                    attrs[3] = attrs[3] & ~_termios.ECHO
+                    _termios.tcsetattr(slave_fd, _termios.TCSANOW, attrs)
+                except Exception:
+                    pass
+
+                proc = await asyncio.create_subprocess_exec(
+                    hermes_bin, "setup",
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    env=env,
+                    start_new_session=True,
+                )
+                os.close(slave_fd)
+
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + 25.0
+                buf = b""
+                next_feed = loop.time() + 0.4
+                while loop.time() < deadline:
+                    if proc.returncode is not None:
+                        break
+                    try:
+                        ready_r, _, _ = _select_mod.select([master_fd], [], [], 0.2)
+                    except Exception:
+                        ready_r = []
+                    if ready_r:
+                        try:
+                            chunk = os.read(master_fd, 4096)
+                        except BlockingIOError:
+                            chunk = b""
+                        except OSError:
+                            break
+                        if chunk:
+                            buf += chunk
+                            while b"\n" in buf:
+                                line, buf = buf.split(b"\n", 1)
+                                text = line.decode("utf-8", errors="replace").rstrip("\r")
+                                if text:
+                                    yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                    # Feed Enter periodically so prompts advance
+                    if loop.time() >= next_feed:
+                        try:
+                            os.write(master_fd, b"\n")
+                        except Exception:
+                            pass
+                        next_feed = loop.time() + 0.5
+
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
+            finally:
+                try:
+                    os.close(slave_fd)
+                except Exception:
+                    pass
+            yield f"data: {json.dumps({'type': 'output', 'text': 'hermes setup (pty) finished'})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ pty-driven hermes setup failed: {exc}'})}\n\n"
+
+        # After setup, the unit may have been registered/started; try
+        # systemctl enable --now once more.
+        try:
+            units2 = await _find_hermes_user_units(env)
+        except Exception:
+            units2 = []
+        new_units = [u for u in units2 if u not in (units or [])]
+        for unit in new_units:
+            await _run_cmd(
+                ["systemctl", "--user", "enable", "--now", unit],
+                env=env,
+                timeout_s=15,
+            )
+            yield f"data: {json.dumps({'type': 'output', 'text': f'enable --now {unit} (post-setup)'})}\n\n"
+
+    if not await _wait_hermes_api_up(10.0):
+        yield f"data: {json.dumps({'type': 'output', 'text': '⚠ API still not listening after all attempts. You may need to run `hermes setup` in an SSH shell to answer the interactive prompts once.'})}\n\n"
 
 
 @router.post("/install-hermes")
 async def install_hermes():
-    """Auto-install Hermes Agent via pip. Streams SSE."""
+    """Auto-install Hermes Agent via the official install script, then
+    ensure gateway (messaging) dependencies are present, and finally start
+    the Hermes HTTP API listener so XSafeClaw can talk to it immediately.
+    Streams SSE.
+
+    The official installer handles: uv, Python 3.11, Node.js, ripgrep,
+    ffmpeg, repo clone, venv, PATH, and initial config.
+
+    We pass ``--skip-setup`` because the upstream ``hermes setup`` wizard is
+    interactive (reads /dev/tty); when launched from the API there is no TTY
+    and ``input()`` raises ``OSError: [Errno 5]``. Users can run
+    ``hermes setup`` over SSH or use XSafeClaw Configure for Hermes.
+
+    Phase 3 replaces the "users must SSH in and run hermes setup" gap with a
+    non-interactive bring-up of the API listener: ``hermes gateway install``
+    (documented in ``hermes --help`` — it installs a systemd user unit
+    without asking any questions) followed by ``systemctl --user enable
+    --now <unit>``. If that path is unavailable we fall back to driving
+    ``hermes setup`` inside a ``pty`` and auto-answering every prompt with
+    an empty line (default choice) + EOF — best-effort, the wizard's prompt
+    set varies by version so we treat this as a safety net, not the primary
+    path. Either way we finish with a ``/health`` readiness probe.
+    """
     env = _build_env()
 
     async def generate():
-        pip_path = _find_pip(env)
-
-        if not pip_path:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'pip not found. Please install Python 3.11+ and pip first.'})}\n\n"
+        bash = shutil.which("bash")
+        if not bash:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'bash not found. Hermes requires Linux / macOS / WSL2.'})}\n\n"
             return
 
-        yield f"data: {json.dumps({'type': 'output', 'text': f'Using pip: {pip_path}'})}\n\n"
-        yield f"data: {json.dumps({'type': 'output', 'text': 'Running: pip install hermes-agent'})}\n\n"
-        yield f"data: {json.dumps({'type': 'pip_install_start'})}\n\n"
+        curl = shutil.which("curl")
+        if not curl:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'curl not found. Please install curl first.'})}\n\n"
+            return
 
+        # ── Phase 1: Official install script ─────────────────────────
+        yield f"data: {json.dumps({'type': 'output', 'text': '━━━ Phase 1/3: Running official Hermes installer ━━━'})}\n\n"
+
+        # --skip-setup: upstream install.sh tries to launch "hermes setup" which
+        # reads interactively from /dev/tty. Without a real TTY (API subprocess,
+        # systemd, docker) input() raises OSError: [Errno 5] and the whole
+        # installer exits non-zero. We always skip it and let XSafeClaw's
+        # Configure/Hermes wizard handle API keys afterwards.
+        install_cmd = (
+            f"curl -fsSL {_HERMES_INSTALL_SCRIPT_URL} | bash -s -- --skip-setup"
+        )
+        yield f"data: {json.dumps({'type': 'output', 'text': f'▸ Running: {install_cmd}'})}\n\n"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                pip_path, "install", "hermes-agent",
+            proc = await asyncio.create_subprocess_shell(
+                install_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -631,15 +1768,116 @@ async def install_hermes():
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
-                yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                if text:
+                    yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
             await proc.wait()
-            if proc.returncode == 0:
-                yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
-                trigger_onboard_scan_preload()
-            else:
-                yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+            rc = proc.returncode
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Install script failed: {exc}'})}\n\n"
+            return
+
+        if rc != 0:
+            yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': rc})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'output', 'text': 'ℹ Skipped interactive setup wizard (--skip-setup). Configure API keys via XSafeClaw, or run `hermes setup` in an SSH shell.'})}\n\n"
+
+        # ── Phase 2: Ensure gateway / messaging extras ───────────────
+        yield f"data: {json.dumps({'type': 'output', 'text': ''})}\n\n"
+        yield f"data: {json.dumps({'type': 'output', 'text': '━━━ Phase 2/3: Installing gateway dependencies ━━━'})}\n\n"
+
+        hermes_repo = _hermes_repo_dir()
+        venv_pip = hermes_repo / "venv" / "bin" / "pip"
+        uv_bin = shutil.which("uv")
+
+        if uv_bin and hermes_repo.is_dir():
+            pip_env = {**env, "VIRTUAL_ENV": str(hermes_repo / "venv")}
+            gateway_cmd = [
+                uv_bin, "pip", "install", "-e", ".[messaging,cron,cli,pty,mcp]",
+            ]
+            yield f"data: {json.dumps({'type': 'output', 'text': f'▸ Running: uv pip install -e \".[messaging,cron,cli,pty,mcp]\"'})}\n\n"
+            try:
+                proc2 = await asyncio.create_subprocess_exec(
+                    *gateway_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=pip_env,
+                    cwd=str(hermes_repo),
+                )
+                while True:
+                    line = await proc2.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                await proc2.wait()
+                if proc2.returncode != 0:
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ Gateway extras exited with code {proc2.returncode} (non-fatal)'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'output', 'text': '✓ Gateway dependencies installed'})}\n\n"
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ Gateway extras install error: {exc} (non-fatal)'})}\n\n"
+        elif venv_pip.is_file():
+            yield f"data: {json.dumps({'type': 'output', 'text': '▸ uv not found, using venv pip for gateway extras'})}\n\n"
+            try:
+                proc2 = await asyncio.create_subprocess_exec(
+                    str(venv_pip), "install", "-e", ".[messaging,cron,cli,pty,mcp]",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=env,
+                    cwd=str(hermes_repo),
+                )
+                while True:
+                    line = await proc2.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                await proc2.wait()
+                if proc2.returncode != 0:
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ Gateway extras exited with code {proc2.returncode} (non-fatal)'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'output', 'text': '✓ Gateway dependencies installed'})}\n\n"
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ Gateway extras install error: {exc} (non-fatal)'})}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'output', 'text': '⚠ Could not locate hermes-agent repo or venv; skipping gateway extras. You can install manually: cd ~/.hermes/hermes-agent && uv pip install -e \".[messaging,cron,cli,pty,mcp]\"'})}\n\n"
+
+        # ── Phase 3: Non-interactive API bring-up ─────────────────────
+        # Goal: have 127.0.0.1:<hermes_api_port>/health return 200 by the
+        # time this SSE stream ends, so XSafeClaw's Setup page can skip to
+        # Configure and the user never has to SSH in.
+        #
+        # Strategy (fall through on failure):
+        #   a) `hermes gateway install` — documented in upstream help; it's
+        #      the non-interactive way to register + start the systemd user
+        #      unit that owns the HTTP listener.
+        #   b) Enumerate `systemctl --user` units named *hermes* and run
+        #      `systemctl --user enable --now <unit>` on each.
+        #   c) Best-effort: drive `hermes setup` inside a pty and feed
+        #      blank lines + EOF (equivalent to pressing Enter at every
+        #      prompt → default choice). Brittle across versions but a
+        #      useful last resort.
+        yield f"data: {json.dumps({'type': 'output', 'text': ''})}\n\n"
+        yield f"data: {json.dumps({'type': 'output', 'text': '━━━ Phase 3/3: Starting Hermes API listener ━━━'})}\n\n"
+
+        async for line in _hermes_bring_up_api(env):
+            yield line
+
+        # Final readiness check — we announce `done` regardless of API
+        # readiness because the install itself succeeded; the frontend will
+        # still refresh status and show whether /health came up.
+        if await _hermes_api_reachable():
+            yield f"data: {json.dumps({'type': 'output', 'text': f'✓ Hermes API is listening on 127.0.0.1:{settings.hermes_api_port}'})}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'output', 'text': f'⚠ Hermes API is not yet reachable on 127.0.0.1:{settings.hermes_api_port}. Try: `systemctl --user status hermes-*.service`, or start it manually via `hermes gateway`.'})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
+        trigger_onboard_scan_preload()
 
     return StreamingResponse(
         generate(),
@@ -1256,6 +2494,262 @@ else:
     _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
     _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 
+# ── Hermes model / provider catalog ──────────────────────────────────────────
+# Static catalog derived from Hermes's official provider documentation.
+# Env-var names and representative models for each provider.
+
+_HERMES_MODEL_CATALOG: list[dict] = [
+    {
+        "id": "anthropic",
+        "name": "Anthropic",
+        "hint": "Claude models (API key or Claude Code auth)",
+        "envKey": "ANTHROPIC_API_KEY",
+        "models": [
+            {"id": "anthropic/claude-opus-4-20250618", "name": "Claude Opus 4", "contextWindow": 200000, "reasoning": False},
+            {"id": "anthropic/claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "contextWindow": 200000, "reasoning": False},
+            {"id": "anthropic/claude-haiku-3.5", "name": "Claude 3.5 Haiku", "contextWindow": 200000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "openai",
+        "name": "OpenAI",
+        "hint": "GPT / o-series models",
+        "envKey": "OPENAI_API_KEY",
+        "models": [
+            {"id": "openai/gpt-4.1", "name": "GPT-4.1", "contextWindow": 1047576, "reasoning": False},
+            {"id": "openai/gpt-4.1-mini", "name": "GPT-4.1 Mini", "contextWindow": 1047576, "reasoning": False},
+            {"id": "openai/gpt-4.1-nano", "name": "GPT-4.1 Nano", "contextWindow": 1047576, "reasoning": False},
+            {"id": "openai/o3", "name": "o3", "contextWindow": 200000, "reasoning": True},
+            {"id": "openai/o4-mini", "name": "o4-mini", "contextWindow": 200000, "reasoning": True},
+        ],
+    },
+    {
+        "id": "openrouter",
+        "name": "OpenRouter",
+        "hint": "200+ models via single API key",
+        "envKey": "OPENROUTER_API_KEY",
+        "models": [
+            {"id": "openrouter/anthropic/claude-sonnet-4-20250514", "name": "Claude Sonnet 4 (OR)", "contextWindow": 200000, "reasoning": False},
+            {"id": "openrouter/google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OR)", "contextWindow": 1048576, "reasoning": True},
+            {"id": "openrouter/deepseek/deepseek-r1", "name": "DeepSeek-R1 (OR)", "contextWindow": 163840, "reasoning": True},
+            {"id": "openrouter/qwen/qwen3-235b-a22b", "name": "Qwen3-235B (OR)", "contextWindow": 131072, "reasoning": False},
+        ],
+    },
+    {
+        "id": "gemini",
+        "name": "Google Gemini",
+        "hint": "Gemini API key",
+        "envKey": "GOOGLE_API_KEY",
+        "models": [
+            {"id": "gemini/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "contextWindow": 1048576, "reasoning": True},
+            {"id": "gemini/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "contextWindow": 1048576, "reasoning": False},
+            {"id": "gemini/gemini-2.0-flash", "name": "Gemini 2.0 Flash", "contextWindow": 1048576, "reasoning": False},
+        ],
+    },
+    {
+        "id": "deepseek",
+        "name": "DeepSeek",
+        "hint": "DeepSeek API",
+        "envKey": "DEEPSEEK_API_KEY",
+        "models": [
+            {"id": "deepseek/deepseek-r1", "name": "DeepSeek-R1", "contextWindow": 163840, "reasoning": True},
+            {"id": "deepseek/deepseek-chat", "name": "DeepSeek-V3", "contextWindow": 163840, "reasoning": False},
+        ],
+    },
+    {
+        "id": "alibaba",
+        "name": "Alibaba Cloud (DashScope / Qwen)",
+        "hint": "Qwen models",
+        "envKey": "DASHSCOPE_API_KEY",
+        "models": [
+            {"id": "alibaba/qwen3-235b-a22b", "name": "Qwen3-235B-A22B", "contextWindow": 131072, "reasoning": False},
+            {"id": "alibaba/qwen3-32b", "name": "Qwen3-32B", "contextWindow": 131072, "reasoning": False},
+            {"id": "alibaba/qwen3.5-plus", "name": "Qwen3.5-Plus", "contextWindow": 131072, "reasoning": False},
+            {"id": "alibaba/qwen-max", "name": "Qwen-Max", "contextWindow": 131072, "reasoning": False},
+        ],
+    },
+    {
+        "id": "zai",
+        "name": "Z.AI / ZhipuAI (GLM)",
+        "hint": "GLM models",
+        "envKey": "GLM_API_KEY",
+        "models": [
+            {"id": "zai/glm-5", "name": "GLM-5", "contextWindow": 128000, "reasoning": False},
+            {"id": "zai/glm-4-plus", "name": "GLM-4-Plus", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "kimi-coding",
+        "name": "Kimi / Moonshot",
+        "hint": "Kimi models (international)",
+        "envKey": "KIMI_API_KEY",
+        "models": [
+            {"id": "kimi-coding/kimi-k2.5", "name": "Kimi K2.5", "contextWindow": 131072, "reasoning": False},
+            {"id": "kimi-coding/kimi-for-coding", "name": "Kimi for Coding", "contextWindow": 131072, "reasoning": False},
+        ],
+    },
+    {
+        "id": "kimi-coding-cn",
+        "name": "Kimi / Moonshot (China)",
+        "hint": "Kimi models (China endpoint)",
+        "envKey": "KIMI_CN_API_KEY",
+        "models": [
+            {"id": "kimi-coding-cn/kimi-k2.5", "name": "Kimi K2.5 (CN)", "contextWindow": 131072, "reasoning": False},
+        ],
+    },
+    {
+        "id": "minimax",
+        "name": "MiniMax",
+        "hint": "MiniMax models (global)",
+        "envKey": "MINIMAX_API_KEY",
+        "models": [
+            {"id": "minimax/MiniMax-M2.7", "name": "MiniMax-M2.7", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "minimax-cn",
+        "name": "MiniMax (China)",
+        "hint": "MiniMax models (China endpoint)",
+        "envKey": "MINIMAX_CN_API_KEY",
+        "models": [
+            {"id": "minimax-cn/MiniMax-M2.7", "name": "MiniMax-M2.7 (CN)", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "xiaomi",
+        "name": "Xiaomi MiMo",
+        "hint": "Xiaomi MiMo models",
+        "envKey": "XIAOMI_API_KEY",
+        "models": [
+            {"id": "xiaomi/mimo-v2-pro", "name": "MiMo-v2-Pro", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "arcee",
+        "name": "Arcee AI",
+        "hint": "Trinity models",
+        "envKey": "ARCEEAI_API_KEY",
+        "models": [
+            {"id": "arcee/trinity-large-thinking", "name": "Trinity Large Thinking", "contextWindow": 128000, "reasoning": True},
+        ],
+    },
+    {
+        "id": "huggingface",
+        "name": "Hugging Face",
+        "hint": "Inference Providers (20+ open models)",
+        "envKey": "HF_TOKEN",
+        "models": [
+            {"id": "huggingface/Qwen/Qwen3-235B-A22B-Thinking-2507", "name": "Qwen3-235B (HF)", "contextWindow": 131072, "reasoning": True},
+            {"id": "huggingface/deepseek-ai/DeepSeek-V3.2", "name": "DeepSeek-V3.2 (HF)", "contextWindow": 163840, "reasoning": False},
+        ],
+    },
+    {
+        "id": "copilot",
+        "name": "GitHub Copilot",
+        "hint": "Uses Copilot subscription (OAuth)",
+        "envKey": "",
+        "models": [
+            {"id": "copilot/gpt-5.4", "name": "GPT-5.4 (Copilot)", "contextWindow": 128000, "reasoning": False},
+            {"id": "copilot/claude-sonnet-4", "name": "Claude Sonnet 4 (Copilot)", "contextWindow": 200000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "kilocode",
+        "name": "Kilo Code",
+        "hint": "Kilo Code API",
+        "envKey": "KILOCODE_API_KEY",
+        "models": [
+            {"id": "kilocode/kilo-coder", "name": "Kilo Coder", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "opencode-zen",
+        "name": "OpenCode Zen",
+        "hint": "OpenCode Zen API",
+        "envKey": "OPENCODE_ZEN_API_KEY",
+        "models": [
+            {"id": "opencode-zen/zen-coder", "name": "Zen Coder", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "opencode-go",
+        "name": "OpenCode Go",
+        "hint": "OpenCode Go API",
+        "envKey": "OPENCODE_GO_API_KEY",
+        "models": [
+            {"id": "opencode-go/go-coder", "name": "Go Coder", "contextWindow": 128000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "mistral",
+        "name": "Mistral AI",
+        "hint": "Mistral API",
+        "envKey": "MISTRAL_API_KEY",
+        "models": [
+            {"id": "mistral/mistral-large-latest", "name": "Mistral Large", "contextWindow": 128000, "reasoning": False},
+            {"id": "mistral/codestral-latest", "name": "Codestral", "contextWindow": 256000, "reasoning": False},
+        ],
+    },
+    {
+        "id": "xai",
+        "name": "xAI (Grok)",
+        "hint": "xAI Grok models",
+        "envKey": "XAI_API_KEY",
+        "models": [
+            {"id": "xai/grok-3", "name": "Grok-3", "contextWindow": 131072, "reasoning": False},
+            {"id": "xai/grok-3-mini", "name": "Grok-3-mini", "contextWindow": 131072, "reasoning": True},
+        ],
+    },
+    {
+        "id": "ai-gateway",
+        "name": "AI Gateway (Vercel)",
+        "hint": "Vercel AI Gateway",
+        "envKey": "AI_GATEWAY_API_KEY",
+        "models": [],
+    },
+    {
+        "id": "custom",
+        "name": "Custom Endpoint",
+        "hint": "Any OpenAI-compatible endpoint (Ollama, vLLM, etc.)",
+        "envKey": "",
+        "models": [],
+    },
+]
+
+_HERMES_AUTH_PROVIDERS: list[dict] = [
+    {
+        "id": prov["id"],
+        "name": prov["name"],
+        "hint": prov["hint"],
+        "supported": True,
+        "methods": [{"id": f"{prov['id']}-api-key", "label": f"{prov['name']} API key"}],
+    }
+    for prov in _HERMES_MODEL_CATALOG
+    if prov["id"] not in ("custom", "copilot")
+] + [
+    {
+        "id": "copilot",
+        "name": "GitHub Copilot",
+        "hint": "OAuth device code flow",
+        "supported": False,
+        "methods": [{"id": "copilot-oauth", "label": "GitHub OAuth (run hermes model)"}],
+    },
+    {
+        "id": "custom",
+        "name": "Custom Endpoint",
+        "hint": "Any OpenAI-compatible endpoint (Ollama, vLLM, etc.)",
+        "supported": True,
+        "methods": [{"id": "custom-api-key", "label": "Custom provider"}],
+    },
+]
+
+# Map Hermes provider id → env var name for writing API keys
+_HERMES_PROVIDER_ENV_KEYS: dict[str, str] = {
+    prov["id"]: prov["envKey"]
+    for prov in _HERMES_MODEL_CATALOG
+    if prov.get("envKey")
+}
+
 # ── Dynamic auth-provider scanning ───────────────────────────────────────────
 # Reads each extension's openclaw.plugin.json at runtime so the provider list
 # stays in sync across OpenClaw upgrades without manual copy-paste.
@@ -1854,6 +3348,59 @@ async def _build_onboard_scan_data() -> dict:
     }
 
 
+def _build_onboard_scan_data_hermes() -> dict:
+    """Build onboard-scan response from the static Hermes model catalog.
+
+    Unlike OpenClaw (which shells out to ``openclaw models list``), Hermes
+    providers are known statically.  We also read ``config.yaml`` to detect
+    the currently configured default model, and check ``~/.hermes/.env``
+    for already-configured API keys.
+    """
+    providers: dict[str, dict] = {}
+    for prov in _HERMES_MODEL_CATALOG:
+        prov_id = prov["id"]
+        if not prov.get("models"):
+            continue
+        providers[prov_id] = {
+            "id": prov_id,
+            "name": prov["name"],
+            "keyUrl": PROVIDER_KEY_URLS.get(prov_id, ""),
+            "models": [
+                {
+                    "id": m["id"],
+                    "name": m.get("name", m["id"]),
+                    "contextWindow": m.get("contextWindow", 0),
+                    "reasoning": m.get("reasoning", False),
+                    "available": True,
+                    "input": "text",
+                }
+                for m in prov["models"]
+            ],
+        }
+
+    default_model = ""
+    try:
+        if _CONFIG_PATH.exists():
+            import yaml
+            cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+            model_cfg = cfg.get("model", "")
+            if isinstance(model_cfg, dict):
+                default_model = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+            else:
+                default_model = str(model_cfg).strip()
+    except Exception:
+        pass
+
+    return {
+        "model_providers": list(providers.values()),
+        "auth_profiles": [],
+        "default_model": default_model,
+        "channels": [],
+        "skills": [],
+        "hooks": [],
+    }
+
+
 def _count_scan_models(data: dict) -> int:
     return sum(len(p.get("models", [])) for p in data.get("model_providers", []))
 
@@ -1932,20 +3479,56 @@ def trigger_onboard_scan_preload(force: bool = False) -> None:
 
 @router.get("/onboard-scan")
 async def onboard_scan(refresh: bool = False):
-    """Scan the local environment for available providers, channels, skills, hooks via openclaw CLI."""
+    """Scan the local environment for available providers, channels, skills, hooks."""
     global _onboard_scan_cache, _onboard_scan_version, _onboard_scan_task
 
+    # ── Hermes fast path — static catalog, no CLI scanning needed ─────────
+    if settings.is_hermes:
+        data = _build_onboard_scan_data_hermes()
+
+        config_summary: list[str] = []
+        hermes_default = data.get("default_model", "")
+        if hermes_default:
+            config_summary.append(f"model: {hermes_default}")
+
+        return {
+            "auth_providers": _HERMES_AUTH_PROVIDERS,
+            "model_providers": data.get("model_providers", []),
+            "auth_profiles": [],
+            "default_model": hermes_default,
+            "channels": [],
+            "skills": [],
+            "hooks": [],
+            "search_providers": SEARCH_PROVIDERS,
+            "config_exists": _CONFIG_PATH.exists(),
+            "config_summary": config_summary,
+            "defaults": {
+                "mode": "local",
+                "gateway_port": settings.hermes_api_port,
+                "gateway_bind": "loopback",
+                "gateway_auth_mode": "token",
+                "gateway_token": "",
+                "tailscale_mode": "off",
+                "workspace": str(_HERMES_DIR / "workspace"),
+                "install_daemon": False,
+                "remote_url": "",
+                "remote_token": "",
+                "enabled_hooks": [],
+                "search_provider": "",
+                "search_api_key": "",
+            },
+        }
+
+    # ── OpenClaw path — full CLI scanning ─────────────────────────────────
     if refresh:
         _onboard_scan_cache.clear()
         _onboard_scan_version = ""
 
     version = _get_openclaw_version_sync()
 
-    # If cache is valid for this version, return immediately
     if _onboard_scan_cache and _onboard_scan_version == version and version:
         data = _onboard_scan_cache
     else:
-        # If a background preload is running, wait for it
         if _onboard_scan_task and not _onboard_scan_task.done():
             print("⏳ Waiting for background onboard-scan preload...")
             try:
@@ -1969,7 +3552,6 @@ async def onboard_scan(refresh: bool = False):
     skills = data.get("skills", [])
     hooks = data.get("hooks", [])
 
-    # Read current config for defaults
     current_config: dict = {}
     if _CONFIG_PATH.exists():
         try:
@@ -1982,7 +3564,6 @@ async def onboard_scan(refresh: bool = False):
     agents = current_config.get("agents", {}).get("defaults", {})
     hooks_cfg = current_config.get("hooks", {}).get("internal", {}).get("entries", {})
     search_cfg = current_config.get("tools", {}).get("web", {}).get("search", {})
-    # Build config summary lines (mirrors summarizeExistingConfig in source)
     config_summary: list[str] = []
     ws_val = agents.get("workspace")
     if ws_val:
@@ -2747,9 +4328,11 @@ async def provider_has_key(provider: str = ""):
     if not provider:
         return {"has_key": False}
 
+    if settings.is_hermes:
+        return {"has_key": _hermes_provider_has_key(provider)}
+
     _AGENT_STATE_DIR = _OPENCLAW_DIR / "agents" / "main" / "agent"
 
-    # Check auth-profiles.json
     profiles_path = _AGENT_STATE_DIR / "auth-profiles.json"
     if profiles_path.exists():
         try:
@@ -2762,7 +4345,6 @@ async def provider_has_key(provider: str = ""):
         except Exception:
             pass
 
-    # Check openclaw.json models.providers.<provider>.apiKey
     if _CONFIG_PATH.exists():
         try:
             config = json.loads(_CONFIG_PATH.read_text("utf-8"))
@@ -2775,31 +4357,63 @@ async def provider_has_key(provider: str = ""):
     return {"has_key": False}
 
 
+def _hermes_provider_has_key(provider_or_method: str) -> bool:
+    """Check ~/.hermes/.env for a provider's API key."""
+    raw_provider = re.sub(r"-api-key$", "", provider_or_method)
+    env_var = _HERMES_PROVIDER_ENV_KEYS.get(raw_provider, "")
+    if not env_var:
+        return False
+
+    hermes_env_path = _HERMES_DIR / ".env"
+    if not hermes_env_path.exists():
+        return False
+    try:
+        for line in hermes_env_path.read_text("utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if stripped.startswith(f"{env_var}="):
+                val = stripped.split("=", 1)[1].strip().strip("'\"")
+                if val:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 class QuickModelConfigRequest(BaseModel):
     provider: str
     api_key: str = ""
     model_id: str
+    # When True (default), Hermes path auto-restarts the API server after
+    # writing ~/.hermes/.env + config.yaml and polls /v1/models to confirm
+    # the new model is visible. Set False to batch multiple edits and call
+    # POST /system/hermes/apply yourself.
+    auto_apply: bool = True
 
 
 @router.post("/quick-model-config")
 async def quick_model_config(body: QuickModelConfigRequest):
-    """Fast-path model configuration that skips the slow full onboard CLI.
+    """Fast-path model configuration.
 
-    Writes the API key via a minimal `openclaw onboard` invocation (key-only,
-    skipping health checks / daemon / UI) and patches the model into
-    openclaw.json directly.  Falls back to the full onboard path if anything
-    unexpected happens.
+    - **Hermes**: writes API key to ``~/.hermes/.env`` and model/provider
+      to ``config.yaml`` directly — no CLI needed.
+    - **OpenClaw**: runs a minimal ``openclaw onboard`` invocation for the
+      key and patches the model into ``openclaw.json``.
     """
     if not body.model_id or not body.provider:
         raise HTTPException(status_code=400, detail="provider and model_id are required")
 
+    if settings.is_hermes:
+        return await _quick_model_config_hermes(body)
+
+    # ── OpenClaw path ─────────────────────────────────────────────────────
     openclaw_path = _find_openclaw()
     if not openclaw_path:
         raise HTTPException(status_code=500, detail="openclaw binary not found")
 
     env = _build_env()
 
-    # --- 1. Write API key via a minimal CLI call (only if key provided) ---
     cli_output = ""
     if body.api_key:
         _, method_cli_flags = _get_auth_providers_and_flags()
@@ -2844,7 +4458,6 @@ async def quick_model_config(body: QuickModelConfigRequest):
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=500, detail="openclaw key setup timed out")
 
-    # --- 2. Patch model into openclaw.json directly ---
     full_body = OnboardConfigRequest(
         provider=body.provider,
         api_key=body.api_key,
@@ -2852,7 +4465,6 @@ async def quick_model_config(body: QuickModelConfigRequest):
     )
     _patch_config_extras(full_body)
 
-    # --- 3. Invalidate model cache + touch to trigger gateway hot-reload ---
     try:
         from .chat import _available_models_cache
         _available_models_cache["expires_at"] = 0.0
@@ -2863,11 +4475,8 @@ async def quick_model_config(body: QuickModelConfigRequest):
     except OSError:
         pass
 
-    # Refresh onboard-scan cache in background (don't block the response)
     trigger_onboard_scan_preload(force=True)
 
-    # Wait briefly for gateway to pick up the new model so the frontend
-    # can skip its own polling loop entirely.
     model_ready = False
     if body.model_id:
         from .chat import _extract_runtime_model_list, _runtime_catalog_match
@@ -2893,15 +4502,156 @@ async def quick_model_config(body: QuickModelConfigRequest):
     return {"success": True, "fast_path": True, "model_ready": model_ready, "output": cli_output}
 
 
+async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
+    """Hermes fast-path: write API key to .env and model to config.yaml."""
+    import yaml as _yaml
+
+    # Ensure the Hermes HTTP API listener is enabled before we try to apply
+    # the new model config. Without API_SERVER_ENABLED=true, /health never
+    # binds and the subsequent restart/readiness probe would time out.
+    # Idempotent — only writes when the flag is missing or false.
+    _ensure_hermes_api_server_env()
+
+    # Strip the "-api-key" suffix that the frontend auth method ID carries
+    # (e.g. "anthropic-api-key" → "anthropic")
+    raw_provider = re.sub(r"-api-key$", "", body.provider)
+
+    # --- 1. Write API key to ~/.hermes/.env ---
+    env_var_name = _HERMES_PROVIDER_ENV_KEYS.get(raw_provider, "")
+    if body.api_key and env_var_name:
+        hermes_env_path = _HERMES_DIR / ".env"
+        _HERMES_DIR.mkdir(parents=True, exist_ok=True)
+
+        existing_lines: list[str] = []
+        if hermes_env_path.exists():
+            existing_lines = hermes_env_path.read_text("utf-8").splitlines()
+
+        replaced = False
+        new_lines: list[str] = []
+        for line in existing_lines:
+            stripped = line.strip()
+            if stripped.startswith(f"{env_var_name}=") or stripped.startswith(f"# {env_var_name}="):
+                new_lines.append(f"{env_var_name}={body.api_key}")
+                replaced = True
+            else:
+                new_lines.append(line)
+
+        if not replaced:
+            new_lines.append(f"{env_var_name}={body.api_key}")
+
+        hermes_env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+    # --- 2. Write model + provider to config.yaml ---
+    config: dict = {}
+    if _CONFIG_PATH.exists():
+        try:
+            config = _yaml.safe_load(_CONFIG_PATH.read_text("utf-8")) or {}
+        except Exception:
+            config = {}
+
+    model_id = body.model_id
+    if "/" in model_id:
+        hermes_provider = model_id.split("/", 1)[0]
+        hermes_model = model_id
+    else:
+        hermes_provider = raw_provider
+        hermes_model = model_id
+
+    config["model"] = {
+        "default": hermes_model,
+        "provider": hermes_provider,
+    }
+
+    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CONFIG_PATH.write_text(
+        _yaml.dump(config, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    # --- 3. Invalidate caches ---
+    try:
+        from .chat import _available_models_cache
+        _available_models_cache["expires_at"] = 0.0
+    except Exception:
+        pass
+
+    # --- 4. Apply: restart Hermes API server + verify readiness ---
+    # Mirrors the OpenClaw fast-path, which relies on `openclaw onboard`
+    # telling the long-running gateway daemon to reload. Hermes lacks a
+    # hot-reload path, so we restart the API server and then poll
+    # /v1/models until the newly configured model_id is visible.
+    #
+    # We always call _restart_hermes_api_server() when auto_apply is True,
+    # even if the API wasn't running before. That function's step 4
+    # (detached spawn of `hermes gateway`) doubles as a cold-start path —
+    # without this, CMD-UI users who have never opened Configure would
+    # never get "configure-and-use": the flag would be flipped in .env but
+    # nothing would restart to pick it up.
+    output = ""
+    restart_ok = True
+    api_was_running = await _hermes_api_reachable()
+
+    if body.auto_apply:
+        restart_ok, output = await _restart_hermes_api_server()
+        if restart_ok and body.model_id:
+            ready, _ = await _wait_hermes_runtime_ready(body.model_id, timeout_s=8.0)
+            model_ready = ready
+        else:
+            model_ready = restart_ok
+        if not restart_ok and not api_was_running:
+            # Surface a clearer message when this was a cold-start attempt
+            # rather than a restart-of-a-running-server. The detail log from
+            # _restart_hermes_api_server is still appended in ``output`` so
+            # the frontend can display systemctl/hermes CLI errors verbatim.
+            output = (
+                f"Hermes API server on 127.0.0.1:{settings.hermes_api_port} was "
+                "not running and we could not start it automatically. Config is "
+                "saved to ~/.hermes/.env + config.yaml. Open XSafeClaw's "
+                "Configure page for a one-click fix, or run `hermes gateway` "
+                "manually after making sure ~/.hermes/.env has "
+                "API_SERVER_ENABLED=true.\n\n" + output
+            )
+    else:
+        # auto_apply=False: caller will explicitly POST /system/hermes/apply.
+        model_ready = False
+
+    return {
+        "success": True,
+        "fast_path": True,
+        "model_ready": model_ready,
+        # "applied" now covers both "restarted a live server" and
+        # "cold-started a stopped server" — the caller (CMD UI / Configure)
+        # only cares whether the new config is live, not which code path
+        # produced the running listener.
+        "applied": bool(body.auto_apply and restart_ok),
+        "api_was_running": api_was_running,
+        "api_reachable": await _hermes_api_reachable(),
+        "output": output,
+    }
+
+
 @router.post("/onboard-config")
 async def onboard_config(body: OnboardConfigRequest):
-    """Run `openclaw onboard --non-interactive` to configure OpenClaw.
+    """Configure the agent platform.
 
-    Core settings (provider, gateway, workspace, daemon) are handled by
-    the CLI itself — with full validation, migration, and atomic writes.
-    Extra settings (model, channels, hooks, search) that have no CLI flags
-    are merge-patched into the resulting openclaw.json afterwards.
+    - **Hermes**: delegates to the same fast-path as ``quick-model-config``.
+    - **OpenClaw**: runs ``openclaw onboard --non-interactive``.
     """
+    if settings.is_hermes:
+        quick_body = QuickModelConfigRequest(
+            provider=body.provider or "",
+            api_key=body.api_key or "",
+            model_id=body.model_id or "",
+        )
+        result = await _quick_model_config_hermes(quick_body)
+        _install_safeclaw_guard_plugin()
+        return {
+            "success": True,
+            "config_path": str(_CONFIG_PATH),
+            "workspace": str(_HERMES_DIR / "workspace"),
+            "output": result.get("output", ""),
+        }
+
     openclaw_path = _find_openclaw()
     if not openclaw_path:
         raise HTTPException(

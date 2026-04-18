@@ -390,7 +390,28 @@ export const systemAPI = {
       hermes_api_port?: number;
       hermes_config_path?: string;
       hermes_home?: string;
+      hermes_api_key_configured?: boolean;
+      hermes_api_server_enabled?: boolean;
     }>("/system/status", { timeout: 8000 }),
+
+  /**
+   * Force-enable the Hermes HTTP API server (API_SERVER_ENABLED=true in
+   * ~/.hermes/.env) and restart the gateway. Used by the Configure status
+   * page when /health never responds — typically because upstream Hermes
+   * ships the flag as false and the gateway therefore boots without an
+   * HTTP listener.
+   */
+  hermesEnableApiServer: () =>
+    api.post<{
+      success: boolean;
+      env_changes: string[];
+      hermes_api_server_enabled: boolean;
+      restart_attempted: boolean;
+      restart_succeeded: boolean;
+      restart_detail: string;
+      api_reachable: boolean;
+      hermes_api_port: number;
+    }>("/system/hermes-enable-api-server"),
 
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',
@@ -470,17 +491,125 @@ export const systemAPI = {
       { app_id: appId, app_secret: appSecret, domain },
     ),
 
-  quickModelConfig: (data: { provider: string; api_key?: string; model_id: string }) =>
-    api.post<{ success: boolean; fast_path: boolean; output?: string }>('/system/quick-model-config', data),
+  quickModelConfig: (data: {
+    provider: string;
+    api_key?: string;
+    model_id: string;
+    /**
+     * Hermes-only: when true (default on the server), the backend restarts the
+     * Hermes API server after writing ~/.hermes/.env + config.yaml and polls
+     * /v1/models to confirm `model_id` is visible. Set false to batch edits
+     * and invoke `hermesApply` explicitly.
+     */
+    auto_apply?: boolean;
+  }) =>
+    api.post<{
+      success: boolean;
+      fast_path: boolean;
+      /** Hermes only: whether /v1/models lists `model_id` after restart. */
+      model_ready?: boolean;
+      /** Hermes only: whether the API server was restarted successfully. */
+      applied?: boolean;
+      /** Hermes only: whether /health currently responds. */
+      api_reachable?: boolean;
+      output?: string;
+    }>('/system/quick-model-config', data),
+
+  /**
+   * Hermes only — restart the Hermes API server so it picks up ~/.hermes/.env
+   * and config.yaml changes, and verify readiness. Used as a standalone
+   * "Apply to Hermes" action when the frontend wants to batch config edits.
+   */
+  hermesApply: (modelId?: string) =>
+    api.post<{
+      success: boolean;
+      restart_ok: boolean;
+      api_was_running: boolean;
+      api_reachable: boolean;
+      model_id: string | null;
+      model_ready: boolean;
+      visible_model: string | null;
+      output: string;
+    }>('/system/hermes/apply', modelId ? { model_id: modelId } : {}),
 
   providerHasKey: (provider: string) =>
     api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
 
   hermesApiKeyStatus: () =>
-    api.get<{ configured: boolean }>('/system/hermes-api-key-status'),
+    api.get<{
+      configured: boolean;
+      hermes_side_configured?: boolean;
+      in_sync?: boolean;
+    }>('/system/hermes-api-key-status'),
 
   saveHermesApiKey: (apiKey: string) =>
-    api.post<{ success: boolean; configured: boolean }>('/system/hermes-api-key', { api_key: apiKey }),
+    api.post<{
+      success: boolean;
+      configured: boolean;
+      hermes_env_path?: string;
+      requires_hermes_restart?: boolean;
+    }>('/system/hermes-api-key', { api_key: apiKey }),
+
+  generateHermesApiKey: () =>
+    api.post<{
+      success: boolean;
+      configured: boolean;
+      api_key: string;
+      hermes_env_path?: string;
+      requires_hermes_restart?: boolean;
+    }>('/system/hermes-api-key/generate'),
+
+  revealHermesApiKey: () =>
+    api.get<{ api_key: string; source: 'xsafeclaw' | 'hermes' | 'none' }>(
+      '/system/hermes-api-key/reveal',
+    ),
+
+  /**
+   * Hermes only — fetch the schema for every supported messaging platform
+   * (Telegram / Discord / Slack / Feishu / DingTalk / WeCom …). The frontend
+   * renders each platform's fields generically from this response.
+   */
+  hermesBotPlatforms: () =>
+    api.get<{
+      platforms: Array<{
+        id: string;
+        name: string;
+        hint: string;
+        docUrl: string;
+        configured: boolean;
+        fields: Array<{
+          key: string;
+          label: string;
+          required: boolean;
+          secret: boolean;
+          placeholder?: string;
+          configured: boolean;
+        }>;
+      }>;
+      env_path: string;
+      any_configured: boolean;
+    }>('/system/hermes-bot-platforms'),
+
+  /**
+   * Hermes only — persist one messaging-platform's credentials into
+   * ``~/.hermes/.env``. When ``auto_apply`` is true (default on the server),
+   * the Hermes API server is restarted so the gateway picks up the new keys
+   * without the user touching a shell.
+   */
+  hermesBotConfig: (data: {
+    platform: string;
+    fields: Record<string, string>;
+    auto_apply?: boolean;
+  }) =>
+    api.post<{
+      success: boolean;
+      platform: string;
+      written_keys: string[];
+      applied: boolean;
+      api_was_running: boolean;
+      api_reachable: boolean;
+      output: string;
+    }>('/system/hermes-bot-config', data),
 };
 
 export const skillsAPI = {

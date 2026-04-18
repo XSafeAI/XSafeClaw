@@ -212,7 +212,7 @@ export default function Setup() {
                 try { localStorage.setItem('xsafeclaw_setup_platform', 'hermes'); } catch { /* ignore */ }
                 setTimeout(() => navigate('/configure', { replace: true }), 1000);
               } else {
-                addLog(`pip exited with code ${d.exit_code}`, 'error');
+                addLog(`Install exited with code ${d.exit_code}`, 'error');
                 setStage('install_hermes_failed');
               }
             } else if (d.type === 'error') {
@@ -365,12 +365,12 @@ export default function Setup() {
                     <span className="text-text-muted select-none"># </span>
                     <span className="text-sky-400">{(t.setup as any).commentHermes}</span>
                   </p>
-                  <p className="text-emerald-400 select-all">pip install hermes-agent</p>
+                  <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
                   <p className="text-text-secondary mt-2">
                     <span className="text-text-muted select-none"># </span>
                     <span className="text-sky-400">GitHub</span>
                   </p>
-                  <p className="text-emerald-400 select-all">https://github.com/hermes-agent/hermes</p>
+                  <p className="text-emerald-400 select-all">https://github.com/NousResearch/hermes-agent</p>
                 </div>
               </div>
 
@@ -544,12 +544,12 @@ export default function Setup() {
                 </p>
                 <div className="space-y-1.5 font-mono text-[12px]">
                   <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
-                  <p className="text-emerald-400 select-all">pip install hermes-agent</p>
+                  <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
                   <p className="text-text-secondary mt-2">
                     <span className="text-text-muted select-none"># </span>
                     <span className="text-sky-400">GitHub</span>
                   </p>
-                  <p className="text-emerald-400 select-all">https://github.com/hermes-agent/hermes</p>
+                  <p className="text-emerald-400 select-all">https://github.com/NousResearch/hermes-agent</p>
                 </div>
               </div>
 
