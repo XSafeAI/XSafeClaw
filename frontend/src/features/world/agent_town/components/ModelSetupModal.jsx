@@ -227,6 +227,13 @@ export default function ModelSetupModal({
   open,
   authProviders = [],
   modelProviders = [],
+  // Per-provider endpoint preset bundles from /system/onboard-scan (§33).
+  // Shape: { [providerId]: { env_key, current, presets: [{id,label,hint,base_url}] } }
+  // Today only ``alibaba`` populates a bundle so we can offer a
+  // DashScope-vs-Coding-Plan picker; all other providers fall through
+  // with no picker rendered. OpenClaw scan payloads omit this field
+  // entirely and the default ``{}`` keeps the modal compatible.
+  providerEndpoints = {},
   defaults = null,
   loading = false,
   loadingError = '',
@@ -240,6 +247,11 @@ export default function ModelSetupModal({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [providerHasExistingKey, setProviderHasExistingKey] = useState(false);
+  // Per-provider endpoint choice, keyed by auth-provider slug.  Initialised
+  // lazily from ``providerEndpoints[slug].current`` (what's already in
+  // ~/.hermes/.env) so re-saving an existing alibaba config doesn't
+  // silently flip DASHSCOPE_BASE_URL back to the "recommended" preset.
+  const [endpointChoice, setEndpointChoice] = useState({});
 
   const availableAuthProviders = useMemo(
     () => authProviders.filter((provider) => provider.id !== 'skip'),
@@ -254,7 +266,21 @@ export default function ModelSetupModal({
     setShowKey(false);
     setSubmitting(false);
     setSubmitError('');
-  }, [open, defaults]);
+    // Seed endpoint choices from what Hermes's .env already has, falling
+    // back to the first preset.  Running this on every open (instead of
+    // once per prop change) keeps the picker consistent if the user
+    // closed the modal, edited .env externally, and reopened it.
+    const seeded = {};
+    for (const [pid, bundle] of Object.entries(providerEndpoints || {})) {
+      const current = String(bundle?.current || '').trim();
+      if (current) {
+        seeded[pid] = current;
+      } else if (Array.isArray(bundle?.presets) && bundle.presets.length > 0) {
+        seeded[pid] = bundle.presets[0].base_url;
+      }
+    }
+    setEndpointChoice(seeded);
+  }, [open, defaults, providerEndpoints]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -274,11 +300,38 @@ export default function ModelSetupModal({
   const effectiveMethod = form.authMethod || (providerMethods.length === 1 ? providerMethods[0]?.id : '');
   const selectedMethod = providerMethods.find((method) => method.id === effectiveMethod);
   const explicitProviderIds = selectedMethod?.modelProviders;
+  // Narrow the model list to the provider slug the user just authed against.
+  //
+  // Old rule: for aggregator auth providers (openrouter, kilocode, …) we
+  // showed models from *all* providers.  That was correct for openclaw,
+  // where aggregators don't carry their own catalog and reuse other
+  // extensions' ids — but on Hermes it produced the §30 trap: pick
+  // OpenRouter, see a model labelled ``Claude Opus 4.6`` that's actually
+  // ``nous/anthropic/claude-opus-4.6`` (Nous-routed), save it with an
+  // OpenRouter key, get a 401 at chat time. The slug prefix was invisible
+  // in the UI (only ``model.name`` was rendered), so users had no way to
+  // tell two same-named routes apart.
+  //
+  // New rule: whenever the user picked *any* auth provider (aggregator or
+  // not), filter modelProviders to that exact slug.  Only fall back to
+  // "show everything" when (a) no auth provider is selected yet, or (b)
+  // the auth slug has no matching modelProviders entry AND it's an
+  // aggregator — that last clause preserves openclaw's
+  // aggregator-borrows-from-everyone behaviour while letting Hermes's
+  // per-aggregator catalogs (populated via fetch_openrouter_models etc.)
+  // win whenever they exist.
   const inferredProviderIds = explicitProviderIds
-    ?? (form.authProvider && !AGGREGATOR_PROVIDERS.has(form.authProvider) ? [form.authProvider] : undefined);
-  const relevantProviders = inferredProviderIds
+    ?? (form.authProvider && form.authProvider !== 'skip' ? [form.authProvider] : undefined);
+  let relevantProviders = inferredProviderIds
     ? modelProviders.filter((provider) => inferredProviderIds.includes(provider.id))
     : modelProviders;
+  if (
+    inferredProviderIds
+    && relevantProviders.length === 0
+    && AGGREGATOR_PROVIDERS.has(form.authProvider)
+  ) {
+    relevantProviders = modelProviders;
+  }
   const visibleModels = relevantProviders.flatMap((provider) => provider.models || []);
   const allModels = modelProviders.flatMap((provider) => provider.models || []);
   const selectedModel = allModels.find((model) => model.id === form.modelId);
@@ -322,12 +375,28 @@ export default function ModelSetupModal({
         && form.authProvider !== 'custom'
         && form.authProvider !== 'cloudflare-ai-gateway';
 
+      // §33 — forward the selected base-URL for providers that ship a
+      // preset bundle (today just alibaba).  Uses ``form.authProvider``
+      // rather than ``effectiveProvider`` because the endpoint bundle
+      // is keyed by auth-provider slug (e.g. ``alibaba``), not by the
+      // auth-method id (``alibaba-api-key``) the backend ultimately
+      // receives.  Skipped when no bundle exists, so other providers'
+      // requests stay payload-clean.
+      const endpointBundle = providerEndpoints?.[form.authProvider];
+      const endpointBaseUrl = endpointBundle
+        ? (endpointChoice[form.authProvider]
+            || endpointBundle.current
+            || endpointBundle.presets?.[0]?.base_url
+            || '')
+        : '';
+
       let modelReady = false;
       if (isSimpleSetup) {
         const res = await systemAPI.quickModelConfig({
           provider: effectiveProvider,
           api_key: realApiKey,
           model_id: configuredModelId,
+          base_url: endpointBaseUrl || undefined,
         });
         modelReady = Boolean(res.data?.model_ready);
       } else {
@@ -548,6 +617,43 @@ export default function ModelSetupModal({
                 </div>
               ) : null}
 
+              {/* §33 — per-provider endpoint preset picker.  Today only
+                  alibaba ships a bundle; the block stays dormant for every
+                  other provider.  Placed directly under the API-key input
+                  so the "this URL receives this key" relationship is
+                  visible at a glance — that's the entire failure mode the
+                  picker is here to prevent. */}
+              {showApiKey && providerEndpoints?.[form.authProvider] ? (() => {
+                const bundle = providerEndpoints[form.authProvider];
+                const currentSel = endpointChoice[form.authProvider]
+                  || bundle.presets?.[0]?.base_url
+                  || '';
+                const activePreset = (bundle.presets || []).find((p) => p.base_url === currentSel);
+                return (
+                  <div className="tc-model-setup-field">
+                    <label className="tc-model-setup-label">API Endpoint</label>
+                    <select
+                      value={currentSel}
+                      onChange={(event) => setEndpointChoice((prev) => ({
+                        ...prev,
+                        [form.authProvider]: event.target.value,
+                      }))}
+                      className="tc-model-setup-input"
+                    >
+                      {(bundle.presets || []).map((preset) => (
+                        <option key={preset.id} value={preset.base_url}>{preset.label}</option>
+                      ))}
+                    </select>
+                    {activePreset?.hint ? (
+                      <p className="tc-model-setup-hint">{activePreset.hint}</p>
+                    ) : null}
+                    <p className="tc-model-setup-hint tc-model-setup-hint-mono">
+                      {bundle.env_key}={currentSel}
+                    </p>
+                  </div>
+                );
+              })() : null}
+
               {showApiKey && form.authProvider === 'cloudflare-ai-gateway' ? (
                 <div className="tc-model-setup-grid">
                   <div className="tc-model-setup-field">
@@ -695,14 +801,26 @@ export default function ModelSetupModal({
                 <SearchablePicker
                   label="Model"
                   value={form.modelId}
-                  displayValue={selectedModel ? `${selectedModel.name}${selectedModel.contextWindow ? ` (${Math.round(selectedModel.contextWindow / 1024)}K)` : ''}` : form.modelId}
+                  // Belt-and-braces companion to the provider-scope filter
+                  // above: even if the filter somehow lets a cross-routed
+                  // entry slip through (backend drift, stale cache, openclaw
+                  // aggregator fallback), the slug prefix here makes the
+                  // routing visible, so users can't silently pick
+                  // ``nous/anthropic/claude-opus-4.6`` while they thought they
+                  // were picking the OpenRouter-routed one.
+                  displayValue={selectedModel
+                    ? `${(String(selectedModel.id || '').split('/')[0] || '')} · ${selectedModel.name}${selectedModel.contextWindow ? ` (${Math.round(selectedModel.contextWindow / 1024)}K)` : ''}`
+                    : form.modelId}
                   placeholder="Choose a model"
                   searchPlaceholder="Search models..."
-                  options={visibleModels.map((model) => ({
-                    id: model.id,
-                    label: model.name,
-                    hint: `${model.contextWindow ? `${Math.round(model.contextWindow / 1024)}K` : ''}${model.reasoning ? ' REASON' : ''}`.trim(),
-                  }))}
+                  options={visibleModels.map((model) => {
+                    const slug = String(model.id || '').split('/')[0] || '';
+                    return {
+                      id: model.id,
+                      label: slug ? `${slug} · ${model.name}` : model.name,
+                      hint: `${model.contextWindow ? `${Math.round(model.contextWindow / 1024)}K` : ''}${model.reasoning ? ' REASON' : ''}`.trim(),
+                    };
+                  })}
                   onSelect={(id) => setForm((prev) => ({ ...prev, modelId: id }))}
                   renderOption={(option, selected) => (
                     <div className="tc-model-setup-option-row">

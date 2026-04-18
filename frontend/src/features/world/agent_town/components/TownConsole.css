@@ -580,6 +580,43 @@
     0 6px 12px rgba(25, 12, 3, 0.12);
 }
 
+/* §36 — per-row delete affordance for the configured-model deck.
+ * Hidden by default and revealed on hover/focus to avoid cluttering the
+ * picker; sits absolutely inside ``.tc-model-entry`` (which already has
+ * ``position: relative``).  Hermes-only at the React level. */
+.tc-model-entry-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 220, 170, 0.65);
+  font-family: var(--px-font);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  appearance: none;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.tc-model-entry:hover .tc-model-entry-delete,
+.tc-model-entry-delete:focus-visible {
+  opacity: 1;
+}
+
+.tc-model-entry-delete:hover {
+  background: rgba(220, 80, 80, 0.28);
+  color: #ffe4d4;
+}
+
 .tc-model-option-name {
   display: block;
   flex: 1 1 88px;
@@ -5089,6 +5126,23 @@
   font-size: 10px;
   color: #a89878;
   margin-top: -4px;
+}
+
+/* Per-provider endpoint picker (§33) — muted helper line + the monospace
+   "ENV_KEY=value" preview line underneath. Reusing the pixel muted colour
+   matches the rest of the modal so the block doesn't fight the panel's
+   existing visual rhythm. */
+.tc-model-setup-hint {
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #a89878;
+}
+
+.tc-model-setup-hint-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #cdb28a;
+  word-break: break-all;
 }
 
 .tc-model-setup-spinner,

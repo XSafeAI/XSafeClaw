@@ -19,7 +19,7 @@ import type { Translations } from '../i18n/locales/en';
 interface AuthMethod { id: string; label: string; hint?: string; modelProviders?: string[]; }
 interface AuthProviderInfo { id: string; name: string; hint: string; supported?: boolean; methods?: AuthMethod[]; }
 interface ModelInfo { id: string; name: string; contextWindow: number; reasoning: boolean; available: boolean; input: string; }
-interface ModelProviderInfo { id: string; name: string; models: ModelInfo[]; keyUrl?: string; }
+interface ModelProviderInfo { id: string; name: string; models: ModelInfo[]; keyUrl?: string; available?: boolean; requiresCredentials?: boolean; }
 interface ChannelInfo { id: string; name: string; configured: boolean; }
 interface SkillInfo { name: string; description: string; emoji: string; eligible: boolean; disabled: boolean; missing: { bins?: string[]; anyBins?: string[]; env?: string[]; os?: string[]; config?: string[] }; source: string; bundled: boolean; }
 interface HookInfo { name: string; description: string; emoji: string; enabled: boolean; }
@@ -1050,6 +1050,20 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
   const [modelSaveError, setModelSaveError] = useState('');
   const [modelSaveNote, setModelSaveNote] = useState('');
 
+  // Per-provider endpoint presets shipped by the backend (§33).  Shape is
+  // keyed by provider id; only ``alibaba`` populates anything today because
+  // Hermes's adapter there hardcodes the Alibaba Coding Plan endpoint, which
+  // 401s standard DashScope keys.  ``current`` is whatever's already in
+  // ~/.hermes/.env so re-saving without touching the dropdown doesn't
+  // silently clobber a value the user hand-edited.
+  type ProviderEndpointPreset = { id: string; label: string; hint?: string; base_url: string };
+  type ProviderEndpointBundle = { env_key: string; current: string; presets: ProviderEndpointPreset[] };
+  const [providerEndpoints, setProviderEndpoints] = useState<Record<string, ProviderEndpointBundle>>({});
+  // User's current endpoint pick, keyed by provider id.  Separate from
+  // ``providerEndpoints`` (which is server-owned) so we can let the user
+  // mutate the dropdown without round-tripping through the scan cache.
+  const [providerEndpointSel, setProviderEndpointSel] = useState<Record<string, string>>({});
+
   // ── Bot step state ────────────────────────────────────────────────────
   // The Hermes backend owns the platform schema (list of fields per
   // platform) so we can add new platforms without a frontend redeploy.
@@ -1162,6 +1176,26 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
           setModelProviders(providers);
           const def: string = d.default_model || '';
           setModelDefaultId(def);
+
+          // Pull the per-provider endpoint bundles the backend ships (see
+          // §33).  We also seed ``providerEndpointSel`` so a provider with
+          // a value already in ~/.hermes/.env shows that as pre-selected
+          // instead of snapping to the first preset — otherwise a user
+          // who previously chose "China" and is just re-saving the key
+          // would silently flip back to "International".
+          const endpoints = (d.provider_endpoints || {}) as Record<string, ProviderEndpointBundle>;
+          setProviderEndpoints(endpoints);
+          const initialSel: Record<string, string> = {};
+          for (const [pid, bundle] of Object.entries(endpoints)) {
+            const current = (bundle.current || '').trim();
+            if (current) {
+              initialSel[pid] = current;
+            } else if (bundle.presets.length > 0) {
+              initialSel[pid] = bundle.presets[0].base_url;
+            }
+          }
+          setProviderEndpointSel(initialSel);
+
           if (!modelProviderId && !modelId && def) {
             // Prefill the form with the currently configured default so
             // the user can see "this is what Hermes is using" at a glance.
@@ -1188,6 +1222,18 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
   }, [step]);
 
   const selectedBotPlatform = botPlatforms.find(p => p.id === botPlatformId);
+  // ``modelProviders`` carries the full probe payload (including providers
+  // whose credentials aren't configured yet — those come back with
+  // ``available === false``). In the STEP_MODEL dropdown the user is picking
+  // a provider *to actually run with*, so unauth'd providers are pure noise
+  // — they can't be selected and just crowd the list. We filter them out
+  // here rather than disabling-and-labelling them (the old behaviour). Auth
+  // providers for the API-Key step live in a separate ``authProviders``
+  // list and are unaffected, so greying them out of the run-picker doesn't
+  // hide the provider from the setup flow.
+  const selectableModelProviders = modelProviders.filter(
+    p => p.available !== false && p.requiresCredentials !== true,
+  );
   const selectedModelProvider = modelProviders.find(p => p.id === modelProviderId);
 
   function onPickBotPlatform(pid: string) {
@@ -1220,10 +1266,20 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
     setModelSaveError('');
     setModelSaveNote('');
     try {
+      // Only forward base_url when the provider we're saving has a preset
+      // bundle (today that's just ``alibaba`` — §33).  Sending it for a
+      // provider with no preset would be a no-op on the backend but makes
+      // the request payload noisier to reason about in logs.
+      const endpointBundle = providerEndpoints[modelProviderId];
+      const endpointBaseUrl = endpointBundle
+        ? (providerEndpointSel[modelProviderId] || endpointBundle.current || endpointBundle.presets[0]?.base_url || '')
+        : '';
+
       const res = await systemAPI.quickModelConfig({
         provider: modelProviderId,
         model_id: modelId,
         api_key: modelApiKey.trim() || undefined,
+        base_url: endpointBaseUrl || undefined,
       });
       setModelSaveResult('ok');
       setModelDefaultId(modelId);
@@ -1792,7 +1848,18 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
                 </div>
               )}
 
-              {!modelLoading && modelProviders.length > 0 && (
+              {/* Probe returned providers but none are authenticated — most
+                  commonly a brand-new install where the user hasn't configured
+                  any API key yet. Point them at the previous step rather than
+                  rendering an empty dropdown that silently does nothing. */}
+              {!modelLoading && modelProviders.length > 0 && selectableModelProviders.length === 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-[12px] text-amber-300 flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span>{h.modelNoAuthedProviders}</span>
+                </div>
+              )}
+
+              {!modelLoading && selectableModelProviders.length > 0 && (
                 <>
                   <div>
                     <label className="text-[12px] font-semibold text-text-primary block mb-1.5">
@@ -1804,11 +1871,57 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
                       className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 text-[13px] text-text-primary focus:outline-none focus:ring-2 focus:ring-violet-500/30"
                     >
                       <option value="">{h.modelProviderPlaceholder}</option>
-                      {modelProviders.map(p => (
+                      {selectableModelProviders.map(p => (
                         <option key={p.id} value={p.id}>{p.name}</option>
                       ))}
                     </select>
                   </div>
+
+                  {selectedModelProvider && selectedModelProvider.models.length === 0 && (
+                    <div className="bg-surface-0 border border-border rounded-xl p-3 text-[12px] text-text-muted">
+                      {h.modelProviderEmptyHint}
+                    </div>
+                  )}
+
+                  {/* Per-provider endpoint preset picker (§33).  Only renders
+                      when the backend shipped a preset bundle for the
+                      currently-selected provider — today that's alibaba's
+                      three DashScope URLs.  Placed above the model dropdown
+                      because a wrong base URL bricks chat regardless of
+                      which model you pick. */}
+                  {selectedModelProvider && providerEndpoints[selectedModelProvider.id] && (() => {
+                    const bundle = providerEndpoints[selectedModelProvider.id];
+                    const currentSel = providerEndpointSel[selectedModelProvider.id] || bundle.presets[0]?.base_url || '';
+                    const activePreset = bundle.presets.find(p => p.base_url === currentSel);
+                    return (
+                      <div className="bg-surface-0 border border-border rounded-xl p-3 space-y-2">
+                        <label className="text-[12px] font-semibold text-text-primary block">
+                          {h.modelEndpointLabel}
+                        </label>
+                        <select
+                          value={currentSel}
+                          onChange={e => {
+                            setProviderEndpointSel(prev => ({
+                              ...prev,
+                              [selectedModelProvider.id]: e.target.value,
+                            }));
+                            setModelSaveResult('idle');
+                          }}
+                          className="w-full bg-surface-1 border border-border rounded-lg px-3 py-2 text-[13px] text-text-primary focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                        >
+                          {bundle.presets.map(p => (
+                            <option key={p.id} value={p.base_url}>{p.label}</option>
+                          ))}
+                        </select>
+                        {activePreset?.hint && (
+                          <p className="text-[11px] text-text-muted">{activePreset.hint}</p>
+                        )}
+                        <p className="text-[11px] text-text-muted font-mono break-all">
+                          {bundle.env_key}={currentSel}
+                        </p>
+                      </div>
+                    );
+                  })()}
 
                   {selectedModelProvider && selectedModelProvider.models.length > 0 && (
                     <div>

@@ -224,25 +224,162 @@ def _build_available_models_payload_from_config() -> dict:
         # or a bare string like ``model: "hermes-agent"``.
         model_cfg = config.get("model", "")
         if isinstance(model_cfg, dict):
-            default_model = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+            default_model_raw = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
             cfg_provider = str(model_cfg.get("provider", "")).strip()
         else:
-            default_model = str(model_cfg).strip()
+            default_model_raw = str(model_cfg).strip()
             cfg_provider = ""
 
-        models = []
+        # Canonicalise the active-model id to the same "{slug}/{bare_id}" shape
+        # the ledger uses, so the dedup gate in ``_add_model`` actually
+        # collapses "active model" and "ledger entry for the same pick" into
+        # one row.  Two subtleties:
+        #
+        #   * After §34 ``config.yaml::model.default`` is **bare** (no slug
+        #     prefix); ``cfg_provider`` carries the slug separately.  We
+        #     re-prefix here.
+        #   * Aggregator bare ids (OpenRouter, Nous, ...) already contain
+        #     ``/`` themselves (e.g. ``anthropic/claude-opus-4.7``) — those
+        #     must NOT be split into provider=``anthropic`` because that
+        #     isn't a Hermes provider slug.  ``cfg_provider`` is the only
+        #     reliable source of the routing slug for those.
+        if default_model_raw:
+            if cfg_provider and cfg_provider != "auto":
+                if default_model_raw.startswith(f"{cfg_provider}/"):
+                    default_model = default_model_raw
+                else:
+                    default_model = f"{cfg_provider}/{default_model_raw}"
+            else:
+                # Old or hand-edited config without ``model.provider`` — fall
+                # back to the legacy "first segment is the slug" heuristic.
+                default_model = default_model_raw
+        else:
+            default_model = ""
+
+        models: list[dict] = []
+        seen_ids: set[str] = set()
+
+        def _add_model(mid: str, provider: str, name: str = "", reasoning: bool = False) -> None:
+            mid = (mid or "").strip()
+            if not mid or mid in seen_ids:
+                return
+            seen_ids.add(mid)
+            models.append({
+                "id": mid,
+                "name": (name or (mid.split("/", 1)[-1] if "/" in mid else mid)),
+                "provider": (provider or "hermes"),
+                "reasoning": bool(reasoning),
+            })
+
         if default_model:
-            if "/" in default_model:
+            if cfg_provider and cfg_provider != "auto":
+                provider = cfg_provider
+                short = default_model_raw
+            elif "/" in default_model:
                 provider, short = default_model.split("/", 1)
             else:
-                provider = cfg_provider if cfg_provider and cfg_provider != "auto" else "hermes"
+                provider = "hermes"
                 short = default_model
-            models.append({
-                "id": default_model,
-                "name": short,
-                "provider": provider,
-                "reasoning": False,
-            })
+            _add_model(default_model, provider, short)
+
+        # ── §35: ledger-driven, auth-gated configured-model list ──────────────
+        # Why we can't use Hermes's per-provider defaults anymore:
+        #   * ``get_default_model_for_provider("openrouter")`` returns ``""``
+        #     (OpenRouter has thousands of models, no canonical pick), so
+        #     OpenRouter silently dropped from the deck even when the user had
+        #     explicitly picked ``anthropic/claude-opus-4.7``.
+        #   * ``get_default_model_for_provider("alibaba")`` returns
+        #     ``"kimi-k2.5"`` in the current Hermes build — a Kimi/Moonshot
+        #     model accidentally wired as alibaba's default — which made an
+        #     unconfigured "kimi" entry appear every time even though the
+        #     user only ever picked ``qwen3-max``.
+        #
+        # Both bugs come from trusting Hermes to remember what the user
+        # picked.  Hermes never did — only ``model.default`` (last-write-wins,
+        # one slot) does.  XSafeClaw now keeps its own ledger (§35) of every
+        # model the user explicitly saved, and we surface those here, gated
+        # by the current Hermes auth state so removing a key removes the
+        # corresponding entries automatically.
+        try:
+            from .system import (
+                _fetch_hermes_configured_models,
+                _load_xs_configured_models,
+                _seed_xs_configured_models_from_config,
+            )
+            probe = _fetch_hermes_configured_models()
+        except Exception:
+            probe = None
+            _load_xs_configured_models = None  # type: ignore[assignment]
+            _seed_xs_configured_models_from_config = None  # type: ignore[assignment]
+
+        # Build the auth gate: any slug Hermes currently considers
+        # authenticated, including the synthetic ``custom:<name>`` form for
+        # user-defined custom providers.  Empty set → degrade to "ledger
+        # entries are unconditionally trusted" (probe failed, don't penalize).
+        authed_slugs: set[str] = set()
+        gate_active = False
+        if isinstance(probe, dict):
+            gate_active = True
+            for entry in probe.get("authenticated") or []:
+                if not isinstance(entry, dict):
+                    continue
+                slug = str(entry.get("slug") or "").strip()
+                if slug:
+                    authed_slugs.add(slug)
+            for cp in probe.get("custom") or []:
+                if not isinstance(cp, dict):
+                    continue
+                cp_name = str(cp.get("name") or "").strip()
+                if cp_name:
+                    authed_slugs.add(f"custom:{cp_name}")
+
+        # Migration: if the ledger is empty but config.yaml already names a
+        # model (pre-§35 user, or someone who configured Hermes via its own
+        # CLI), seed one entry so the very first restart isn't blank.
+        if _seed_xs_configured_models_from_config and default_model:
+            seed_provider = cfg_provider or (
+                default_model.split("/", 1)[0] if "/" in default_model else ""
+            )
+            if seed_provider:
+                try:
+                    _seed_xs_configured_models_from_config(
+                        default_model=(
+                            default_model.split("/", 1)[1]
+                            if "/" in default_model
+                            else default_model
+                        ),
+                        provider=seed_provider,
+                    )
+                except Exception:
+                    pass
+
+        ledger_entries: list[dict] = []
+        if _load_xs_configured_models is not None:
+            try:
+                ledger_entries = _load_xs_configured_models()
+            except Exception:
+                ledger_entries = []
+
+        # Surface ledger entries newest-first so the picker's natural order
+        # mirrors the user's most recent intent.
+        for entry in sorted(
+            ledger_entries,
+            key=lambda e: float(e.get("configured_at") or 0.0),
+            reverse=True,
+        ):
+            slug = str(entry.get("slug") or "").strip()
+            full_id = str(entry.get("model_id") or "").strip()
+            bare_id = str(entry.get("bare_id") or "").strip() or full_id
+            display_name = str(entry.get("name") or bare_id)
+            if not slug or not full_id:
+                continue
+            if gate_active and slug not in authed_slugs:
+                # The provider used to be authenticated but the user removed
+                # the key (or rotated the .env).  Hide the entry; the ledger
+                # stays intact so re-adding the key resurrects it untouched.
+                continue
+            _add_model(full_id, slug, display_name)
+
         return _ensure_default_model_visible({"models": models, "default_model": default_model})
 
     # OpenClaw config

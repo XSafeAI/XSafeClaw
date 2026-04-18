@@ -198,6 +198,80 @@ def _find_agent_binary() -> Optional[str]:
     return _find_openclaw()
 
 
+# ── Hermes embedded-Python bridge ─────────────────────────────────────────────
+# Hermes ships its own Python package tree at ``~/.hermes/hermes-agent/`` with
+# a dedicated venv (``venv/bin/python3``).  That interpreter has full access
+# to ``hermes_cli.models`` and ``agent.models_dev`` — the upstream single
+# source of truth for providers, model ids, and models.dev metadata.
+#
+# By spawning *that* interpreter (not XSafeClaw's own) we can read the live
+# catalog without HTTP scraping or pty TUI gymnastics.  Results are cached so
+# the 0.5–2s subprocess startup doesn't run on every onboard-scan hit.
+
+_hermes_interp_cache: tuple[str, str] | None = None  # (hermes_bin, python_path)
+
+
+def _hermes_python_interpreter() -> Optional[str]:
+    """Return the Python interpreter bundled with the installed Hermes.
+
+    Parses the shebang of the ``hermes`` CLI wrapper (installer always writes
+    an absolute-path shebang pointing into the Hermes venv).  Returns ``None``
+    when Hermes isn't installed or the wrapper doesn't match the expected
+    shape — callers must fall back gracefully.
+    """
+    global _hermes_interp_cache
+
+    hermes_bin = _find_hermes()
+    if not hermes_bin:
+        return None
+
+    if _hermes_interp_cache and _hermes_interp_cache[0] == hermes_bin:
+        return _hermes_interp_cache[1]
+
+    try:
+        with open(hermes_bin, "rb") as fh:
+            first = fh.readline(256)
+    except OSError:
+        return None
+
+    if not first.startswith(b"#!"):
+        return None
+    shebang = first[2:].decode("utf-8", errors="replace").strip()
+    if not shebang:
+        return None
+    # Some installers write "#!/usr/bin/env python3" — reject that, since it
+    # doesn't give us Hermes's site-packages.  We only trust absolute paths
+    # that resolve to an executable python.
+    interp = shebang.split()[0]
+    if not os.path.isabs(interp):
+        return None
+    if not _is_runnable_file(Path(interp)):
+        return None
+
+    _hermes_interp_cache = (hermes_bin, interp)
+    return interp
+
+
+def _hermes_install_root() -> Optional[str]:
+    """Return the directory containing Hermes's ``hermes_cli/`` and ``agent/``.
+
+    Derived from the venv python's path:
+    ``<root>/venv/bin/python3``  →  ``<root>``.  Verified by checking that
+    ``hermes_cli/models.py`` actually exists there.
+    """
+    interp = _hermes_python_interpreter()
+    if not interp:
+        return None
+    p = Path(interp).resolve()
+    # Walk up from ``…/venv/bin/python3`` until we find ``hermes_cli``.
+    for candidate in (p.parents[2] if len(p.parents) > 2 else None, p.parents[1] if len(p.parents) > 1 else None):
+        if candidate is None:
+            continue
+        if (candidate / "hermes_cli" / "models.py").is_file():
+            return str(candidate)
+    return None
+
+
 def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
     """Build a subprocess command that can launch OpenClaw across platforms."""
     suffix = Path(openclaw_path).suffix.lower()
@@ -2498,222 +2572,44 @@ else:
 # Static catalog derived from Hermes's official provider documentation.
 # Env-var names and representative models for each provider.
 
+# Provider *shell* registry for Hermes — NO model ids.
+#
+# This table intentionally carries only identity/UX metadata (id, display
+# name, hint, envKey).  Model lists are authoritatively owned by Hermes
+# itself and fetched at runtime by ``_fetch_hermes_catalog_live()``; writing
+# ids here invites the exact kind of drift that caused the ``Model Not
+# Exist`` / ``[No response]`` regressions (OpenRouter's
+# ``anthropic/claude-sonnet-4-20250514`` was Anthropic's snapshot naming,
+# not OpenRouter's; ``alibaba/*`` mixed coding-intl and standard DashScope
+# naming; etc.).
+#
+# Two downstream consumers still need this shell:
+#   • ``_HERMES_AUTH_PROVIDERS`` — drives the Configure wizard's auth-step UI
+#   • ``_HERMES_PROVIDER_ENV_KEYS`` — tells ``_quick_model_config_hermes``
+#     which env var receives the API key the user just typed in
 _HERMES_MODEL_CATALOG: list[dict] = [
-    {
-        "id": "anthropic",
-        "name": "Anthropic",
-        "hint": "Claude models (API key or Claude Code auth)",
-        "envKey": "ANTHROPIC_API_KEY",
-        "models": [
-            {"id": "anthropic/claude-opus-4-20250618", "name": "Claude Opus 4", "contextWindow": 200000, "reasoning": False},
-            {"id": "anthropic/claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "contextWindow": 200000, "reasoning": False},
-            {"id": "anthropic/claude-haiku-3.5", "name": "Claude 3.5 Haiku", "contextWindow": 200000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "openai",
-        "name": "OpenAI",
-        "hint": "GPT / o-series models",
-        "envKey": "OPENAI_API_KEY",
-        "models": [
-            {"id": "openai/gpt-4.1", "name": "GPT-4.1", "contextWindow": 1047576, "reasoning": False},
-            {"id": "openai/gpt-4.1-mini", "name": "GPT-4.1 Mini", "contextWindow": 1047576, "reasoning": False},
-            {"id": "openai/gpt-4.1-nano", "name": "GPT-4.1 Nano", "contextWindow": 1047576, "reasoning": False},
-            {"id": "openai/o3", "name": "o3", "contextWindow": 200000, "reasoning": True},
-            {"id": "openai/o4-mini", "name": "o4-mini", "contextWindow": 200000, "reasoning": True},
-        ],
-    },
-    {
-        "id": "openrouter",
-        "name": "OpenRouter",
-        "hint": "200+ models via single API key",
-        "envKey": "OPENROUTER_API_KEY",
-        "models": [
-            {"id": "openrouter/anthropic/claude-sonnet-4-20250514", "name": "Claude Sonnet 4 (OR)", "contextWindow": 200000, "reasoning": False},
-            {"id": "openrouter/google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OR)", "contextWindow": 1048576, "reasoning": True},
-            {"id": "openrouter/deepseek/deepseek-r1", "name": "DeepSeek-R1 (OR)", "contextWindow": 163840, "reasoning": True},
-            {"id": "openrouter/qwen/qwen3-235b-a22b", "name": "Qwen3-235B (OR)", "contextWindow": 131072, "reasoning": False},
-        ],
-    },
-    {
-        "id": "gemini",
-        "name": "Google Gemini",
-        "hint": "Gemini API key",
-        "envKey": "GOOGLE_API_KEY",
-        "models": [
-            {"id": "gemini/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "contextWindow": 1048576, "reasoning": True},
-            {"id": "gemini/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "contextWindow": 1048576, "reasoning": False},
-            {"id": "gemini/gemini-2.0-flash", "name": "Gemini 2.0 Flash", "contextWindow": 1048576, "reasoning": False},
-        ],
-    },
-    {
-        "id": "deepseek",
-        "name": "DeepSeek",
-        "hint": "DeepSeek API",
-        "envKey": "DEEPSEEK_API_KEY",
-        "models": [
-            {"id": "deepseek/deepseek-r1", "name": "DeepSeek-R1", "contextWindow": 163840, "reasoning": True},
-            {"id": "deepseek/deepseek-chat", "name": "DeepSeek-V3", "contextWindow": 163840, "reasoning": False},
-        ],
-    },
-    {
-        "id": "alibaba",
-        "name": "Alibaba Cloud (DashScope / Qwen)",
-        "hint": "Qwen models",
-        "envKey": "DASHSCOPE_API_KEY",
-        "models": [
-            {"id": "alibaba/qwen3-235b-a22b", "name": "Qwen3-235B-A22B", "contextWindow": 131072, "reasoning": False},
-            {"id": "alibaba/qwen3-32b", "name": "Qwen3-32B", "contextWindow": 131072, "reasoning": False},
-            {"id": "alibaba/qwen3.5-plus", "name": "Qwen3.5-Plus", "contextWindow": 131072, "reasoning": False},
-            {"id": "alibaba/qwen-max", "name": "Qwen-Max", "contextWindow": 131072, "reasoning": False},
-        ],
-    },
-    {
-        "id": "zai",
-        "name": "Z.AI / ZhipuAI (GLM)",
-        "hint": "GLM models",
-        "envKey": "GLM_API_KEY",
-        "models": [
-            {"id": "zai/glm-5", "name": "GLM-5", "contextWindow": 128000, "reasoning": False},
-            {"id": "zai/glm-4-plus", "name": "GLM-4-Plus", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "kimi-coding",
-        "name": "Kimi / Moonshot",
-        "hint": "Kimi models (international)",
-        "envKey": "KIMI_API_KEY",
-        "models": [
-            {"id": "kimi-coding/kimi-k2.5", "name": "Kimi K2.5", "contextWindow": 131072, "reasoning": False},
-            {"id": "kimi-coding/kimi-for-coding", "name": "Kimi for Coding", "contextWindow": 131072, "reasoning": False},
-        ],
-    },
-    {
-        "id": "kimi-coding-cn",
-        "name": "Kimi / Moonshot (China)",
-        "hint": "Kimi models (China endpoint)",
-        "envKey": "KIMI_CN_API_KEY",
-        "models": [
-            {"id": "kimi-coding-cn/kimi-k2.5", "name": "Kimi K2.5 (CN)", "contextWindow": 131072, "reasoning": False},
-        ],
-    },
-    {
-        "id": "minimax",
-        "name": "MiniMax",
-        "hint": "MiniMax models (global)",
-        "envKey": "MINIMAX_API_KEY",
-        "models": [
-            {"id": "minimax/MiniMax-M2.7", "name": "MiniMax-M2.7", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "minimax-cn",
-        "name": "MiniMax (China)",
-        "hint": "MiniMax models (China endpoint)",
-        "envKey": "MINIMAX_CN_API_KEY",
-        "models": [
-            {"id": "minimax-cn/MiniMax-M2.7", "name": "MiniMax-M2.7 (CN)", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "xiaomi",
-        "name": "Xiaomi MiMo",
-        "hint": "Xiaomi MiMo models",
-        "envKey": "XIAOMI_API_KEY",
-        "models": [
-            {"id": "xiaomi/mimo-v2-pro", "name": "MiMo-v2-Pro", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "arcee",
-        "name": "Arcee AI",
-        "hint": "Trinity models",
-        "envKey": "ARCEEAI_API_KEY",
-        "models": [
-            {"id": "arcee/trinity-large-thinking", "name": "Trinity Large Thinking", "contextWindow": 128000, "reasoning": True},
-        ],
-    },
-    {
-        "id": "huggingface",
-        "name": "Hugging Face",
-        "hint": "Inference Providers (20+ open models)",
-        "envKey": "HF_TOKEN",
-        "models": [
-            {"id": "huggingface/Qwen/Qwen3-235B-A22B-Thinking-2507", "name": "Qwen3-235B (HF)", "contextWindow": 131072, "reasoning": True},
-            {"id": "huggingface/deepseek-ai/DeepSeek-V3.2", "name": "DeepSeek-V3.2 (HF)", "contextWindow": 163840, "reasoning": False},
-        ],
-    },
-    {
-        "id": "copilot",
-        "name": "GitHub Copilot",
-        "hint": "Uses Copilot subscription (OAuth)",
-        "envKey": "",
-        "models": [
-            {"id": "copilot/gpt-5.4", "name": "GPT-5.4 (Copilot)", "contextWindow": 128000, "reasoning": False},
-            {"id": "copilot/claude-sonnet-4", "name": "Claude Sonnet 4 (Copilot)", "contextWindow": 200000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "kilocode",
-        "name": "Kilo Code",
-        "hint": "Kilo Code API",
-        "envKey": "KILOCODE_API_KEY",
-        "models": [
-            {"id": "kilocode/kilo-coder", "name": "Kilo Coder", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "opencode-zen",
-        "name": "OpenCode Zen",
-        "hint": "OpenCode Zen API",
-        "envKey": "OPENCODE_ZEN_API_KEY",
-        "models": [
-            {"id": "opencode-zen/zen-coder", "name": "Zen Coder", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "opencode-go",
-        "name": "OpenCode Go",
-        "hint": "OpenCode Go API",
-        "envKey": "OPENCODE_GO_API_KEY",
-        "models": [
-            {"id": "opencode-go/go-coder", "name": "Go Coder", "contextWindow": 128000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "mistral",
-        "name": "Mistral AI",
-        "hint": "Mistral API",
-        "envKey": "MISTRAL_API_KEY",
-        "models": [
-            {"id": "mistral/mistral-large-latest", "name": "Mistral Large", "contextWindow": 128000, "reasoning": False},
-            {"id": "mistral/codestral-latest", "name": "Codestral", "contextWindow": 256000, "reasoning": False},
-        ],
-    },
-    {
-        "id": "xai",
-        "name": "xAI (Grok)",
-        "hint": "xAI Grok models",
-        "envKey": "XAI_API_KEY",
-        "models": [
-            {"id": "xai/grok-3", "name": "Grok-3", "contextWindow": 131072, "reasoning": False},
-            {"id": "xai/grok-3-mini", "name": "Grok-3-mini", "contextWindow": 131072, "reasoning": True},
-        ],
-    },
-    {
-        "id": "ai-gateway",
-        "name": "AI Gateway (Vercel)",
-        "hint": "Vercel AI Gateway",
-        "envKey": "AI_GATEWAY_API_KEY",
-        "models": [],
-    },
-    {
-        "id": "custom",
-        "name": "Custom Endpoint",
-        "hint": "Any OpenAI-compatible endpoint (Ollama, vLLM, etc.)",
-        "envKey": "",
-        "models": [],
-    },
+    {"id": "anthropic",      "name": "Anthropic",                         "hint": "Claude models (API key or Claude Code auth)",          "envKey": "ANTHROPIC_API_KEY",      "models": []},
+    {"id": "openai",         "name": "OpenAI",                            "hint": "GPT / o-series models",                                "envKey": "OPENAI_API_KEY",         "models": []},
+    {"id": "openrouter",     "name": "OpenRouter",                        "hint": "200+ models via single API key",                       "envKey": "OPENROUTER_API_KEY",     "models": []},
+    {"id": "gemini",         "name": "Google Gemini",                     "hint": "Gemini API key",                                       "envKey": "GOOGLE_API_KEY",         "models": []},
+    {"id": "deepseek",       "name": "DeepSeek",                          "hint": "DeepSeek API",                                         "envKey": "DEEPSEEK_API_KEY",       "models": []},
+    {"id": "alibaba",        "name": "Alibaba Cloud (DashScope / Qwen)",  "hint": "Qwen models",                                          "envKey": "DASHSCOPE_API_KEY",      "models": []},
+    {"id": "zai",            "name": "Z.AI / ZhipuAI (GLM)",              "hint": "GLM models",                                           "envKey": "GLM_API_KEY",            "models": []},
+    {"id": "kimi-coding",    "name": "Kimi / Moonshot",                   "hint": "Kimi models (international)",                          "envKey": "KIMI_API_KEY",           "models": []},
+    {"id": "kimi-coding-cn", "name": "Kimi / Moonshot (China)",           "hint": "Kimi models (China endpoint)",                         "envKey": "KIMI_CN_API_KEY",        "models": []},
+    {"id": "minimax",        "name": "MiniMax",                           "hint": "MiniMax models (global)",                              "envKey": "MINIMAX_API_KEY",        "models": []},
+    {"id": "minimax-cn",     "name": "MiniMax (China)",                   "hint": "MiniMax models (China endpoint)",                      "envKey": "MINIMAX_CN_API_KEY",     "models": []},
+    {"id": "xiaomi",         "name": "Xiaomi MiMo",                       "hint": "Xiaomi MiMo models",                                   "envKey": "XIAOMI_API_KEY",         "models": []},
+    {"id": "arcee",          "name": "Arcee AI",                          "hint": "Trinity models",                                       "envKey": "ARCEEAI_API_KEY",        "models": []},
+    {"id": "huggingface",    "name": "Hugging Face",                      "hint": "Inference Providers (20+ open models)",                "envKey": "HF_TOKEN",               "models": []},
+    {"id": "copilot",        "name": "GitHub Copilot",                    "hint": "Uses Copilot subscription (OAuth)",                    "envKey": "",                       "models": []},
+    {"id": "kilocode",       "name": "Kilo Code",                         "hint": "Kilo Code API",                                        "envKey": "KILOCODE_API_KEY",       "models": []},
+    {"id": "opencode-zen",   "name": "OpenCode Zen",                      "hint": "OpenCode Zen API",                                     "envKey": "OPENCODE_ZEN_API_KEY",   "models": []},
+    {"id": "opencode-go",    "name": "OpenCode Go",                       "hint": "OpenCode Go API",                                      "envKey": "OPENCODE_GO_API_KEY",    "models": []},
+    {"id": "mistral",        "name": "Mistral AI",                        "hint": "Mistral API",                                          "envKey": "MISTRAL_API_KEY",        "models": []},
+    {"id": "xai",            "name": "xAI (Grok)",                        "hint": "xAI Grok models",                                      "envKey": "XAI_API_KEY",            "models": []},
+    {"id": "ai-gateway",     "name": "AI Gateway (Vercel)",               "hint": "Vercel AI Gateway",                                    "envKey": "AI_GATEWAY_API_KEY",     "models": []},
+    {"id": "custom",         "name": "Custom Endpoint",                   "hint": "Any OpenAI-compatible endpoint (Ollama, vLLM, etc.)",  "envKey": "",                       "models": []},
 ]
 
 _HERMES_AUTH_PROVIDERS: list[dict] = [
@@ -2749,6 +2645,62 @@ _HERMES_PROVIDER_ENV_KEYS: dict[str, str] = {
     for prov in _HERMES_MODEL_CATALOG
     if prov.get("envKey")
 }
+
+# ── DashScope endpoint presets ───────────────────────────────────────────────
+# Hermes's ``alibaba`` adapter hardcodes its default to the Alibaba *Coding
+# Plan* endpoint (``coding-intl.dashscope.aliyuncs.com/v1``), which rejects
+# standard DashScope API keys with HTTP 401 / ``Model Not Exist``.  Because
+# Hermes silently swallows adapter-side exceptions in the gateway the user
+# sees this as ``[No response]`` in the UI — the same class of trap §30 fixed
+# for OpenRouter/Nous, just dressed differently.
+#
+# We surface the three realistic endpoints so the Configure wizard and the
+# agent-town ``create agent`` modal can let users pick the one that matches
+# the key they pasted in.  The id is frontend-facing only; the authoritative
+# value is ``base_url``, which we upsert into ``~/.hermes/.env`` as
+# ``DASHSCOPE_BASE_URL``.  Hermes honours that env var at provider
+# construction time (see docs/reference/environment-variables) so no
+# ``config.yaml`` model-level override is needed.
+_HERMES_DASHSCOPE_ENDPOINTS: list[dict] = [
+    {
+        "id": "dashscope-intl",
+        "label": "DashScope (International, recommended)",
+        "hint": "Standard DashScope OpenAI-compatible endpoint. Works with keys from bailian.console.aliyun.com or dashscope.console.aliyun.com.",
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    },
+    {
+        "id": "dashscope-cn",
+        "label": "DashScope (Mainland China)",
+        "hint": "Mainland China DashScope endpoint. Use this only if your key is bound to the China region.",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    },
+    {
+        "id": "coding-intl",
+        "label": "Alibaba Coding Plan (Hermes default)",
+        "hint": "Only for users with an Alibaba Coding Plan subscription — standard DashScope keys will get 401 here.",
+        "base_url": "https://coding-intl.dashscope.aliyuncs.com/v1",
+    },
+]
+
+# The env var Hermes reads to override the alibaba adapter's hardcoded
+# base URL.  Kept as a module-level constant so downstream refactors don't
+# drift from the dotenv key name.
+_HERMES_DASHSCOPE_BASE_URL_ENV = "DASHSCOPE_BASE_URL"
+
+
+def _current_hermes_dashscope_base_url() -> str:
+    """Return the ``DASHSCOPE_BASE_URL`` currently persisted in ~/.hermes/.env.
+
+    Empty string when the file doesn't exist or the variable is unset.  The
+    Configure UI uses this to pre-select whatever endpoint the user last
+    picked (or manually edited), so re-saving the ``alibaba`` provider
+    without touching the dropdown doesn't silently clobber their choice.
+    """
+    try:
+        return _read_dotenv_value(_hermes_env_path(), _HERMES_DASHSCOPE_BASE_URL_ENV).strip()
+    except Exception:
+        return ""
+
 
 # ── Dynamic auth-provider scanning ───────────────────────────────────────────
 # Reads each extension's openclaw.plugin.json at runtime so the provider list
@@ -3348,36 +3300,728 @@ async def _build_onboard_scan_data() -> dict:
     }
 
 
-def _build_onboard_scan_data_hermes() -> dict:
-    """Build onboard-scan response from the static Hermes model catalog.
+# ── Live Hermes catalog bridge ────────────────────────────────────────────────
+# Imports ``hermes_cli.models`` + ``agent.models_dev`` via the Hermes-bundled
+# Python so the XSafeClaw frontend can offer *exactly* the providers/models
+# the installed Hermes version supports — not a copy-pasted snapshot that
+# drifts on each Hermes upgrade.  Falls back to the static catalog below if
+# anything goes wrong (Hermes not installed, shebang unparseable, import
+# error in a future Hermes version, etc.).
 
-    Unlike OpenClaw (which shells out to ``openclaw models list``), Hermes
-    providers are known statically.  We also read ``config.yaml`` to detect
-    the currently configured default model, and check ``~/.hermes/.env``
-    for already-configured API keys.
-    """
-    providers: dict[str, dict] = {}
-    for prov in _HERMES_MODEL_CATALOG:
-        prov_id = prov["id"]
-        if not prov.get("models"):
+_HERMES_CATALOG_TTL_S = 600.0  # 10 minutes — matches Hermes's own models.dev refresh cadence
+_hermes_catalog_cache: tuple[list[dict], float] | None = None
+
+# Inline Python executed inside the Hermes venv.  Kept deliberately tiny and
+# dependency-free beyond ``hermes_cli`` / ``agent`` so it won't break on
+# partial installs.
+#
+# Two important contracts vs the older probe:
+#
+#   1. Credentials gate — we call ``list_available_providers()`` (same primitive
+#      that powers the ``hermes model`` TUI picker) so provider entries get an
+#      ``authenticated`` flag.  The frontend uses that flag to grey out
+#      providers the user hasn't set keys for, which is the *only* way to
+#      prevent the "pick a Nous-routed claude-opus with no NOUS_API_KEY and
+#      watch chat return [No response]" class of regression.
+#
+#   2. OpenRouter uses its live ``/v1/models`` — ``_PROVIDER_MODELS`` has no
+#      ``openrouter`` entry by design (Hermes routes OpenRouter through
+#      ``fetch_openrouter_models`` with its own 10-minute disk cache).
+#      Using the static catalog here would surface wrong ids
+#      (``anthropic/claude-sonnet-4-20250514`` is Anthropic snapshot naming;
+#      OpenRouter actually serves ``anthropic/claude-sonnet-4.5`` etc.).
+_HERMES_CATALOG_PROBE_SCRIPT = r"""
+import json, sys
+try:
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_MODELS
+except Exception as exc:
+    json.dump({"error": f"import hermes_cli.models failed: {exc!r}"}, sys.stdout)
+    sys.exit(0)
+
+try:
+    from hermes_cli.models import list_available_providers
+except Exception:
+    def list_available_providers():
+        return []
+
+try:
+    from hermes_cli.models import fetch_openrouter_models
+except Exception:
+    fetch_openrouter_models = None
+
+try:
+    from agent.models_dev import get_model_info, get_provider_info
+except Exception:
+    def get_model_info(*a, **kw): return None
+    def get_provider_info(*a, **kw): return None
+
+try:
+    from hermes_cli.env_loader import load_hermes_dotenv
+    load_hermes_dotenv()
+except Exception:
+    pass
+
+authed = set()
+try:
+    for ap in list_available_providers() or []:
+        pid = str(ap.get("id") or "").strip() if isinstance(ap, dict) else ""
+        if pid:
+            authed.add(pid)
+except Exception:
+    pass
+
+def _models_from_static(slug):
+    bare_list = _PROVIDER_MODELS.get(slug, []) or []
+    out_models = []
+    for mid in bare_list:
+        try:
+            mi = get_model_info(slug, mid)
+        except Exception:
+            mi = None
+        out_models.append({
+            "bare_id": mid,
+            "name": (getattr(mi, "name", None) or mid),
+            "context_window": int(getattr(mi, "context_window", 0) or 0),
+            "reasoning": bool(getattr(mi, "reasoning", False)),
+        })
+    return out_models
+
+def _models_from_openrouter():
+    if fetch_openrouter_models is None:
+        return []
+    try:
+        pairs = fetch_openrouter_models(force_refresh=False) or []
+    except Exception:
+        return []
+    out_models = []
+    for item in pairs:
+        try:
+            mid = str(item[0] if isinstance(item, (list, tuple)) else item).strip()
+        except Exception:
             continue
-        providers[prov_id] = {
-            "id": prov_id,
-            "name": prov["name"],
-            "keyUrl": PROVIDER_KEY_URLS.get(prov_id, ""),
-            "models": [
-                {
-                    "id": m["id"],
-                    "name": m.get("name", m["id"]),
-                    "contextWindow": m.get("contextWindow", 0),
-                    "reasoning": m.get("reasoning", False),
-                    "available": True,
-                    "input": "text",
-                }
-                for m in prov["models"]
-            ],
+        if not mid:
+            continue
+        try:
+            mi = get_model_info("openrouter", mid)
+        except Exception:
+            mi = None
+        out_models.append({
+            "bare_id": mid,
+            "name": (getattr(mi, "name", None) or mid),
+            "context_window": int(getattr(mi, "context_window", 0) or 0),
+            "reasoning": bool(getattr(mi, "reasoning", False)),
+        })
+    return out_models
+
+out = []
+for p in CANONICAL_PROVIDERS:
+    try:
+        pi = get_provider_info(p.slug)
+    except Exception:
+        pi = None
+
+    is_authed = p.slug in authed
+    if p.slug == "openrouter" and is_authed:
+        models = _models_from_openrouter()
+        if not models:
+            models = _models_from_static(p.slug)
+    else:
+        models = _models_from_static(p.slug)
+
+    env_keys = []
+    doc_url = ""
+    if pi is not None:
+        try:
+            env_keys = list(getattr(pi, "env", ()) or ())
+            doc_url = str(getattr(pi, "doc", "") or "")
+        except Exception:
+            pass
+
+    out.append({
+        "slug": p.slug,
+        "label": p.label,
+        "desc": p.tui_desc,
+        "env_keys": env_keys,
+        "doc_url": doc_url,
+        "models": models,
+        "authenticated": is_authed,
+    })
+
+json.dump({"providers": out}, sys.stdout)
+"""
+
+
+def _shape_live_catalog_entry(entry: dict) -> Optional[dict]:
+    """Normalise one live-catalog provider into XSafeClaw's scan-data shape.
+
+    Unlike the older version, this no longer drops provider entries with an
+    empty ``models`` list — instead it surfaces them as ``available=False``
+    so the UI can grey them out and the user sees *why* the provider exists
+    but is unusable (missing API key, OAuth not completed, etc.).  This
+    closes the regression where unauthenticated aggregators (``nous``,
+    ``openrouter`` without an ``OPENROUTER_API_KEY``) silently produced a
+    successful-looking selection that blew up at chat time.
+    """
+    slug = str(entry.get("slug") or "").strip()
+    if not slug:
+        return None
+
+    authed = bool(entry.get("authenticated"))
+
+    # Preserve XSafeClaw's historical "<slug>/<bare_id>" id convention so
+    # existing saved selections (and the downstream _quick_model_config_hermes
+    # dispatch path) keep working without any other changes.
+    prefix = f"{slug}/"
+    models_out: list[dict] = []
+    for m in entry.get("models") or []:
+        bid = str(m.get("bare_id") or "").strip()
+        if not bid:
+            continue
+        display_id = bid if bid.startswith(prefix) else f"{prefix}{bid}"
+        models_out.append({
+            "id": display_id,
+            "name": str(m.get("name") or bid),
+            "contextWindow": int(m.get("context_window") or 0),
+            "reasoning": bool(m.get("reasoning") or False),
+            "available": authed,
+            "input": "text",
+        })
+
+    return {
+        "id": slug,
+        "name": str(entry.get("label") or slug),
+        "keyUrl": PROVIDER_KEY_URLS.get(slug, ""),
+        "models": models_out,
+        "available": authed,
+        "requiresCredentials": not authed,
+        # Extra fields preserved for future use (not consumed by the current
+        # frontend; leaving them here avoids another round-trip when we
+        # eventually surface provider env-var hints / docs).
+        "_hermes_env_keys": list(entry.get("env_keys") or ()),
+        "_hermes_doc_url": str(entry.get("doc_url") or ""),
+        "_hermes_desc": str(entry.get("desc") or ""),
+    }
+
+
+def _fetch_hermes_catalog_live(*, force: bool = False) -> Optional[list[dict]]:
+    """Spawn Hermes's own Python and return the live provider/model catalog.
+
+    Results are cached for ``_HERMES_CATALOG_TTL_S`` seconds.  Returns
+    ``None`` when Hermes isn't installed, the probe subprocess fails, or
+    the interpreter can't import the expected modules — every caller must
+    handle ``None`` by falling back to the static catalog.
+    """
+    global _hermes_catalog_cache
+    import subprocess
+    import time
+
+    now = time.monotonic()
+    if not force and _hermes_catalog_cache is not None:
+        cached, stamp = _hermes_catalog_cache
+        if now - stamp < _HERMES_CATALOG_TTL_S:
+            return cached
+
+    interp = _hermes_python_interpreter()
+    if not interp:
+        return None
+
+    env = _build_env()
+    root = _hermes_install_root()
+    if root:
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{root}{_PATH_SEP}{existing_pp}" if existing_pp else root
+        )
+    # Hermes's models.dev loader caches to ~/.hermes; ensure HOME resolves
+    # there even when XSafeClaw is launched under systemd / nohup.
+    env.setdefault("HOME", str(Path.home()))
+
+    try:
+        result = subprocess.run(
+            [interp, "-I", "-c", _HERMES_CATALOG_PROBE_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    if payload.get("error"):
+        return None
+
+    providers_raw = payload.get("providers") or []
+    shaped: list[dict] = []
+    for entry in providers_raw:
+        if not isinstance(entry, dict):
+            continue
+        out = _shape_live_catalog_entry(entry)
+        if out is not None:
+            shaped.append(out)
+
+    if not shaped:
+        return None
+
+    _hermes_catalog_cache = (shaped, now)
+    return shaped
+
+
+# ── Live Hermes *configured-models* bridge ────────────────────────────────────
+# Sibling of _fetch_hermes_catalog_live() — that one returns the full catalog
+# ("what could be configured"), this one returns only what Hermes actually has
+# credentials for right now ("what is configured").  The CMD-UI model picker
+# consumes this so every provider the user logged into shows up as an option,
+# not just the one currently stored in ``config.yaml::model.default``.
+#
+# Cached for 30s — much shorter than the catalog's 10min, because auth state
+# and ``custom_providers`` change the instant a user edits ~/.hermes/.env or
+# runs ``hermes auth``, and we want the CMD-UI to reflect that quickly.
+
+_HERMES_CONFIGURED_TTL_S = 30.0
+_hermes_configured_cache: tuple[dict, float] | None = None
+
+# Inline probe executed inside the Hermes venv.  Uses the same trust boundary
+# as §28's catalog probe — we rely on Hermes's own ``list_available_providers``
+# for the authenticated check so our view of "configured" always matches what
+# ``hermes model`` / ``/model`` show.
+_HERMES_CONFIGURED_PROBE_SCRIPT = r"""
+import json, sys
+try:
+    from hermes_cli.env_loader import load_hermes_dotenv
+    load_hermes_dotenv()
+except Exception:
+    pass
+
+try:
+    from hermes_cli.models import (
+        CANONICAL_PROVIDERS,
+        list_available_providers,
+        get_default_model_for_provider,
+    )
+    from hermes_cli.config import load_config
+except Exception as exc:
+    json.dump({"error": f"import failed: {exc!r}"}, sys.stdout)
+    sys.exit(0)
+
+label_for = {p.slug: p.label for p in CANONICAL_PROVIDERS}
+
+try:
+    cfg = load_config() or {}
+except Exception:
+    cfg = {}
+
+mcfg = cfg.get("model", "")
+if isinstance(mcfg, dict):
+    active_model = str(mcfg.get("default", "") or mcfg.get("model", "")).strip()
+    active_provider = str(mcfg.get("provider", "") or "").strip()
+else:
+    active_model = str(mcfg).strip()
+    active_provider = ""
+
+authed = []
+try:
+    for entry in list_available_providers() or []:
+        if not isinstance(entry, dict) or not entry.get("authenticated"):
+            continue
+        pid = str(entry.get("id") or "").strip()
+        # "custom" is surfaced via cfg["custom_providers"] below, skip here.
+        if not pid or pid == "custom":
+            continue
+        try:
+            default_m = str(get_default_model_for_provider(pid) or "").strip()
+        except Exception:
+            default_m = ""
+        authed.append({
+            "slug": pid,
+            "label": str(entry.get("label") or label_for.get(pid) or pid),
+            "default_model": default_m,
+        })
+except Exception:
+    pass
+
+customs = []
+cps = cfg.get("custom_providers")
+if isinstance(cps, list):
+    for cp in cps:
+        if not isinstance(cp, dict):
+            continue
+        name = str(cp.get("name") or "").strip()
+        model = str(cp.get("model") or "").strip()
+        base_url = str(cp.get("base_url") or "").strip()
+        if not name or not model or not base_url:
+            continue
+        customs.append({"name": name, "model": model})
+
+json.dump({
+    "active_model": active_model,
+    "active_provider": active_provider,
+    "authenticated": authed,
+    "custom": customs,
+}, sys.stdout)
+"""
+
+
+def _fetch_hermes_configured_models(*, force: bool = False) -> Optional[dict]:
+    """Ask Hermes which providers are authenticated + what their models are.
+
+    Returns a dict of the form::
+
+        {
+            "active_model": "deepseek/deepseek-chat",  # from config.yaml
+            "active_provider": "deepseek",
+            "authenticated": [{"slug": "anthropic", "label": "Anthropic",
+                                "default_model": "claude-sonnet-4.5"}, ...],
+            "custom": [{"name": "MyGateway", "model": "llama-3.1-70b"}, ...],
         }
 
+    Returns ``None`` when Hermes isn't installed or the probe fails — callers
+    must fall back gracefully (usually by degrading to the single-model read
+    from config.yaml).
+    """
+    global _hermes_configured_cache
+    import subprocess
+    import time
+
+    now = time.monotonic()
+    if not force and _hermes_configured_cache is not None:
+        cached, stamp = _hermes_configured_cache
+        if now - stamp < _HERMES_CONFIGURED_TTL_S:
+            return cached
+
+    interp = _hermes_python_interpreter()
+    if not interp:
+        return None
+
+    env = _build_env()
+    root = _hermes_install_root()
+    if root:
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{root}{_PATH_SEP}{existing_pp}" if existing_pp else root
+        )
+    env.setdefault("HOME", str(Path.home()))
+
+    try:
+        result = subprocess.run(
+            [interp, "-I", "-c", _HERMES_CONFIGURED_PROBE_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None
+
+    _hermes_configured_cache = (payload, now)
+    return payload
+
+
+def _invalidate_hermes_configured_cache() -> None:
+    """Drop the cached configured-models probe so the next CMD-UI refresh re-reads.
+
+    Called after ``/api/system/quick-model-config`` writes to Hermes so the
+    user sees the new provider/model deck immediately instead of waiting up
+    to 30s for the TTL to expire.
+    """
+    global _hermes_configured_cache
+    _hermes_configured_cache = None
+
+
+# ── §35: XSafeClaw-side persisted "configured-by-user" model list ─────────────
+# Hermes's ``config.yaml::model.default`` only tracks one model at a time and
+# ``hermes_cli.models.get_default_model_for_provider`` returns Hermes's
+# **hardcoded** per-provider default (``""`` for OpenRouter, ``"kimi-k2.5"`` for
+# alibaba, ...), neither of which captures *what the user actually picked the
+# last time they ran quick-model-config*.  Without our own bookkeeping the
+# CMD-UI's Create-Agent dropdown loses every prior pick on restart and shows
+# Hermes's wrong defaults instead — see §35 in the change log.
+#
+# This file is a tiny append-only-with-dedupe ledger:
+#
+#     ~/.xsafeclaw/configured_models.json
+#     {
+#       "version": 1,
+#       "models": [
+#         {"slug": "openrouter", "model_id": "openrouter/anthropic/claude-opus-4.7",
+#          "bare_id": "anthropic/claude-opus-4.7", "name": "...", "configured_at": 1.7e9},
+#         ...
+#       ]
+#     }
+#
+# Reads are cheap (no parse caching; file is tiny).  Writes are atomic via
+# tmp-then-rename so a crashed process can't leave a half-written ledger.
+
+_XS_CONFIGURED_MODELS_VERSION = 1
+
+
+def _xs_configured_models_path() -> Path:
+    """Path to the XSafeClaw-side configured-models ledger."""
+    return Path.home() / ".xsafeclaw" / "configured_models.json"
+
+
+def _load_xs_configured_models() -> list[dict]:
+    """Load the ledger.  Returns ``[]`` on missing / unparseable / wrong-shape file.
+
+    Each entry is normalised so callers can rely on at least
+    ``{"slug": str, "model_id": str, "bare_id": str, "name": str, "configured_at": float}``.
+    """
+    path = _xs_configured_models_path()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    items = raw.get("models")
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("slug") or "").strip()
+        model_id = str(item.get("model_id") or "").strip()
+        if not slug or not model_id:
+            continue
+        bare_id = str(item.get("bare_id") or "").strip()
+        if not bare_id:
+            # Backfill ``bare_id`` from ``model_id`` for entries written by an
+            # older version of the recorder, so consumers can lean on the
+            # invariant that bare_id is always populated.
+            if "/" in model_id:
+                _, bare_id = model_id.split("/", 1)
+            else:
+                bare_id = model_id
+        out.append({
+            "slug": slug,
+            "model_id": model_id,
+            "bare_id": bare_id,
+            "name": str(item.get("name") or bare_id),
+            "configured_at": float(item.get("configured_at") or 0.0),
+        })
+    return out
+
+
+def _record_xs_configured_model(
+    *,
+    slug: str,
+    model_id: str,
+    bare_id: str = "",
+    name: str = "",
+) -> None:
+    """Upsert a (slug, bare_id) pair into the ledger.
+
+    Idempotent on ``(slug, bare_id)`` — re-saving the same pick just refreshes
+    its ``configured_at`` timestamp (so the CMD-UI's "most recent" sort still
+    works) without producing duplicates.
+    """
+    slug = (slug or "").strip()
+    model_id = (model_id or "").strip()
+    if not slug or not model_id:
+        return
+
+    if not bare_id:
+        bare_id = model_id.split("/", 1)[1] if "/" in model_id else model_id
+    bare_id = bare_id.strip()
+    if not bare_id:
+        return
+
+    name = (name or bare_id).strip()
+
+    import time
+    now_ts = time.time()
+
+    entries = _load_xs_configured_models()
+    matched = False
+    for entry in entries:
+        if entry["slug"] == slug and entry["bare_id"] == bare_id:
+            entry["model_id"] = model_id
+            entry["name"] = name
+            entry["configured_at"] = now_ts
+            matched = True
+            break
+    if not matched:
+        entries.append({
+            "slug": slug,
+            "model_id": model_id,
+            "bare_id": bare_id,
+            "name": name,
+            "configured_at": now_ts,
+        })
+
+    path = _xs_configured_models_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {"version": _XS_CONFIGURED_MODELS_VERSION, "models": entries},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except Exception:
+        # Ledger writes are best-effort: failing to persist must not break the
+        # primary quick-model-config flow that already wrote config.yaml + .env
+        # successfully.  The CMD-UI degrades to "only the active model is
+        # remembered" until the next successful save.
+        pass
+
+
+def _remove_xs_configured_model(*, slug: str, bare_id: str) -> bool:
+    """Drop one ``(slug, bare_id)`` entry from the ledger.
+
+    Returns ``True`` if the entry existed and was removed, ``False`` if there
+    was no matching entry (idempotent — callers can treat the absence as a
+    success too).  Never touches ``.env`` or ``config.yaml``: deleting a
+    ledger entry only hides the model from the CMD-UI's "configured models"
+    deck; agents already pinned to that ``model_id`` keep working as long
+    as the provider's API key is still present in ``.env``.
+    """
+    slug = (slug or "").strip()
+    bare_id = (bare_id or "").strip()
+    if not slug or not bare_id:
+        return False
+
+    entries = _load_xs_configured_models()
+    kept = [e for e in entries if not (e["slug"] == slug and e["bare_id"] == bare_id)]
+    if len(kept) == len(entries):
+        return False
+
+    path = _xs_configured_models_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {"version": _XS_CONFIGURED_MODELS_VERSION, "models": kept},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except Exception:
+        # Same best-effort policy as ``_record_xs_configured_model``: a
+        # failed disk write must not pretend the entry is gone (the next
+        # CMD-UI refresh would still see it), so re-raise as False.
+        return False
+    return True
+
+
+def _seed_xs_configured_models_from_config(
+    *,
+    default_model: str,
+    provider: str,
+) -> None:
+    """One-shot migration: when the ledger is empty but ``config.yaml`` already
+    has a ``model.default`` (e.g. user upgraded into §35 with a pre-existing
+    setup), record the active model so it survives the very first restart.
+    """
+    if not default_model or not provider:
+        return
+    if _load_xs_configured_models():
+        return  # Ledger already has entries — nothing to seed.
+    if "/" in default_model:
+        bare_id = default_model
+        full_id = f"{provider}/{default_model}" if not default_model.startswith(f"{provider}/") else default_model
+    else:
+        bare_id = default_model
+        full_id = f"{provider}/{default_model}"
+    _record_xs_configured_model(
+        slug=provider,
+        model_id=full_id,
+        bare_id=bare_id,
+        name=bare_id,
+    )
+
+
+def _build_onboard_scan_data_hermes() -> dict:
+    """Build onboard-scan response for Hermes.
+
+    Prefers the live catalog read out of ``hermes_cli.models`` /
+    ``agent.models_dev`` via the Hermes-bundled interpreter, so whatever the
+    installed Hermes build supports is what users see.  Falls back to the
+    static ``_HERMES_MODEL_CATALOG`` below whenever the live probe fails
+    (Hermes not installed, shebang unparseable, import failure after a
+    breaking Hermes upgrade, etc.).
+
+    Also reads ``config.yaml`` to surface the currently configured default
+    model so the Configure UI can highlight the active selection.
+    """
+    providers: dict[str, dict] = {}
+
+    live = _fetch_hermes_catalog_live()
+    if live:
+        for entry in live:
+            providers[entry["id"]] = entry
+        # Provider-shell merge: if Hermes's canonical list of providers lost
+        # coverage of something we know about (Hermes upgrade removed a
+        # slug, probe partially failed, etc.), expose an empty shell so the
+        # UI still knows the provider exists.  We *never* carry the static
+        # model ids forward anymore — live Hermes is the single source of
+        # truth for what's installable; stale or wrong ids here caused the
+        # ``Model Not Exist`` / ``[No response]`` regressions.
+        for prov in _HERMES_MODEL_CATALOG:
+            pid = prov["id"]
+            if pid in providers:
+                continue
+            providers[pid] = {
+                "id": pid,
+                "name": prov["name"],
+                "keyUrl": PROVIDER_KEY_URLS.get(pid, ""),
+                "models": [],
+                "available": False,
+                "requiresCredentials": True,
+            }
+    else:
+        # Live probe unavailable (Hermes not installed, interpreter shebang
+        # unparseable, import failure after a breaking Hermes upgrade).  We
+        # surface the provider shells so the UI can still render them + let
+        # the user start the setup flow, but we keep the models list empty
+        # to avoid offering selections we can't validate.
+        for prov in _HERMES_MODEL_CATALOG:
+            prov_id = prov["id"]
+            providers[prov_id] = {
+                "id": prov_id,
+                "name": prov["name"],
+                "keyUrl": PROVIDER_KEY_URLS.get(prov_id, ""),
+                "models": [],
+                "available": False,
+                "requiresCredentials": True,
+            }
+
+    # ``default_model`` is what the Configure wizard uses to preselect the
+    # current model when the user re-opens it.  Historically Hermes stored
+    # the slug-prefixed id (``openrouter/anthropic/claude-opus-4.7``) in
+    # ``model.default``, and the frontend does ``def.split('/')[0]`` to
+    # recover the provider slug.  Since §34 we now write the **bare** id to
+    # ``model.default`` (to match Hermes's outbound-API contract), so we
+    # re-attach the provider slug here purely for the UI hydration path.
+    # Without this, Configure would read ``anthropic/claude-opus-4.7`` and
+    # try to match provider ``"anthropic"`` against the catalog, which lists
+    # the route as ``"openrouter"`` and silently drops the pre-selection.
     default_model = ""
     try:
         if _CONFIG_PATH.exists():
@@ -3385,7 +4029,12 @@ def _build_onboard_scan_data_hermes() -> dict:
             cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
             model_cfg = cfg.get("model", "")
             if isinstance(model_cfg, dict):
-                default_model = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+                raw_default = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+                raw_provider = str(model_cfg.get("provider", "") or "").strip()
+                if raw_default and raw_provider and not raw_default.startswith(f"{raw_provider}/"):
+                    default_model = f"{raw_provider}/{raw_default}"
+                else:
+                    default_model = raw_default
             else:
                 default_model = str(model_cfg).strip()
     except Exception:
@@ -3492,6 +4141,10 @@ async def onboard_scan(refresh: bool = False):
             config_summary.append(f"model: {hermes_default}")
 
         return {
+            # Surfaced so Hermes-only UI affordances (e.g. the §36 model-delete
+            # button in the agent-town picker) can hide themselves on OpenClaw
+            # without an extra status round-trip.
+            "platform": "hermes",
             "auth_providers": _HERMES_AUTH_PROVIDERS,
             "model_providers": data.get("model_providers", []),
             "auth_profiles": [],
@@ -3502,6 +4155,19 @@ async def onboard_scan(refresh: bool = False):
             "search_providers": SEARCH_PROVIDERS,
             "config_exists": _CONFIG_PATH.exists(),
             "config_summary": config_summary,
+            # Per-provider hints the Hermes UI needs for the "pick a base URL"
+            # step.  Kept in a single ``provider_endpoints`` bag so adding
+            # similar fixes for other providers (moonshot .ai vs .cn, zai
+            # coding vs paas, minimax .io vs .cn) later is a one-entry change
+            # on both sides.  Today only ``alibaba`` ships presets; every
+            # other Hermes provider keeps its single default.
+            "provider_endpoints": {
+                "alibaba": {
+                    "env_key": _HERMES_DASHSCOPE_BASE_URL_ENV,
+                    "current": _current_hermes_dashscope_base_url(),
+                    "presets": _HERMES_DASHSCOPE_ENDPOINTS,
+                },
+            },
             "defaults": {
                 "mode": "local",
                 "gateway_port": settings.hermes_api_port,
@@ -4385,11 +5051,124 @@ class QuickModelConfigRequest(BaseModel):
     provider: str
     api_key: str = ""
     model_id: str
+    # Optional Hermes-side endpoint override.  Currently only the ``alibaba``
+    # provider consumes it (see §33 — Hermes's hardcoded ``coding-intl``
+    # default traps standard DashScope keys); other providers ignore it.  The
+    # string is written verbatim into ``~/.hermes/.env`` under the per-provider
+    # env var (``DASHSCOPE_BASE_URL`` for alibaba), so callers must pass a
+    # fully-qualified URL — no path concatenation, no trailing-slash fixups.
+    base_url: str = ""
     # When True (default), Hermes path auto-restarts the API server after
     # writing ~/.hermes/.env + config.yaml and polls /v1/models to confirm
     # the new model is visible. Set False to batch multiple edits and call
     # POST /system/hermes/apply yourself.
     auto_apply: bool = True
+
+
+class RemoveConfiguredModelRequest(BaseModel):
+    """Body for ``POST /system/hermes/configured-models/delete``.
+
+    Either ``model_id`` (the prefixed ``slug/bare_id`` form the CMD-UI
+    already carries in its picker state) or the explicit ``slug`` +
+    ``bare_id`` pair can be passed.  ``model_id`` takes precedence when
+    both are supplied; we split it on the first ``/`` to recover the
+    routing slug, which is the same convention §34 / §35 use everywhere
+    else in the Hermes branch.
+    """
+
+    model_id: str = ""
+    slug: str = ""
+    bare_id: str = ""
+
+
+@router.post("/hermes/configured-models/delete")
+async def delete_configured_model(body: RemoveConfiguredModelRequest):
+    """Remove one entry from XSafeClaw's per-user configured-model ledger.
+
+    Hermes-only.  Refuses to delete the model currently active in
+    ``~/.hermes/config.yaml::model.default`` so we never leave Hermes
+    pointing at a model the picker won't show.  Does **not** touch
+    ``~/.hermes/.env`` — the provider's API key stays so any agent that
+    was already created with this ``model_id`` keeps working.
+
+    See §36.
+    """
+    if not settings.is_hermes:
+        raise HTTPException(
+            status_code=400,
+            detail="Configured-model deletion is only available on the Hermes platform.",
+        )
+
+    # 1. Resolve (slug, bare_id) from whichever shape the caller used.
+    slug = (body.slug or "").strip()
+    bare_id = (body.bare_id or "").strip()
+    if body.model_id:
+        full = body.model_id.strip()
+        if "/" in full:
+            split_slug, split_bare = full.split("/", 1)
+            slug = slug or split_slug
+            bare_id = bare_id or split_bare
+        else:
+            # No slash: treat the whole thing as bare_id and require
+            # callers to also pass an explicit slug.  Hermes-side ids
+            # should always be prefixed (post-§35 the ledger normalises
+            # this), so this branch is only hit by hand-rolled requests.
+            bare_id = bare_id or full
+    if not slug or not bare_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing model_id (or slug + bare_id).",
+        )
+
+    # 2. Refuse if the request targets the currently active model.
+    #
+    # Why refuse instead of also clearing config.yaml::model.default:
+    # leaving model.default empty makes Hermes fall back to its own
+    # "auto-detect main provider" path, which is exactly the lottery
+    # that produced the §35 Kimi-zombie surprise.  Forcing the user to
+    # explicitly switch active first keeps the deletion path side-effect-free.
+    active_slug = ""
+    active_bare = ""
+    if _CONFIG_PATH.exists():
+        try:
+            import yaml as _yaml_lib
+            cfg_yaml = _yaml_lib.safe_load(_CONFIG_PATH.read_text("utf-8")) or {}
+            mcfg = cfg_yaml.get("model", "")
+            if isinstance(mcfg, dict):
+                active_bare = str(mcfg.get("default", "") or mcfg.get("model", "")).strip()
+                active_slug = str(mcfg.get("provider", "") or "").strip()
+        except Exception:
+            pass
+
+    if active_slug == slug and active_bare == bare_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot delete the model that is currently active in "
+                "~/.hermes/config.yaml. Switch to a different model first, "
+                "then delete this one."
+            ),
+        )
+
+    # 3. Remove from the ledger.
+    removed = _remove_xs_configured_model(slug=slug, bare_id=bare_id)
+
+    # 4. Drop caches so the next /api/chat/available-models read reflects
+    #    the change immediately rather than after the 30 s TTL.  Same
+    #    invalidation pair _quick_model_config_hermes uses.
+    try:
+        from .chat import _available_models_cache
+        _available_models_cache["expires_at"] = 0.0
+    except Exception:
+        pass
+    _invalidate_hermes_configured_cache()
+
+    return {
+        "success": True,
+        "removed": removed,
+        "slug": slug,
+        "bare_id": bare_id,
+    }
 
 
 @router.post("/quick-model-config")
@@ -4541,6 +5320,22 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
 
         hermes_env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
+    # --- 1b. Persist per-provider base-URL override (§33 — DashScope trap) ---
+    #
+    # Today only ``alibaba`` uses this branch.  We gate on the provider slug
+    # rather than "is base_url non-empty" so a stray value on a request for
+    # some other provider can't accidentally write a bogus DASHSCOPE_BASE_URL.
+    # When the UI leaves the field blank we *don't* delete an existing value —
+    # that would silently regress users who hand-edited the dotenv to some
+    # custom proxy URL.  Removal is an explicit action; that can come later.
+    base_url_clean = (body.base_url or "").strip()
+    if raw_provider == "alibaba" and base_url_clean:
+        _upsert_dotenv_line(
+            _hermes_env_path(),
+            _HERMES_DASHSCOPE_BASE_URL_ENV,
+            base_url_clean,
+        )
+
     # --- 2. Write model + provider to config.yaml ---
     config: dict = {}
     if _CONFIG_PATH.exists():
@@ -4549,10 +5344,24 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         except Exception:
             config = {}
 
+    # Split the incoming "<slug>/<bare_id>" id back into the two fields
+    # Hermes's ``config.yaml`` expects — ``model.provider`` for routing and
+    # ``model.default`` for the **bare** id to forward to the upstream API.
+    #
+    # Prior behaviour wrote the full slug-prefixed string into
+    # ``model.default`` (e.g. ``openrouter/anthropic/claude-opus-4.7``).  That
+    # mis-matches Hermes's contract: the ``auxiliary_client`` takes
+    # ``model.default`` verbatim as the outbound model id, so OpenRouter (and
+    # any other provider whose bare ids already contain a ``/``) rejected the
+    # double-prefixed string with ``"... is not a valid model ID"`` and the
+    # agent returned ``[No response]``.  See §34 for the full trace.
+    #
+    # ``split("/", 1)`` cuts only the first ``/``, so aggregator bare ids with
+    # their own ``vendor/model`` form (``anthropic/claude-opus-4.7``,
+    # ``openai/gpt-5.4-mini``) survive intact and get written correctly.
     model_id = body.model_id
     if "/" in model_id:
-        hermes_provider = model_id.split("/", 1)[0]
-        hermes_model = model_id
+        hermes_provider, hermes_model = model_id.split("/", 1)
     else:
         hermes_provider = raw_provider
         hermes_model = model_id
@@ -4568,12 +5377,30 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         encoding="utf-8",
     )
 
+    # --- 2.5. Persist user pick to XSafeClaw ledger (§35) ---
+    # ``config.yaml::model.default`` only stores the most recent pick — the
+    # next save overwrites it and the previous selection is lost.  We need
+    # the CMD-UI's Create-Agent picker to remember **every** model the user
+    # has explicitly configured so it survives both restarts and
+    # configure-another-provider flows.  See ``_record_xs_configured_model``
+    # for the file-format contract.
+    _record_xs_configured_model(
+        slug=hermes_provider,
+        model_id=body.model_id,
+        bare_id=hermes_model,
+        name=hermes_model,
+    )
+
     # --- 3. Invalidate caches ---
     try:
         from .chat import _available_models_cache
         _available_models_cache["expires_at"] = 0.0
     except Exception:
         pass
+    # Drop the Hermes configured-providers probe cache too. Otherwise the
+    # CMD-UI could keep showing the pre-edit deck for up to 30s after
+    # quick-model-config writes to ~/.hermes/.env + config.yaml.
+    _invalidate_hermes_configured_cache()
 
     # --- 4. Apply: restart Hermes API server + verify readiness ---
     # Mirrors the OpenClaw fast-path, which relies on `openclaw onboard`

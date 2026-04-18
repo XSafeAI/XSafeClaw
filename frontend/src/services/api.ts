@@ -496,6 +496,15 @@ export const systemAPI = {
     api_key?: string;
     model_id: string;
     /**
+     * Hermes-only per-provider base URL override.  Currently consumed only
+     * by the ``alibaba`` provider (§33): the wizard/modal ships one of the
+     * DashScope endpoint presets so the adapter's hardcoded
+     * ``coding-intl.dashscope.aliyuncs.com`` default doesn't 401 standard
+     * DashScope keys.  Blank means "don't touch DASHSCOPE_BASE_URL in
+     * ~/.hermes/.env"; non-alibaba providers ignore this field.
+     */
+    base_url?: string;
+    /**
      * Hermes-only: when true (default on the server), the backend restarts the
      * Hermes API server after writing ~/.hermes/.env + config.yaml and polls
      * /v1/models to confirm `model_id` is visible. Set false to batch edits
@@ -531,6 +540,21 @@ export const systemAPI = {
       visible_model: string | null;
       output: string;
     }>('/system/hermes/apply', modelId ? { model_id: modelId } : {}),
+
+  /**
+   * Hermes only — drop one entry from the per-user configured-model ledger
+   * (~/.xsafeclaw/configured_models.json).  Refuses (HTTP 409) when the
+   * target model is the one currently active in ~/.hermes/config.yaml; the
+   * UI must switch active first.  Does NOT touch ~/.hermes/.env, so any
+   * agent already created with this `model_id` keeps working.  See §36.
+   */
+  removeConfiguredModel: (modelId: string) =>
+    api.post<{
+      success: boolean;
+      removed: boolean;
+      slug: string;
+      bare_id: string;
+    }>('/system/hermes/configured-models/delete', { model_id: modelId }),
 
   providerHasKey: (provider: string) =>
     api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
