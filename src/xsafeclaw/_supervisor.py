@@ -215,12 +215,42 @@ def run_server_with_supervisor(
             )
 
     # ── Main server ──────────────────────────────────────────────────────
-    # Propagate the pin via env var so ``config.Settings`` picks it up at
-    # import time. We explicitly clear the picker-mode flag in case some
-    # outer shell set it by mistake; otherwise the middleware would block
-    # everything on the real server too.
+    # Propagate the pin via env var so ``config.Settings`` picks it up for
+    # any *future* instantiation (e.g. uvicorn reload workers). We also
+    # explicitly clear the picker-mode flag in case some outer shell set it
+    # by mistake; otherwise the middleware would block everything on the
+    # real server too.
     if chosen_platform is not None:
         os.environ["PLATFORM"] = chosen_platform
+
+        # Critical: ``config.py`` creates a module-level ``settings`` singleton
+        # at first import, snapshotting ``PLATFORM`` at that moment. ``__main__``
+        # (and ``cli``) imports ``settings`` BEFORE this supervisor runs, so
+        # by now the singleton already has ``platform="auto"`` cached — and
+        # because the rest of the app does ``from .config import settings``
+        # (binding by name), replacing the module attribute wouldn't reach
+        # them either. So we mutate the existing instance in place. Pydantic
+        # v2 ``BaseSettings`` fields are mutable by default, and the derived
+        # ``resolved_platform`` / ``is_openclaw`` / ``is_hermes`` properties
+        # read ``self.platform`` on every access, so this is sufficient.
+        try:
+            from . import config as _cfg
+
+            existing = getattr(_cfg, "settings", None)
+            if existing is not None:
+                existing.platform = chosen_platform
+                _log(
+                    f"✓ Settings singleton updated: platform={chosen_platform} "
+                    f"(resolved_platform={existing.resolved_platform})"
+                )
+        except Exception as exc:  # noqa: BLE001
+            _log(
+                f"⚠ Could not propagate platform={chosen_platform!r} into "
+                f"config.settings singleton: {exc!r}. The app will likely "
+                f"fall back to _detect_platform() — re-export PLATFORM in "
+                f"your .env to work around.",
+                stderr=True,
+            )
     os.environ.pop(PICKER_MODE_ENV, None)
 
     if on_server_start is not None:
