@@ -72,7 +72,7 @@ interface FormData {
 const INITIAL: FormData = {
   mode: 'local', authProvider: '', authMethod: '', apiKey: '', modelFilter: '', modelId: '',
   gatewayPort: 18789, gatewayBind: 'loopback', gatewayAuthMode: 'token', gatewayToken: '',
-  channels: [], hooks: [], workspace: '~/.openclaw/workspace',
+  channels: [], hooks: [], workspace: '',
   installDaemon: true, tailscaleMode: 'off',
   searchProvider: '', searchApiKey: '', remoteUrl: '', remoteToken: '',
   selectedSkills: [], wizardMode: 'quickstart', configAction: 'update', resetScope: '',

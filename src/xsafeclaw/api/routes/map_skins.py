@@ -26,15 +26,15 @@ _STATIC_MAP_DIR = _STATIC_DIR / "Map-opensorce"
 def _public_dir() -> Path:
     """Return the directory that the active file-server reads Map PNGs from.
 
-    Production (built frontend in static/): FastAPI spa_fallback reads from
-        static/Map-opensorce/  →  downloads MUST land there.
-    Dev mode (no build, Vite dev server):   Vite reads from
-        frontend/public/Map-opensorce/  →  downloads land there.
-    """
-    if (_STATIC_DIR / "index.html").is_file():
-        _STATIC_MAP_DIR.mkdir(parents=True, exist_ok=True)
-        return _STATIC_MAP_DIR
+    Dev mode (source tree + Vite dev server): Vite serves from
+        frontend/public/Map-opensorce/  →  downloads must land there so the
+        browser (hitting Vite's port) can see them.
+    Production (pip-installed, FastAPI serving built bundle): reads from
+        src/xsafeclaw/static/Map-opensorce/  →  downloads land there.
 
+    We pick by presence of ``frontend/public/`` — it only exists when the
+    repository is checked out in source form, not in a pip install.
+    """
     project_root = Path(__file__).parent.parent.parent.parent.parent
     dev_dir = project_root / "frontend" / "public" / "Map-opensorce"
     if dev_dir.is_dir():

@@ -32,6 +32,12 @@ except ImportError:
 
 router = APIRouter()
 
+# OpenClaw paths on the same machine as this API process.
+_OPENCLAW_DIR = Path.home() / ".openclaw"
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+_DEFAULT_OPENCLAW_WORKSPACE_STR = str(_OPENCLAW_DIR / "workspace")
+
 # ---------------------------------------------------------------------------
 # PTY-based process registry for interactive (onboard) steps
 # { proc_id: {"proc": Process, "master_fd": int, "queue": Queue, "done": bool} }
@@ -332,6 +338,7 @@ async def get_system_status():
             "openclaw_path": None,
             "node_version": _find_node_version(),
             "config_exists": _CONFIG_PATH.exists(),
+            "default_workspace": _DEFAULT_OPENCLAW_WORKSPACE_STR,
         }
 
     version: Optional[str] = None
@@ -356,6 +363,7 @@ async def get_system_status():
                 "node_version": _find_node_version(),
                 "config_exists": _CONFIG_PATH.exists(),
                 "error": "node_version_too_low",
+                "default_workspace": _DEFAULT_OPENCLAW_WORKSPACE_STR,
             }
     except Exception:
         version = "unknown"
@@ -382,6 +390,7 @@ async def get_system_status():
         "openclaw_path": openclaw_path,
         "node_version": _find_node_version(),
         "config_exists": _CONFIG_PATH.exists(),
+        "default_workspace": _DEFAULT_OPENCLAW_WORKSPACE_STR,
     }
 
 
@@ -1966,7 +1975,7 @@ async def install_hermes():
 
 class ConfigResetRequest(BaseModel):
     scope: str = "config"
-    workspace: str = "~/.openclaw/workspace"
+    workspace: str = _DEFAULT_OPENCLAW_WORKSPACE_STR
 
 
 @router.post("/config-reset")
@@ -2531,7 +2540,11 @@ PROVIDERS: list[dict] = [
 AVAILABLE_HOOKS = [
     {"id": "session-memory", "name": "Session Memory", "description": "Save session context to memory on /new or /reset"},
     {"id": "boot-md", "name": "Boot MD", "description": "Execute BOOT.md on gateway startup"},
-    {"id": "command-logger", "name": "Command Logger", "description": "Log all commands to ~/.openclaw/logs/commands.log"},
+    {
+        "id": "command-logger",
+        "name": "Command Logger",
+        "description": f"Log all commands to {_OPENCLAW_DIR / 'logs' / 'commands.log'}",
+    },
     {"id": "bootstrap-extra-files", "name": "Bootstrap Extra Files", "description": "Include extra files during agent bootstrap"},
 ]
 
@@ -4266,7 +4279,7 @@ async def onboard_scan(refresh: bool = False):
             "gateway_auth_mode": gw.get("auth", {}).get("mode", "token"),
             "gateway_token": gw.get("auth", {}).get("token", ""),
             "tailscale_mode": gw.get("tailscale", {}).get("mode", "off"),
-            "workspace": agents.get("workspace", str(_OPENCLAW_DIR / "workspace")),
+            "workspace": agents.get("workspace", _DEFAULT_OPENCLAW_WORKSPACE_STR),
             "install_daemon": True,
             "remote_url": remote_cfg.get("url", ""),
             "remote_token": remote_cfg.get("token", ""),
@@ -4314,7 +4327,7 @@ async def onboard_defaults():
         "gateway_token": gw.get("auth", {}).get("token", ""),
         "channels": [],
         "hooks": enabled_hooks,
-        "workspace": agents.get("workspace", str(_OPENCLAW_DIR / "workspace")),
+        "workspace": agents.get("workspace", _DEFAULT_OPENCLAW_WORKSPACE_STR),
         "install_daemon": True,
         "tailscale_mode": gw.get("tailscale", {}).get("mode", "off"),
     }
@@ -4339,7 +4352,7 @@ class OnboardConfigRequest(BaseModel):
     gateway_token: str = ""
     channels: list[str] = Field(default_factory=list)
     hooks: list[str] = Field(default_factory=list)
-    workspace: str = "~/.openclaw/workspace"
+    workspace: str = _DEFAULT_OPENCLAW_WORKSPACE_STR
     install_daemon: bool = True
     tailscale_mode: str = "off"
     search_provider: str = ""

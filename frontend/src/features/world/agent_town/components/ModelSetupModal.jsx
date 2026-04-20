@@ -45,7 +45,7 @@ const DEFAULT_FORM = {
   gatewayBind: 'loopback',
   gatewayAuthMode: 'token',
   gatewayToken: '',
-  workspace: '~/.openclaw/workspace',
+  workspace: '',
   installDaemon: true,
   tailscaleMode: 'off',
   searchProvider: '',
@@ -281,6 +281,19 @@ export default function ModelSetupModal({
     }
     setEndpointChoice(seeded);
   }, [open, defaults, providerEndpoints]);
+
+  useEffect(() => {
+    if (!open || (defaults && defaults.workspace)) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await systemAPI.status();
+        if (cancelled || !data?.default_workspace) return;
+        setForm((f) => ({ ...f, workspace: f.workspace || data.default_workspace }));
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [open, defaults]);
 
   useEffect(() => {
     if (!open) return undefined;
