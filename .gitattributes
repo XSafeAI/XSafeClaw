@@ -1,0 +1,36 @@
+# Shell scripts MUST be LF-only — CRLF breaks bash with errors like
+# "invalid option name: pipefail". Force LF regardless of the
+# contributor's core.autocrlf setting.
+*.sh          text eol=lf
+*.bash        text eol=lf
+
+# Python / config / web source can be "native" on checkout but stored as LF
+# in the repo, which is git's default behaviour.
+*.py          text
+*.yml         text
+*.yaml        text
+*.json        text
+*.md          text
+*.ts          text
+*.tsx         text
+*.js          text
+*.jsx         text
+*.css         text
+*.html        text
+*.env         text
+*.env.example text
+
+# Binary assets — never try to normalise.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary

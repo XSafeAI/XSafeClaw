@@ -1,25 +1,39 @@
-"""API routes for OpenClaw agent chat sessions."""
+"""API routes for agent chat sessions (OpenClaw + Hermes)."""
 
 import asyncio
+import hashlib
 import json
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 
 from ...config import settings
+from ...database import get_db_context
 from ...gateway_client import GatewayClient
+from ...hermes_client import HermesClient
+from ...models import Message, Session
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
+from ...services.event_sync_service import EventSyncService
 
-# Path to OpenClaw sessions directory
+# ── Platform-aware paths ──────────────────────────────────────────────────
 _OPENCLAW_DIR = Path.home() / ".openclaw"
-_SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
-_SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
-_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_HERMES_DIR = settings.hermes_home
+
+if settings.is_hermes:
+    _SESSIONS_DIR = settings.hermes_sessions_dir
+    _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+    _CONFIG_PATH = settings.hermes_config_path
+else:
+    _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
+    _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
@@ -186,15 +200,189 @@ def _ensure_default_model_visible(payload: dict) -> dict:
 
 
 def _build_available_models_payload_from_config() -> dict:
-    """Fallback to configured models from ~/.openclaw/openclaw.json."""
+    """Fallback to configured models from platform config file.
+
+    Reads ``~/.openclaw/openclaw.json`` (OpenClaw) or
+    ``~/.hermes/config.yaml`` (Hermes).
+    """
     if not _CONFIG_PATH.exists():
         return {"models": [], "default_model": ""}
 
     try:
-        config = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = _CONFIG_PATH.read_text(encoding="utf-8")
+        if settings.is_hermes:
+            import yaml
+            config = yaml.safe_load(raw) or {}
+        else:
+            config = json.loads(raw)
     except Exception:
         return {"models": [], "default_model": ""}
 
+    if settings.is_hermes:
+        # Hermes config.yaml: ``model`` can be a nested dict with a
+        # ``default`` key (e.g. ``model: {default: "anthropic/claude-opus-4.6", provider: "auto"}``)
+        # or a bare string like ``model: "hermes-agent"``.
+        model_cfg = config.get("model", "")
+        if isinstance(model_cfg, dict):
+            default_model_raw = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+            cfg_provider = str(model_cfg.get("provider", "")).strip()
+        else:
+            default_model_raw = str(model_cfg).strip()
+            cfg_provider = ""
+
+        # Canonicalise the active-model id to the same "{slug}/{bare_id}" shape
+        # the ledger uses, so the dedup gate in ``_add_model`` actually
+        # collapses "active model" and "ledger entry for the same pick" into
+        # one row.  Two subtleties:
+        #
+        #   * After §34 ``config.yaml::model.default`` is **bare** (no slug
+        #     prefix); ``cfg_provider`` carries the slug separately.  We
+        #     re-prefix here.
+        #   * Aggregator bare ids (OpenRouter, Nous, ...) already contain
+        #     ``/`` themselves (e.g. ``anthropic/claude-opus-4.7``) — those
+        #     must NOT be split into provider=``anthropic`` because that
+        #     isn't a Hermes provider slug.  ``cfg_provider`` is the only
+        #     reliable source of the routing slug for those.
+        if default_model_raw:
+            if cfg_provider and cfg_provider != "auto":
+                if default_model_raw.startswith(f"{cfg_provider}/"):
+                    default_model = default_model_raw
+                else:
+                    default_model = f"{cfg_provider}/{default_model_raw}"
+            else:
+                # Old or hand-edited config without ``model.provider`` — fall
+                # back to the legacy "first segment is the slug" heuristic.
+                default_model = default_model_raw
+        else:
+            default_model = ""
+
+        models: list[dict] = []
+        seen_ids: set[str] = set()
+
+        def _add_model(mid: str, provider: str, name: str = "", reasoning: bool = False) -> None:
+            mid = (mid or "").strip()
+            if not mid or mid in seen_ids:
+                return
+            seen_ids.add(mid)
+            models.append({
+                "id": mid,
+                "name": (name or (mid.split("/", 1)[-1] if "/" in mid else mid)),
+                "provider": (provider or "hermes"),
+                "reasoning": bool(reasoning),
+            })
+
+        if default_model:
+            if cfg_provider and cfg_provider != "auto":
+                provider = cfg_provider
+                short = default_model_raw
+            elif "/" in default_model:
+                provider, short = default_model.split("/", 1)
+            else:
+                provider = "hermes"
+                short = default_model
+            _add_model(default_model, provider, short)
+
+        # ── §35: ledger-driven, auth-gated configured-model list ──────────────
+        # Why we can't use Hermes's per-provider defaults anymore:
+        #   * ``get_default_model_for_provider("openrouter")`` returns ``""``
+        #     (OpenRouter has thousands of models, no canonical pick), so
+        #     OpenRouter silently dropped from the deck even when the user had
+        #     explicitly picked ``anthropic/claude-opus-4.7``.
+        #   * ``get_default_model_for_provider("alibaba")`` returns
+        #     ``"kimi-k2.5"`` in the current Hermes build — a Kimi/Moonshot
+        #     model accidentally wired as alibaba's default — which made an
+        #     unconfigured "kimi" entry appear every time even though the
+        #     user only ever picked ``qwen3-max``.
+        #
+        # Both bugs come from trusting Hermes to remember what the user
+        # picked.  Hermes never did — only ``model.default`` (last-write-wins,
+        # one slot) does.  XSafeClaw now keeps its own ledger (§35) of every
+        # model the user explicitly saved, and we surface those here, gated
+        # by the current Hermes auth state so removing a key removes the
+        # corresponding entries automatically.
+        try:
+            from .system import (
+                _fetch_hermes_configured_models,
+                _load_xs_configured_models,
+                _seed_xs_configured_models_from_config,
+            )
+            probe = _fetch_hermes_configured_models()
+        except Exception:
+            probe = None
+            _load_xs_configured_models = None  # type: ignore[assignment]
+            _seed_xs_configured_models_from_config = None  # type: ignore[assignment]
+
+        # Build the auth gate: any slug Hermes currently considers
+        # authenticated, including the synthetic ``custom:<name>`` form for
+        # user-defined custom providers.  Empty set → degrade to "ledger
+        # entries are unconditionally trusted" (probe failed, don't penalize).
+        authed_slugs: set[str] = set()
+        gate_active = False
+        if isinstance(probe, dict):
+            gate_active = True
+            for entry in probe.get("authenticated") or []:
+                if not isinstance(entry, dict):
+                    continue
+                slug = str(entry.get("slug") or "").strip()
+                if slug:
+                    authed_slugs.add(slug)
+            for cp in probe.get("custom") or []:
+                if not isinstance(cp, dict):
+                    continue
+                cp_name = str(cp.get("name") or "").strip()
+                if cp_name:
+                    authed_slugs.add(f"custom:{cp_name}")
+
+        # Migration: if the ledger is empty but config.yaml already names a
+        # model (pre-§35 user, or someone who configured Hermes via its own
+        # CLI), seed one entry so the very first restart isn't blank.
+        if _seed_xs_configured_models_from_config and default_model:
+            seed_provider = cfg_provider or (
+                default_model.split("/", 1)[0] if "/" in default_model else ""
+            )
+            if seed_provider:
+                try:
+                    _seed_xs_configured_models_from_config(
+                        default_model=(
+                            default_model.split("/", 1)[1]
+                            if "/" in default_model
+                            else default_model
+                        ),
+                        provider=seed_provider,
+                    )
+                except Exception:
+                    pass
+
+        ledger_entries: list[dict] = []
+        if _load_xs_configured_models is not None:
+            try:
+                ledger_entries = _load_xs_configured_models()
+            except Exception:
+                ledger_entries = []
+
+        # Surface ledger entries newest-first so the picker's natural order
+        # mirrors the user's most recent intent.
+        for entry in sorted(
+            ledger_entries,
+            key=lambda e: float(e.get("configured_at") or 0.0),
+            reverse=True,
+        ):
+            slug = str(entry.get("slug") or "").strip()
+            full_id = str(entry.get("model_id") or "").strip()
+            bare_id = str(entry.get("bare_id") or "").strip() or full_id
+            display_name = str(entry.get("name") or bare_id)
+            if not slug or not full_id:
+                continue
+            if gate_active and slug not in authed_slugs:
+                # The provider used to be authenticated but the user removed
+                # the key (or rotated the .env).  Hide the entry; the ledger
+                # stays intact so re-adding the key resurrects it untouched.
+                continue
+            _add_model(full_id, slug, display_name)
+
+        return _ensure_default_model_visible({"models": models, "default_model": default_model})
+
+    # OpenClaw config
     providers_cfg = (
         config.get("models", {})
         .get("providers", {})
@@ -226,6 +414,24 @@ def _build_available_models_payload_from_config() -> dict:
     return _ensure_default_model_visible({"models": models, "default_model": default_model})
 
 
+def _extract_runtime_model_list(raw: dict | list | None) -> list[dict]:
+    """Extract model entries from gateway (OpenClaw) or API server (Hermes).
+
+    OpenClaw gateway returns ``{"models": [...]}``, while the Hermes API
+    server uses the OpenAI-compatible ``{"data": [...]}``.
+    """
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        models = raw.get("models")
+        if isinstance(models, list) and models:
+            return models
+        data = raw.get("data")
+        if isinstance(data, list):
+            return data
+    return []
+
+
 def _runtime_model_ref_candidates(entry: dict) -> list[str]:
     refs: list[str] = []
     key = str(entry.get("key", "")).strip()
@@ -239,6 +445,8 @@ def _runtime_model_ref_candidates(entry: dict) -> list[str]:
         if "/" in model_id and not model_id.lower().startswith(f"{provider.lower()}/"):
             refs.append(f"{provider}/{model_id}")
     elif model_id and "/" in model_id:
+        refs.append(model_id)
+    elif model_id:
         refs.append(model_id)
 
     seen: set[str] = set()
@@ -289,14 +497,19 @@ def _runtime_catalog_match(models: list[dict], target_model_id: str) -> tuple[bo
 
 def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     """
-    Read chat history from OpenClaw's local .jsonl storage.
+    Read chat history from agent session JSONL storage.
 
-    OpenClaw stores sessions in:
-      ~/.openclaw/agents/main/sessions/sessions.json  (key → sessionId mapping)
-      ~/.openclaw/agents/main/sessions/<sessionId>.jsonl  (message log)
+    Supports two layouts:
 
-    The chat.history WebSocket API only returns the active LLM context window,
-    NOT the full persisted log. We read the files directly instead.
+    **OpenClaw** — wrapped entries::
+
+        ~/.openclaw/agents/main/sessions/sessions.json  (key → sessionId mapping)
+        ~/.openclaw/agents/main/sessions/<sessionId>.jsonl
+
+    **Hermes** — flat entries (standard OpenAI chat format)::
+
+        ~/.hermes/sessions/sessions.json  (key → sessionId mapping)
+        ~/.hermes/sessions/<sessionId>.jsonl
     """
     if not _SESSIONS_JSON.exists():
         return []
@@ -316,7 +529,7 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     if not session_info:
         return []
 
-    session_id = session_info.get("sessionId")
+    session_id = session_info.get("sessionId") or session_info.get("session_id")
     if not session_id:
         return []
 
@@ -327,10 +540,7 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     import re
 
     messages = []
-    # Pending tool calls: { toolCallId → {tool_id, tool_name, args, timestamp, entry_id} }
-    # These are emitted as tool_call messages once we find the matching toolResult.
     pending_tool_calls: dict[str, dict] = {}
-    # Tool calls inserted before the NEXT assistant text message
     queued_tool_calls: list[dict] = []
 
     try:
@@ -343,14 +553,24 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
             except json.JSONDecodeError:
                 continue
 
-            if entry.get("type") != "message":
+            # ── Detect format: wrapped (OpenClaw) vs flat (Hermes) ────
+            if "message" in entry and isinstance(entry.get("message"), dict):
+                # OpenClaw wrapped format
+                if entry.get("type") != "message":
+                    continue
+                msg       = entry["message"]
+                timestamp = entry.get("timestamp")
+                entry_id  = entry.get("id", "")
+            elif "role" in entry:
+                # Hermes flat format
+                msg       = entry
+                timestamp = entry.get("timestamp")
+                entry_id  = entry.get("id", "")
+            else:
                 continue
 
-            msg       = entry.get("message", {})
-            role      = msg.get("role", "")
-            timestamp = entry.get("timestamp")
-            entry_id  = entry.get("id", "")
-            content   = msg.get("content", "")
+            role    = msg.get("role", "")
+            content = msg.get("content", "")
 
             if role == "user":
                 # Flush any queued tool calls before user message (shouldn't happen, but safety)
@@ -405,8 +625,8 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
                     queued_tool_calls = []
                     messages.append({"role": "assistant", "content": text, "timestamp": timestamp, "id": entry_id})
 
-            elif role == "toolResult":
-                tc_id = msg.get("toolCallId", "")
+            elif role in ("toolResult", "tool"):
+                tc_id = msg.get("toolCallId") or msg.get("tool_call_id", "")
                 if tc_id and tc_id in pending_tool_calls:
                     # Extract result text
                     result_content = content
@@ -455,7 +675,7 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
     if not session_info:
         return []
 
-    session_id = session_info.get("sessionId")
+    session_id = session_info.get("sessionId") or session_info.get("session_id")
     if not session_id:
         return []
 
@@ -477,7 +697,11 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
         # Find entries since the LAST user message (i.e., the most recent turn)
         last_user_idx = -1
         for i, e in enumerate(entries):
+            # OpenClaw: {"type":"message","message":{"role":"user",...}}
+            # Hermes:   {"role":"user","content":"..."}
             if e.get("type") == "message" and e.get("message", {}).get("role") == "user":
+                last_user_idx = i
+            elif e.get("role") == "user":
                 last_user_idx = i
 
         if last_user_idx < 0:
@@ -485,18 +709,24 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
 
         recent = entries[last_user_idx + 1:]
 
-        # Collect tool calls: match assistant messages that have tool calls
-        # with the corresponding toolResult messages.
-        tool_calls: dict[str, dict] = {}  # toolCallId → tool_call info
+        tool_calls: dict[str, dict] = {}
 
         for entry in recent:
-            if entry.get("type") != "message":
+            # Resolve msg from wrapped or flat format
+            if "message" in entry and isinstance(entry.get("message"), dict):
+                if entry.get("type") != "message":
+                    continue
+                msg = entry["message"]
+            elif "role" in entry:
+                msg = entry
+            else:
                 continue
-            msg = entry.get("message", {})
+
             role = msg.get("role", "")
 
             if role == "assistant":
                 content = msg.get("content", [])
+                # OpenClaw tool calls: content blocks with type=toolCall
                 if isinstance(content, list):
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "toolCall":
@@ -511,9 +741,23 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
                                     "result":    None,
                                     "is_error":  False,
                                 }
+                # Hermes tool calls: msg.tool_calls list
+                for tc in msg.get("tool_calls", []) or []:
+                    tc_id = tc.get("id", "")
+                    func = tc.get("function", {})
+                    tc_name = func.get("name", "tool")
+                    tc_args = func.get("arguments")
+                    if tc_id:
+                        tool_calls[tc_id] = {
+                            "tool_id":   tc_id,
+                            "tool_name": tc_name,
+                            "args":      tc_args,
+                            "result":    None,
+                            "is_error":  False,
+                        }
 
-            elif role == "toolResult":
-                tc_id = msg.get("toolCallId", "")
+            elif role in ("toolResult", "tool"):
+                tc_id = msg.get("toolCallId") or msg.get("tool_call_id", "")
                 if tc_id and tc_id in tool_calls:
                     result_content = msg.get("content", "")
                     if isinstance(result_content, list):
@@ -525,7 +769,7 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
                     else:
                         result_text = str(result_content)
                     tool_calls[tc_id]["result"]   = result_text
-                    tool_calls[tc_id]["is_error"] = bool(msg.get("isError", False))
+                    tool_calls[tc_id]["is_error"] = bool(msg.get("isError") or msg.get("is_error", False))
 
         # Emit: first a tool_start, then a tool_result for each tool
         events = []
@@ -553,18 +797,27 @@ def _ws_is_open(ws: object) -> bool:
         return True
 
 # --------------- Gateway session store ---------------
-# { session_key: GatewayClient }
+# { session_key: GatewayClient | HermesClient }
 # NOTE: This is in-memory and will reset on server reload.
 # send-message handles the "client missing" case by reconnecting.
-_gateway_sessions: dict[str, GatewayClient] = {}
+_gateway_sessions: dict[str, GatewayClient | HermesClient] = {}
 
 
-async def _connect_gateway_with_retries() -> GatewayClient:
-    """Connect to the OpenClaw gateway, tolerating short daemon reload windows."""
+async def _connect_gateway_with_retries() -> GatewayClient | HermesClient:
+    """Connect to the agent gateway, tolerating short daemon reload windows.
+
+    Returns a ``HermesClient`` when the platform is Hermes, otherwise
+    a ``GatewayClient`` (OpenClaw WebSocket).
+    """
     last_error: Exception | None = None
 
     for attempt in range(1, _GATEWAY_CONNECT_RETRY_ATTEMPTS + 1):
-        client = GatewayClient()
+        if settings.is_hermes:
+            client: GatewayClient | HermesClient = HermesClient(
+                api_key=settings.hermes_api_key or None,
+            )
+        else:
+            client = GatewayClient()
         try:
             await client.connect()
             return client
@@ -578,20 +831,26 @@ async def _connect_gateway_with_retries() -> GatewayClient:
             if attempt < _GATEWAY_CONNECT_RETRY_ATTEMPTS:
                 await asyncio.sleep(_GATEWAY_CONNECT_RETRY_DELAY_S)
 
+    platform_name = "Hermes API server" if settings.is_hermes else "OpenClaw gateway"
     detail = (
-        f"Failed to connect to OpenClaw gateway after {_GATEWAY_CONNECT_RETRY_ATTEMPTS} attempts: "
+        f"Failed to connect to {platform_name} after {_GATEWAY_CONNECT_RETRY_ATTEMPTS} attempts: "
         f"{last_error}. The gateway may still be restarting."
     )
     raise HTTPException(status_code=503, detail=detail)
 
 
-async def _get_or_create_client(session_key: str) -> GatewayClient:
+async def _get_or_create_client(session_key: str) -> GatewayClient | HermesClient:
     """Get existing client or create a fresh one if missing/dead."""
     client = _gateway_sessions.get(session_key)
-    if client is not None and client._ws is not None and _ws_is_open(client._ws):
-        return client
 
-    # Client missing or WebSocket closed — create a new connection
+    if settings.is_hermes:
+        if client is not None and isinstance(client, HermesClient):
+            return client
+    else:
+        if client is not None and isinstance(client, GatewayClient) and client._ws is not None and _ws_is_open(client._ws):
+            return client
+
+    # Client missing or connection dead — create a new connection
     client = await _connect_gateway_with_retries()
     _gateway_sessions[session_key] = client
     return client
@@ -654,12 +913,145 @@ class TranscribeCleanResponse(BaseModel):
     cleaned_text: str
 
 
+# --------------- Hermes direct DB persistence ---------------
+# When the platform is Hermes, we write Session/Message/Event rows directly
+# so that Agent Town can display the agent without relying on .jsonl file
+# watcher alone.  OpenClaw is unaffected — it uses the file-watcher path.
+
+_hermes_session_model_info: dict[str, dict[str, str]] = {}
+_hermes_event_sync = EventSyncService()
+
+
+def _deterministic_message_id(session_key: str, role: str, text: str, seq: int) -> str:
+    """Produce a stable 24-char hex ID so duplicate inserts are idempotent."""
+    raw = f"{session_key}:{role}:{seq}:{text}".encode()
+    return hashlib.sha256(raw).hexdigest()[:24]
+
+
+async def _persist_hermes_session(
+    session_key: str,
+    session_id: str | None,
+    *,
+    model_provider: str | None = None,
+    model_name: str | None = None,
+) -> str:
+    """Ensure a Session row exists for this Hermes chat. Returns session_id."""
+    sid = session_id or session_key
+    async with get_db_context() as db:
+        result = await db.execute(
+            select(Session).where(Session.session_id == sid)
+        )
+        session = result.scalar_one_or_none()
+        if session:
+            session.last_activity_at = datetime.now(timezone.utc)
+            if model_provider and not session.current_model_provider:
+                session.current_model_provider = model_provider
+            if model_name and not session.current_model_name:
+                session.current_model_name = model_name
+            if not session.session_key:
+                session.session_key = session_key
+            await db.commit()
+            return sid
+
+        session = Session(
+            session_id=sid,
+            session_key=session_key,
+            channel="webchat",
+            first_seen_at=datetime.now(timezone.utc),
+            last_activity_at=datetime.now(timezone.utc),
+            current_model_provider=model_provider,
+            current_model_name=model_name,
+        )
+        db.add(session)
+        await db.commit()
+    return sid
+
+
+async def _persist_hermes_chat_turn(
+    session_key: str,
+    session_id: str | None,
+    user_text: str,
+    assistant_text: str,
+    *,
+    stop_reason: str | None = None,
+    usage: dict | None = None,
+) -> None:
+    """Write user + assistant messages to DB and trigger event sync (Hermes only)."""
+    sid = session_id or session_key
+    now = datetime.now(timezone.utc)
+
+    model_info = _hermes_session_model_info.get(session_key, {})
+
+    async with get_db_context() as db:
+        result = await db.execute(
+            select(Session).where(Session.session_id == sid)
+        )
+        session = result.scalar_one_or_none()
+        if not session:
+            session = Session(
+                session_id=sid,
+                session_key=session_key,
+                channel="webchat",
+                first_seen_at=now,
+                last_activity_at=now,
+                current_model_provider=model_info.get("provider"),
+                current_model_name=model_info.get("model"),
+            )
+            db.add(session)
+            await db.flush()
+
+        count_result = await db.execute(
+            select(func.count()).select_from(Message).where(Message.session_id == sid)
+        )
+        seq_base = count_result.scalar() or 0
+
+        user_msg_id = _deterministic_message_id(session_key, "user", user_text, seq_base)
+        existing = await db.execute(
+            select(Message.id).where(Message.message_id == user_msg_id)
+        )
+        if existing.scalar_one_or_none() is not None:
+            return
+
+        user_msg = Message(
+            session_id=sid,
+            message_id=user_msg_id,
+            role="user",
+            timestamp=now,
+            content_text=user_text,
+        )
+        db.add(user_msg)
+
+        asst_msg_id = _deterministic_message_id(session_key, "assistant", assistant_text, seq_base + 1)
+        asst_msg = Message(
+            session_id=sid,
+            message_id=asst_msg_id,
+            role="assistant",
+            timestamp=now,
+            content_text=assistant_text,
+            provider=model_info.get("provider"),
+            model_id=model_info.get("model"),
+            stop_reason=stop_reason or "stop",
+            input_tokens=(usage or {}).get("prompt_tokens"),
+            output_tokens=(usage or {}).get("completion_tokens"),
+            total_tokens=(usage or {}).get("total_tokens"),
+        )
+        db.add(asst_msg)
+
+        session.last_activity_at = now
+        await db.commit()
+
+    try:
+        await _hermes_event_sync.sync_session_events(sid)
+    except Exception as exc:
+        print(f"[hermes-persist] event sync error for {sid[:8]}: {exc}")
+
+
 # --------------- Endpoints ---------------
 
 @router.post("/start-session", response_model=StartSessionResponse)
 async def start_session(request: StartSessionRequest | None = None):
     """
-    Create a new OpenClaw gateway chat session.
+    Create a new gateway chat session.
     Returns a session_key for subsequent send-message calls.
     """
     body = request or StartSessionRequest()
@@ -685,6 +1077,27 @@ async def start_session(request: StartSessionRequest | None = None):
             ) from exc
     else:
         await client.enable_verbose(session_key)
+
+    # Hermes: create the Session row eagerly so it appears in Agent Town right away
+    if settings.is_hermes:
+        model_provider = body.provider_override
+        model_name = body.model_override
+        if initial_model and "/" in initial_model:
+            model_provider = initial_model.split("/", 1)[0]
+            model_name = initial_model.split("/", 1)[1]
+        _hermes_session_model_info[session_key] = {
+            "provider": model_provider or "hermes",
+            "model": model_name or "hermes-agent",
+        }
+        try:
+            await _persist_hermes_session(
+                session_key,
+                None,
+                model_provider=model_provider or "hermes",
+                model_name=model_name or "hermes-agent",
+            )
+        except Exception as exc:
+            print(f"[hermes-persist] session create warning: {exc}")
 
     return StartSessionResponse(session_key=session_key, status="connected")
 
@@ -713,6 +1126,22 @@ async def send_message(request: SendMessageRequest):
             message=request.message,
             timeout_ms=120_000,
         )
+
+        # Hermes: persist turn directly to DB
+        if settings.is_hermes and result.get("state") == "final":
+            hermes_sid = client.last_session_id if isinstance(client, HermesClient) else None
+            try:
+                await _persist_hermes_chat_turn(
+                    request.session_key,
+                    hermes_sid,
+                    request.message,
+                    result.get("response_text", ""),
+                    stop_reason=result.get("stop_reason"),
+                    usage=result.get("usage"),
+                )
+            except Exception as exc:
+                print(f"[hermes-persist] send_message warning: {exc}")
+
         return SendMessageResponse(
             run_id=result.get("run_id", ""),
             state=result.get("state", "unknown"),
@@ -789,8 +1218,20 @@ async def send_message_stream(request: SendMessageRequest):
             yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
             return
 
+        # Hermes: persist turn directly to DB after streaming completes
+        if settings.is_hermes and final_text:
+            hermes_sid = client.last_session_id if isinstance(client, HermesClient) else None
+            try:
+                await _persist_hermes_chat_turn(
+                    request.session_key,
+                    hermes_sid,
+                    request.message,
+                    final_text,
+                )
+            except Exception as exc:
+                print(f"[hermes-persist] stream warning: {exc}")
+
         # After the final response, read tool calls from the JSONL file.
-        # This is more reliable than relying on real-time agent events.
         try:
             tool_events = _read_tool_calls_from_jsonl(request.session_key)
             for evt in tool_events:
@@ -913,13 +1354,44 @@ async def patch_session(request: PatchSessionRequest):
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+async def _build_available_models_from_hermes_api() -> dict:
+    """Query the live Hermes API server for its model catalog.
+
+    Called as a fallback when ``config.yaml`` has no usable model entry.
+    """
+    try:
+        client = HermesClient(api_key=settings.hermes_api_key or None)
+        await client.connect()
+        raw = await client.list_models()
+        await client.disconnect()
+    except Exception:
+        return {"models": [], "default_model": ""}
+
+    models = []
+    for entry in _extract_runtime_model_list(raw):
+        model_id = str(entry.get("id", "")).strip()
+        if not model_id:
+            continue
+        provider = str(entry.get("owned_by", "")).strip() or "hermes"
+        models.append({
+            "id": model_id,
+            "name": model_id,
+            "provider": provider,
+            "reasoning": False,
+        })
+
+    default_model = models[0]["id"] if models else ""
+    return _ensure_default_model_visible({"models": models, "default_model": default_model})
+
+
 @router.get("/available-models")
 async def available_models():
     """Return the saved model deck for Agent Valley.
 
     Priority:
-      1. Explicit models persisted in ~/.openclaw/openclaw.json
-      2. Live CLI model listing (when no explicit saved models exist)
+      1. Explicit models persisted in config file
+      2. (OpenClaw) Live CLI model listing
+         (Hermes)  Live API server model catalog
       3. Last known good payload
 
     We intentionally do NOT fall back to onboard-scan's full catalog here,
@@ -943,30 +1415,39 @@ async def available_models():
 
         config_payload = _build_available_models_payload_from_config()
         if config_payload["models"]:
-            print("[available-models] using configured models from openclaw.json")
+            print("[available-models] using configured models from config file")
             _available_models_cache["payload"] = config_payload
             _available_models_cache["last_success"] = config_payload
             _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
             return config_payload
 
-        raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
-        status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None
-        payload = _build_available_models_payload(raw, status_raw)
+        if settings.is_hermes:
+            hermes_payload = await _build_available_models_from_hermes_api()
+            if hermes_payload["models"]:
+                print("[available-models] using live Hermes API model catalog")
+                _available_models_cache["payload"] = hermes_payload
+                _available_models_cache["last_success"] = hermes_payload
+                _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+                return hermes_payload
+        else:
+            raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
+            status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None
+            payload = _build_available_models_payload(raw, status_raw)
 
-        if payload["models"]:
-            _available_models_cache["payload"] = payload
-            _available_models_cache["last_success"] = payload
-            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
-            return payload
+            if payload["models"]:
+                _available_models_cache["payload"] = payload
+                _available_models_cache["last_success"] = payload
+                _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+                return payload
 
         last_success = _available_models_cache.get("last_success")
         if isinstance(last_success, dict) and last_success.get("models"):
-            print("[available-models] using last known good model list after CLI returned no models")
+            print("[available-models] using last known good model list (live source returned nothing)")
             _available_models_cache["payload"] = last_success
             _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
             return last_success
 
-        print("[available-models] openclaw returned no models and no cached model list is available")
+        print("[available-models] no models found from any source")
         empty_payload = {"models": [], "default_model": ""}
         _available_models_cache["payload"] = empty_payload
         _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
@@ -982,11 +1463,23 @@ async def model_readiness(
     if not target_model_id:
         raise HTTPException(status_code=400, detail="model_id is required")
 
-    client: GatewayClient | None = None
+    client: GatewayClient | HermesClient | None = None
     try:
         client = await _connect_gateway_with_retries()
         raw = await client.list_models()
-        models = raw.get("models", []) if isinstance(raw, dict) else raw
+        models = _extract_runtime_model_list(raw)
+
+        # Hermes manages model routing internally — its runtime catalog only
+        # reports "hermes-agent" regardless of the backend model the user
+        # configured.  As long as the API server is reachable and exposes at
+        # least one model, the gateway is ready to accept requests.
+        if settings.is_hermes and models:
+            return ModelReadinessResponse(
+                model_id=target_model_id,
+                ready=True,
+                visible_model_id=target_model_id,
+            )
+
         matched, visible_model_id = _runtime_catalog_match(
             models if isinstance(models, list) else [],
             target_model_id,

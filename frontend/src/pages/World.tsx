@@ -14,7 +14,7 @@ export default function World() {
         if (cancelled) return;
         const d = res.data as any;
 
-        if (!d.openclaw_installed) {
+        if (!d.openclaw_installed && !d.hermes_installed) {
           navigate('/setup', { replace: true });
           return;
         }

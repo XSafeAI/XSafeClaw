@@ -1,4 +1,4 @@
-"""OpenClaw skills management API."""
+"""Agent skills / tools management API (OpenClaw + Hermes)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ...config import settings
 from ...services import skill_scan_service
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
-_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_HERMES_DIR = settings.hermes_home
+
+if settings.is_hermes:
+    _CONFIG_PATH = settings.hermes_config_path
+else:
+    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 
 
 # ---------------------------------------------------------------------------
@@ -57,65 +63,88 @@ def _find_openclaw() -> str | None:
     return None
 
 
+def _find_hermes() -> str | None:
+    """Find the hermes binary."""
+    return shutil.which("hermes")
+
+
+def _find_agent_binary() -> str | None:
+    """Find the active platform's binary."""
+    if settings.is_hermes:
+        return _find_hermes()
+    return _find_openclaw()
+
+
 def _read_config() -> dict:
-    """Read and parse openclaw.json."""
+    """Read and parse the platform config file."""
     if not _CONFIG_PATH.exists():
         return {}
     try:
-        return json.loads(_CONFIG_PATH.read_text("utf-8"))
+        raw = _CONFIG_PATH.read_text("utf-8")
+        if settings.is_hermes:
+            import yaml
+            return yaml.safe_load(raw) or {}
+        return json.loads(raw)
     except Exception:
         return {}
 
 
 def _write_config(config: dict) -> None:
-    """Write config dict to openclaw.json."""
-    _OPENCLAW_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(_CONFIG_PATH)
+    """Write config dict to the platform config file."""
+    if settings.is_hermes:
+        import yaml
+        _HERMES_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(yaml.dump(config, allow_unicode=True, default_flow_style=False), encoding="utf-8")
+        tmp.rename(_CONFIG_PATH)
+    else:
+        _OPENCLAW_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.rename(_CONFIG_PATH)
 
 
 def _build_skill_paths() -> dict[str, str]:
-    """Scan known directories to build a skill_name → directory_path mapping."""
+    """Scan known directories to build a skill_name -> directory_path mapping."""
     skill_map: dict[str, str] = {}
 
-    scan_bases: list[Path] = [
-        _OPENCLAW_DIR / "skills",
-    ]
+    scan_bases: list[Path] = []
 
-    # ~/.openclaw/extensions/*/skills/
-    ext_dir = _OPENCLAW_DIR / "extensions"
-    if ext_dir.is_dir():
-        for ext in ext_dir.iterdir():
-            if ext.is_dir():
-                skills_sub = ext / "skills"
-                if skills_sub.is_dir():
-                    scan_bases.append(skills_sub)
+    if settings.is_hermes:
+        # Hermes: ~/.hermes/skills/
+        scan_bases.append(_HERMES_DIR / "skills")
+    else:
+        # OpenClaw: ~/.openclaw/skills/ + extensions
+        scan_bases.append(_OPENCLAW_DIR / "skills")
+        ext_dir = _OPENCLAW_DIR / "extensions"
+        if ext_dir.is_dir():
+            for ext in ext_dir.iterdir():
+                if ext.is_dir():
+                    skills_sub = ext / "skills"
+                    if skills_sub.is_dir():
+                        scan_bases.append(skills_sub)
 
-    # Paths relative to the openclaw binary
-    openclaw_bin = _find_openclaw()
-    if openclaw_bin:
-        bin_path = Path(openclaw_bin).resolve()
-        pkg_root = bin_path.parent
-        # If resolved into the package itself (symlink case), use directly
-        # Otherwise climb from bin/ to the package dir
-        pkg_candidates = [
-            pkg_root,
-            pkg_root.parent,
-            pkg_root / ".." / "lib" / "node_modules" / "openclaw",
-        ]
-        for pkg in pkg_candidates:
-            pkg = pkg.resolve()
-            skills_dir = pkg / "skills"
-            if skills_dir.is_dir():
-                scan_bases.append(skills_dir)
-            ext_dir2 = pkg / "extensions"
-            if ext_dir2.is_dir():
-                for ext in ext_dir2.iterdir():
-                    if ext.is_dir():
-                        skills_sub = ext / "skills"
-                        if skills_sub.is_dir():
-                            scan_bases.append(skills_sub)
+        openclaw_bin = _find_openclaw()
+        if openclaw_bin:
+            bin_path = Path(openclaw_bin).resolve()
+            pkg_root = bin_path.parent
+            pkg_candidates = [
+                pkg_root,
+                pkg_root.parent,
+                pkg_root / ".." / "lib" / "node_modules" / "openclaw",
+            ]
+            for pkg in pkg_candidates:
+                pkg = pkg.resolve()
+                skills_dir = pkg / "skills"
+                if skills_dir.is_dir():
+                    scan_bases.append(skills_dir)
+                ext_dir2 = pkg / "extensions"
+                if ext_dir2.is_dir():
+                    for ext in ext_dir2.iterdir():
+                        if ext.is_dir():
+                            skills_sub = ext / "skills"
+                            if skills_sub.is_dir():
+                                scan_bases.append(skills_sub)
 
     for base in scan_bases:
         if not base.is_dir():
@@ -202,31 +231,36 @@ class ScanOneRequest(BaseModel):
 
 @router.get("/list")
 async def list_skills():
-    """List skills via openclaw CLI and enrich with config / scan data."""
-    openclaw_bin = _find_openclaw()
-    if not openclaw_bin:
-        raise HTTPException(status_code=500, detail="openclaw binary not found")
+    """List skills/tools via agent CLI and enrich with config / scan data."""
+    agent_bin = _find_agent_binary()
+    if not agent_bin:
+        platform_name = "hermes" if settings.is_hermes else "openclaw"
+        raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
 
     env = _build_env()
+
+    # Hermes: ``hermes tools list --json`` / OpenClaw: ``openclaw skills list --json``
+    if settings.is_hermes:
+        cmd = [agent_bin, "tools", "list", "--json"]
+    else:
+        cmd = [agent_bin, "skills", "list", "--json"]
+
     try:
-        result = subprocess.run(
-            [openclaw_bin, "skills", "list", "--json"],
-            capture_output=True, text=True, timeout=30, env=env,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to run openclaw: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to run agent CLI: {exc}")
 
     if result.returncode != 0:
         raise HTTPException(
             status_code=500,
-            detail=f"openclaw skills list failed (exit {result.returncode}): {result.stderr}",
+            detail=f"skills list failed (exit {result.returncode}): {result.stderr}",
         )
 
     try:
         raw = result.stdout
         data = _extract_json(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid JSON from openclaw: {exc}")
+        raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
 
     config = _read_config()
     skills_config = config.get("skills", {})
@@ -258,25 +292,29 @@ async def list_skills():
 
 @router.get("/check")
 async def check_skills():
-    """Check skill eligibility via openclaw CLI."""
-    openclaw_bin = _find_openclaw()
-    if not openclaw_bin:
-        raise HTTPException(status_code=500, detail="openclaw binary not found")
+    """Check skill/tool eligibility via agent CLI."""
+    agent_bin = _find_agent_binary()
+    if not agent_bin:
+        platform_name = "hermes" if settings.is_hermes else "openclaw"
+        raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
 
     env = _build_env()
+
+    if settings.is_hermes:
+        cmd = [agent_bin, "tools", "check", "--json"]
+    else:
+        cmd = [agent_bin, "skills", "check", "--json"]
+
     try:
-        result = subprocess.run(
-            [openclaw_bin, "skills", "check", "--json"],
-            capture_output=True, text=True, timeout=30, env=env,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to run openclaw: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to run agent CLI: {exc}")
 
     try:
         raw = result.stdout
         return _extract_json(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid JSON from openclaw: {exc}")
+        raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
 
 
 @router.post("/scan-all")
@@ -306,7 +344,7 @@ async def scan_status():
 
 @router.post("/{skill_key}/update")
 async def update_skill(skill_key: str, body: SkillUpdateRequest):
-    """Update skill configuration in openclaw.json."""
+    """Update skill configuration in platform config file."""
     config = _read_config()
     skills = config.setdefault("skills", {})
     entry = skills.setdefault(skill_key, {})

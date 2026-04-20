@@ -1,11 +1,13 @@
-"""Service for synchronizing OpenClaw messages to database (new Message-based schema)."""
+"""Service for synchronizing OpenClaw / Hermes messages to database (new Message-based schema)."""
 
 import asyncio
+import json as _json
 import os
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,11 +21,16 @@ from .event_sync_service import EventSyncService
 
 
 class MessageSyncService:
-    """Service for syncing OpenClaw session files to database using Message model."""
+    """Service for syncing agent session files to database using Message model.
+
+    Supports both OpenClaw (``~/.openclaw/agents/main/sessions/``) and
+    Hermes (``~/.hermes/sessions/``) session JSONL directories.  The
+    active directory is selected via ``settings.active_sessions_dir``.
+    """
 
     def __init__(self):
         """Initialize sync service."""
-        self.sessions_dir = Path(settings.OPENCLAW_SESSIONS_DIR)
+        self.sessions_dir = Path(settings.active_sessions_dir)
         self.watcher: SessionFileWatcher | None = None
         self._running = False
         self._sync_task: asyncio.Task | None = None
@@ -43,6 +50,11 @@ class MessageSyncService:
         # Track sessions that need event sync: set of session_ids
         self._pending_event_sync: set[str] = set()
         self._event_sync_task: asyncio.Task | None = None
+
+        # Cached sessions.json index: session_id -> metadata
+        self._sessions_index: dict[str, dict[str, Any]] = {}
+        self._sessions_index_mtime: float = 0.0
+        self._sessions_json_path = self.sessions_dir / "sessions.json"
 
     async def start(self) -> None:
         """Start the sync service."""
@@ -593,6 +605,60 @@ class MessageSyncService:
         
         await db.commit()
 
+    def _load_sessions_index(self) -> dict[str, dict[str, Any]]:
+        """Load and cache the sessions.json reverse index (session_id -> metadata).
+
+        Re-reads the file only when its mtime changes.
+        """
+        try:
+            if not self._sessions_json_path.exists():
+                return self._sessions_index
+
+            mtime = self._sessions_json_path.stat().st_mtime
+            if mtime == self._sessions_index_mtime and self._sessions_index:
+                return self._sessions_index
+
+            raw = _json.loads(self._sessions_json_path.read_text(encoding="utf-8"))
+            index: dict[str, dict[str, Any]] = {}
+            for session_key, entry in raw.items():
+                if not isinstance(entry, dict):
+                    continue
+                sid = entry.get("sessionId") or entry.get("session_id")
+                if not sid:
+                    continue
+                delivery = entry.get("deliveryContext") or {}
+                origin = entry.get("origin") or {}
+                index[sid] = {
+                    "session_key": session_key,
+                    "model_provider": entry.get("modelProvider"),
+                    "model": entry.get("model"),
+                    "channel": (
+                        delivery.get("channel")
+                        or entry.get("lastChannel")
+                        or origin.get("provider")
+                    ),
+                }
+            self._sessions_index = index
+            self._sessions_index_mtime = mtime
+        except Exception as exc:
+            print(f"[sync] sessions.json load error: {exc}")
+        return self._sessions_index
+
+    def _enrich_session_from_index(self, session: Session, session_id: str) -> None:
+        """Populate session_key, channel, model from sessions.json if available."""
+        index = self._load_sessions_index()
+        meta = index.get(session_id)
+        if not meta:
+            return
+        if not session.session_key and meta.get("session_key"):
+            session.session_key = meta["session_key"]
+        if not session.channel and meta.get("channel"):
+            session.channel = meta["channel"]
+        if not session.current_model_provider and meta.get("model_provider"):
+            session.current_model_provider = meta["model_provider"]
+        if not session.current_model_name and meta.get("model"):
+            session.current_model_name = meta["model"]
+
     async def _ensure_session(self, db: AsyncSession, session_id: str, parser: JSONLParser) -> Session:
         """Ensure session exists in database."""
         result = await db.execute(
@@ -603,6 +669,7 @@ class MessageSyncService:
         if session:
             session.last_activity_at = datetime.now(timezone.utc)
             session.updated_at = datetime.now(timezone.utc)
+            self._enrich_session_from_index(session, session_id)
             return session
         
         # Create new session
@@ -614,6 +681,7 @@ class MessageSyncService:
             cwd=session_info.cwd if session_info else None,
             last_activity_at=datetime.now(timezone.utc),
         )
+        self._enrich_session_from_index(session, session_id)
         db.add(session)
         await db.flush()
         
@@ -637,11 +705,18 @@ class MessageSyncService:
             return data
     
     async def _sync_message(self, db: AsyncSession, session_id: str, entry: JSONLEntry) -> None:
-        """Sync a message entry to database."""
+        """Sync a message entry to database.
+
+        Handles two JSONL layouts:
+        - **OpenClaw**: ``{"type":"message","id":"...","message":{"role":"...","content":[...]}}``
+        - **Hermes**:   ``{"role":"user","content":"..."}`` (flat, no wrapper)
+        """
         message_id = entry.entry_id
         if not message_id:
-            print(f"⚠️  Message entry has no ID, skipping")
-            return
+            # Hermes entries may lack an id; generate a deterministic one
+            import hashlib, json as _json
+            raw_bytes = _json.dumps(entry.raw_data, sort_keys=True, ensure_ascii=False).encode()
+            message_id = hashlib.sha256(raw_bytes).hexdigest()[:24]
         
         # Check if message already exists
         result = await db.execute(
@@ -650,8 +725,12 @@ class MessageSyncService:
         existing_message = result.scalar_one_or_none()
         if existing_message:
             return  # Already synced
-        
-        msg_data = entry.raw_data.get("message", {})
+
+        # Support both wrapped (OpenClaw) and flat (Hermes) formats
+        if "message" in entry.raw_data and isinstance(entry.raw_data.get("message"), dict):
+            msg_data = entry.raw_data["message"]
+        else:
+            msg_data = entry.raw_data
         role = msg_data.get("role", "unknown")
         content = msg_data.get("content", [])
         
@@ -717,8 +796,8 @@ class MessageSyncService:
             for tool_call_item in tool_calls_data:
                 await self._create_tool_call(db, message.id, message_id, tool_call_item, entry.timestamp)
         
-        # Process toolResult message
-        if role == "toolResult":
+        # Process toolResult message (OpenClaw: role="toolResult", Hermes: role="tool")
+        if role in ("toolResult", "tool"):
             await self._update_tool_call_result(db, msg_data, message_id, entry.timestamp)
         
         print(f"✅ Synced {role} message {message_id[:8]}...")

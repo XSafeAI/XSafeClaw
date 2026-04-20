@@ -1,10 +1,39 @@
 """Configuration management using pydantic-settings."""
 
+import shutil
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _detect_platform() -> str:
+    """Auto-detect the agent platform installed on this system.
+
+    Returns ``"hermes"`` if the Hermes home directory or binary is found,
+    ``"openclaw"`` if the OpenClaw home directory or binary is found, or
+    ``"openclaw"`` as fallback.
+    """
+    hermes_home = Path.home() / ".hermes"
+    openclaw_home = Path.home() / ".openclaw"
+
+    hermes_exists = hermes_home.is_dir()
+    openclaw_exists = openclaw_home.is_dir()
+
+    if hermes_exists and not openclaw_exists:
+        return "hermes"
+    if openclaw_exists and not hermes_exists:
+        return "openclaw"
+
+    if shutil.which("hermes") and not shutil.which("openclaw"):
+        return "hermes"
+    if shutil.which("openclaw") and not shutil.which("hermes"):
+        return "openclaw"
+
+    if hermes_exists:
+        return "hermes"
+    return "openclaw"
 
 
 class Settings(BaseSettings):
@@ -15,6 +44,13 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+    )
+
+    # ── Platform selection ────────────────────────────────────────────────
+    platform: Literal["auto", "openclaw", "hermes"] = Field(
+        default="auto",
+        description="Agent platform: 'auto' detects installed platform, "
+                    "or force 'openclaw' / 'hermes'",
     )
 
     # Data directory
@@ -42,20 +78,72 @@ class Settings(BaseSettings):
             db_path = self.data_dir / "data.db"
             self.database_url = f"sqlite+aiosqlite:///{db_path}"
 
-    # OpenClaw Sessions
+    # ── OpenClaw paths ────────────────────────────────────────────────────
     openclaw_sessions_dir: Path = Field(
         default=Path.home() / ".openclaw" / "agents" / "main" / "sessions",
         description="Directory containing OpenClaw session JSONL files",
         alias="OPENCLAW_SESSIONS_DIR",
     )
-    
-    @field_validator('openclaw_sessions_dir', mode='before')
+
+    # ── Hermes paths ──────────────────────────────────────────────────────
+    hermes_home: Path = Field(
+        default=Path.home() / ".hermes",
+        description="Hermes home directory",
+    )
+    hermes_sessions_dir: Path = Field(
+        default=Path.home() / ".hermes" / "sessions",
+        description="Directory containing Hermes session JSONL files",
+    )
+    hermes_config_path: Path = Field(
+        default=Path.home() / ".hermes" / "config.yaml",
+        description="Path to Hermes config.yaml",
+    )
+    hermes_api_port: int = Field(
+        default=8642,
+        description="Hermes API server port",
+    )
+    hermes_api_key: str = Field(
+        default="",
+        description="Hermes API server key (must match API_SERVER_KEY in Hermes .env)",
+    )
+
+    @field_validator(
+        'openclaw_sessions_dir', 'hermes_home',
+        'hermes_sessions_dir', 'hermes_config_path',
+        mode='before',
+    )
     @classmethod
     def expand_path(cls, v):
         """Expand ~ in path strings."""
         if isinstance(v, str):
             return Path(v).expanduser()
         return v
+
+    # ── Resolved platform ─────────────────────────────────────────────────
+
+    @property
+    def resolved_platform(self) -> str:
+        """Return the concrete platform name (never ``'auto'``)."""
+        if self.platform != "auto":
+            return self.platform
+        return _detect_platform()
+
+    @property
+    def is_hermes(self) -> bool:
+        return self.resolved_platform == "hermes"
+
+    @property
+    def is_openclaw(self) -> bool:
+        return self.resolved_platform == "openclaw"
+
+    @property
+    def active_sessions_dir(self) -> Path:
+        """Return the session JSONL directory for the active platform."""
+        if self.is_hermes:
+            return self.hermes_sessions_dir
+        return self.openclaw_sessions_dir
+
+    # ── Backwards-compatible aliases ──────────────────────────────────────
     
     @property
     def OPENCLAW_SESSIONS_DIR(self) -> Path:

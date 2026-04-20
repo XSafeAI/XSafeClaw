@@ -18,7 +18,11 @@ Locale = Literal["zh", "en"]
 
 _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _RISK_RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-_SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
+
+if settings.is_hermes:
+    _SESSIONS_DIR = settings.hermes_sessions_dir
+else:
+    _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
 _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
 _RISK_LEVEL_PATTERNS = (
     ("high", re.compile(r"风险判断\s*[:：]\s*高风险", re.IGNORECASE)),

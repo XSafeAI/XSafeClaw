@@ -726,6 +726,13 @@ export default function CrewTab({
   filteredModels,
   pendingModelId,
   onPickModel,
+  // §36 — Hermes-only.  When ``isHermes`` is false the row's × button is
+  // not rendered at all (OpenClaw doesn't have the configured-model ledger
+  // backing this affordance).  ``onDeleteModel`` is invoked with
+  // ``(modelId, modelName)`` after the user confirms; the parent owns
+  // both the confirmation prompt and the API call.
+  isHermes = false,
+  onDeleteModel,
   onOpenModelSetup,
   onCreateAgent,
   createAgentDisabled,
@@ -876,6 +883,12 @@ export default function CrewTab({
                 ) : (
                   filteredModels.map((model) => {
                     const isSelected = pendingModelId === model.id;
+                    // §36 — only render × on Hermes, never on the active
+                    // model (the backend would refuse with HTTP 409 anyway,
+                    // but hiding the button up-front avoids a jarring
+                    // confirm-then-error round trip).  ``isDefault`` is
+                    // shaped by TownConsole's configuredModels memo.
+                    const canDelete = isHermes && !model.isDefault && typeof onDeleteModel === 'function';
                     return (
                       <div
                         key={model.id}
@@ -901,6 +914,20 @@ export default function CrewTab({
                             ) : null}
                           </div>
                         </button>
+                        {canDelete ? (
+                          <button
+                            type="button"
+                            className="tc-model-entry-delete"
+                            title="Remove from configured models"
+                            aria-label={`Remove ${model.name} from configured models`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onDeleteModel(model.id, model.name);
+                            }}
+                          >
+                            ×
+                          </button>
+                        ) : null}
                         {isSelected ? (
                           <div className="tc-model-option-expand">
                             <div className="tc-model-option-expand-row">
