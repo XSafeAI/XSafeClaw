@@ -53,6 +53,17 @@ interface ModelChoice {
 
 type WizardMode = 'quickstart' | 'manual';
 
+const NANOBOT_PROVIDER_CATALOG_ALIASES: Record<string, string[]> = {
+  gemini: ['google'],
+  dashscope: ['alibaba', 'qwen-portal', 'modelstudio'],
+  zhipu: ['zai'],
+  moonshot: ['kimi-coding', 'kimi-coding-cn'],
+  minimax: ['minimax-cn'],
+  openaiCodex: ['openai'],
+  githubCopilot: ['copilot'],
+  vllm: ['custom'],
+};
+
 const copy = {
   zh: {
     eyebrow: 'Nanobot Configure',
@@ -398,11 +409,54 @@ function normalizeModelForProvider(provider: string, modelId: string): string {
   const trimmed = modelId.trim();
   const normalizedProvider = provider.trim();
   if (!trimmed || !normalizedProvider) return trimmed;
-  const prefix = `${normalizedProvider}/`;
-  if (trimmed.toLowerCase().startsWith(prefix.toLowerCase())) {
-    return trimmed.slice(prefix.length);
+  const aliases = resolveCatalogProviderAliases(normalizedProvider);
+  for (const alias of aliases) {
+    const prefix = `${alias}/`;
+    if (trimmed.toLowerCase().startsWith(prefix.toLowerCase())) {
+      return trimmed.slice(prefix.length);
+    }
   }
   return trimmed;
+}
+
+function resolveCatalogProviderAliases(provider: string): string[] {
+  const normalized = provider.trim();
+  if (!normalized) return [];
+  const deduped = new Map<string, string>();
+  [normalized, ...(NANOBOT_PROVIDER_CATALOG_ALIASES[normalized] || [])].forEach((candidate) => {
+    const trimmed = candidate.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (!deduped.has(key)) deduped.set(key, trimmed);
+  });
+  return [...deduped.values()];
+}
+
+function buildModelMatchKeys(provider: string, modelId: string): string[] {
+  const trimmed = modelId.trim();
+  if (!trimmed) return [];
+
+  const normalized = normalizeModelForProvider(provider, trimmed);
+  const aliases = resolveCatalogProviderAliases(provider);
+  const keys = new Map<string, string>();
+  const push = (value: string) => {
+    const text = value.trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (!keys.has(key)) keys.set(key, text);
+  };
+
+  push(trimmed);
+  push(normalized);
+
+  if (!trimmed.includes('/')) {
+    aliases.forEach((alias) => push(`${alias}/${trimmed}`));
+  }
+  if (!normalized.includes('/')) {
+    aliases.forEach((alias) => push(`${alias}/${normalized}`));
+  }
+
+  return [...keys.values()];
 }
 
 function displayModelRef(provider: string, model: string): string {
@@ -1048,6 +1102,8 @@ export default function NanobotConfigure() {
   const modelOptions = useMemo(() => {
     const provider = form.provider.trim();
     if (!provider) return [];
+    const catalogAliases = resolveCatalogProviderAliases(provider);
+    const catalogAliasKeys = new Set(catalogAliases.map(alias => alias.toLowerCase()));
     const seen = new Set<string>();
     const choices: ModelChoice[] = [];
 
@@ -1070,10 +1126,10 @@ export default function NanobotConfigure() {
 
     modelProviders.forEach(providerInfo => {
       const providerId = String(providerInfo.id || '').trim();
-      const providerMatches = providerId.toLowerCase() === provider.toLowerCase();
+      const providerMatches = catalogAliasKeys.has(providerId.toLowerCase());
       (providerInfo.models || []).forEach(model => {
         const modelId = String(model.id || '').trim();
-        const idMatches = modelId.toLowerCase().startsWith(`${provider.toLowerCase()}/`);
+        const idMatches = catalogAliases.some(alias => modelId.toLowerCase().startsWith(`${alias.toLowerCase()}/`));
         if (providerMatches || idMatches) pushChoice(model, providerId || provider, 'catalog');
       });
     });
@@ -1095,8 +1151,11 @@ export default function NanobotConfigure() {
   const selectedModelOption = useMemo(() => {
     const model = form.model.trim();
     if (!model) return undefined;
-    const fullRef = displayModelRef(form.provider, model);
-    return modelOptions.find(option => option.shortId === model || option.id === model || option.id === fullRef);
+    const matchKeys = new Set(buildModelMatchKeys(form.provider, model).map(value => value.toLowerCase()));
+    return modelOptions.find(option => (
+      matchKeys.has(option.shortId.toLowerCase())
+      || matchKeys.has(option.id.toLowerCase())
+    ));
   }, [form.model, form.provider, modelOptions]);
 
   const modelValidation = useMemo(() => {
