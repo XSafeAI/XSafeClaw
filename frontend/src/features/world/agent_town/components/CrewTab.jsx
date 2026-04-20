@@ -973,7 +973,20 @@ export default function CrewTab({
                 {selectedRuntimeUnavailable && runtimeUnavailableMessage ? (
                   <div className="tc-inline-error">{runtimeUnavailableMessage}</div>
                 ) : null}
-                {createError ? <div className="tc-inline-error">{createError}</div> : null}
+                {createError ? (
+                  <div className="tc-inline-error">
+                    <span className="tc-inline-error-text">{createError}</span>
+                    {(createError.includes('not installed') || createError.includes('未安装')) && (
+                      <button
+                        type="button"
+                        className="tc-inline-error-link"
+                        onClick={() => { window.location.href = '/setup'; }}
+                      >
+                        前往安装
+                      </button>
+                    )}
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}

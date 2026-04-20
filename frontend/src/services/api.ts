@@ -84,6 +84,24 @@ export interface SystemStatusResponse {
   error?: string;
 }
 
+export interface InstallStatusResponse {
+  openclaw_installed: boolean;
+  openclaw_version: string | null;
+  openclaw_error?: string | null;
+  openclaw_path: string | null;
+  nanobot_installed: boolean;
+  nanobot_version: string | null;
+  nanobot_error?: string | null;
+  nanobot_path: string | null;
+  config_exists: boolean;
+  nanobot_config_exists: boolean;
+  requires_setup: boolean;
+  requires_configure: boolean;
+  requires_nanobot_setup: boolean;
+  requires_nanobot_configure: boolean;
+  node_version: string;
+}
+
 export interface RuntimeInstanceHealth {
   instance_id: string;
   platform: 'openclaw' | 'nanobot';
@@ -117,6 +135,75 @@ export interface NanobotGuardConfigResponse {
   default_timeout_s?: number;
   instance?: RuntimeInstance;
   instances?: RuntimeInstance[];
+}
+
+export type NanobotGuardMode = 'disabled' | 'observe' | 'blocking';
+
+export interface NanobotProviderOption {
+  id: string;
+  name: string;
+  default_model: string;
+}
+
+export interface NanobotProviderConfigState {
+  has_api_key: boolean;
+  api_base: string | null;
+}
+
+export interface NanobotConfigResponse {
+  success?: boolean;
+  config_exists: boolean;
+  config_path: string;
+  workspace: string;
+  provider: string;
+  model: string;
+  api_base: string | null;
+  provider_options: NanobotProviderOption[];
+  provider_configs: Record<string, NanobotProviderConfigState>;
+  gateway: {
+    host: string;
+    port: number;
+    health_url: string;
+  };
+  websocket: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    path: string;
+    url: string;
+    requires_token: boolean;
+    has_token: boolean;
+  };
+  guard: {
+    mode: NanobotGuardMode;
+    enabled: boolean;
+    hook_present: boolean;
+    hook_valid: boolean;
+    base_url: string;
+    timeout_s: number;
+    configured_instance_id: string | null;
+  };
+  instances?: RuntimeInstance[];
+}
+
+export interface NanobotConfigPayload {
+  workspace: string;
+  provider: string;
+  model: string;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+  api_base?: string | null;
+  gateway_host: string;
+  gateway_port: number;
+  websocket_enabled: boolean;
+  websocket_host: string;
+  websocket_port: number;
+  websocket_path: string;
+  websocket_requires_token: boolean;
+  websocket_token?: string | null;
+  guard_mode: NanobotGuardMode;
+  guard_base_url: string;
+  guard_timeout_s: number;
 }
 
 // Sessions API
@@ -467,7 +554,10 @@ export const guardAPI = {
 // System API (openclaw install / onboard / status)
 export const systemAPI = {
   /** Check whether openclaw CLI is installed. */
-  status: () => api.get<SystemStatusResponse>("/system/status", { timeout: 2500 }),
+  status: () => api.get<SystemStatusResponse>("/system/status", { timeout: 30000 }),
+
+  /** Fast install/config probe used by setup and route guards. */
+  installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
 
   instances: () =>
     api.get<{ instances: RuntimeInstance[]; total: number }>('/system/instances'),
@@ -493,6 +583,9 @@ export const systemAPI = {
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',
 
+  /** SSE URL for nanobot install stream (use with fetch). */
+  nanobotInstallUrl: () => '/api/system/nanobot/install',
+
   /** Create the default nanobot config/workspace after nanobot is installed. */
   nanobotInitDefault: () =>
     api.post<{
@@ -505,6 +598,14 @@ export const systemAPI = {
       output?: string;
       instances?: RuntimeInstance[];
     }>('/system/nanobot/init-default'),
+
+  /** Read default nanobot config with secrets redacted. */
+  getNanobotConfig: () =>
+    api.get<NanobotConfigResponse>('/system/nanobot/config'),
+
+  /** Create/update the default nanobot config used by XSafeClaw. */
+  setNanobotConfig: (payload: NanobotConfigPayload) =>
+    api.post<NanobotConfigResponse>('/system/nanobot/config', payload),
 
   /** Start onboard process, returns proc_id. */
   onboardStart: () =>
@@ -569,6 +670,7 @@ export const systemAPI = {
     custom_model_id?: string;
     custom_provider_id?: string;
     custom_compatibility?: string;
+    custom_context_window?: number;
   }) => api.post('/system/onboard-config', data),
 
   /** Test Feishu credentials. */

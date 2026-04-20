@@ -14,7 +14,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -22,9 +22,15 @@ from pydantic import BaseModel, Field
 
 from ..runtime_helpers import get_instance, list_instances, runtime_registry, serialize_instance
 from ...runtime.nanobot import (
+    DEFAULT_NANOBOT_GATEWAY_HOST,
+    DEFAULT_NANOBOT_GATEWAY_PORT,
+    DEFAULT_NANOBOT_WEBSOCKET_HOST,
+    DEFAULT_NANOBOT_WEBSOCKET_PATH,
+    DEFAULT_NANOBOT_WEBSOCKET_PORT,
     DEFAULT_XSAFECLAW_GUARD_BASE_URL,
     DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S,
     NANOBOT_DEFAULT_CONFIG,
+    parse_nanobot_gateway_state,
     read_nanobot_guard_state,
     update_nanobot_gateway_state,
     update_nanobot_guard_state,
@@ -100,6 +106,24 @@ _NANOBOT_EXECUTABLES = (
     if os.name == "nt"
     else ("nanobot",)
 )
+_NANOBOT_PROVIDER_OPTIONS = [
+    {"id": "minimax", "name": "MiniMax", "default_model": "MiniMax-M2.7"},
+    {"id": "anthropic", "name": "Anthropic", "default_model": "anthropic/claude-opus-4-5"},
+    {"id": "openai", "name": "OpenAI", "default_model": "openai/gpt-4.1"},
+    {"id": "openrouter", "name": "OpenRouter", "default_model": "openrouter/anthropic/claude-sonnet-4"},
+    {"id": "deepseek", "name": "DeepSeek", "default_model": "deepseek/deepseek-chat"},
+    {"id": "gemini", "name": "Gemini", "default_model": "gemini/gemini-2.5-pro"},
+    {"id": "moonshot", "name": "Moonshot", "default_model": "moonshot/kimi-k2"},
+    {"id": "dashscope", "name": "DashScope", "default_model": "dashscope/qwen-plus"},
+    {"id": "zhipu", "name": "Zhipu AI", "default_model": "zhipu/glm-4.5"},
+    {"id": "groq", "name": "Groq", "default_model": "groq/llama-3.3-70b-versatile"},
+    {"id": "vllm", "name": "vLLM / Local", "default_model": "vllm/local-model"},
+    {"id": "ollama", "name": "Ollama", "default_model": "ollama/llama3.1"},
+    {"id": "mistral", "name": "Mistral", "default_model": "mistral/mistral-large-latest"},
+    {"id": "openaiCodex", "name": "OpenAI Codex", "default_model": "openaiCodex/codex"},
+    {"id": "githubCopilot", "name": "GitHub Copilot", "default_model": "githubCopilot/gpt-4.1"},
+]
+_NANOBOT_PROVIDER_IDS = {item["id"] for item in _NANOBOT_PROVIDER_OPTIONS}
 
 
 def _is_runnable_file(path: Path) -> bool:
@@ -126,8 +150,11 @@ def _set_pty_size(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 def _build_env() -> dict:
-    """Build an env dict that includes nvm Node 22 bin directory if available."""
+    """Build an env dict that includes nvm Node 22 bin directory if available (cross-platform)."""
     env = {**os.environ, "CI": "true", "NO_COLOR": "1"}
+    path_sep = _PATH_SEP
+
+    # nvm-sh (Linux/macOS/WSL): ~/.nvm/versions/node/v22.x.x/bin
     nvm_node22 = Path.home() / ".nvm" / "versions" / "node"
     if nvm_node22.exists():
         v22_dirs = sorted(
@@ -138,7 +165,25 @@ def _build_env() -> dict:
             v22_bin = str(v22_dirs[0] / "bin")
             current_path = env.get("PATH", "")
             if v22_bin not in current_path:
-                env["PATH"] = v22_bin + _PATH_SEP + current_path
+                env["PATH"] = v22_bin + path_sep + current_path
+
+    # nvm-windows: %NVM_HOME% symlinks to current Node, versions under %NVM_HOME%\..\versions\node
+    nvm_home = os.environ.get("NVM_HOME") or os.environ.get("NVM_SYMLINK")
+    if nvm_home:
+        nvm_home_path = Path(nvm_home)
+        nvm_windows_versions = nvm_home_path.parent / "versions" / "node"
+        if nvm_windows_versions.exists():
+            v22_dirs = sorted(
+                [d for d in nvm_windows_versions.iterdir() if d.name.startswith("v22")],
+                reverse=True,
+            )
+            if v22_dirs:
+                # On Windows nvm-windows, Node.exe lives directly in the version dir (no /bin subfolder)
+                v22_bin = str(v22_dirs[0])
+                current_path = env.get("PATH", "")
+                if v22_bin not in current_path:
+                    env["PATH"] = v22_bin + path_sep + current_path
+
     return env
 
 def _find_openclaw() -> Optional[str]:
@@ -323,6 +368,161 @@ def _find_node_version() -> str:
 # Status
 # ──────────────────────────────────────────────
 
+def _status_flags(
+    *,
+    openclaw_installed: bool,
+    nanobot_installed: bool,
+    config_exists: bool,
+) -> tuple[bool, bool]:
+    if not (openclaw_installed or nanobot_installed):
+        return True, False
+    if openclaw_installed and not config_exists:
+        return False, True
+    return False, False
+
+
+def _decode_first_line(stdout: bytes | None, stderr: bytes | None) -> tuple[str, str | None]:
+    raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
+    first_line = raw.splitlines()[0] if raw else None
+    return raw, first_line
+
+
+async def _probe_openclaw_install_async(
+    openclaw_path: str | None,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 2.0,
+) -> tuple[bool, str | None, str | None]:
+    """Fast OpenClaw install probe.
+
+    Finding the executable is enough to treat OpenClaw as installed; version
+    probing is best-effort so slow CLI startup cannot create false negatives.
+    """
+    if not openclaw_path:
+        return False, None, "openclaw executable not found"
+
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_openclaw_command(openclaw_path, ["--version"]),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        return True, None, "openclaw --version timed out"
+    except Exception as exc:
+        return True, None, str(exc)
+
+    raw, first_line = _decode_first_line(stdout, stderr)
+    lowered = raw.lower()
+    if "requires node" in lowered or "upgrade node" in lowered:
+        return False, None, "node_version_too_low"
+    if proc.returncode == 0:
+        return True, first_line or "unknown", None
+    return False, None, first_line or f"openclaw exited with code {proc.returncode}"
+
+
+async def _probe_nanobot_install_async(
+    nanobot_path: str | None,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 2.0,
+) -> tuple[bool, str | None, str | None]:
+    """Fast nanobot install probe.
+
+    A located executable counts as installed unless the probe returns a clear
+    broken-CLI signal. Probe timeouts are surfaced as diagnostics, not false
+    installation failures.
+    """
+    if not nanobot_path:
+        return False, None, "nanobot executable not found"
+
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_nanobot_command(nanobot_path, ["--version"]),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        return True, None, "nanobot --version timed out"
+    except Exception as exc:
+        return True, None, str(exc)
+
+    raw, first_line = _decode_first_line(stdout, stderr)
+    lowered = raw.lower()
+    if "traceback" in lowered or "no module named" in lowered:
+        return False, None, first_line or "nanobot CLI traceback"
+    if (
+        proc.returncode == 0
+        and first_line
+        and "nanobot" in first_line.lower()
+    ):
+        return True, first_line, None
+    if proc.returncode == 0:
+        return True, first_line or "unknown", None
+    return False, None, first_line or f"nanobot exited with code {proc.returncode}"
+
+
+@router.get("/install-status")
+async def get_install_status():
+    """Fast install/config status for routing and setup screens."""
+    env = _build_env()
+    openclaw_path = _find_openclaw()
+    nanobot_path = _find_nanobot(env=env)
+
+    openclaw_ready, openclaw_version, openclaw_error = await _probe_openclaw_install_async(
+        openclaw_path,
+        env=env,
+    )
+    nanobot_ready, nanobot_version, nanobot_error = await _probe_nanobot_install_async(
+        nanobot_path,
+        env=env,
+    )
+
+    config_exists = _CONFIG_PATH.exists()
+    nanobot_config_exists = NANOBOT_DEFAULT_CONFIG.exists()
+    requires_setup, requires_configure = _status_flags(
+        openclaw_installed=openclaw_ready,
+        nanobot_installed=nanobot_ready,
+        config_exists=config_exists,
+    )
+
+    return {
+        "openclaw_installed": openclaw_ready,
+        "openclaw_version": openclaw_version,
+        "openclaw_error": openclaw_error,
+        "openclaw_path": openclaw_path,
+        "nanobot_installed": nanobot_ready,
+        "nanobot_version": nanobot_version,
+        "nanobot_error": nanobot_error,
+        "nanobot_path": nanobot_path,
+        "config_exists": config_exists,
+        "nanobot_config_exists": nanobot_config_exists,
+        "requires_setup": requires_setup,
+        "requires_configure": requires_configure,
+        "requires_nanobot_setup": not nanobot_ready,
+        "requires_nanobot_configure": nanobot_ready and not nanobot_config_exists,
+        "node_version": _find_node_version(),
+    }
+
+
 @router.get("/status")
 async def get_system_status():
     """Check whether openclaw CLI is installed and whether its daemon is running."""
@@ -337,13 +537,6 @@ async def get_system_status():
     enabled_instances = [instance for instance in instances if instance.enabled]
     default_instance = next((instance for instance in enabled_instances if instance.is_default), None)
     nanobot_config_exists = NANOBOT_DEFAULT_CONFIG.exists()
-
-    def _status_flags(*, openclaw_installed: bool, config_exists: bool) -> tuple[bool, bool]:
-        if not openclaw_installed:
-            return True, False
-        if not config_exists:
-            return False, True
-        return False, False
 
     nanobot_installed = nanobot_ready
     requires_nanobot_setup = not nanobot_installed
@@ -364,6 +557,7 @@ async def get_system_status():
         has_instances = bool(enabled_instances)
         requires_setup, requires_configure = _status_flags(
             openclaw_installed=False,
+            nanobot_installed=nanobot_installed,
             config_exists=_CONFIG_PATH.exists(),
         )
         return {
@@ -404,6 +598,7 @@ async def get_system_status():
             has_instances = bool(enabled_instances)
             requires_setup, requires_configure = _status_flags(
                 openclaw_installed=False,
+                nanobot_installed=nanobot_installed,
                 config_exists=_CONFIG_PATH.exists(),
             )
             return {
@@ -448,6 +643,7 @@ async def get_system_status():
     has_instances = bool(enabled_instances)
     requires_setup, requires_configure = _status_flags(
         openclaw_installed=True,
+        nanobot_installed=nanobot_installed,
         config_exists=_CONFIG_PATH.exists(),
     )
     return {
@@ -479,6 +675,275 @@ class NanobotGuardConfigRequest(BaseModel):
     mode: Literal["disabled", "observe", "blocking"] = "disabled"
     base_url: str | None = None
     timeout_s: float | None = Field(default=None, ge=1.0)
+
+
+class NanobotConfigRequest(BaseModel):
+    """Create/update the default nanobot config used by XSafeClaw."""
+
+    workspace: str = "~/.nanobot/workspace"
+    provider: str = "minimax"
+    model: str = "MiniMax-M2.7"
+    api_key: str | None = None
+    clear_api_key: bool = False
+    api_base: str | None = None
+    gateway_host: str = DEFAULT_NANOBOT_GATEWAY_HOST
+    gateway_port: int = Field(DEFAULT_NANOBOT_GATEWAY_PORT, ge=1, le=65535)
+    websocket_enabled: bool = True
+    websocket_host: str = DEFAULT_NANOBOT_WEBSOCKET_HOST
+    websocket_port: int = Field(DEFAULT_NANOBOT_WEBSOCKET_PORT, ge=1, le=65535)
+    websocket_path: str = DEFAULT_NANOBOT_WEBSOCKET_PATH
+    websocket_requires_token: bool = False
+    websocket_token: str | None = None
+    guard_mode: Literal["disabled", "observe", "blocking"] = "blocking"
+    guard_base_url: str = DEFAULT_XSAFECLAW_GUARD_BASE_URL
+    guard_timeout_s: float = Field(DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S, ge=1.0)
+
+
+def _json_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _read_json_mapping(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_json_mapping(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _nanobot_default_workspace() -> str:
+    return str(Path.home() / ".nanobot" / "workspace")
+
+
+def _nanobot_default_config_payload() -> dict[str, Any]:
+    return {
+        "agents": {
+            "defaults": {
+                "workspace": _nanobot_default_workspace(),
+                "provider": "minimax",
+                "model": "MiniMax-M2.7",
+            }
+        },
+        "providers": {
+            "minimax": {},
+        },
+        "gateway": {
+            "host": DEFAULT_NANOBOT_GATEWAY_HOST,
+            "port": DEFAULT_NANOBOT_GATEWAY_PORT,
+            "heartbeat": 30,
+        },
+        "channels": {
+            "sendProgress": True,
+            "sendToolHints": False,
+            "sendMaxRetries": 3,
+            "transcriptionProvider": "groq",
+            "websocket": {
+                "enabled": True,
+                "host": DEFAULT_NANOBOT_WEBSOCKET_HOST,
+                "port": DEFAULT_NANOBOT_WEBSOCKET_PORT,
+                "path": DEFAULT_NANOBOT_WEBSOCKET_PATH,
+                "websocketRequiresToken": False,
+                "allowFrom": ["xsafeclaw"],
+                "streaming": True,
+            },
+        },
+    }
+
+
+def _redacted_nanobot_provider_configs(providers: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    redacted: dict[str, dict[str, Any]] = {}
+    for provider_id, raw_config in providers.items():
+        config = _json_mapping(raw_config)
+        api_key = str(config.get("apiKey") or "").strip()
+        redacted[str(provider_id)] = {
+            "has_api_key": bool(api_key),
+            "api_base": config.get("apiBase"),
+        }
+    return redacted
+
+
+def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
+    path = Path(config_path or NANOBOT_DEFAULT_CONFIG).expanduser()
+    config_exists = path.exists()
+    data = _read_json_mapping(path) if config_exists else _nanobot_default_config_payload()
+    agents = _json_mapping(data.get("agents"))
+    defaults = _json_mapping(agents.get("defaults"))
+    providers = _json_mapping(data.get("providers"))
+    provider = str(defaults.get("provider") or "").strip()
+    model = str(defaults.get("model") or "").strip()
+    if not provider:
+        provider = model.split("/", 1)[0] if "/" in model else "minimax"
+    if not model:
+        default_option = next((item for item in _NANOBOT_PROVIDER_OPTIONS if item["id"] == provider), None)
+        model = str((default_option or _NANOBOT_PROVIDER_OPTIONS[0])["default_model"])
+
+    workspace = str(defaults.get("workspace") or _nanobot_default_workspace()).strip()
+    gateway = parse_nanobot_gateway_state(data)
+    guard = read_nanobot_guard_state(path) if config_exists else {
+        "hook_present": False,
+        "enabled": False,
+        "hook_valid": False,
+        "class_path": None,
+        "mode": "blocking",
+        "base_url": DEFAULT_XSAFECLAW_GUARD_BASE_URL,
+        "configured_instance_id": None,
+        "timeout_s": DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S,
+    }
+    active_provider_config = _json_mapping(providers.get(provider))
+
+    return {
+        "config_exists": config_exists,
+        "config_path": str(path),
+        "workspace": workspace,
+        "provider": provider,
+        "model": model,
+        "api_base": active_provider_config.get("apiBase"),
+        "provider_options": _NANOBOT_PROVIDER_OPTIONS,
+        "provider_configs": _redacted_nanobot_provider_configs(providers),
+        "gateway": {
+            "host": gateway["gateway_host"],
+            "port": gateway["gateway_port"],
+            "health_url": gateway["gateway_health_url"],
+        },
+        "websocket": {
+            "enabled": gateway["websocket_enabled"],
+            "host": gateway["websocket_host"],
+            "port": gateway["websocket_port"],
+            "path": gateway["websocket_path"],
+            "url": gateway["websocket_url"],
+            "requires_token": bool(
+                _json_mapping(_json_mapping(data.get("channels")).get("websocket")).get("websocketRequiresToken")
+            ),
+            "has_token": bool(gateway["websocket_token"]),
+        },
+        "guard": {
+            "mode": guard["mode"],
+            "enabled": guard["enabled"],
+            "hook_present": guard["hook_present"],
+            "hook_valid": guard["hook_valid"],
+            "base_url": guard["base_url"],
+            "timeout_s": guard["timeout_s"],
+            "configured_instance_id": guard["configured_instance_id"],
+        },
+    }
+
+
+def _set_nanobot_config_value(data: dict[str, Any], body: NanobotConfigRequest) -> dict[str, Any]:
+    provider = body.provider.strip()
+    if provider not in _NANOBOT_PROVIDER_IDS:
+        raise ValueError(f"Unsupported nanobot provider: {body.provider}")
+
+    workspace = str(Path(body.workspace or _nanobot_default_workspace()).expanduser())
+    Path(workspace).mkdir(parents=True, exist_ok=True)
+
+    agents = data.setdefault("agents", {})
+    if not isinstance(agents, dict):
+        agents = {}
+        data["agents"] = agents
+    defaults = agents.setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        defaults = {}
+        agents["defaults"] = defaults
+    defaults["workspace"] = workspace
+    defaults["provider"] = provider
+    defaults["model"] = body.model.strip() or next(
+        item["default_model"] for item in _NANOBOT_PROVIDER_OPTIONS if item["id"] == provider
+    )
+
+    providers = data.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        data["providers"] = providers
+    provider_config = providers.setdefault(provider, {})
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+        providers[provider] = provider_config
+    if body.clear_api_key:
+        provider_config.pop("apiKey", None)
+    elif body.api_key and body.api_key.strip():
+        provider_config["apiKey"] = body.api_key.strip()
+    if body.api_base and body.api_base.strip():
+        provider_config["apiBase"] = body.api_base.strip()
+    else:
+        provider_config.pop("apiBase", None)
+
+    gateway = data.setdefault("gateway", {})
+    if not isinstance(gateway, dict):
+        gateway = {}
+        data["gateway"] = gateway
+    gateway["host"] = body.gateway_host.strip() or DEFAULT_NANOBOT_GATEWAY_HOST
+    gateway["port"] = body.gateway_port
+    gateway.setdefault("heartbeat", 30)
+
+    channels = data.setdefault("channels", {})
+    if not isinstance(channels, dict):
+        channels = {}
+        data["channels"] = channels
+    channels.setdefault("sendProgress", True)
+    channels.setdefault("sendToolHints", False)
+    channels.setdefault("sendMaxRetries", 3)
+    channels.setdefault("transcriptionProvider", "groq")
+    websocket = channels.setdefault("websocket", {})
+    if not isinstance(websocket, dict):
+        websocket = {}
+        channels["websocket"] = websocket
+    websocket["enabled"] = body.websocket_enabled
+    websocket["host"] = body.websocket_host.strip() or DEFAULT_NANOBOT_WEBSOCKET_HOST
+    websocket["port"] = body.websocket_port
+    websocket["path"] = body.websocket_path.strip() or DEFAULT_NANOBOT_WEBSOCKET_PATH
+    websocket["websocketRequiresToken"] = body.websocket_requires_token
+    websocket.setdefault("allowFrom", ["xsafeclaw"])
+    websocket.setdefault("streaming", True)
+    if body.websocket_requires_token and body.websocket_token and body.websocket_token.strip():
+        websocket["token"] = body.websocket_token.strip()
+    elif not body.websocket_requires_token:
+        websocket.pop("token", None)
+
+    return data
+
+
+@router.get("/nanobot/config")
+async def get_nanobot_config():
+    """Read the editable default nanobot configuration with secrets redacted."""
+    return _nanobot_config_response()
+
+
+@router.post("/nanobot/config")
+async def set_nanobot_config(body: NanobotConfigRequest):
+    """Write the default nanobot configuration used by the setup wizard."""
+    path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
+    data = _read_json_mapping(path) if path.exists() else _nanobot_default_config_payload()
+    try:
+        data = _set_nanobot_config_value(data, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _write_json_mapping(path, data)
+    guard = update_nanobot_guard_state(
+        path,
+        instance_id="nanobot-default",
+        mode=body.guard_mode,
+        base_url=body.guard_base_url,
+        timeout_s=body.guard_timeout_s,
+    )
+    response = _nanobot_config_response(path)
+    try:
+        instances = await runtime_registry.discover()
+    except Exception:
+        instances = []
+    return {
+        "success": True,
+        **response,
+        "guard": response["guard"] | {"mode": guard["mode"]},
+        "instances": [serialize_instance(instance) for instance in instances],
+    }
 
 
 @router.get("/instances")
@@ -782,6 +1247,45 @@ async def install_openclaw():
             if proc.returncode == 0:
                 yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
                 trigger_onboard_scan_preload()
+            else:
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/nanobot/install")
+async def install_nanobot():
+    """Install nanobot via uv tool install. Streams SSE output."""
+    env = _build_env()
+
+    async def generate():
+        install_cmd = _nanobot_tool_install_command()
+        yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {install_cmd}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'nanobot_install_start'})}\n\n"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "uv", "tool", "install", "nanobot-ai", "--force",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+            await proc.wait()
+            if proc.returncode == 0:
+                yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
             else:
                 yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
         except Exception as exc:
@@ -1489,6 +1993,8 @@ AVAILABLE_CHANNELS = [
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+_OPENCLAW_MIN_CONTEXT_WINDOW = 16000
+_CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW = 204800
 
 # ── Dynamic auth-provider scanning ───────────────────────────────────────────
 # Reads each extension's openclaw.plugin.json at runtime so the provider list
@@ -2309,6 +2815,7 @@ class OnboardConfigRequest(BaseModel):
     custom_model_id: str = ""
     custom_provider_id: str = ""
     custom_compatibility: str = "openai"
+    custom_context_window: int = Field(default=_CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW, ge=_OPENCLAW_MIN_CONTEXT_WINDOW)
 
 
 # _METHOD_CLI_FLAGS is now dynamically built by _get_auth_providers_and_flags()
@@ -2450,6 +2957,17 @@ def _normalize_full_model_id(model_id: str, provider_hint: str = "") -> str:
         return f"{lookup[0]}/{target}"
     return target
 
+
+def _normalize_context_window(value: int | str | None, *, default: int = _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed < _OPENCLAW_MIN_CONTEXT_WINDOW:
+        return default
+    return parsed
+
+
 def _load_explicit_model_ids() -> list[str]:
     if not _EXPLICIT_MODELS_PATH.exists():
         return []
@@ -2533,6 +3051,36 @@ def _strip_legacy_xsafeclaw_config(config: dict) -> bool:
     return True
 
 
+def _repair_too_small_model_context_windows(config: dict) -> bool:
+    """Repair model entries written by older XSafeClaw builds with 8K context."""
+    changed = False
+    providers_cfg = (
+        config.get("models", {})
+        .get("providers", {})
+    )
+    if not isinstance(providers_cfg, dict):
+        return False
+
+    for provider_cfg in providers_cfg.values():
+        if not isinstance(provider_cfg, dict):
+            continue
+        models = provider_cfg.get("models")
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            raw_context = model.get("contextWindow")
+            try:
+                context_window = int(raw_context or 0)
+            except (TypeError, ValueError):
+                context_window = 0
+            if 0 < context_window < _OPENCLAW_MIN_CONTEXT_WINDOW:
+                model["contextWindow"] = _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW
+                changed = True
+    return changed
+
+
 def sanitize_legacy_openclaw_config() -> bool:
     """Migrate/remove legacy XSafeClaw-only keys from openclaw.json."""
     if not _CONFIG_PATH.exists():
@@ -2545,13 +3093,17 @@ def sanitize_legacy_openclaw_config() -> bool:
     if not isinstance(config, dict):
         return False
 
-    changed = _strip_legacy_xsafeclaw_config(config)
+    changed = False
+    if _strip_legacy_xsafeclaw_config(config):
+        changed = True
+    if _repair_too_small_model_context_windows(config):
+        changed = True
     if not changed:
         return False
 
     tmp = _CONFIG_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(_CONFIG_PATH)
+    tmp.replace(_CONFIG_PATH)
     return True
 
 
@@ -2728,8 +3280,8 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         custom_cfg["models"] = [{
             "id": body.custom_model_id,
             "name": f"{body.custom_model_id} (Custom Provider)",
-            "contextWindow": 8192,
-            "maxTokens": 4096,
+            "contextWindow": _normalize_context_window(body.custom_context_window),
+            "maxTokens": 8192,
             "input": ["text"],
             "reasoning": False,
             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},

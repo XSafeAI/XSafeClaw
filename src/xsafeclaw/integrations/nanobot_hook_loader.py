@@ -16,6 +16,7 @@ _CONFIG_PATCH_ATTR = "_xsafeclaw_config_hooks_compat_installed"
 _ORIGINAL_INIT_ATTR = "_xsafeclaw_original_init"
 _ORIGINAL_RUN_ATTR = "_xsafeclaw_original_run_agent_loop"
 _ORIGINAL_LOAD_CONFIG_ATTR = "_xsafeclaw_original_load_config"
+_XSAFECLAW_CHANNEL_EXTENSION_NAME = "xsafeclaw"
 
 
 def _default_config_path() -> Path:
@@ -55,15 +56,28 @@ def _import_hook_class(class_path: str) -> type[Any]:
     return target
 
 
+def _read_hook_entries(data: dict[str, Any]) -> dict[str, Any]:
+    channels = _read_mapping(data.get("channels"))
+    extension = _read_mapping(channels.get(_XSAFECLAW_CHANNEL_EXTENSION_NAME))
+    extension_hooks = _read_mapping(extension.get("hooks"))
+    extension_entries = _read_mapping(extension_hooks.get("entries"))
+    if extension_entries:
+        return extension_entries
+
+    legacy_hooks = _read_mapping(data.get("hooks"))
+    return _read_mapping(legacy_hooks.get("entries"))
+
+
 def load_configured_nanobot_hooks(config_path: str | Path | None = None) -> list[Any]:
     """Instantiate nanobot hooks from raw config JSON.
 
-    Upstream nanobot currently drops unknown top-level keys when loading its
-    Pydantic config model, so XSafeClaw reads ``hooks.entries`` directly from
-    the JSON file instead of going through nanobot's typed config object.
+    Upstream nanobot currently rejects unknown top-level keys when loading its
+    Pydantic config model, so XSafeClaw stores current hook configuration under
+    ``channels.xsafeclaw.hooks.entries`` and still reads legacy ``hooks.entries``
+    for older configs.
     """
     path = Path(config_path).expanduser() if config_path else _default_config_path()
-    entries = _read_mapping(_read_mapping(_read_json(path).get("hooks")).get("entries"))
+    entries = _read_hook_entries(_read_json(path))
     hooks: list[Any] = []
 
     for name, entry in entries.items():
@@ -116,9 +130,10 @@ def _strip_xsafeclaw_config_extensions(data: Any) -> Any:
 def install_nanobot_config_compat() -> bool:
     """Allow upstream nanobot config loading to coexist with XSafeClaw extensions.
 
-    nanobot 0.1.5 forbids unknown top-level fields in its Pydantic config. XSafeClaw
-    stores hook configuration under ``hooks.entries`` in the same JSON file for a
-    plugin-like UX, so nanobot must ignore that extension while loading its own config.
+    nanobot 0.1.5 forbids unknown top-level fields in its Pydantic config. Older
+    XSafeClaw configs used ``hooks.entries`` in the same JSON file for a
+    plugin-like UX, so nanobot must ignore that legacy extension while loading
+    its own config.
     """
     try:
         import pydantic

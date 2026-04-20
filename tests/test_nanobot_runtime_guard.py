@@ -17,6 +17,7 @@ import xsafeclaw.runtime.nanobot as nanobot_runtime
 import xsafeclaw.runtime.registry as registry_runtime
 from xsafeclaw.runtime import RuntimeRegistry
 from xsafeclaw.runtime.nanobot import (
+    XSAFECLAW_CHANNEL_EXTENSION_NAME,
     XSAFECLAW_HOOK_CLASS_PATH,
     read_nanobot_guard_state,
     update_nanobot_gateway_state,
@@ -51,16 +52,20 @@ def test_nanobot_hook_loader_reads_raw_hook_config(tmp_path):
     config_path.write_text(
         json.dumps(
             {
-                "hooks": {
-                    "entries": {
-                        "xsafeclaw": {
-                            "enabled": True,
-                            "class_path": XSAFECLAW_HOOK_CLASS_PATH,
-                            "config": {
-                                "mode": "blocking",
-                                "base_url": "http://127.0.0.1:6874",
-                                "instance_id": "nanobot-default",
-                                "timeout_s": 12,
+                "channels": {
+                    XSAFECLAW_CHANNEL_EXTENSION_NAME: {
+                        "hooks": {
+                            "entries": {
+                                "xsafeclaw": {
+                                    "enabled": True,
+                                    "class_path": XSAFECLAW_HOOK_CLASS_PATH,
+                                    "config": {
+                                        "mode": "blocking",
+                                        "base_url": "http://127.0.0.1:6874",
+                                        "instance_id": "nanobot-default",
+                                        "timeout_s": 12,
+                                    },
+                                }
                             },
                         }
                     }
@@ -78,6 +83,33 @@ def test_nanobot_hook_loader_reads_raw_hook_config(tmp_path):
     assert hooks[0].mode == "blocking"
     assert hooks[0].instance_id == "nanobot-default"
     assert hooks[0].timeout_s == 12
+
+
+def test_nanobot_hook_loader_reads_legacy_top_level_hook_config(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "entries": {
+                        "xsafeclaw": {
+                            "enabled": True,
+                            "class_path": XSAFECLAW_HOOK_CLASS_PATH,
+                            "config": {"mode": "observe"},
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hooks = nanobot_hook_loader.load_configured_nanobot_hooks(config_path)
+
+    assert len(hooks) == 1
+    assert isinstance(hooks[0], XSafeClawHook)
+    assert hooks[0].mode == "observe"
 
 
 def test_nanobot_hook_loader_deduplicates_existing_hook(monkeypatch):
@@ -148,6 +180,12 @@ def test_nanobot_guard_config_roundtrip_and_runtime_capabilities(monkeypatch, tm
     assert updated["mode"] == "blocking"
     assert updated["configured_instance_id"] == "nanobot-default"
     assert updated["class_path"] == XSAFECLAW_HOOK_CLASS_PATH
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "hooks" not in stored
+    assert (
+        stored["channels"][XSAFECLAW_CHANNEL_EXTENSION_NAME]["hooks"]["entries"]["xsafeclaw"]["config"]["mode"]
+        == "blocking"
+    )
     gateway = update_nanobot_gateway_state(config_path)
     assert gateway["gateway_health_url"] == "http://127.0.0.1:18790/health"
     assert gateway["websocket_url"] == "ws://127.0.0.1:8765/"
@@ -278,6 +316,254 @@ def test_system_status_reports_nanobot_setup_without_breaking_openclaw(monkeypat
     assert data["requires_setup"] is False
     assert data["requires_configure"] is False
     assert data["nanobot_installed"] is False
+    assert data["requires_nanobot_setup"] is True
+
+
+def test_install_status_uses_fast_cli_checks_without_runtime_discovery(monkeypatch, tmp_path):
+    async def fail_list_instances():
+        raise AssertionError("install-status must not perform runtime discovery")
+
+    class FakeProcess:
+        def __init__(self, args):
+            self.args = args
+            self.returncode = 0
+
+        async def communicate(self):
+            command = str(self.args[0]).lower()
+            if "nanobot" in command:
+                return b"\xf0\x9f\x90\x88 nanobot v0.1.5.post1\n", b""
+            return b"OpenClaw 2026.4.15\n", b""
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        return FakeProcess(args)
+
+    openclaw_config = tmp_path / "openclaw.json"
+    nanobot_config = tmp_path / "nanobot-config.json"
+    openclaw_config.write_text("{}", encoding="utf-8")
+    nanobot_config.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: str(tmp_path / "openclaw.cmd"))
+    monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
+    monkeypatch.setattr(system_routes, "_find_node_version", lambda: "v22.0.0")
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", openclaw_config)
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", nanobot_config)
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    client = TestClient(app)
+    response = client.get("/api/system/install-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["openclaw_installed"] is True
+    assert data["openclaw_version"] == "OpenClaw 2026.4.15"
+    assert data["nanobot_installed"] is True
+    assert data["nanobot_version"] == "🐈 nanobot v0.1.5.post1"
+    assert data["requires_setup"] is False
+    assert data["requires_configure"] is False
+    assert data["requires_nanobot_setup"] is False
+    assert data["requires_nanobot_configure"] is False
+
+
+def test_install_status_does_not_require_openclaw_config_for_nanobot_only(monkeypatch, tmp_path):
+    async def fail_list_instances():
+        raise AssertionError("install-status must not perform runtime discovery")
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"nanobot v0.1.5.post1\n", b""
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeProcess()
+
+    nanobot_config = tmp_path / "nanobot-config.json"
+    nanobot_config.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: None)
+    monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
+    monkeypatch.setattr(system_routes, "_find_node_version", lambda: "v22.0.0")
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", tmp_path / "missing-openclaw.json")
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", nanobot_config)
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    client = TestClient(app)
+    response = client.get("/api/system/install-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["openclaw_installed"] is False
+    assert data["nanobot_installed"] is True
+    assert data["requires_setup"] is False
+    assert data["requires_configure"] is False
+    assert data["requires_nanobot_setup"] is False
+    assert data["requires_nanobot_configure"] is False
+
+
+def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_path):
+    config_path = tmp_path / "nanobot-config.json"
+
+    async def fake_discover():
+        return []
+
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", config_path)
+    monkeypatch.setattr(system_routes.runtime_registry, "discover", fake_discover)
+
+    client = TestClient(app)
+    initial = client.get("/api/system/nanobot/config")
+
+    assert initial.status_code == 200
+    assert initial.json()["config_exists"] is False
+    assert initial.json()["provider"] == "minimax"
+
+    response = client.post(
+        "/api/system/nanobot/config",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "provider": "minimax",
+            "model": "MiniMax-M2.7",
+            "api_key": "secret-key",
+            "api_base": "https://api.minimax.io/v1",
+            "gateway_host": "127.0.0.1",
+            "gateway_port": 18790,
+            "websocket_enabled": True,
+            "websocket_host": "127.0.0.1",
+            "websocket_port": 8765,
+            "websocket_path": "/",
+            "websocket_requires_token": True,
+            "websocket_token": "ws-secret",
+            "guard_mode": "blocking",
+            "guard_base_url": "http://127.0.0.1:6874",
+            "guard_timeout_s": 30,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["config_exists"] is True
+    assert data["provider_configs"]["minimax"]["has_api_key"] is True
+    assert "secret-key" not in json.dumps(data, ensure_ascii=False)
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert stored["agents"]["defaults"]["model"] == "MiniMax-M2.7"
+    assert stored["providers"]["minimax"]["apiKey"] == "secret-key"
+    assert stored["providers"]["minimax"]["apiBase"] == "https://api.minimax.io/v1"
+    assert stored["channels"]["websocket"]["websocketRequiresToken"] is True
+    assert "hooks" not in stored
+    assert (
+        stored["channels"][XSAFECLAW_CHANNEL_EXTENSION_NAME]["hooks"]["entries"]["xsafeclaw"]["config"]["mode"]
+        == "blocking"
+    )
+
+    readback = client.get("/api/system/nanobot/config")
+    assert readback.status_code == 200
+    assert readback.json()["provider_configs"]["minimax"]["has_api_key"] is True
+    assert "secret-key" not in json.dumps(readback.json(), ensure_ascii=False)
+
+
+def test_openclaw_config_sanitizer_repairs_legacy_custom_context_window(monkeypatch, tmp_path):
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "providers": {
+                        "custom-minimax": {
+                            "models": [
+                                {"id": "MiniMax-M2.7", "contextWindow": 8192}
+                            ]
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", config_path)
+
+    changed = system_routes.sanitize_legacy_openclaw_config()
+
+    assert changed is True
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    model = stored["models"]["providers"]["custom-minimax"]["models"][0]
+    assert model["contextWindow"] == 204800
+
+
+def test_openclaw_custom_provider_uses_configurable_context_window(monkeypatch, tmp_path):
+    config_path = tmp_path / "openclaw.json"
+    explicit_path = tmp_path / "xsafeclaw-explicit-models.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(system_routes, "_EXPLICIT_MODELS_PATH", explicit_path)
+
+    body = system_routes.OnboardConfigRequest(
+        provider="custom-api-key",
+        custom_base_url="https://api.minimaxi.com/v1",
+        custom_model_id="MiniMax-M2.7",
+        custom_provider_id="minimax",
+        custom_compatibility="openai",
+        custom_context_window=204800,
+    )
+    system_routes._patch_config_extras(body)
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    provider = stored["models"]["providers"]["minimax"]
+    model = provider["models"][0]
+    assert provider["baseUrl"] == "https://api.minimaxi.com/v1"
+    assert provider["api"] == "openai-completions"
+    assert model["id"] == "MiniMax-M2.7"
+    assert model["contextWindow"] == 204800
+    assert model["maxTokens"] == 8192
+
+
+def test_install_status_rejects_broken_nanobot_cli(monkeypatch, tmp_path):
+    async def fail_list_instances():
+        raise AssertionError("install-status must not perform runtime discovery")
+
+    class FakeProcess:
+        def __init__(self, args):
+            self.args = args
+            command = str(args[0]).lower()
+            self.returncode = 1 if "nanobot" in command else 0
+
+        async def communicate(self):
+            command = str(self.args[0]).lower()
+            if "nanobot" in command:
+                return (
+                    b"",
+                    b"Traceback (most recent call last):\n"
+                    b"ModuleNotFoundError: No module named 'nanobot.cli'\n",
+                )
+            return b"OpenClaw 2026.4.15\n", b""
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        return FakeProcess(args)
+
+    openclaw_config = tmp_path / "openclaw.json"
+    openclaw_config.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: str(tmp_path / "openclaw.cmd"))
+    monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
+    monkeypatch.setattr(system_routes, "_find_node_version", lambda: "v22.0.0")
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", openclaw_config)
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", tmp_path / "nanobot-config.json")
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    client = TestClient(app)
+    response = client.get("/api/system/install-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["openclaw_installed"] is True
+    assert data["nanobot_installed"] is False
+    assert data["nanobot_version"] is None
+    assert data["nanobot_error"] == "Traceback (most recent call last):"
+    assert data["requires_setup"] is False
     assert data["requires_nanobot_setup"] is True
 
 

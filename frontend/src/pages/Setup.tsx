@@ -1,23 +1,25 @@
 /**
- * Setup page — detect and install OpenClaw CLI.
- * If npm/Node.js is missing, auto-downloads Node.js first.
- * After installation completes, redirects to /configure for onboard wizard.
+ * Setup page — detect and install OpenClaw CLI and/or Nanobot CLI.
+ * If at least one platform is installed, user can skip to the main app.
+ * After installation completes, redirects to the platform-specific configure wizard.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  CheckCircle, Download, Loader2, XCircle, ChevronRight, AlertTriangle, Terminal,
-  ArrowDownToLine,
+  CheckCircle, Download, Loader2, XCircle, ChevronRight, Terminal,
+  ArrowDownToLine, Zap, Bot, SkipForward,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
 
-type Stage =
-  | 'checking'
-  | 'not_installed'
-  | 'downloading_node'
-  | 'installing'
-  | 'install_failed';
+type Stage = 'checking' | 'selecting' | 'downloading_node' | 'installing_openclaw' | 'installing_nanobot' | 'install_failed';
+type Platform = 'openclaw' | 'nanobot';
+
+interface PlatformInfo {
+  installed: boolean | null;
+  version?: string;
+  configured?: boolean;
+}
 
 interface LogLine { id: number; text: string; kind: 'output' | 'info' | 'success' | 'error'; }
 let _lid = 0;
@@ -82,12 +84,94 @@ interface NodeStatus {
   progressText?: string;
 }
 
+interface SetupCardProps {
+  platform: Platform;
+  info: PlatformInfo;
+  installing: boolean;
+  onInstall: () => void;
+  t: any;
+}
+
+function SetupCard({ platform, info, installing, onInstall, t }: SetupCardProps) {
+  const isOpenClaw = platform === 'openclaw';
+  const name = isOpenClaw ? 'OpenClaw' : 'Nanobot';
+  const Icon = isOpenClaw ? Zap : Bot;
+  const isInstalled = info.installed === true;
+  const isUnknown = info.installed === null;
+  const accentColor = isOpenClaw ? 'border-blue-500/30 bg-blue-500/5' : 'border-cyan-500/30 bg-cyan-500/5';
+  const iconBg = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : 'bg-cyan-500/15 text-cyan-400';
+  const badgeInstalled = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : 'bg-cyan-500/15 text-cyan-400';
+  const badgeNotInstalled = 'bg-surface-2 text-text-muted';
+
+  return (
+    <div className={`border rounded-2xl p-6 transition-all ${isInstalled ? 'border-emerald-500/30 bg-emerald-500/5' : accentColor}`}>
+      <div className="flex items-start gap-4">
+        <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${isInstalled ? 'bg-emerald-500/15' : iconBg}`}>
+          {isInstalled ? (
+            <CheckCircle className="w-6 h-6 text-emerald-400" />
+          ) : installing ? (
+            <Loader2 className="w-6 h-6 text-text-muted animate-spin" />
+          ) : isUnknown ? (
+            <XCircle className="w-6 h-6 text-text-muted" />
+          ) : (
+            <Icon className="w-6 h-6" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <h3 className="text-base font-bold text-text-primary">{name}</h3>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase ${isInstalled ? badgeInstalled : badgeNotInstalled}`}>
+              {isInstalled ? (info.configured ? 'ready' : 'installed') : isUnknown ? 'unknown' : 'not installed'}
+            </span>
+          </div>
+          <p className="text-[12px] text-text-muted leading-relaxed">
+            {isOpenClaw
+              ? t.setup.openclawDesc
+              : t.setup.nanobotDesc}
+          </p>
+          {isInstalled && info.version && (
+            <p className="text-[11px] text-text-muted mt-1 font-mono">
+              v{info.version}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {info.installed === false && !installing && (
+        <button
+          onClick={onInstall}
+          className={`w-full mt-4 flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-[13px] transition-all shadow ${
+            isOpenClaw
+              ? 'bg-blue-500 hover:bg-blue-600 text-white shadow-blue-500/25'
+              : 'bg-cyan-500 hover:bg-cyan-600 text-white shadow-cyan-500/25'
+          }`}
+        >
+          <Download className="w-4 h-4" />
+          {isOpenClaw ? t.setup.installOpenClaw : t.setup.installNanobot}
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      )}
+
+      {installing && (
+        <div className="mt-4 flex items-center gap-2 text-[12px] text-text-muted">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          {isOpenClaw ? t.setup.installing : t.setup.nanobotInstalling}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Setup() {
   const navigate = useNavigate();
   const { t } = useI18n();
   const [stage, setStage] = useState<Stage>('checking');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
+  const [openclawInfo, setOpenclawInfo] = useState<PlatformInfo>({ installed: null });
+  const [nanobotInfo, setNanobotInfo] = useState<PlatformInfo>({ installed: null, configured: false });
+  const [installingPlatform, setInstallingPlatform] = useState<Platform | null>(null);
+  const [detectionError, setDetectionError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
 
   const addLog = (text: string, kind: LogLine['kind'] = 'output') => {
@@ -95,23 +179,43 @@ export default function Setup() {
     setLogs(prev => [...prev, { id: ++_lid, text, kind }]);
   };
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await systemAPI.status();
-        if (res.data.openclaw_installed) {
-          navigate('/configure', { replace: true });
-        } else {
-          setStage('not_installed');
-        }
-      } catch {
-        setStage('not_installed');
-      }
-    })();
-  }, [navigate]);
+  const detectInstallStatus = useCallback(async () => {
+    setStage('checking');
+    setDetectionError('');
+    try {
+      const res = await systemAPI.installStatus();
+      const d = res.data as any;
+      const openclawOk = Boolean(d.openclaw_installed);
+      const nanobotOk = Boolean(d.nanobot_installed);
 
-  const handleInstall = async () => {
-    setStage('installing');
+      setOpenclawInfo({
+        installed: openclawOk,
+        version: d.openclaw_version || undefined,
+        configured: d.config_exists || false,
+      });
+      setNanobotInfo({
+        installed: nanobotOk,
+        version: d.nanobot_version || undefined,
+        configured: d.nanobot_config_exists || false,
+      });
+    } catch {
+      setOpenclawInfo({ installed: null });
+      setNanobotInfo({ installed: null, configured: false });
+      setDetectionError(t.setup.detectFailed || 'Runtime detection failed. Check the backend and retry.');
+    } finally {
+      setStage('selecting');
+    }
+  }, [t]);
+
+  // Initial detection
+  useEffect(() => {
+    detectInstallStatus();
+  }, [detectInstallStatus]);
+
+  // OpenClaw install (existing SSE flow)
+  const handleInstallOpenClaw = async () => {
+    setInstallingPlatform('openclaw');
+    setStage('installing_openclaw');
     setLogs([]);
     setNodeStatus(null);
 
@@ -147,14 +251,15 @@ export default function Setup() {
             } else if (d.type === 'node_progress') {
               setNodeStatus(prev => prev ? { ...prev, percent: d.percent, progressText: d.text } : prev);
             } else if (d.type === 'npm_install_start') {
-              setStage('installing');
+              setStage('installing_openclaw');
               setNodeStatus(null);
             } else if (d.type === 'output' && d.text) {
               addLog(d.text);
             } else if (d.type === 'done') {
               if (d.success) {
-                addLog(t.setup.installComplete, 'success');
-                setTimeout(() => navigate('/configure', { replace: true }), 1000);
+                addLog(t.setup.openclawInstallComplete, 'success');
+                setOpenclawInfo(prev => ({ ...prev, installed: true, version: d.version, configured: false }));
+                setTimeout(() => navigate('/openclaw_configure', { replace: true }), 1500);
               } else {
                 addLog(`npm exited with code ${d.exit_code}`, 'error');
                 setStage('install_failed');
@@ -171,7 +276,87 @@ export default function Setup() {
         addLog(String(err), 'error');
         setStage('install_failed');
       }
+    } finally {
+      setInstallingPlatform(null);
     }
+  };
+
+  // Nanobot install (SSE flow + init-default)
+  const handleInstallNanobot = async () => {
+    setInstallingPlatform('nanobot');
+    setStage('installing_nanobot');
+    setLogs([]);
+    addLog(t.setup.nanobotInitStart, 'info');
+
+    try {
+      const resp = await fetch('/api/system/nanobot/install', { method: 'POST' });
+      const reader = resp.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let success = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop() ?? '';
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          try {
+            const d = JSON.parse(line.slice(5).trim());
+            if (d.type === 'output' && d.text) addLog(d.text);
+            else if (d.type === 'done') {
+              success = d.success;
+              if (success) addLog(t.setup.nanobotInitSuccess, 'success');
+              else addLog(`uv exited with code ${d.exit_code}`, 'error');
+            } else if (d.type === 'error') {
+              addLog(d.message, 'error');
+              success = false;
+            }
+          } catch {}
+        }
+      }
+
+      if (success) {
+        // Init default config after install
+        try {
+          await systemAPI.nanobotInitDefault();
+        } catch { /* ignore - may already be configured */ }
+        setNanobotInfo(prev => ({ ...prev, installed: true, configured: true }));
+        setTimeout(() => navigate('/nanobot_configure', { replace: true }), 1500);
+      } else {
+        // Show manual install hint
+        addLog(t.setup.nanobotInstallFailedHint, 'info');
+        setStage('install_failed');
+      }
+    } catch (err: any) {
+      addLog(String(err), 'error');
+      setStage('install_failed');
+    } finally {
+      setInstallingPlatform(null);
+    }
+  };
+
+  const handleSkip = () => {
+    const openclawNeedsConfigure = openclawInfo.installed === true && openclawInfo.configured === false;
+    const nanobotNeedsConfigure = nanobotInfo.installed === true && nanobotInfo.configured === false;
+    if (openclawNeedsConfigure && nanobotNeedsConfigure) {
+      navigate('/configure_select', { replace: true });
+    } else if (nanobotNeedsConfigure) {
+      navigate('/nanobot_configure', { replace: true });
+    } else if (openclawNeedsConfigure) {
+      navigate('/openclaw_configure', { replace: true });
+    } else {
+      navigate('/agent-valley', { replace: true });
+    }
+  };
+
+  const handleRetry = () => {
+    setLogs([]);
+    setNodeStatus(null);
+    detectInstallStatus();
   };
 
   const steps = [
@@ -181,9 +366,11 @@ export default function Setup() {
   ];
 
   const stepActive =
-    stage === 'checking' || stage === 'not_installed' ? 1
+    stage === 'checking' || stage === 'selecting' ? 1
     : stage === 'downloading_node' ? 2
     : 3;
+
+  const hasAnyInstalled = openclawInfo.installed === true || nanobotInfo.installed === true;
 
   return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
@@ -207,22 +394,81 @@ export default function Setup() {
             </div>
           )}
 
-          {/* Not installed — prompt to start */}
-          {stage === 'not_installed' && (
-            <div className="flex flex-col gap-6">
-              <div className="flex items-start gap-4 p-4 bg-warning/10 border border-warning/30 rounded-xl">
-                <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.notFound}</p>
-                  <p className="text-[12px] text-text-muted mt-1">
-                    {t.setup.notFoundDesc}
-                  </p>
-                </div>
+          {/* Selecting platform */}
+          {(stage === 'selecting' || stage === 'install_failed') && (
+            <div className="flex flex-col gap-5">
+              <div className="text-center mb-2">
+                <p className="text-[14px] font-semibold text-text-primary">{t.setup.selectTitle}</p>
+                <p className="text-[12px] text-text-muted mt-1">{t.setup.selectDesc}</p>
               </div>
-              <button onClick={handleInstall}
-                className="w-full flex items-center justify-center gap-2.5 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
-                <Download className="w-4 h-4" /> {t.setup.installBtn} <ChevronRight className="w-4 h-4" />
-              </button>
+
+              {detectionError && (
+                <div className="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+                  <XCircle className="w-5 h-5 text-amber-300 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-text-primary">{t.setup.detectFailedTitle || 'Detection failed'}</p>
+                    <p className="text-[12px] text-text-muted mt-1">{detectionError}</p>
+                  </div>
+                </div>
+              )}
+
+              <SetupCard
+                platform="openclaw"
+                info={openclawInfo}
+                installing={installingPlatform === 'openclaw'}
+                onInstall={handleInstallOpenClaw}
+                t={t}
+              />
+              <SetupCard
+                platform="nanobot"
+                info={nanobotInfo}
+                installing={installingPlatform === 'nanobot'}
+                onInstall={handleInstallNanobot}
+                t={t}
+              />
+
+              {stage === 'install_failed' && (
+                <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+                  <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
+                    <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
+                  </div>
+                </div>
+              )}
+
+              {stage === 'install_failed' && (
+                <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
+                  <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
+                    <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
+                  </p>
+                  <div className="space-y-1.5 font-mono text-[12px]">
+                    <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNode}</span></p>
+                    <p className="text-emerald-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
+                    <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
+                    <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
+                    <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNanobot}</span></p>
+                    <p className="text-emerald-400 select-all">uv tool install nanobot-ai --with-editable &lt;repo-root&gt; --force</p>
+                  </div>
+                </div>
+              )}
+
+              {hasAnyInstalled && stage !== 'install_failed' && (
+                <button
+                  onClick={handleSkip}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 text-[13px] text-text-muted hover:text-text-primary transition-colors"
+                >
+                  <SkipForward className="w-4 h-4" />
+                  {t.setup.skipBtn}
+                </button>
+              )}
+
+              {(stage === 'install_failed' || detectionError) && (
+                <button onClick={handleRetry}
+                  className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
+                  {detectionError ? (t.setup.retryDetect || 'Retry detection') : t.setup.retryInstall}
+                </button>
+              )}
             </div>
           )}
 
@@ -240,7 +486,6 @@ export default function Setup() {
               </div>
 
               <div className="bg-surface-2 border border-border rounded-xl p-5 space-y-4">
-                {/* Resolving version */}
                 <div className="flex items-center gap-3">
                   {nodeStatus.step === 'resolving' ? (
                     <Loader2 className="w-4 h-4 text-accent animate-spin flex-shrink-0" />
@@ -252,7 +497,6 @@ export default function Setup() {
                   </span>
                 </div>
 
-                {/* Downloading */}
                 {nodeStatus.step !== 'resolving' && (
                   <div className="space-y-2">
                     <div className="flex items-center gap-3">
@@ -276,7 +520,6 @@ export default function Setup() {
                   </div>
                 )}
 
-                {/* Extracting */}
                 {(nodeStatus.step === 'extracting' || nodeStatus.step === 'done') && (
                   <div className="flex items-center gap-3">
                     {nodeStatus.step === 'extracting' ? (
@@ -291,18 +534,17 @@ export default function Setup() {
                 )}
               </div>
 
-              {/* Terminal log underneath for verbose output */}
               {logs.length > 0 && <TerminalLog lines={logs} waitingText={t.setup.waiting} />}
             </div>
           )}
 
           {/* Installing OpenClaw via npm */}
-          {stage === 'installing' && (
+          {stage === 'installing_openclaw' && (
             <div className="flex flex-col gap-4">
               <div className="flex items-center gap-3">
                 <Loader2 className="w-5 h-5 text-accent animate-spin flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.installing}</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.installingOpenClaw}</p>
                   <p className="text-[12px] text-text-muted">{t.setup.installingDesc}</p>
                 </div>
               </div>
@@ -310,34 +552,17 @@ export default function Setup() {
             </div>
           )}
 
-          {/* Failed */}
-          {stage === 'install_failed' && (
+          {/* Installing Nanobot */}
+          {stage === 'installing_nanobot' && (
             <div className="flex flex-col gap-4">
-              <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
-                <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+              <div className="flex items-center gap-3">
+                <Loader2 className="w-5 h-5 text-cyan-400 animate-spin flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
-                  <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.nanobotInstalling}</p>
+                  <p className="text-[12px] text-text-muted">{t.setup.nanobotInstallingDesc}</p>
                 </div>
               </div>
               <TerminalLog lines={logs} waitingText={t.setup.waiting} />
-
-              <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
-                <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
-                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
-                </p>
-                <div className="space-y-1.5 font-mono text-[12px]">
-                  <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNode}</span></p>
-                  <p className="text-emerald-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
-                  <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
-                  <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
-                </div>
-              </div>
-
-              <button onClick={() => { setLogs([]); setNodeStatus(null); handleInstall(); }}
-                className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
-                {t.setup.retryInstall}
-              </button>
             </div>
           )}
         </div>

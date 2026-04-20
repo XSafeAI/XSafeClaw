@@ -10,7 +10,9 @@ import RiskTest from './pages/RiskTest';
 import Chat from './pages/Chat';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
-import { systemAPI } from './services/api';
+import ConfigureSelector from './pages/ConfigureSelector';
+import NanobotConfigure from './pages/NanobotConfigure';
+import { systemAPI, type InstallStatusResponse } from './services/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -22,9 +24,18 @@ const queryClient = new QueryClient({
   },
 });
 
-type CheckState = 'pending' | 'setup' | 'configure' | 'ok';
+type CheckState = 'pending' | 'setup' | 'openclaw_configure' | 'nanobot_configure' | 'configure_select' | 'ok';
 
-const EXEMPT_PATHS = ['/setup', '/configure'];
+const EXEMPT_PATHS = ['/setup', '/configure', '/openclaw_configure', '/nanobot_configure', '/configure_select'];
+
+function configureStateForStatus(status: InstallStatusResponse): CheckState {
+  const needsOpenClaw = Boolean(status.requires_configure);
+  const needsNanobot = Boolean(status.requires_nanobot_configure);
+  if (needsOpenClaw && needsNanobot) return 'configure_select';
+  if (needsNanobot) return 'nanobot_configure';
+  if (needsOpenClaw) return 'openclaw_configure';
+  return 'ok';
+}
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
@@ -36,21 +47,14 @@ function AppRoutes() {
 
     (async () => {
       try {
-        const res = await Promise.race([
-          systemAPI.status(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('timeout')), 3000)
-          ),
-        ]);
+        const res = await systemAPI.installStatus();
         if (cancelled) return;
         const d = res.data as any;
 
-        if (d.requires_setup || !d.openclaw_installed) {
+        if (d.requires_setup || (!d.openclaw_installed && !d.nanobot_installed)) {
           setCheckState('setup');
-        } else if (d.requires_configure || !d.config_exists) {
-          setCheckState('configure');
         } else {
-          setCheckState('ok');
+          setCheckState(configureStateForStatus(d));
         }
       } catch {
         if (!cancelled) setCheckState('ok');
@@ -67,8 +71,12 @@ function AppRoutes() {
 
     if (checkState === 'setup') {
       navigate('/setup', { replace: true });
-    } else if (checkState === 'configure') {
-      navigate('/configure', { replace: true });
+    } else if (checkState === 'openclaw_configure') {
+      navigate('/openclaw_configure', { replace: true });
+    } else if (checkState === 'nanobot_configure') {
+      navigate('/nanobot_configure', { replace: true });
+    } else if (checkState === 'configure_select') {
+      navigate('/configure_select', { replace: true });
     }
   }, [checkState, location.pathname, navigate]);
 
@@ -77,7 +85,10 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/setup" element={<Setup />} />
-      <Route path="/configure" element={<Configure />} />
+      <Route path="/configure" element={<Navigate to="/openclaw_configure" replace />} />
+      <Route path="/openclaw_configure" element={<Configure />} />
+      <Route path="/nanobot_configure" element={<NanobotConfigure />} />
+      <Route path="/configure_select" element={<ConfigureSelector />} />
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />
       <Route path="/world" element={<World />} />

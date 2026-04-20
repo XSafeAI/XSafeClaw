@@ -219,6 +219,8 @@ nanobot gateway --port 18790 --verbose
 
 当前 Chat 和 Agent Valley 使用 `nanobot gateway` 通道，不需要启动 `nanobot serve`。
 
+Web UI 也提供了默认本机 nanobot 运行时的配置页，会写入 `~/.nanobot/config.json`，包括 workspace、provider/model、API Key、gateway、WebSocket channel、可选 WebSocket token，以及 XSafeClaw Guard hook 设置。修改 gateway、WebSocket、provider 或 token 后，需要重启 `nanobot gateway`，让正在运行的 gateway 加载最新配置。
+
 ---
 
 ## ⚙️ 配置说明

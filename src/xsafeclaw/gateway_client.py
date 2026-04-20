@@ -7,13 +7,18 @@ so that the gateway grants the requested scopes (including operator.write).
 
 import asyncio
 import base64
+import hashlib
 import json
+import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
+
+_XSAFECLAW_DEVICE_PATH = Path.home() / ".xsafeclaw" / "openclaw-device.json"
 
 async def _load_gateway_config() -> dict:
     """Load gateway config from ~/.openclaw/openclaw.json."""
@@ -24,23 +29,50 @@ async def _load_gateway_config() -> dict:
 
 
 def _load_device_identity() -> dict | None:
-    """Load device identity (Ed25519 key) from ~/.openclaw/identity/device.json.
-    If none exists, generate a new Ed25519 keypair and persist it."""
-    p = Path.home() / ".openclaw" / "identity" / "device.json"
+    """Load XSafeClaw's OpenClaw pairing identity.
+
+    Keep this separate from OpenClaw's own CLI identity. Reusing
+    ~/.openclaw/identity/device.json lets XSafeClaw pin different client
+    metadata to the same device id, which can make later gateway connects fail
+    with a metadata-upgrade/pairing error.
+    """
+    p = _XSAFECLAW_DEVICE_PATH
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            parsed = json.loads(p.read_text(encoding="utf-8"))
+            identity = _normalize_device_identity(parsed)
+            if identity:
+                if (
+                    parsed.get("version") != 1
+                    or parsed.get("deviceId") != identity["deviceId"]
+                    or parsed.get("publicKeyPem") != identity["publicKeyPem"]
+                ):
+                    p.write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
+                return identity
+            print("⚠️  Device identity file is incomplete; generating a new one")
+        except Exception as e:
+            print(f"⚠️  Failed to load device identity: {e}")
 
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from cryptography.hazmat.primitives.serialization import (
-            Encoding, PrivateFormat, NoEncryption,
+            Encoding, PrivateFormat, NoEncryption, PublicFormat,
         )
         key = Ed25519PrivateKey.generate()
         pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
-        device_id = str(uuid.uuid4())
-        identity = {"deviceId": device_id, "privateKeyPem": pem}
+        public_pem = key.public_key().public_bytes(
+            Encoding.PEM,
+            PublicFormat.SubjectPublicKeyInfo,
+        ).decode()
+        device_id = _fingerprint_public_key_pem(public_pem)
+        identity = {
+            "version": 1,
+            "deviceId": device_id,
+            "publicKeyPem": public_pem,
+            "privateKeyPem": pem,
+        }
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+        p.write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
         print(f"🔑 Generated new device identity: {device_id[:12]}…")
         return identity
     except Exception as e:
@@ -48,9 +80,81 @@ def _load_device_identity() -> dict | None:
         return None
 
 
+def _normalize_device_identity(parsed: dict[str, Any]) -> dict[str, Any] | None:
+    """Return OpenClaw-compatible identity metadata.
+
+    OpenClaw derives deviceId from the raw Ed25519 public key. Older
+    XSafeClaw builds stored a random UUID, which OpenClaw rejects with
+    "device identity mismatch" before granting operator scopes.
+    """
+    private_key_pem = parsed.get("privateKeyPem")
+    if not isinstance(private_key_pem, str) or not private_key_pem.strip():
+        return None
+
+    public_key_pem = parsed.get("publicKeyPem")
+    if not isinstance(public_key_pem, str) or not public_key_pem.strip():
+        public_key_pem = _public_key_pem_from_private(private_key_pem)
+
+    return {
+        "version": 1,
+        "deviceId": _fingerprint_public_key_pem(public_key_pem),
+        "publicKeyPem": public_key_pem,
+        "privateKeyPem": private_key_pem,
+    }
+
+
+def _public_key_pem_from_private(private_key_pem: str) -> str:
+    """Derive OpenClaw's stored publicKeyPem from a PEM private key."""
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        PublicFormat,
+        load_pem_private_key,
+    )
+
+    key = load_pem_private_key(private_key_pem.encode(), password=None)
+    return key.public_key().public_bytes(  # type: ignore[attr-defined]
+        Encoding.PEM,
+        PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+
+
+def _client_platform() -> str:
+    """Return OpenClaw/Node-style platform names for device metadata."""
+    if sys.platform.startswith("win"):
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform or "unknown"
+
+
 def _b64url_encode(data: bytes) -> str:
     """URL-safe base64 without padding (same as OpenClaw's base64UrlEncode)."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _public_key_raw_from_pem(public_key_pem: str) -> bytes:
+    """Return raw Ed25519 public-key bytes from an SPKI PEM public key."""
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        PublicFormat,
+        load_pem_public_key,
+    )
+
+    key = load_pem_public_key(public_key_pem.encode())
+    return key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # type: ignore[attr-defined]
+
+
+def _fingerprint_public_key_pem(public_key_pem: str) -> str:
+    """Match OpenClaw's deriveDeviceIdFromPublicKey(): sha256(raw public key)."""
+    return hashlib.sha256(_public_key_raw_from_pem(public_key_pem)).hexdigest()
+
+
+def _normalize_device_metadata_for_auth(value: str | None) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
 
 
 def _sign_payload(private_key_pem: str, payload: str) -> str:
@@ -61,14 +165,9 @@ def _sign_payload(private_key_pem: str, payload: str) -> str:
     return _b64url_encode(sig)
 
 
-def _public_key_raw_b64url(private_key_pem: str) -> str:
-    """Derive raw public key bytes from PEM private key → base64url."""
-    from cryptography.hazmat.primitives.serialization import (
-        load_pem_private_key, Encoding, PublicFormat,
-    )
-    key = load_pem_private_key(private_key_pem.encode(), password=None)
-    raw = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)  # type: ignore
-    return _b64url_encode(raw)
+def _public_key_raw_b64url(public_key_pem: str) -> str:
+    """Encode raw Ed25519 public-key bytes as OpenClaw base64url."""
+    return _b64url_encode(_public_key_raw_from_pem(public_key_pem))
 
 
 def _build_device_auth_payload(
@@ -101,6 +200,39 @@ def _build_device_auth_payload(
     if version == "v2":
         parts.append(nonce or "")
     return "|".join(parts)
+
+
+def _build_device_auth_payload_v3(
+    device_id: str,
+    client_id: str,
+    client_mode: str,
+    role: str,
+    scopes: list[str],
+    signed_at_ms: int,
+    token: str | None,
+    nonce: str,
+    platform: str | None,
+    device_family: str | None,
+) -> str:
+    """
+    Reproduces OpenClaw's buildDeviceAuthPayloadV3().
+
+    Format:
+      v3|deviceId|clientId|clientMode|role|scope1,scope2|signedAtMs|token|nonce|platform|deviceFamily
+    """
+    return "|".join([
+        "v3",
+        device_id,
+        client_id,
+        client_mode,
+        role,
+        ",".join(scopes),
+        str(signed_at_ms),
+        token or "",
+        nonce,
+        _normalize_device_metadata_for_auth(platform),
+        _normalize_device_metadata_for_auth(device_family),
+    ])
 
 
 def _extract_json_from_output(raw: str) -> Any:
@@ -159,21 +291,58 @@ async def auto_approve_pending_devices() -> list[str]:
 
     openclaw_bin = shutil.which("openclaw")
     if not openclaw_bin:
-        for search_base in [
-            Path.home() / ".nvm" / "versions" / "node",
-            Path("/opt/homebrew/bin"),
-            Path("/usr/local/bin"),
-        ]:
+        search_bases: list[Path] = []
+
+        # nvm-sh (Linux/macOS/WSL): ~/.nvm/versions/node
+        nvm_sh_base = Path.home() / ".nvm" / "versions" / "node"
+        if nvm_sh_base.exists():
+            search_bases.append(nvm_sh_base)
+
+        # nvm-windows: %NVM_HOME%\..\versions\node
+        nvm_home = os.environ.get("NVM_HOME") or os.environ.get("NVM_SYMLINK")
+        if nvm_home:
+            nvm_windows_base = Path(nvm_home).parent / "versions" / "node"
+            if nvm_windows_base.exists():
+                search_bases.append(nvm_windows_base)
+
+        # Platform-specific system paths
+        if os.name == "nt":
+            # Windows: check Python Scripts directories and common locations
+            import sys as _sys
+            for prefix in [Path(_sys.prefix), Path(_sys.executable).resolve().parent]:
+                scripts = prefix / "Scripts"
+                if scripts.exists():
+                    search_bases.append(scripts)
+                search_bases.append(prefix)
+        else:
+            # Unix/macOS: Homebrew, system bin, local bin
+            for p in [Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path.home() / ".local" / "bin"]:
+                if p.exists():
+                    search_bases.append(p)
+
+        for search_base in search_bases:
             if search_base.name == "node" and search_base.exists():
+                # nvm-style directory: look for v22.*/bin/openclaw
                 for vdir in sorted(search_base.iterdir(), reverse=True):
-                    candidate = vdir / "bin" / "openclaw"
-                    if candidate.is_file():
-                        openclaw_bin = str(candidate)
+                    for suffix in ("", ".cmd", ".bat", ".exe"):
+                        if (vdir / "bin").exists():
+                            candidate = vdir / "bin" / f"openclaw{suffix}"
+                        else:
+                            candidate = vdir / f"openclaw{suffix}"
+                        if candidate.is_file():
+                            openclaw_bin = str(candidate)
+                            break
+                    if openclaw_bin:
                         break
             else:
-                candidate = search_base / "openclaw"
-                if candidate.is_file():
-                    openclaw_bin = str(candidate)
+                # Direct binary directory: look for openclaw with common suffixes
+                if search_base.is_dir():
+                    suffixes = ("", ".cmd", ".bat", ".exe") if os.name == "nt" else ("",)
+                    for suffix in suffixes:
+                        candidate = search_base / f"openclaw{suffix}"
+                        if candidate.is_file():
+                            openclaw_bin = str(candidate)
+                            break
             if openclaw_bin:
                 break
     if not openclaw_bin:
@@ -288,36 +457,47 @@ class GatewayClient:
         Strategy:
         1. Try connecting with device identity + token
         2. If pairing required, auto-approve and retry
-        3. If auto-approve fails, fall back to token-only auth
+        3. If device metadata/pairing still fails, fall back to token-only auth
         """
+        first_error: Exception | None = None
         try:
             await self._try_connect()
+            return
         except Exception as e:
-            if "pairing" not in str(e).lower():
+            first_error = e
+            message = str(e).lower()
+            retryable_device_error = any(
+                marker in message
+                for marker in ("pairing", "metadata", "connect failed", "1008", "policy")
+            )
+            if not retryable_device_error and not self._token:
                 raise
-            print("🔑 Device pairing required — auto-approving...")
-            await self.disconnect()
-            approved = await auto_approve_pending_devices()
-            if approved:
-                await asyncio.sleep(2)
-                self._connected = asyncio.Event()
-                try:
-                    await self._try_connect()
-                    return
-                except Exception:
-                    pass
 
-            print("⚠️  Auto-approve failed, falling back to token-only auth...")
-            await self.disconnect()
-            self._connected = asyncio.Event()
-            try:
-                await self._try_connect(skip_device=True)
-                print("✅ Connected with token-only auth (no device identity)")
-            except Exception as e2:
-                raise Exception(
-                    "Failed to connect to OpenClaw gateway. "
-                    "Is the gateway running? Check with 'openclaw status'."
-                ) from e2
+            if "pairing" in message:
+                print("🔑 Device pairing required — auto-approving...")
+                await self.disconnect()
+                approved = await auto_approve_pending_devices()
+                if approved:
+                    await asyncio.sleep(2)
+                    self._connected = asyncio.Event()
+                    try:
+                        await self._try_connect()
+                        return
+                    except Exception as retry_error:
+                        first_error = retry_error
+
+        print("⚠️  Device auth failed, falling back to token-only auth...")
+        await self.disconnect()
+        self._connected = asyncio.Event()
+        try:
+            await self._try_connect(skip_device=True)
+            print("✅ Connected with token-only auth (no device identity)")
+        except Exception as e2:
+            raise Exception(
+                "Failed to connect to OpenClaw gateway. "
+                "Is the gateway running? Check with 'openclaw status'. "
+                f"device_auth_error={first_error}; token_auth_error={e2}"
+            ) from e2
 
     async def _try_connect(self, skip_device: bool = False) -> None:
         """Single connection attempt to the gateway."""
@@ -367,6 +547,8 @@ class GatewayClient:
         role        = "operator"
         scopes      = ["operator.admin", "operator.write", "operator.read"]
         signed_at   = int(__import__("time").time() * 1000)
+        platform    = _client_platform()
+        device_family: str | None = None
 
         params: dict[str, Any] = {
             "minProtocol": 3,
@@ -375,7 +557,7 @@ class GatewayClient:
                 "id":          client_id,
                 "displayName": "XSafeClaw",
                 "version":     "1.0.0",
-                "platform":    "linux",
+                "platform":    platform,
                 "mode":        client_mode,
                 "instanceId":  str(uuid.uuid4()),
             },
@@ -389,12 +571,13 @@ class GatewayClient:
             params["auth"] = {"token": self._token}
 
         # Device identity auth (provides signed scopes the gateway will trust)
-        if self._device:
+        if self._device and nonce:
             try:
                 device_id      = self._device["deviceId"]
                 private_key_pem = self._device["privateKeyPem"]
+                public_key_pem = self._device.get("publicKeyPem") or _public_key_pem_from_private(private_key_pem)
 
-                payload = _build_device_auth_payload(
+                payload = _build_device_auth_payload_v3(
                     device_id=device_id,
                     client_id=client_id,
                     client_mode=client_mode,
@@ -403,9 +586,11 @@ class GatewayClient:
                     signed_at_ms=signed_at,
                     token=self._token,
                     nonce=nonce,
+                    platform=platform,
+                    device_family=device_family,
                 )
                 signature  = _sign_payload(private_key_pem, payload)
-                public_key = _public_key_raw_b64url(private_key_pem)
+                public_key = _public_key_raw_b64url(public_key_pem)
 
                 params["device"] = {
                     "id":        device_id,

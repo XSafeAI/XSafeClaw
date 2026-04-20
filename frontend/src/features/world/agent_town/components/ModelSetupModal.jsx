@@ -738,7 +738,7 @@ export default function ModelSetupModal({
 
               {form.authProvider && !providerSupported ? (
                 <div className="tc-inline-error tc-model-setup-error-panel">
-                  This provider still needs the full Configure flow. Open `/configure` if you want to set it up.
+                  This provider still needs the full OpenClaw Configure flow. Open `/openclaw_configure` if you want to set it up.
                 </div>
               ) : null}
             </>

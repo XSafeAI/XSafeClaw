@@ -1316,6 +1316,7 @@ export default function TownConsole({
   const [guardResolvingId, setGuardResolvingId] = useState(null);
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
   const [pendingImagesMap, setPendingImagesMap] = useState({});
+  const [nanobotInstalled, setNanobotInstalled] = useState(null);
   const streamControllerRef = useRef(null);
   const stopRequestedRef = useRef(false);
   const mockReplyTimeoutRef = useRef(null);
@@ -1348,6 +1349,19 @@ export default function TownConsole({
   const runtimeUnavailableMessage = selectedRuntimeUnavailable
     ? townText.create.nanobotGatewayOffline
     : '';
+
+  // Detect nanobot installation status
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await systemAPI.installStatus();
+        if (cancelled) return;
+        setNanobotInstalled(Boolean(res.data?.nanobot_installed));
+      } catch { if (!cancelled) setNanobotInstalled(null); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => () => {
     streamControllerRef.current?.abort();
@@ -2242,6 +2256,12 @@ export default function TownConsole({
       return;
     }
 
+    // Check if nanobot is selected but not installed
+    if (selectedRuntime?.platform === 'nanobot' && nanobotInstalled === false) {
+      setCreateError(townText.create.nanobotNotInstalled || 'Nanobot is not installed. Go to the setup page to install it.');
+      return;
+    }
+
     setCreatingAgent(true);
     setCreateError('');
     try {
@@ -2326,6 +2346,7 @@ export default function TownConsole({
   }, [
     configuredModels,
     creatingAgent,
+    nanobotInstalled,
     pendingModelId,
     pendingModelOption,
     runtimeUnavailableMessage,

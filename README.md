@@ -223,6 +223,8 @@ nanobot gateway --port 18790 --verbose
 
 XSafeClaw uses `nanobot gateway` for Chat and Agent Valley. `nanobot serve` is not required for the current integration.
 
+The Web UI also provides a nanobot configuration page for the default local runtime. It writes `~/.nanobot/config.json`, including workspace, provider/model, API key, gateway, WebSocket channel, optional WebSocket token, and XSafeClaw Guard hook settings. Restart `nanobot gateway` after changing gateway, WebSocket, provider, or token settings so the running gateway loads the latest config.
+
 ---
 
 ## ⚙️ Configuration

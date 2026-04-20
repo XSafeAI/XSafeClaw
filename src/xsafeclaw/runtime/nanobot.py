@@ -23,6 +23,7 @@ NANOBOT_DEFAULT_CONFIG = Path.home() / ".nanobot" / "config.json"
 _UNSAFE_ID_CHARS = re.compile(r"[^a-z0-9]+")
 XSAFECLAW_HOOK_NAME = "xsafeclaw"
 XSAFECLAW_HOOK_CLASS_PATH = "xsafeclaw.integrations.nanobot_guard_hook:XSafeClawHook"
+XSAFECLAW_CHANNEL_EXTENSION_NAME = "xsafeclaw"
 DEFAULT_XSAFECLAW_GUARD_BASE_URL = "http://127.0.0.1:6874"
 DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S = 305.0
 DEFAULT_NANOBOT_GATEWAY_HOST = "127.0.0.1"
@@ -77,6 +78,45 @@ def _read_bool(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _read_xsafeclaw_hook_entries(config: dict[str, Any]) -> dict[str, Any]:
+    """Read hook entries from the schema-safe extension, falling back to legacy."""
+    channels = _read_mapping(config.get("channels"))
+    extension = _read_mapping(channels.get(XSAFECLAW_CHANNEL_EXTENSION_NAME))
+    extension_hooks = _read_mapping(extension.get("hooks"))
+    extension_entries = _read_mapping(extension_hooks.get("entries"))
+    if extension_entries:
+        return extension_entries
+
+    legacy_hooks = _read_mapping(config.get("hooks"))
+    return _read_mapping(legacy_hooks.get("entries"))
+
+
+def _ensure_xsafeclaw_hook_entries(config: dict[str, Any]) -> dict[str, Any]:
+    """Return schema-safe storage for XSafeClaw hook entries.
+
+    nanobot 0.1.5 rejects unknown top-level config fields, so XSafeClaw stores
+    its extension data under ``channels.xsafeclaw`` because channel config
+    explicitly permits plugin/extra sections.
+    """
+    channels = config.setdefault("channels", {})
+    if not isinstance(channels, dict):
+        channels = {}
+        config["channels"] = channels
+    extension = channels.setdefault(XSAFECLAW_CHANNEL_EXTENSION_NAME, {})
+    if not isinstance(extension, dict):
+        extension = {}
+        channels[XSAFECLAW_CHANNEL_EXTENSION_NAME] = extension
+    hooks = extension.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        extension["hooks"] = hooks
+    entries = hooks.setdefault("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+        hooks["entries"] = entries
+    return entries
+
+
 def _join_websocket_url(host: str, port: int, path: str) -> str:
     normalized_path = path.strip() or DEFAULT_NANOBOT_WEBSOCKET_PATH
     if not normalized_path.startswith("/"):
@@ -86,8 +126,7 @@ def _join_websocket_url(host: str, port: int, path: str) -> str:
 
 def parse_nanobot_guard_state(config: dict[str, Any]) -> dict[str, Any]:
     """Extract XSafeClaw guard-hook state from a nanobot config payload."""
-    hooks = _read_mapping(config.get("hooks"))
-    entries = _read_mapping(hooks.get("entries"))
+    entries = _read_xsafeclaw_hook_entries(config)
     entry = _read_mapping(entries.get(XSAFECLAW_HOOK_NAME))
     hook_config = _read_mapping(entry.get("config"))
     class_path = str(entry.get("class_path") or entry.get("classPath") or "").strip()
@@ -151,18 +190,13 @@ def update_nanobot_guard_state(
     if not isinstance(data, dict):
         data = {}
 
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        hooks = {}
-        data["hooks"] = hooks
-    entries = hooks.setdefault("entries", {})
-    if not isinstance(entries, dict):
-        entries = {}
-        hooks["entries"] = entries
-
     normalized_mode = str(mode or "disabled").strip().lower()
     if normalized_mode not in {"disabled", "observe", "blocking"}:
         raise ValueError(f"Unsupported nanobot guard mode: {mode}")
+
+    # Remove the legacy extension field so upstream nanobot can validate config.
+    data.pop("hooks", None)
+    entries = _ensure_xsafeclaw_hook_entries(data)
 
     if normalized_mode == "disabled":
         entries.pop(XSAFECLAW_HOOK_NAME, None)

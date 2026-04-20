@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
-  Settings2, Brain, Cpu, Shield, Check, AlertTriangle, Mic, MicOff,
+  Settings2, Brain, Cpu, Shield, Check, AlertTriangle, Mic, MicOff, Zap,
 } from 'lucide-react';
 import { chatAPI, guardAPI, systemAPI, voiceAPI } from '../services/api';
 import type { RuntimeInstance } from '../services/api';
@@ -66,6 +66,25 @@ function saveStoredSessions(sessions: StoredSession[]) {
 }
 
 /* ==================== Helpers ==================== */
+async function responseErrorMessage(response: Response): Promise<string> {
+  const fallback = `HTTP ${response.status}`;
+  try {
+    const text = await response.text();
+    if (!text) return fallback;
+    try {
+      const data = JSON.parse(text);
+      const detail = data?.detail;
+      if (typeof detail === 'string' && detail.trim()) return detail;
+      if (detail) return JSON.stringify(detail);
+    } catch {
+      return text;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
 function fmtTime(d: Date) {
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
@@ -298,6 +317,9 @@ export default function Chat() {
   const [gpResolving, setGpResolving] = useState<string | null>(null);
   const [gpExpandedId, setGpExpandedId] = useState<string | null>(null);
 
+  const [installModalOpen, setInstallModalOpen] = useState(false);
+  const [installModalPlatform, setInstallModalPlatform] = useState<'openclaw' | 'nanobot'>('openclaw');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -327,11 +349,20 @@ export default function Chat() {
     { value: 'xhigh',  label: t.chat.thinkingLevels.max },
   ];
 
+  const activeSession = activeKey ? (sessions.find(item => item.key === activeKey) ?? null) : null;
   const activeMessages: ChatMessage[] = activeKey ? (messageMap[activeKey] ?? []) : [];
   const selectedInstance = availableInstances.find(instance => instance.instance_id === selectedInstanceId) ?? null;
+  const activeInstance = activeSession?.instanceId
+    ? availableInstances.find(instance => instance.instance_id === activeSession.instanceId) ?? null
+    : null;
   const selectedRuntimeUnavailable =
     selectedInstance?.platform === 'nanobot' && selectedInstance.health_status !== 'healthy';
+  const activeRuntimeUnavailable =
+    activeInstance?.platform === 'nanobot' && activeInstance.health_status !== 'healthy';
   const selectedRuntimeUnavailableMessage = selectedRuntimeUnavailable
+    ? t.chat.nanobotGatewayOffline
+    : '';
+  const activeRuntimeUnavailableMessage = activeRuntimeUnavailable
     ? t.chat.nanobotGatewayOffline
     : '';
 
@@ -362,7 +393,11 @@ export default function Chat() {
           ?? instances.find(i => i.platform === 'openclaw')
           ?? instances[0];
         if (defaultInstance) {
-          setSelectedInstanceId(prev => prev || defaultInstance.instance_id);
+          setSelectedInstanceId(prev => (
+            prev && instances.some(instance => instance.instance_id === prev)
+              ? prev
+              : defaultInstance.instance_id
+          ));
         }
       } catch {
         if (!cancelled) setAvailableInstances([]);
@@ -372,6 +407,12 @@ export default function Chat() {
     const timer = window.setInterval(loadInstances, 5000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    if (activeSession?.instanceId) {
+      setSelectedInstanceId(activeSession.instanceId);
+    }
+  }, [activeSession?.instanceId]);
 
   // Load history when switching to a session that has no messages loaded yet
   const loadHistory = useCallback(async (key: string, force = false) => {
@@ -573,6 +614,27 @@ export default function Chat() {
   /* --- New Session --- */
   const handleNewSession = async () => {
     if (connecting) return;
+
+    // Detect which platform the selected instance belongs to
+    const selectedInstance = availableInstances.find(i => i.instance_id === selectedInstanceId) ?? null;
+    const isNanobot = selectedInstance?.platform === 'nanobot';
+
+    // Check installation status from system status
+    try {
+      const statusRes = await systemAPI.installStatus();
+      const d = statusRes.data as any;
+      if (isNanobot && !d.nanobot_installed) {
+        setInstallModalPlatform('nanobot');
+        setInstallModalOpen(true);
+        return;
+      }
+      if (!isNanobot && !d.openclaw_installed) {
+        setInstallModalPlatform('openclaw');
+        setInstallModalOpen(true);
+        return;
+      }
+    } catch { /* proceed without check */ }
+
     if (selectedRuntimeUnavailable) {
       alert(selectedRuntimeUnavailableMessage);
       return;
@@ -634,6 +696,21 @@ export default function Chat() {
     const text = input.trim();
     const hasImages = pendingImages.length > 0;
     if ((!text && !hasImages) || !activeKey || inFlightRef.current) return;
+    if (activeRuntimeUnavailable) {
+      setMessageMap(prev => ({
+        ...prev,
+        [activeKey]: [
+          ...(prev[activeKey] ?? []),
+          {
+            id: uuidv4(),
+            role: 'error' as const,
+            content: activeRuntimeUnavailableMessage,
+            timestamp: new Date(),
+          },
+        ],
+      }));
+      return;
+    }
 
     const modelCommand = parsePromptModelSwitch(text);
     const textToSend = modelCommand ?? text;
@@ -673,7 +750,7 @@ export default function Chat() {
       });
 
       if (!response.ok || !response.body) {
-        throw new Error(`HTTP ${response.status}`);
+        throw new Error(await responseErrorMessage(response));
       }
 
       const reader = response.body.getReader();
@@ -1027,6 +1104,12 @@ export default function Chat() {
         <div className="flex-shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-8 py-2.5 text-[12px] text-amber-200 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span>{selectedRuntimeUnavailableMessage}</span>
+        </div>
+      )}
+      {activeRuntimeUnavailable && activeSession?.instanceId !== selectedInstanceId && (
+        <div className="flex-shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-8 py-2.5 text-[12px] text-amber-200 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          <span>{activeRuntimeUnavailableMessage}</span>
         </div>
       )}
 
@@ -1496,7 +1579,8 @@ export default function Chat() {
                   />
                   <button
                     onClick={handleSend}
-                    disabled={(!input.trim() && pendingImages.length === 0) || sending || voiceProcessing}
+                    disabled={(!input.trim() && pendingImages.length === 0) || sending || voiceProcessing || activeRuntimeUnavailable}
+                    title={activeRuntimeUnavailable ? activeRuntimeUnavailableMessage : undefined}
                     className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-lg bg-accent text-white hover:bg-accent-dim disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm shadow-accent/20"
                   >
                     {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
@@ -1513,6 +1597,48 @@ export default function Chat() {
           )}
         </div>
       </div>
+
+      {/* Install prompt modal */}
+      {installModalOpen && (
+        <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-surface-1 border border-border rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+            <div className="flex items-start gap-4 mb-5">
+              <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                installModalPlatform === 'nanobot' ? 'bg-cyan-500/15' : 'bg-blue-500/15'
+              }`}>
+                {installModalPlatform === 'nanobot'
+                  ? <Bot className="w-6 h-6 text-cyan-400" />
+                  : <Zap className="w-6 h-6 text-blue-400" />}
+              </div>
+              <div className="flex-1">
+                <h3 className="text-base font-bold text-text-primary mb-1">
+                  {installModalPlatform === 'nanobot' ? t.chat.installModalNanobotTitle : t.chat.installModalOpenclawTitle}
+                </h3>
+                <p className="text-[12px] text-text-muted leading-relaxed">
+                  {installModalPlatform === 'nanobot' ? t.chat.installModalNanobotDesc : t.chat.installModalOpenclawDesc}
+                </p>
+              </div>
+              <button onClick={() => setInstallModalOpen(false)} className="text-text-muted hover:text-text-primary flex-shrink-0">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setInstallModalOpen(false)}
+                className="flex-1 py-2.5 border border-border text-[13px] font-medium text-text-secondary hover:text-text-primary hover:bg-surface-2 rounded-xl transition-all">
+                {t.chat.installModalCancel}
+              </button>
+              <button onClick={() => { setInstallModalOpen(false); window.location.href = '/setup'; }}
+                className={`flex-1 py-2.5 text-white text-[13px] font-semibold rounded-xl transition-all shadow ${
+                  installModalPlatform === 'nanobot'
+                    ? 'bg-cyan-500 hover:bg-cyan-600 shadow-cyan-500/25'
+                    : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/25'
+                }`}>
+                {t.chat.installModalGo}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

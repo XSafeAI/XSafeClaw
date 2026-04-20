@@ -783,6 +783,32 @@
   color: #ffb2a3;
   background: rgba(178, 31, 31, 0.14);
   border: 1px solid rgba(255, 132, 104, 0.18);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-inline-error-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.tc-inline-error-link {
+  color: #60a5fa;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  white-space: nowrap;
+  text-decoration: underline;
+  flex-shrink: 0;
+}
+
+.tc-inline-error-link:hover {
+  color: #93c5fd;
 }
 
 .tc-model-discovery-note {

@@ -123,6 +123,8 @@ class NanobotGatewayClient:
                 yield {"type": "delta", "text": accumulated}
                 continue
             if event == "stream_end":
+                if not accumulated:
+                    continue
                 yield {
                     "type": "final",
                     "text": accumulated,

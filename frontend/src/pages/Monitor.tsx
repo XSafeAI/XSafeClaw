@@ -145,6 +145,18 @@ function monitorEventStatusBadgeClass(status: string | undefined): string {
   return 'bg-yellow-500/15 text-yellow-400';
 }
 
+/** Badge for agent source platform (openclaw / nanobot). */
+function PlatformBadge({ platform }: { platform: string }) {
+  const isNanobot = platform === 'nanobot';
+  return (
+    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+      isNanobot ? 'bg-cyan-500/15 text-cyan-400' : 'bg-blue-500/15 text-blue-400'
+    }`}>
+      {platform}
+    </span>
+  );
+}
+
 /** Determine which sessions are "active" based on their most-recent event time. */
 function classifyActiveSessions(events: EventItem[], cutoffMs: number): Set<string> {
   const latestPerSession = new Map<string, number>();
@@ -1467,9 +1479,12 @@ export default function Monitor() {
                               {row.session && ` · ${fmtTokens(row.session.total_tokens)}`}
                             </p>
                             {row.session?.platform && (
-                              <p className="text-[10px] text-text-muted mt-0.5">
-                                {row.session.platform}{row.session.instance_id ? ` · ${row.session.instance_id}` : ''}
-                              </p>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <PlatformBadge platform={row.session.platform} />
+                                {row.session.instance_id && (
+                                  <span className="text-[10px] text-text-muted">{row.session.instance_id}</span>
+                                )}
+                              </div>
                             )}
                           </div>
 
