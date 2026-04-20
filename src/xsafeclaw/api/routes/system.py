@@ -5599,3 +5599,135 @@ async def onboard_config(body: OnboardConfigRequest):
         "workspace": workspace,
         "output": output,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §38  Runtime platform picker
+#
+# When the CLI supervisor detects both OpenClaw and Hermes installed, it
+# launches the server as a subprocess with ``XSAFECLAW_PICKER_MODE=1``. The
+# middleware in ``api/main.py`` then blocks every /api/* route except the two
+# endpoints below. Once the user makes a choice:
+#   1. we persist the answer to ``~/.xsafeclaw/.runtime-platform-pin``;
+#   2. we schedule ``os._exit(_PICKER_EXIT_CODE)`` via a background thread so
+#      the HTTP response has time to flush;
+#   3. the CLI supervisor sees the magic exit code, reads and deletes the pin
+#      file, then spawns the real server with ``PLATFORM`` fixed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Non-zero, unique-looking return code used to signal "user picked a platform"
+# from the picker subprocess back to the CLI supervisor. Any other exit code
+# means the picker died / was cancelled, and the supervisor falls back to
+# platform auto-detection instead of blocking forever.
+_PICKER_EXIT_CODE = 42
+
+# Env var name kept in sync with ``api/main.py``; duplicated here so this
+# module doesn't have to import from the app package it lives inside of.
+_PICKER_MODE_ENV = "XSAFECLAW_PICKER_MODE"
+
+
+def _picker_mode_active() -> bool:
+    return os.environ.get(_PICKER_MODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _runtime_platform_pin_path() -> Path:
+    """CLI-supervisor <-> picker handoff file.
+
+    The pin lives under the XSafeClaw data directory (not under Hermes or
+    OpenClaw homes) so the choice is scoped to XSafeClaw and never leaks into
+    the agent frameworks themselves.
+    """
+    return Path.home() / ".xsafeclaw" / ".runtime-platform-pin"
+
+
+def _detect_installed_frameworks() -> dict:
+    """Report which agent frameworks are installed on this machine.
+
+    Consumed by the picker UI (to render two cards) and — indirectly via the
+    CLI — by the supervisor loop (to decide whether a picker is needed at
+    all). A framework counts as installed when either its binary is on PATH
+    *or* its home directory exists, matching the heuristics used by
+    ``config._detect_platform()``.
+    """
+    hermes_bin = _find_hermes()
+    openclaw_bin = _find_openclaw()
+    hermes_home = (Path.home() / ".hermes").is_dir()
+    openclaw_home = (Path.home() / ".openclaw").is_dir()
+    return {
+        "openclaw_installed": bool(openclaw_bin) or openclaw_home,
+        "hermes_installed": bool(hermes_bin) or hermes_home,
+        "openclaw_path": openclaw_bin,
+        "hermes_path": hermes_bin,
+    }
+
+
+@router.get("/runtime-platform-status")
+async def runtime_platform_status():
+    """Return picker-mode flag plus framework detection.
+
+    The frontend router guard polls this on every navigation: when
+    ``picker_mode === true``, every route except ``/select-framework`` is
+    redirected to the picker. The SelectFramework page itself uses the
+    ``*_installed`` fields to decide which cards to render (a card for a
+    missing framework is disabled / hidden rather than submittable).
+    """
+    info = _detect_installed_frameworks()
+    return {
+        "picker_mode": _picker_mode_active(),
+        **info,
+    }
+
+
+class _RuntimePlatformPickRequest(BaseModel):
+    """Body for POST /api/system/runtime-platform-pick."""
+
+    platform: str = Field(..., pattern=r"^(openclaw|hermes)$")
+
+
+@router.post("/runtime-platform-pick")
+async def runtime_platform_pick(body: _RuntimePlatformPickRequest):
+    """Accept the user's framework choice and signal the CLI supervisor.
+
+    Refuses (409) when the server is NOT in picker mode — this prevents an
+    accidental call during normal operation from triggering a hard exit.
+    On success, writes the choice atomically and schedules process exit with
+    ``_PICKER_EXIT_CODE`` after a short delay so the HTTP response can flush.
+    """
+    if not _picker_mode_active():
+        raise HTTPException(
+            status_code=409,
+            detail="XSafeClaw is not in picker mode; platform pinning is disabled.",
+        )
+
+    # Also reject choices for a framework that isn't actually installed — the
+    # supervisor would just fail to spawn the real server otherwise.
+    info = _detect_installed_frameworks()
+    if body.platform == "hermes" and not info["hermes_installed"]:
+        raise HTTPException(status_code=400, detail="Hermes is not installed on this machine.")
+    if body.platform == "openclaw" and not info["openclaw_installed"]:
+        raise HTTPException(status_code=400, detail="OpenClaw is not installed on this machine.")
+
+    pin_path = _runtime_platform_pin_path()
+    try:
+        pin_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = pin_path.with_suffix(".tmp")
+        tmp.write_text(body.platform, encoding="utf-8")
+        os.replace(tmp, pin_path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to persist picker choice: {exc}") from exc
+
+    def _exit_after_delay() -> None:
+        # Give the response a moment to leave the socket before killing the
+        # process. ``os._exit`` bypasses uvicorn's graceful shutdown on
+        # purpose — the CLI supervisor is the one in charge of lifecycle.
+        import time as _time
+        _time.sleep(0.6)
+        os._exit(_PICKER_EXIT_CODE)
+
+    threading.Thread(target=_exit_after_delay, daemon=True).start()
+
+    return {
+        "success": True,
+        "platform": body.platform,
+        "pin_path": str(pin_path),
+    }

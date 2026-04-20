@@ -634,6 +634,35 @@ export const systemAPI = {
       api_reachable: boolean;
       output: string;
     }>('/system/hermes-bot-config', data),
+
+  /**
+   * §38 — Is this server running in "platform picker mode"?  Returned by the
+   * CLI supervisor's one-shot picker subprocess.  When ``picker_mode === true``
+   * the frontend must redirect every route (except /select-framework) to the
+   * framework picker and block normal navigation.
+   */
+  runtimePlatformStatus: () =>
+    api.get<{
+      picker_mode: boolean;
+      openclaw_installed: boolean;
+      hermes_installed: boolean;
+      openclaw_path: string | null;
+      hermes_path: string | null;
+    }>('/system/runtime-platform-status', { timeout: 4000 }),
+
+  /**
+   * §38 — Submit the user's framework choice to the picker server.  On
+   * success the picker schedules a hard exit (~600 ms later) so the CLI
+   * supervisor can spawn the real server with ``PLATFORM`` pinned.  The
+   * frontend should wait for the old server to drop, then reload the page
+   * (the new server will answer on the same port).
+   */
+  pickRuntimePlatform: (platform: 'openclaw' | 'hermes') =>
+    api.post<{
+      success: boolean;
+      platform: 'openclaw' | 'hermes';
+      pin_path: string;
+    }>('/system/runtime-platform-pick', { platform }),
 };
 
 export const skillsAPI = {
