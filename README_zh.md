@@ -203,9 +203,13 @@ cp -r plugins/safeclaw-guard ~/.openclaw/extensions/safeclaw-guard
 uv tool install nanobot-ai --with-editable . --force
 ```
 
+当 XSafeClaw 以源码仓库方式运行时，`/setup` 页面现在也会自动使用同一条 editable 安装命令，确保 nanobot 的工具环境可以导入当前仓库里的 XSafeClaw hook 模块。
+
 `pyproject.toml` 也提供了可选的 `nanobot` extra，供确实希望把 `nanobot-ai` 安装进当前项目虚拟环境的用户使用。对于本仓库的开发流程，仍优先推荐上面的 uv-tool 命令，因为这更符合平时直接运行 `nanobot` CLI 的方式。
 
-然后启动 XSafeClaw，通过 Web UI 初始化 nanobot，或调用初始化接口：
+然后启动 XSafeClaw。`/setup` 页面现在只负责安装 Nanobot CLI，安装完成后会直接跳转到 `/nanobot_configure`。只有在 Nanobot 配置页点击“保存”后，才会真正创建 `~/.nanobot/config.json`。首次进入配置页时，provider、model 和 API Key 都不会预填。
+
+兼容旧流程时，初始化接口仍然保留，但它只会创建不含 provider/model 默认值的 skeleton 配置：
 
 ```bash
 curl -X POST http://127.0.0.1:6874/api/system/nanobot/init-default
@@ -219,7 +223,7 @@ nanobot gateway --port 18790 --verbose
 
 当前 Chat 和 Agent Valley 使用 `nanobot gateway` 通道，不需要启动 `nanobot serve`。
 
-Web UI 也提供了默认本机 nanobot 运行时的配置页，会写入 `~/.nanobot/config.json`，包括 workspace、provider/model、API Key、gateway、WebSocket channel、可选 WebSocket token，以及 XSafeClaw Guard hook 设置。修改 gateway、WebSocket、provider 或 token 后，需要重启 `nanobot gateway`，让正在运行的 gateway 加载最新配置。
+Web UI 也提供了默认本机 nanobot 运行时的配置页，会写入 `~/.nanobot/config.json`，包括 workspace、provider/model、API Key、gateway、WebSocket channel、可选 WebSocket token，以及 XSafeClaw Guard hook 设置。首次打开时，只会预填 workspace、端口、WebSocket 和 Guard 这类基础设施默认值，不会自动选择 provider 或模型。你也可以先只保存基础配置，但在补齐 provider 和 model 之前，Nanobot 仍会保持“待配置”状态。修改 gateway、WebSocket、provider 或 token 后，需要重启 `nanobot gateway`，让正在运行的 gateway 加载最新配置。
 
 ---
 
@@ -232,7 +236,7 @@ XSafeClaw 默认配置开箱即用。如需自定义，将 `.env.example` 复制
 | `API_PORT` | `6874` | 服务器端口 |
 | `API_HOST` | `0.0.0.0` | 绑定地址 |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw 会话目录 |
-| `~/.nanobot/config.json` | *由 nanobot 初始化生成* | nanobot 配置、gateway、workspace 与 XSafeClaw hook 设置 |
+| `~/.nanobot/config.json` | *在 Nanobot 配置页保存时生成* | nanobot 配置、gateway、workspace 与 XSafeClaw hook 设置 |
 | `GUARD_BASE_URL` | *（自动检测）* | 守卫模型 API 基础 URL |
 | `GUARD_BASE_MODEL` | *（自动检测）* | 守卫模型 ID |
 
@@ -262,7 +266,7 @@ uv tool install nanobot-ai --with-editable . --force
 nanobot gateway --port 18790 --verbose
 
 # 前端（另开终端）
-cd frontend && npm install && npm run dev   # http://localhost:3000，支持 HMR
+cd frontend && npm install && npm run dev   # http://localhost:3003，支持 HMR
 
 # 构建前端用于生产
 cd frontend && npm run build     # 输出到 src/xsafeclaw/static/

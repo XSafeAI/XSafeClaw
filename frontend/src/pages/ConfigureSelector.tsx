@@ -157,7 +157,7 @@ export default function ConfigureSelector() {
               title={labels.nanobotTitle}
               desc={labels.nanobotDesc}
               installed={nanobotInstalled}
-              configured={Boolean(status?.nanobot_config_exists)}
+              configured={nanobotInstalled && !Boolean(status?.requires_nanobot_configure)}
               accent="cyan"
               icon={Bot}
               onClick={() => navigate(nanobotInstalled ? '/nanobot_configure' : '/setup', { replace: true })}

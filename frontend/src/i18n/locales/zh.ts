@@ -505,11 +505,15 @@ export const zh: Translations = {
     retryInstall: '重新安装',
     // Nanobot install
     nanobotInstalling: '正在安装 Nanobot...',
-    nanobotInstallingDesc: '正在初始化 Nanobot 配置和工作区...',
-    nanobotInitStart: '正在初始化 Nanobot...',
-    nanobotInitSuccess: 'Nanobot 安装完成！',
+    nanobotInstallingDesc: '正在安装 Nanobot CLI...',
+    nanobotInitStart: '开始安装 Nanobot CLI...',
+    nanobotCliInstallComplete: 'Nanobot CLI 安装完成，正在进入配置页...',
+    nanobotConfigInitStart: 'Nanobot 配置文件会在配置页点击保存后写入。',
+    nanobotInitSuccess: 'Nanobot CLI 安装完成！',
     nanobotInitFailed: 'Nanobot 安装失败',
+    nanobotConfigInitFailedHint: 'Nanobot CLI 已安装，但配置仍需在 Nanobot 配置页手动完成。',
     nanobotInstallFailedHint: '如果 uv 未安装，请先安装 uv: pip install uv',
+    nanobotContinueConfigure: '继续配置 Nanobot',
     // Skip
     skipBtn: '跳过，继续使用',
   },

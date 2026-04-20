@@ -27,19 +27,23 @@ const copy = {
   zh: {
     eyebrow: 'Nanobot Configure',
     title: '配置 Nanobot 默认运行时',
-    subtitle: '写入 ~/.nanobot/config.json，用于 Agent Valley、Chat 和 Guard hook 连接同一个 nanobot gateway。',
+    subtitle: '点击保存后才会写入 ~/.nanobot/config.json。首次打开不会预填 provider、model 或 API Key。',
     loading: '正在读取 Nanobot 配置...',
     loadFailed: '读取 Nanobot 配置失败',
     modelSection: '模型与密钥',
-    modelSectionDesc: '选择 provider 和默认模型。API Key 只写入本机配置，接口不会回传密钥明文。',
+    modelSectionDesc: 'Provider、模型和 API Key 需要你手动填写。你也可以先只保存 workspace、gateway、WebSocket 和 Guard 基础配置。',
     provider: 'Provider',
+    providerPlaceholder: '暂不选择，先保存基础配置',
+    providerHint: '不预填默认 provider。先选 provider 后才能编辑对应 API Key。',
     model: '模型 ID',
+    modelHint: '留空表示稍后再选模型。',
     apiKey: 'API Key',
-    apiKeyKeep: '留空表示保留已有密钥',
-    apiKeyNew: '首次配置需要填写对应 provider 的 API Key',
+    apiKeyKeep: '留空表示保留已保存的 API Key',
+    apiKeyNew: '为当前 provider 写入新的 API Key',
+    apiKeyNeedsProvider: '先选择 provider，才能编辑对应 API Key',
     clearApiKey: '清除当前 provider 已保存的 API Key',
     apiBase: 'API Base',
-    apiBasePlaceholder: '可选，例如 https://api.minimax.io/v1',
+    apiBasePlaceholder: '可选，例如 https://api.openai.com/v1',
     workspaceSection: 'Workspace',
     workspaceSectionDesc: 'Nanobot 的会话、记忆和运行数据目录。',
     workspace: '工作目录',
@@ -54,18 +58,24 @@ const copy = {
     websocketRequiresToken: 'WebSocket 需要 token',
     websocketToken: 'WebSocket Token',
     guardSection: 'XSafeClaw Guard',
-    guardSectionDesc: '写入 Nanobot hook，让原始 nanobot agent/gateway 启动时加载 XSafeClaw 安全检查。',
+    guardSectionDesc: '写入 Nanobot hook，让原生 nanobot agent/gateway 启动时加载 XSafeClaw 安全检查。',
     guardMode: 'Guard 模式',
     guardBaseUrl: 'Guard Base URL',
     guardTimeout: 'Guard Timeout',
     disabled: '关闭',
     observe: '观察',
     blocking: '阻断',
+    incompleteTitle: 'Nanobot 仍待模型配置',
+    incompleteDesc: '你现在可以先保存基础配置，但在选择 provider 和 model 之前，Chat 和 Agent Valley 仍不会把 Nanobot 视为已完成配置。',
     save: '保存 Nanobot 配置',
     saving: '保存中...',
+    saveWithoutModelConfirm: '当前还没有选择完整的 provider 和 model。\n\n这次保存只会写入基础配置，Nanobot 仍会保持“待配置”状态，Chat 和 Agent Valley 暂时不可用。\n\n是否继续保存？',
     saved: 'Nanobot 配置已保存',
-    savedDesc: '现在可以启动 nanobot gateway，或直接进入 Agent Valley 创建 Nanobot 智能体。',
+    savedDesc: 'Nanobot 运行时已完整配置。现在可以启动 nanobot gateway，或直接进入 Agent Valley 创建 Nanobot 智能体。',
+    savedPartial: '基础配置已保存',
+    savedPartialDesc: 'provider 和 model 还没有配置完成。Nanobot 仍会保持待配置状态，稍后需要回来补全模型设置。',
     enterValley: '进入 Agent Valley',
+    continueConfigure: '继续配置模型',
     backSetup: '返回安装向导',
     editAgain: '继续编辑',
     errorFallback: '保存失败',
@@ -75,19 +85,23 @@ const copy = {
   en: {
     eyebrow: 'Nanobot Configure',
     title: 'Configure the default Nanobot runtime',
-    subtitle: 'Writes ~/.nanobot/config.json so Agent Valley, Chat, and Guard hooks connect to the same nanobot gateway.',
+    subtitle: 'The file ~/.nanobot/config.json is created only after you click Save. Provider, model, and API key are blank on first load.',
     loading: 'Reading Nanobot config...',
     loadFailed: 'Failed to read Nanobot config',
     modelSection: 'Model and Secret',
-    modelSectionDesc: 'Choose the provider and default model. API keys are written locally and never returned by the API.',
+    modelSectionDesc: 'Provider, model, and API key must be entered manually. You can also save workspace, gateway, WebSocket, and Guard settings first.',
     provider: 'Provider',
+    providerPlaceholder: 'Not now, save base config first',
+    providerHint: 'No default provider is preselected. Choose a provider before editing provider-specific secrets.',
     model: 'Model ID',
+    modelHint: 'Leave blank to configure the model later.',
     apiKey: 'API Key',
-    apiKeyKeep: 'Leave blank to keep the stored key',
-    apiKeyNew: 'Enter the provider API key for first-time setup',
+    apiKeyKeep: 'Leave blank to keep the stored API key',
+    apiKeyNew: 'Write a new API key for the selected provider',
+    apiKeyNeedsProvider: 'Select a provider before editing its API key',
     clearApiKey: 'Clear the stored API key for this provider',
     apiBase: 'API Base',
-    apiBasePlaceholder: 'Optional, for example https://api.minimax.io/v1',
+    apiBasePlaceholder: 'Optional, for example https://api.openai.com/v1',
     workspaceSection: 'Workspace',
     workspaceSectionDesc: 'Where Nanobot stores sessions, memory, and runtime data.',
     workspace: 'Workspace',
@@ -109,11 +123,17 @@ const copy = {
     disabled: 'Disabled',
     observe: 'Observe',
     blocking: 'Blocking',
+    incompleteTitle: 'Nanobot still needs model configuration',
+    incompleteDesc: 'You can save the base config now, but Nanobot will still be treated as incomplete until provider and model are set. Chat and Agent Valley will stay blocked.',
     save: 'Save Nanobot Config',
     saving: 'Saving...',
+    saveWithoutModelConfirm: 'Provider and model are not fully configured yet.\n\nThis save will only write the base config. Nanobot will remain in a needs-config state, and Chat / Agent Valley will stay unavailable.\n\nContinue saving?',
     saved: 'Nanobot config saved',
-    savedDesc: 'You can start nanobot gateway now, or enter Agent Valley to create Nanobot agents.',
+    savedDesc: 'The Nanobot runtime is fully configured. You can start nanobot gateway now, or enter Agent Valley to create Nanobot agents.',
+    savedPartial: 'Base config saved',
+    savedPartialDesc: 'Provider and model are still incomplete. Nanobot will remain in needs-config state until you come back and finish the model setup.',
     enterValley: 'Enter Agent Valley',
+    continueConfigure: 'Continue Configuring',
     backSetup: 'Back to Setup',
     editAgain: 'Edit Again',
     errorFallback: 'Save failed',
@@ -122,15 +142,17 @@ const copy = {
   },
 };
 
-type FormState = NanobotConfigPayload & {
+type FormState = Omit<NanobotConfigPayload, 'provider' | 'model'> & {
+  provider: string;
+  model: string;
   clear_api_key: boolean;
 };
 
 function initialForm(): FormState {
   return {
     workspace: '~/.nanobot/workspace',
-    provider: 'minimax',
-    model: 'MiniMax-M2.7',
+    provider: '',
+    model: '',
     api_key: '',
     clear_api_key: false,
     api_base: '',
@@ -151,8 +173,8 @@ function initialForm(): FormState {
 function formFromConfig(config: NanobotConfigResponse): FormState {
   return {
     workspace: config.workspace || '~/.nanobot/workspace',
-    provider: config.provider || 'minimax',
-    model: config.model || 'MiniMax-M2.7',
+    provider: config.provider || '',
+    model: config.model || '',
     api_key: '',
     clear_api_key: false,
     api_base: config.api_base || '',
@@ -230,6 +252,7 @@ export default function NanobotConfigure() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [savedModelConfigured, setSavedModelConfigured] = useState(false);
   const [error, setError] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showWsToken, setShowWsToken] = useState(false);
@@ -254,7 +277,9 @@ export default function NanobotConfigure() {
   }, [labels.loadFailed]);
 
   const providerOptions = config?.provider_options || [];
-  const providerState = config?.provider_configs?.[form.provider];
+  const providerSelected = Boolean(form.provider.trim());
+  const modelConfigured = Boolean(form.provider.trim() && form.model.trim());
+  const providerState = providerSelected ? config?.provider_configs?.[form.provider] : undefined;
   const providerHasKey = Boolean(providerState?.has_api_key);
 
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
@@ -262,12 +287,11 @@ export default function NanobotConfigure() {
   };
 
   const handleProviderChange = (provider: string) => {
-    const option = providerOptions.find(item => item.id === provider);
-    const nextState = config?.provider_configs?.[provider];
+    const nextState = provider ? config?.provider_configs?.[provider] : undefined;
     setForm(prev => ({
       ...prev,
       provider,
-      model: option?.default_model || prev.model,
+      model: provider === prev.provider ? prev.model : '',
       api_base: nextState?.api_base || '',
       api_key: '',
       clear_api_key: false,
@@ -275,11 +299,17 @@ export default function NanobotConfigure() {
   };
 
   const handleSubmit = async () => {
+    if (!modelConfigured && !window.confirm(labels.saveWithoutModelConfirm)) {
+      return;
+    }
+
     setSaving(true);
     setError('');
     try {
       const payload: NanobotConfigPayload = {
         ...form,
+        provider: form.provider?.trim() || null,
+        model: form.model?.trim() || null,
         api_key: form.api_key?.trim() || null,
         clear_api_key: form.clear_api_key,
         api_base: form.api_base?.trim() || null,
@@ -288,6 +318,7 @@ export default function NanobotConfigure() {
       const res = await systemAPI.setNanobotConfig(payload);
       setConfig(res.data);
       setForm(formFromConfig(res.data));
+      setSavedModelConfigured(Boolean(res.data.model_configured));
       setSaved(true);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
@@ -309,31 +340,43 @@ export default function NanobotConfigure() {
   }
 
   if (saved) {
+    const complete = savedModelConfigured;
     return (
       <div className="min-h-screen relative overflow-hidden bg-[#070b10] text-text-primary">
-        <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(34,211,238,0.18),transparent_35%)]" />
+        <div className={`absolute inset-0 pointer-events-none ${complete ? 'bg-[radial-gradient(circle_at_50%_0%,rgba(34,211,238,0.18),transparent_35%)]' : 'bg-[radial-gradient(circle_at_50%_0%,rgba(251,191,36,0.16),transparent_35%)]'}`} />
         <div className="relative z-10 max-w-2xl mx-auto px-6 py-24">
-          <div className="rounded-[2rem] border border-emerald-500/25 bg-emerald-500/5 p-8 text-center shadow-2xl shadow-emerald-950/30">
-            <div className="mx-auto w-16 h-16 rounded-3xl bg-emerald-500/15 border border-emerald-500/25 flex items-center justify-center text-emerald-300">
-              <CheckCircle className="w-8 h-8" />
+          <div className={`rounded-[2rem] p-8 text-center shadow-2xl ${complete ? 'border border-emerald-500/25 bg-emerald-500/5 shadow-emerald-950/30' : 'border border-amber-500/25 bg-amber-500/8 shadow-amber-950/20'}`}>
+            <div className={`mx-auto w-16 h-16 rounded-3xl border flex items-center justify-center ${complete ? 'bg-emerald-500/15 border-emerald-500/25 text-emerald-300' : 'bg-amber-500/15 border-amber-500/25 text-amber-200'}`}>
+              {complete ? <CheckCircle className="w-8 h-8" /> : <AlertTriangle className="w-8 h-8" />}
             </div>
-            <h1 className="mt-6 text-3xl font-black text-text-primary">{labels.saved}</h1>
-            <p className="mt-3 text-sm leading-7 text-text-secondary">{labels.savedDesc}</p>
+            <h1 className="mt-6 text-3xl font-black text-text-primary">{complete ? labels.saved : labels.savedPartial}</h1>
+            <p className="mt-3 text-sm leading-7 text-text-secondary">{complete ? labels.savedDesc : labels.savedPartialDesc}</p>
             <div className="mt-8 flex flex-col sm:flex-row justify-center gap-3">
+              {complete ? (
+                <button
+                  type="button"
+                  onClick={() => navigate('/agent-valley', { replace: true })}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-cyan-500 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-cyan-500/25 hover:bg-cyan-600"
+                >
+                  {labels.enterValley}
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setSaved(false)}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-5 py-3 text-sm font-bold text-black shadow-lg shadow-amber-500/20 hover:bg-amber-400"
+                >
+                  {labels.continueConfigure}
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => navigate('/agent-valley', { replace: true })}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-cyan-500 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-cyan-500/25 hover:bg-cyan-600"
-              >
-                {labels.enterValley}
-                <ChevronRight className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setSaved(false)}
+                onClick={complete ? () => setSaved(false) : () => navigate('/setup', { replace: true })}
                 className="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-surface-1 px-5 py-3 text-sm font-semibold text-text-secondary hover:text-text-primary hover:bg-surface-2"
               >
-                {labels.editAgain}
+                {complete ? labels.editAgain : labels.backSetup}
               </button>
             </div>
           </div>
@@ -376,41 +419,64 @@ export default function NanobotConfigure() {
           </div>
         )}
 
+        {!modelConfigured && (
+          <div className="mt-6 flex items-start gap-3 rounded-2xl border border-amber-500/25 bg-amber-500/10 p-4 text-sm text-amber-100">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <div>
+              <p className="font-semibold text-text-primary">{labels.incompleteTitle}</p>
+              <p className="mt-1 text-[13px] leading-6 text-text-secondary">{labels.incompleteDesc}</p>
+            </div>
+          </div>
+        )}
+
         <div className="mt-8 space-y-5">
           <Section icon={Key} title={labels.modelSection} desc={labels.modelSectionDesc}>
-            <Field label={labels.provider}>
+            <Field label={labels.provider} hint={labels.providerHint}>
               <select className={inputClass} value={form.provider} onChange={e => handleProviderChange(e.target.value)}>
+                <option value="">{labels.providerPlaceholder}</option>
                 {providerOptions.map(option => (
                   <option key={option.id} value={option.id}>{option.name}</option>
                 ))}
               </select>
             </Field>
-            <Field label={labels.model}>
-              <input className={inputClass} value={form.model} onChange={e => setField('model', e.target.value)} />
+            <Field label={labels.model} hint={labels.modelHint}>
+              <input
+                className={inputClass}
+                value={form.model}
+                onChange={e => setField('model', e.target.value)}
+                placeholder="provider/model-name"
+              />
             </Field>
-            <Field label={labels.apiKey} hint={providerHasKey ? labels.apiKeyKeep : labels.apiKeyNew}>
+            <Field label={labels.apiKey} hint={providerSelected ? (providerHasKey ? labels.apiKeyKeep : labels.apiKeyNew) : labels.apiKeyNeedsProvider}>
               <div className="relative">
                 <input
                   className={`${inputClass} pr-10`}
                   type={showApiKey ? 'text' : 'password'}
                   value={form.api_key || ''}
                   onChange={e => setField('api_key', e.target.value)}
-                  placeholder={providerHasKey ? labels.secretStored : labels.noSecret}
-                  disabled={form.clear_api_key}
+                  placeholder={providerSelected ? (providerHasKey ? labels.secretStored : labels.noSecret) : labels.apiKeyNeedsProvider}
+                  disabled={!providerSelected || form.clear_api_key}
                 />
                 <button
                   type="button"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-text-muted hover:text-text-primary"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-text-muted hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => setShowApiKey(v => !v)}
+                  disabled={!providerSelected}
                 >
                   {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
             </Field>
             <Field label={labels.apiBase} hint={labels.apiBasePlaceholder}>
-              <input className={inputClass} value={form.api_base || ''} onChange={e => setField('api_base', e.target.value)} placeholder="https://..." />
+              <input
+                className={inputClass}
+                value={form.api_base || ''}
+                onChange={e => setField('api_base', e.target.value)}
+                placeholder="https://..."
+                disabled={!providerSelected}
+              />
             </Field>
-            {providerHasKey && (
+            {providerSelected && providerHasKey && (
               <label className="md:col-span-2 flex items-center gap-2 rounded-xl border border-border bg-surface-0 px-3 py-2.5 text-[13px] text-text-secondary">
                 <input
                   type="checkbox"

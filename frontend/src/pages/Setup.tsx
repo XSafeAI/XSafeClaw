@@ -196,7 +196,7 @@ export default function Setup() {
       setNanobotInfo({
         installed: nanobotOk,
         version: d.nanobot_version || undefined,
-        configured: d.nanobot_config_exists || false,
+        configured: nanobotOk && !Boolean(d.requires_nanobot_configure),
       });
     } catch {
       setOpenclawInfo({ installed: null });
@@ -281,7 +281,7 @@ export default function Setup() {
     }
   };
 
-  // Nanobot install (SSE flow + init-default)
+  // Nanobot install (SSE flow only; config is created later in /nanobot_configure)
   const handleInstallNanobot = async () => {
     setInstallingPlatform('nanobot');
     setStage('installing_nanobot');
@@ -290,6 +290,12 @@ export default function Setup() {
 
     try {
       const resp = await fetch('/api/system/nanobot/install', { method: 'POST' });
+      if (!resp.ok || !resp.body) {
+        addLog(`HTTP ${resp.status} ${resp.statusText}`, 'error');
+        addLog(t.setup.nanobotInstallFailedHint, 'info');
+        setStage('install_failed');
+        return;
+      }
       const reader = resp.body!.getReader();
       const dec = new TextDecoder();
       let buf = '';
@@ -320,12 +326,9 @@ export default function Setup() {
       }
 
       if (success) {
-        // Init default config after install
-        try {
-          await systemAPI.nanobotInitDefault();
-        } catch { /* ignore - may already be configured */ }
-        setNanobotInfo(prev => ({ ...prev, installed: true, configured: true }));
-        setTimeout(() => navigate('/nanobot_configure', { replace: true }), 1500);
+        addLog(t.setup.nanobotCliInstallComplete || t.setup.nanobotInitSuccess, 'success');
+        setNanobotInfo(prev => ({ ...prev, installed: true, configured: false }));
+        setTimeout(() => navigate('/nanobot_configure', { replace: true }), 1200);
       } else {
         // Show manual install hint
         addLog(t.setup.nanobotInstallFailedHint, 'info');
@@ -437,6 +440,10 @@ export default function Setup() {
                 </div>
               )}
 
+              {stage === 'install_failed' && logs.length > 0 && (
+                <TerminalLog lines={logs} waitingText={t.setup.waiting} />
+              )}
+
               {stage === 'install_failed' && (
                 <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
                   <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
@@ -451,6 +458,15 @@ export default function Setup() {
                     <p className="text-emerald-400 select-all">uv tool install nanobot-ai --with-editable &lt;repo-root&gt; --force</p>
                   </div>
                 </div>
+              )}
+
+              {stage === 'install_failed' && nanobotInfo.installed === true && nanobotInfo.configured === false && (
+                <button
+                  onClick={() => navigate('/nanobot_configure', { replace: true })}
+                  className="w-full py-2.5 bg-cyan-500 hover:bg-cyan-600 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-cyan-500/25"
+                >
+                  {t.setup.nanobotContinueConfigure || 'Continue to Nanobot Configure'}
+                </button>
               )}
 
               {hasAnyInstalled && stage !== 'install_failed' && (

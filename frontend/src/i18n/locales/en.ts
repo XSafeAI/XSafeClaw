@@ -511,11 +511,15 @@ export const en = {
     retryInstall: 'Retry Installation',
     // Nanobot install
     nanobotInstalling: 'Installing Nanobot...',
-    nanobotInstallingDesc: 'Initializing Nanobot config and workspace...',
-    nanobotInitStart: 'Initializing Nanobot...',
-    nanobotInitSuccess: 'Nanobot installed!',
+    nanobotInstallingDesc: 'Installing the Nanobot CLI...',
+    nanobotInitStart: 'Starting Nanobot CLI installation...',
+    nanobotCliInstallComplete: 'Nanobot CLI installed, redirecting to the config page...',
+    nanobotConfigInitStart: 'The Nanobot config file will be written when you save in Nanobot Configure.',
+    nanobotInitSuccess: 'Nanobot CLI installed!',
     nanobotInitFailed: 'Nanobot installation failed',
+    nanobotConfigInitFailedHint: 'The Nanobot CLI is installed, but the runtime still needs manual configuration in Nanobot Configure.',
     nanobotInstallFailedHint: 'If uv is not installed, install it first: pip install uv',
+    nanobotContinueConfigure: 'Continue to Nanobot Configure',
     // Skip
     skipBtn: 'Skip, continue to use',
   },

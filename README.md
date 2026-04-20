@@ -207,9 +207,13 @@ For nanobot, do **not** copy `plugins/safeclaw-guard`. nanobot is integrated thr
 uv tool install nanobot-ai --with-editable . --force
 ```
 
+When XSafeClaw is running from a source checkout, the `/setup` page now uses the same editable-install command automatically so the nanobot tool environment can import the local XSafeClaw hook modules.
+
 `pyproject.toml` also exposes an optional `nanobot` extra for users who intentionally want `nanobot-ai` installed inside the active project environment. For this repository's developer workflow, the uv-tool command above is preferred because it matches how the `nanobot` CLI is usually run.
 
-Then start XSafeClaw and initialize nanobot from the web UI, or call the setup endpoint:
+Then start XSafeClaw. The `/setup` page only installs the Nanobot CLI and then redirects to `/nanobot_configure`. The Nanobot config file is created only when you click Save on the Nanobot configuration page. Provider, model, and API key are intentionally blank on first load.
+
+For compatibility, the setup endpoint still exists and creates only a skeleton config without provider/model defaults:
 
 ```bash
 curl -X POST http://127.0.0.1:6874/api/system/nanobot/init-default
@@ -223,7 +227,7 @@ nanobot gateway --port 18790 --verbose
 
 XSafeClaw uses `nanobot gateway` for Chat and Agent Valley. `nanobot serve` is not required for the current integration.
 
-The Web UI also provides a nanobot configuration page for the default local runtime. It writes `~/.nanobot/config.json`, including workspace, provider/model, API key, gateway, WebSocket channel, optional WebSocket token, and XSafeClaw Guard hook settings. Restart `nanobot gateway` after changing gateway, WebSocket, provider, or token settings so the running gateway loads the latest config.
+The Web UI also provides a nanobot configuration page for the default local runtime. It writes `~/.nanobot/config.json`, including workspace, provider/model, API key, gateway, WebSocket channel, optional WebSocket token, and XSafeClaw Guard hook settings. On first run, the page pre-fills only infrastructure defaults such as workspace, ports, WebSocket, and Guard; it does not auto-select a model provider or API key. Saving only the base config is allowed, but Nanobot will still remain in a needs-config state until provider and model are set. Restart `nanobot gateway` after changing gateway, WebSocket, provider, or token settings so the running gateway loads the latest config.
 
 ---
 
@@ -236,7 +240,7 @@ XSafeClaw works out of the box with sensible defaults. Copy `.env.example` to `.
 | `API_PORT`              | `6874`                             | Server port                |
 | `API_HOST`              | `0.0.0.0`                          | Bind address               |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session directory |
-| `~/.nanobot/config.json` | *(created by nanobot init)*        | nanobot config, gateway, workspace, and XSafeClaw hook settings |
+| `~/.nanobot/config.json` | *(created when saved in Nanobot Configure)* | nanobot config, gateway, workspace, and XSafeClaw hook settings |
 | `GUARD_BASE_URL`        | *(auto-detected)*                  | Guard model API base URL   |
 | `GUARD_BASE_MODEL`      | *(auto-detected)*                  | Guard model ID             |
 
@@ -265,7 +269,7 @@ uv tool install nanobot-ai --with-editable . --force
 nanobot gateway --port 18790 --verbose
 
 # Frontend (separate terminal)
-cd frontend && npm install && npm run dev   # http://localhost:3000, HMR
+cd frontend && npm install && npm run dev   # http://localhost:3003, HMR
 
 # Build frontend for production
 cd frontend && npm run build     # outputs to src/xsafeclaw/static/

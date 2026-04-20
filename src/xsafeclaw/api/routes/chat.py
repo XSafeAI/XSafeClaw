@@ -946,8 +946,8 @@ def _nanobot_gateway_websocket_url(instance: RuntimeInstance) -> str:
             status_code=503,
             detail=(
                 "nanobot websocket channel is not configured. "
-                "Run /api/system/nanobot/init-default or add channels.websocket "
-                "to ~/.nanobot/config.json."
+                "Open /nanobot_configure and save the Nanobot runtime config, "
+                "or add channels.websocket to ~/.nanobot/config.json."
             ),
         )
     return websocket_url

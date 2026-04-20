@@ -126,6 +126,69 @@ def test_nanobot_hook_loader_deduplicates_existing_hook(monkeypatch):
     assert hooks == [existing_hook]
 
 
+def test_nanobot_tool_install_command_prefers_editable_checkout(monkeypatch, tmp_path):
+    monkeypatch.setattr(system_routes, "_find_source_checkout_root", lambda: tmp_path)
+
+    command = system_routes._nanobot_tool_install_command()
+
+    assert "--with-editable" in command
+    assert str(tmp_path) in command
+    assert "nanobot-ai" in command
+
+
+def test_nanobot_tool_install_command_falls_back_to_installed_package(monkeypatch):
+    monkeypatch.setattr(system_routes, "_find_source_checkout_root", lambda: None)
+    monkeypatch.setattr(system_routes.importlib_metadata, "version", lambda _name: "1.2.3")
+
+    command = system_routes._nanobot_tool_install_command()
+
+    assert "--with" in command
+    assert "xsafeclaw==1.2.3" in command
+
+
+def test_nanobot_install_endpoint_uses_resolved_install_command(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakeStdout:
+        def __init__(self) -> None:
+            self._lines = [b"installed nanobot\n", b""]
+
+        async def readline(self) -> bytes:
+            return self._lines.pop(0)
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+            self.returncode = 0
+
+        async def wait(self) -> None:
+            return None
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setattr(system_routes, "_find_uv_executable", lambda **_: r"C:\Tools\uv.exe")
+    monkeypatch.setattr(system_routes, "_find_source_checkout_root", lambda: tmp_path)
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    client = TestClient(app)
+    response = client.post("/api/system/nanobot/install")
+
+    assert response.status_code == 200
+    assert "--with-editable" in response.text
+    assert str(tmp_path).replace("\\", "\\\\") in response.text
+    assert captured["args"] == (
+        r"C:\Tools\uv.exe",
+        "tool",
+        "install",
+        "nanobot-ai",
+        "--with-editable",
+        str(tmp_path),
+        "--force",
+    )
+
+
 def test_nanobot_config_extension_stripper_preserves_nanobot_config():
     payload = {
         "providers": {"minimax": {"apiKey": "secret"}},
@@ -189,6 +252,10 @@ def test_nanobot_guard_config_roundtrip_and_runtime_capabilities(monkeypatch, tm
     gateway = update_nanobot_gateway_state(config_path)
     assert gateway["gateway_health_url"] == "http://127.0.0.1:18790/health"
     assert gateway["websocket_url"] == "ws://127.0.0.1:8765/"
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert stored["gateway"]["heartbeat"]["enabled"] is True
+    assert stored["gateway"]["heartbeat"]["intervalS"] == 30
+    assert stored["gateway"]["heartbeat"]["keepRecentMessages"] == 8
 
     client = TestClient(app)
     instances_response = client.get("/api/system/instances")
@@ -340,7 +407,7 @@ def test_install_status_uses_fast_cli_checks_without_runtime_discovery(monkeypat
     openclaw_config = tmp_path / "openclaw.json"
     nanobot_config = tmp_path / "nanobot-config.json"
     openclaw_config.write_text("{}", encoding="utf-8")
-    nanobot_config.write_text("{}", encoding="utf-8")
+    _write_nanobot_config(nanobot_config, tmp_path / "nanobot-workspace")
 
     monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
     monkeypatch.setattr(system_routes, "_find_openclaw", lambda: str(tmp_path / "openclaw.cmd"))
@@ -363,6 +430,7 @@ def test_install_status_uses_fast_cli_checks_without_runtime_discovery(monkeypat
     assert data["requires_configure"] is False
     assert data["requires_nanobot_setup"] is False
     assert data["requires_nanobot_configure"] is False
+    assert data["nanobot_model_configured"] is True
 
 
 def test_install_status_does_not_require_openclaw_config_for_nanobot_only(monkeypatch, tmp_path):
@@ -379,7 +447,7 @@ def test_install_status_does_not_require_openclaw_config_for_nanobot_only(monkey
         return FakeProcess()
 
     nanobot_config = tmp_path / "nanobot-config.json"
-    nanobot_config.write_text("{}", encoding="utf-8")
+    _write_nanobot_config(nanobot_config, tmp_path / "nanobot-workspace")
 
     monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
     monkeypatch.setattr(system_routes, "_find_openclaw", lambda: None)
@@ -400,6 +468,51 @@ def test_install_status_does_not_require_openclaw_config_for_nanobot_only(monkey
     assert data["requires_configure"] is False
     assert data["requires_nanobot_setup"] is False
     assert data["requires_nanobot_configure"] is False
+    assert data["nanobot_model_configured"] is True
+
+
+def test_install_status_requires_nanobot_configure_for_base_config_only(monkeypatch, tmp_path):
+    async def fail_list_instances():
+        raise AssertionError("install-status must not perform runtime discovery")
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"nanobot v0.1.5.post1\n", b""
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeProcess()
+
+    nanobot_config = tmp_path / "nanobot-config.json"
+    nanobot_config.write_text(
+        json.dumps(
+            {
+                "agents": {"defaults": {"workspace": str(tmp_path / "workspace")}},
+                "gateway": {"host": "127.0.0.1", "port": 18790},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: None)
+    monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
+    monkeypatch.setattr(system_routes, "_find_node_version", lambda: "v22.0.0")
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", tmp_path / "missing-openclaw.json")
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", nanobot_config)
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    client = TestClient(app)
+    response = client.get("/api/system/install-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["nanobot_installed"] is True
+    assert data["nanobot_config_exists"] is True
+    assert data["nanobot_model_configured"] is False
+    assert data["requires_nanobot_configure"] is True
 
 
 def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_path):
@@ -416,7 +529,9 @@ def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_
 
     assert initial.status_code == 200
     assert initial.json()["config_exists"] is False
-    assert initial.json()["provider"] == "minimax"
+    assert initial.json()["provider"] == ""
+    assert initial.json()["model"] == ""
+    assert initial.json()["model_configured"] is False
 
     response = client.post(
         "/api/system/nanobot/config",
@@ -444,6 +559,7 @@ def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_
     data = response.json()
     assert data["success"] is True
     assert data["config_exists"] is True
+    assert data["model_configured"] is True
     assert data["provider_configs"]["minimax"]["has_api_key"] is True
     assert "secret-key" not in json.dumps(data, ensure_ascii=False)
 
@@ -451,6 +567,8 @@ def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_
     assert stored["agents"]["defaults"]["model"] == "MiniMax-M2.7"
     assert stored["providers"]["minimax"]["apiKey"] == "secret-key"
     assert stored["providers"]["minimax"]["apiBase"] == "https://api.minimax.io/v1"
+    assert stored["gateway"]["heartbeat"]["enabled"] is True
+    assert stored["gateway"]["heartbeat"]["intervalS"] == 30
     assert stored["channels"]["websocket"]["websocketRequiresToken"] is True
     assert "hooks" not in stored
     assert (
@@ -460,8 +578,144 @@ def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_
 
     readback = client.get("/api/system/nanobot/config")
     assert readback.status_code == 200
+    assert readback.json()["model_configured"] is True
     assert readback.json()["provider_configs"]["minimax"]["has_api_key"] is True
     assert "secret-key" not in json.dumps(readback.json(), ensure_ascii=False)
+
+
+def test_nanobot_config_api_allows_base_config_without_provider_model(monkeypatch, tmp_path):
+    config_path = tmp_path / "nanobot-config.json"
+
+    async def fake_discover():
+        return []
+
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", config_path)
+    monkeypatch.setattr(system_routes.runtime_registry, "discover", fake_discover)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/system/nanobot/config",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "provider": None,
+            "model": None,
+            "gateway_host": "127.0.0.1",
+            "gateway_port": 18790,
+            "websocket_enabled": True,
+            "websocket_host": "127.0.0.1",
+            "websocket_port": 8765,
+            "websocket_path": "/",
+            "websocket_requires_token": False,
+            "guard_mode": "blocking",
+            "guard_base_url": "http://127.0.0.1:6874",
+            "guard_timeout_s": 30,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["config_exists"] is True
+    assert data["provider"] == ""
+    assert data["model"] == ""
+    assert data["model_configured"] is False
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert stored["agents"]["defaults"]["workspace"] == str(tmp_path / "workspace")
+    assert "provider" not in stored["agents"]["defaults"]
+    assert "model" not in stored["agents"]["defaults"]
+    assert stored.get("providers") in (None, {})
+    assert stored["gateway"]["heartbeat"]["enabled"] is True
+    assert stored["gateway"]["heartbeat"]["intervalS"] == 30
+    assert (
+        stored["channels"][XSAFECLAW_CHANNEL_EXTENSION_NAME]["hooks"]["entries"]["xsafeclaw"]["config"]["mode"]
+        == "blocking"
+    )
+
+
+def test_nanobot_init_default_creates_skeleton_config_without_provider_defaults(monkeypatch, tmp_path):
+    config_path = tmp_path / "nanobot-config.json"
+
+    async def fake_discover():
+        return []
+
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", config_path)
+    monkeypatch.setattr(system_routes.runtime_registry, "discover", fake_discover)
+    monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
+    monkeypatch.setattr(
+        system_routes,
+        "_probe_nanobot_cli",
+        lambda *_args, **_kwargs: (True, "nanobot v0.1.5.post1", None),
+    )
+
+    client = TestClient(app)
+    response = client.post("/api/system/nanobot/init-default")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["created"] is True
+    assert data["model_configured"] is False
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert stored["agents"]["defaults"]["workspace"]
+    assert "provider" not in stored["agents"]["defaults"]
+    assert "model" not in stored["agents"]["defaults"]
+    assert stored.get("providers") in (None, {})
+    assert stored["gateway"]["heartbeat"]["enabled"] is True
+    assert stored["gateway"]["heartbeat"]["intervalS"] == 30
+
+
+def test_nanobot_config_save_repairs_legacy_integer_heartbeat(monkeypatch, tmp_path):
+    config_path = tmp_path / "nanobot-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "workspace": str(tmp_path / "workspace"),
+                        "provider": "minimax",
+                        "model": "MiniMax-M2.7",
+                    }
+                },
+                "gateway": {"host": "127.0.0.1", "port": 18790, "heartbeat": 30},
+                "providers": {"minimax": {"apiKey": "secret-key"}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_discover():
+        return []
+
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", config_path)
+    monkeypatch.setattr(system_routes.runtime_registry, "discover", fake_discover)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/system/nanobot/config",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "provider": "minimax",
+            "model": "MiniMax-M2.7",
+            "gateway_host": "127.0.0.1",
+            "gateway_port": 18790,
+            "websocket_enabled": True,
+            "websocket_host": "127.0.0.1",
+            "websocket_port": 8765,
+            "websocket_path": "/",
+            "websocket_requires_token": False,
+            "guard_mode": "blocking",
+            "guard_base_url": "http://127.0.0.1:6874",
+            "guard_timeout_s": 30,
+        },
+    )
+
+    assert response.status_code == 200
+    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    assert stored["gateway"]["heartbeat"]["enabled"] is True
+    assert stored["gateway"]["heartbeat"]["intervalS"] == 30
+    assert stored["gateway"]["heartbeat"]["keepRecentMessages"] == 8
 
 
 def test_openclaw_config_sanitizer_repairs_legacy_custom_context_window(monkeypatch, tmp_path):

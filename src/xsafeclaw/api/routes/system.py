@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from importlib import metadata as importlib_metadata
 import json
 import os
 import re
 import select as _select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -30,6 +32,8 @@ from ...runtime.nanobot import (
     DEFAULT_XSAFECLAW_GUARD_BASE_URL,
     DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S,
     NANOBOT_DEFAULT_CONFIG,
+    default_nanobot_gateway_heartbeat_config,
+    ensure_nanobot_gateway_heartbeat_config,
     parse_nanobot_gateway_state,
     read_nanobot_guard_state,
     update_nanobot_gateway_state,
@@ -185,6 +189,59 @@ def _build_env() -> dict:
                     env["PATH"] = v22_bin + path_sep + current_path
 
     return env
+
+
+def _find_uv_executable(*, env: dict | None = None) -> Optional[str]:
+    """Locate the uv executable used for tool-based nanobot installs."""
+    search_env = env or _build_env()
+    return shutil.which("uv", path=search_env.get("PATH"))
+
+
+def _find_source_checkout_root() -> Path | None:
+    """Return the repository root when running from a source checkout."""
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "src" / "xsafeclaw").is_dir():
+            return parent
+    return None
+
+
+def _nanobot_tool_install_binding() -> tuple[str, str]:
+    """Return the XSafeClaw dependency injection used for nanobot's tool env."""
+    repo_root = _find_source_checkout_root()
+    if repo_root is not None:
+        return "--with-editable", str(repo_root)
+
+    try:
+        version = importlib_metadata.version("xsafeclaw")
+    except importlib_metadata.PackageNotFoundError:
+        return "--with", "xsafeclaw"
+    return "--with", f"xsafeclaw=={version}"
+
+
+def _nanobot_tool_install_args(
+    *,
+    env: dict | None = None,
+    uv_executable: str | None = None,
+) -> list[str]:
+    """Build the uv tool install command for nanobot plus XSafeClaw integration."""
+    binding_flag, binding_value = _nanobot_tool_install_binding()
+    return [
+        uv_executable or _find_uv_executable(env=env) or "uv",
+        "tool",
+        "install",
+        "nanobot-ai",
+        binding_flag,
+        binding_value,
+        "--force",
+    ]
+
+
+def _format_command(args: list[str]) -> str:
+    """Render a subprocess argument list as a shell command for logs/UI."""
+    if os.name == "nt":
+        return subprocess.list2cmdline(args)
+    return shlex.join(args)
 
 def _find_openclaw() -> Optional[str]:
     """Locate the openclaw binary, checking nvm Node 22 paths first."""
@@ -497,7 +554,7 @@ async def get_install_status():
     )
 
     config_exists = _CONFIG_PATH.exists()
-    nanobot_config_exists = NANOBOT_DEFAULT_CONFIG.exists()
+    nanobot_config_exists, nanobot_model_configured, _, _ = _nanobot_config_flags()
     requires_setup, requires_configure = _status_flags(
         openclaw_installed=openclaw_ready,
         nanobot_installed=nanobot_ready,
@@ -515,10 +572,11 @@ async def get_install_status():
         "nanobot_path": nanobot_path,
         "config_exists": config_exists,
         "nanobot_config_exists": nanobot_config_exists,
+        "nanobot_model_configured": nanobot_model_configured,
         "requires_setup": requires_setup,
         "requires_configure": requires_configure,
         "requires_nanobot_setup": not nanobot_ready,
-        "requires_nanobot_configure": nanobot_ready and not nanobot_config_exists,
+        "requires_nanobot_configure": nanobot_ready and not nanobot_model_configured,
         "node_version": _find_node_version(),
     }
 
@@ -536,11 +594,11 @@ async def get_system_status():
     instances = await list_instances()
     enabled_instances = [instance for instance in instances if instance.enabled]
     default_instance = next((instance for instance in enabled_instances if instance.is_default), None)
-    nanobot_config_exists = NANOBOT_DEFAULT_CONFIG.exists()
+    nanobot_config_exists, nanobot_model_configured, _, _ = _nanobot_config_flags()
 
     nanobot_installed = nanobot_ready
     requires_nanobot_setup = not nanobot_installed
-    requires_nanobot_configure = nanobot_installed and not nanobot_config_exists
+    requires_nanobot_configure = nanobot_installed and not nanobot_model_configured
     runtime_summary = {
         "total": len(instances),
         "enabled": len(enabled_instances),
@@ -568,6 +626,7 @@ async def get_system_status():
             "nanobot_error": nanobot_error,
             "nanobot_path": nanobot_path,
             "nanobot_config_exists": nanobot_config_exists,
+            "nanobot_model_configured": nanobot_model_configured,
             "requires_nanobot_setup": requires_nanobot_setup,
             "requires_nanobot_configure": requires_nanobot_configure,
             "daemon_running": False,
@@ -609,6 +668,7 @@ async def get_system_status():
                 "nanobot_error": nanobot_error,
                 "nanobot_path": nanobot_path,
                 "nanobot_config_exists": nanobot_config_exists,
+                "nanobot_model_configured": nanobot_model_configured,
                 "requires_nanobot_setup": requires_nanobot_setup,
                 "requires_nanobot_configure": requires_nanobot_configure,
                 "daemon_running": False,
@@ -654,6 +714,7 @@ async def get_system_status():
         "nanobot_error": nanobot_error,
         "nanobot_path": nanobot_path,
         "nanobot_config_exists": nanobot_config_exists,
+        "nanobot_model_configured": nanobot_model_configured,
         "requires_nanobot_setup": requires_nanobot_setup,
         "requires_nanobot_configure": requires_nanobot_configure,
         "daemon_running": daemon_running,
@@ -681,8 +742,8 @@ class NanobotConfigRequest(BaseModel):
     """Create/update the default nanobot config used by XSafeClaw."""
 
     workspace: str = "~/.nanobot/workspace"
-    provider: str = "minimax"
-    model: str = "MiniMax-M2.7"
+    provider: str | None = None
+    model: str | None = None
     api_key: str | None = None
     clear_api_key: bool = False
     api_base: str | None = None
@@ -727,17 +788,12 @@ def _nanobot_default_config_payload() -> dict[str, Any]:
         "agents": {
             "defaults": {
                 "workspace": _nanobot_default_workspace(),
-                "provider": "minimax",
-                "model": "MiniMax-M2.7",
             }
-        },
-        "providers": {
-            "minimax": {},
         },
         "gateway": {
             "host": DEFAULT_NANOBOT_GATEWAY_HOST,
             "port": DEFAULT_NANOBOT_GATEWAY_PORT,
-            "heartbeat": 30,
+            "heartbeat": default_nanobot_gateway_heartbeat_config(),
         },
         "channels": {
             "sendProgress": True,
@@ -755,6 +811,32 @@ def _nanobot_default_config_payload() -> dict[str, Any]:
             },
         },
     }
+
+
+def _nanobot_selected_provider(defaults: dict[str, Any]) -> str:
+    model = str(defaults.get("model") or "").strip()
+    provider = str(defaults.get("provider") or "").strip()
+    if provider:
+        return provider
+    if "/" in model:
+        return model.split("/", 1)[0].strip()
+    return ""
+
+
+def _nanobot_model_configured(provider: str, model: str) -> bool:
+    return bool(provider and model)
+
+
+def _nanobot_config_flags(config_path: Path | None = None) -> tuple[bool, bool, str, str]:
+    path = Path(config_path or NANOBOT_DEFAULT_CONFIG).expanduser()
+    if not path.exists():
+        return False, False, "", ""
+
+    data = _read_json_mapping(path)
+    defaults = _json_mapping(_json_mapping(data.get("agents")).get("defaults"))
+    provider = _nanobot_selected_provider(defaults)
+    model = str(defaults.get("model") or "").strip()
+    return True, _nanobot_model_configured(provider, model), provider, model
 
 
 def _redacted_nanobot_provider_configs(providers: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -776,13 +858,9 @@ def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
     agents = _json_mapping(data.get("agents"))
     defaults = _json_mapping(agents.get("defaults"))
     providers = _json_mapping(data.get("providers"))
-    provider = str(defaults.get("provider") or "").strip()
+    provider = _nanobot_selected_provider(defaults)
     model = str(defaults.get("model") or "").strip()
-    if not provider:
-        provider = model.split("/", 1)[0] if "/" in model else "minimax"
-    if not model:
-        default_option = next((item for item in _NANOBOT_PROVIDER_OPTIONS if item["id"] == provider), None)
-        model = str((default_option or _NANOBOT_PROVIDER_OPTIONS[0])["default_model"])
+    model_configured = _nanobot_model_configured(provider, model)
 
     workspace = str(defaults.get("workspace") or _nanobot_default_workspace()).strip()
     gateway = parse_nanobot_gateway_state(data)
@@ -804,6 +882,7 @@ def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
         "workspace": workspace,
         "provider": provider,
         "model": model,
+        "model_configured": model_configured,
         "api_base": active_provider_config.get("apiBase"),
         "provider_options": _NANOBOT_PROVIDER_OPTIONS,
         "provider_configs": _redacted_nanobot_provider_configs(providers),
@@ -836,9 +915,18 @@ def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
 
 
 def _set_nanobot_config_value(data: dict[str, Any], body: NanobotConfigRequest) -> dict[str, Any]:
-    provider = body.provider.strip()
-    if provider not in _NANOBOT_PROVIDER_IDS:
+    provider = str(body.provider or "").strip()
+    model = str(body.model or "").strip()
+    if provider and provider not in _NANOBOT_PROVIDER_IDS:
         raise ValueError(f"Unsupported nanobot provider: {body.provider}")
+    if model and not provider:
+        raise ValueError("Select a provider before setting the default model.")
+    if (
+        body.clear_api_key
+        or (body.api_key and body.api_key.strip())
+        or (body.api_base and body.api_base.strip())
+    ) and not provider:
+        raise ValueError("Select a provider before editing provider credentials.")
 
     workspace = str(Path(body.workspace or _nanobot_default_workspace()).expanduser())
     Path(workspace).mkdir(parents=True, exist_ok=True)
@@ -852,27 +940,36 @@ def _set_nanobot_config_value(data: dict[str, Any], body: NanobotConfigRequest) 
         defaults = {}
         agents["defaults"] = defaults
     defaults["workspace"] = workspace
-    defaults["provider"] = provider
-    defaults["model"] = body.model.strip() or next(
-        item["default_model"] for item in _NANOBOT_PROVIDER_OPTIONS if item["id"] == provider
-    )
+    if provider:
+        defaults["provider"] = provider
+    else:
+        defaults.pop("provider", None)
+    if model:
+        defaults["model"] = model
+    else:
+        defaults.pop("model", None)
 
     providers = data.setdefault("providers", {})
     if not isinstance(providers, dict):
         providers = {}
         data["providers"] = providers
-    provider_config = providers.setdefault(provider, {})
-    if not isinstance(provider_config, dict):
-        provider_config = {}
-        providers[provider] = provider_config
-    if body.clear_api_key:
-        provider_config.pop("apiKey", None)
-    elif body.api_key and body.api_key.strip():
-        provider_config["apiKey"] = body.api_key.strip()
-    if body.api_base and body.api_base.strip():
-        provider_config["apiBase"] = body.api_base.strip()
-    else:
-        provider_config.pop("apiBase", None)
+    if provider:
+        provider_config = providers.setdefault(provider, {})
+        if not isinstance(provider_config, dict):
+            provider_config = {}
+            providers[provider] = provider_config
+        if body.clear_api_key:
+            provider_config.pop("apiKey", None)
+        elif body.api_key and body.api_key.strip():
+            provider_config["apiKey"] = body.api_key.strip()
+        if body.api_base and body.api_base.strip():
+            provider_config["apiBase"] = body.api_base.strip()
+        else:
+            provider_config.pop("apiBase", None)
+        if not provider_config:
+            providers.pop(provider, None)
+    if not providers:
+        data.pop("providers", None)
 
     gateway = data.setdefault("gateway", {})
     if not isinstance(gateway, dict):
@@ -880,7 +977,7 @@ def _set_nanobot_config_value(data: dict[str, Any], body: NanobotConfigRequest) 
         data["gateway"] = gateway
     gateway["host"] = body.gateway_host.strip() or DEFAULT_NANOBOT_GATEWAY_HOST
     gateway["port"] = body.gateway_port
-    gateway.setdefault("heartbeat", 30)
+    ensure_nanobot_gateway_heartbeat_config(gateway)
 
     channels = data.setdefault("channels", {})
     if not isinstance(channels, dict):
@@ -1265,13 +1362,22 @@ async def install_nanobot():
     env = _build_env()
 
     async def generate():
-        install_cmd = _nanobot_tool_install_command()
-        yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {install_cmd}'})}\n\n"
-        yield f"data: {json.dumps({'type': 'nanobot_install_start'})}\n\n"
-
         try:
+            uv_executable = _find_uv_executable(env=env)
+            if not uv_executable:
+                raise RuntimeError(
+                    "uv executable not found in PATH. Install uv first, then retry."
+                )
+
+            install_args = _nanobot_tool_install_args(
+                env=env,
+                uv_executable=uv_executable,
+            )
+            install_cmd = _format_command(install_args)
+            yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {install_cmd}'})}\n\n"
+            yield f"data: {json.dumps({'type': 'nanobot_install_start'})}\n\n"
             proc = await asyncio.create_subprocess_exec(
-                "uv", "tool", "install", "nanobot-ai", "--force",
+                *install_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -1300,16 +1406,15 @@ async def install_nanobot():
 
 def _nanobot_tool_install_command() -> str:
     """Return the supported developer install command for uv-tool nanobot."""
-    repo_root = Path(__file__).resolve().parents[4]
-    return f'uv tool install nanobot-ai --with-editable "{repo_root}" --force'
+    return _format_command(_nanobot_tool_install_args())
 
 
 @router.post("/nanobot/init-default")
 async def init_default_nanobot():
-    """Create/update the default nanobot config and XSafeClaw guard hook."""
+    """Create/update a skeleton nanobot config and XSafeClaw guard hook."""
     env = _build_env()
     nanobot_path = _find_nanobot(env=env)
-    ready, _, error = _probe_nanobot_cli(nanobot_path, env=env)
+    ready, _, error = _probe_nanobot_cli(nanobot_path, env=env, timeout_s=15.0)
     if not ready:
         raise HTTPException(
             status_code=400,
@@ -1321,73 +1426,37 @@ async def init_default_nanobot():
 
     workspace = Path.home() / ".nanobot" / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    if NANOBOT_DEFAULT_CONFIG.exists():
-        gateway = update_nanobot_gateway_state(NANOBOT_DEFAULT_CONFIG)
-        guard = update_nanobot_guard_state(
-            NANOBOT_DEFAULT_CONFIG,
-            instance_id="nanobot-default",
-            mode="blocking",
-        )
-        instances = await runtime_registry.discover()
-        return {
-            "success": True,
-            "created": False,
-            "config_path": str(NANOBOT_DEFAULT_CONFIG),
-            "workspace_path": str(workspace),
-            "gateway": gateway,
-            "gateway_command": "nanobot gateway --port 18790 --verbose",
-            "guard": guard,
-            "install_command": _nanobot_tool_install_command(),
-            "instances": [serialize_instance(instance) for instance in instances],
-        }
+    config_path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
+    created = not config_path.exists()
+    data = _read_json_mapping(config_path) if config_path.exists() else _nanobot_default_config_payload()
+    agents = data.setdefault("agents", {})
+    if not isinstance(agents, dict):
+        agents = {}
+        data["agents"] = agents
+    defaults = agents.setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        defaults = {}
+        agents["defaults"] = defaults
+    defaults["workspace"] = str(workspace)
+    _write_json_mapping(config_path, data)
 
-    NANOBOT_DEFAULT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    command = _build_nanobot_command(
-        nanobot_path,
-        [
-            "onboard",
-            "--config",
-            str(NANOBOT_DEFAULT_CONFIG),
-            "--workspace",
-            str(workspace),
-        ],
-    )
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        stdin=asyncio.subprocess.DEVNULL,
-        env=env,
-    )
-    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-    output = stdout.decode("utf-8", errors="replace")
-    if proc.returncode != 0:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "message": "nanobot onboard failed",
-                "exit_code": proc.returncode,
-                "output": output[-4000:],
-            },
-        )
-
-    gateway = update_nanobot_gateway_state(NANOBOT_DEFAULT_CONFIG)
+    gateway = update_nanobot_gateway_state(config_path)
     guard = update_nanobot_guard_state(
-        NANOBOT_DEFAULT_CONFIG,
+        config_path,
         instance_id="nanobot-default",
         mode="blocking",
     )
     instances = await runtime_registry.discover()
     return {
         "success": True,
-        "created": True,
-        "config_path": str(NANOBOT_DEFAULT_CONFIG),
+        "created": created,
+        "config_path": str(config_path),
         "workspace_path": str(workspace),
-        "output": output[-4000:],
         "gateway": gateway,
         "gateway_command": "nanobot gateway --port 18790 --verbose",
         "guard": guard,
         "install_command": _nanobot_tool_install_command(),
+        "model_configured": False,
         "instances": [serialize_instance(instance) for instance in instances],
     }
 

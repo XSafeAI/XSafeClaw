@@ -28,6 +28,8 @@ DEFAULT_XSAFECLAW_GUARD_BASE_URL = "http://127.0.0.1:6874"
 DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S = 305.0
 DEFAULT_NANOBOT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_NANOBOT_GATEWAY_PORT = 18790
+DEFAULT_NANOBOT_GATEWAY_HEARTBEAT_INTERVAL_S = 30
+DEFAULT_NANOBOT_GATEWAY_HEARTBEAT_KEEP_RECENT_MESSAGES = 8
 DEFAULT_NANOBOT_WEBSOCKET_HOST = "127.0.0.1"
 DEFAULT_NANOBOT_WEBSOCKET_PORT = 8765
 DEFAULT_NANOBOT_WEBSOCKET_PATH = "/"
@@ -224,6 +226,54 @@ def normalize_host(host: str | None) -> str:
     return host
 
 
+def default_nanobot_gateway_heartbeat_config() -> dict[str, Any]:
+    """Return the schema-valid Nanobot gateway heartbeat configuration."""
+    return {
+        "enabled": True,
+        "intervalS": DEFAULT_NANOBOT_GATEWAY_HEARTBEAT_INTERVAL_S,
+        "keepRecentMessages": DEFAULT_NANOBOT_GATEWAY_HEARTBEAT_KEEP_RECENT_MESSAGES,
+    }
+
+
+def ensure_nanobot_gateway_heartbeat_config(gateway: dict[str, Any]) -> dict[str, Any]:
+    """Normalize legacy heartbeat values into Nanobot's HeartbeatConfig object."""
+    raw = gateway.get("heartbeat")
+    default = default_nanobot_gateway_heartbeat_config()
+
+    if isinstance(raw, dict):
+        enabled = raw.get("enabled", default["enabled"])
+        interval = raw.get("intervalS", raw.get("interval_s", default["intervalS"]))
+        keep_recent = raw.get(
+            "keepRecentMessages",
+            raw.get("keep_recent_messages", default["keepRecentMessages"]),
+        )
+    elif isinstance(raw, (int, float)) and raw > 0:
+        enabled = True
+        interval = int(raw)
+        keep_recent = default["keepRecentMessages"]
+    else:
+        enabled = default["enabled"]
+        interval = default["intervalS"]
+        keep_recent = default["keepRecentMessages"]
+
+    try:
+        interval_value = max(int(interval), 1)
+    except (TypeError, ValueError):
+        interval_value = default["intervalS"]
+    try:
+        keep_recent_value = max(int(keep_recent), 0)
+    except (TypeError, ValueError):
+        keep_recent_value = default["keepRecentMessages"]
+
+    heartbeat = {
+        "enabled": bool(enabled),
+        "intervalS": interval_value,
+        "keepRecentMessages": keep_recent_value,
+    }
+    gateway["heartbeat"] = heartbeat
+    return heartbeat
+
+
 def parse_nanobot_gateway_state(config: dict[str, Any]) -> dict[str, Any]:
     """Extract gateway and websocket channel settings from nanobot config."""
     gateway = _read_mapping(config.get("gateway"))
@@ -276,7 +326,7 @@ def update_nanobot_gateway_state(config_path: str | Path) -> dict[str, Any]:
         data["gateway"] = gateway
     gateway.setdefault("host", DEFAULT_NANOBOT_GATEWAY_HOST)
     gateway.setdefault("port", DEFAULT_NANOBOT_GATEWAY_PORT)
-    gateway.setdefault("heartbeat", 30)
+    ensure_nanobot_gateway_heartbeat_config(gateway)
 
     channels = data.setdefault("channels", {})
     if not isinstance(channels, dict):

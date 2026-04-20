@@ -63,6 +63,7 @@ export interface SystemStatusResponse {
   nanobot_version: string | null;
   nanobot_path: string | null;
   nanobot_config_exists: boolean;
+  nanobot_model_configured: boolean;
   daemon_running: boolean;
   openclaw_path: string | null;
   node_version: string;
@@ -95,6 +96,7 @@ export interface InstallStatusResponse {
   nanobot_path: string | null;
   config_exists: boolean;
   nanobot_config_exists: boolean;
+  nanobot_model_configured: boolean;
   requires_setup: boolean;
   requires_configure: boolean;
   requires_nanobot_setup: boolean;
@@ -157,6 +159,7 @@ export interface NanobotConfigResponse {
   workspace: string;
   provider: string;
   model: string;
+  model_configured: boolean;
   api_base: string | null;
   provider_options: NanobotProviderOption[];
   provider_configs: Record<string, NanobotProviderConfigState>;
@@ -188,8 +191,8 @@ export interface NanobotConfigResponse {
 
 export interface NanobotConfigPayload {
   workspace: string;
-  provider: string;
-  model: string;
+  provider?: string | null;
+  model?: string | null;
   api_key?: string | null;
   clear_api_key?: boolean;
   api_base?: string | null;
@@ -586,11 +589,12 @@ export const systemAPI = {
   /** SSE URL for nanobot install stream (use with fetch). */
   nanobotInstallUrl: () => '/api/system/nanobot/install',
 
-  /** Create the default nanobot config/workspace after nanobot is installed. */
+  /** Create a skeleton nanobot config/workspace for compatibility flows. */
   nanobotInitDefault: () =>
     api.post<{
       success: boolean;
       created: boolean;
+      model_configured?: boolean;
       config_path: string;
       workspace_path: string;
       guard?: Record<string, any>;
