@@ -118,10 +118,14 @@ function getAgentIdentity(agent) {
   return normalizeSessionIdentity(getAgentSessionKey(agent) || agent?.id || '');
 }
 
-function fmtTime(ts) {
+function resolveDateLocale(locale = 'en') {
+  return locale === 'zh' ? 'zh-CN' : 'en-US';
+}
+
+function fmtTime(ts, locale = 'en') {
   if (!ts) return '';
   try {
-    return new Date(ts).toLocaleTimeString('en-US', {
+    return new Date(ts).toLocaleTimeString(resolveDateLocale(locale), {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
@@ -132,10 +136,10 @@ function fmtTime(ts) {
   }
 }
 
-function fmtDate(ts) {
+function fmtDate(ts, locale = 'en') {
   if (!ts) return '';
   try {
-    return new Date(ts).toLocaleString('en-US', {
+    return new Date(ts).toLocaleString(resolveDateLocale(locale), {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -147,10 +151,10 @@ function fmtDate(ts) {
   }
 }
 
-function fmtExactDate(ts) {
+function fmtExactDate(ts, locale = 'en') {
   if (!ts) return '';
   try {
-    return new Date(ts).toLocaleString('en-US', {
+    return new Date(ts).toLocaleString(resolveDateLocale(locale), {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -187,7 +191,7 @@ function fmtTokens(value) {
   return `${(n / 1000000).toFixed(1)}m`;
 }
 
-function durationStr(startTs, endTs) {
+function durationStr(startTs, endTs, locale = 'en') {
   const start = startTs ? new Date(startTs).getTime() : NaN;
   const end = endTs ? new Date(endTs).getTime() : Date.now();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '---';
@@ -195,6 +199,11 @@ function durationStr(startTs, endTs) {
   const hours = Math.floor(totalSec / 3600);
   const minutes = Math.floor((totalSec % 3600) / 60);
   const seconds = totalSec % 60;
+  if (locale === 'zh') {
+    if (hours > 0) return `${hours}小时 ${minutes}分`;
+    if (minutes > 0) return `${minutes}分 ${seconds}秒`;
+    return `${seconds}秒`;
+  }
   if (hours > 0) return `${hours}h ${minutes}m`;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
@@ -483,13 +492,13 @@ function formatTaskId(value, length = 12) {
 }
 
 /** One-line preview for task cards / modal — list API `user_message_preview`, then error, then id. */
-function dashboardTaskListSnippet(task) {
+function dashboardTaskListSnippet(task, userMessageLabel = 'user_message') {
   const user = String(task?.user_message_preview || '').trim();
   if (user) return user.slice(0, 180);
   const err = String(task?.error_message || '').trim();
   if (err) return err.slice(0, 180);
   const uid = task?.user_message_id;
-  if (uid) return `user_message ${String(uid).slice(0, 28)}`;
+  if (uid) return `${userMessageLabel} ${String(uid).slice(0, 28)}`;
   return '—';
 }
 
@@ -659,7 +668,9 @@ function TaskDetailFact({
 }
 
 function TaskDetailMessage({ msg }) {
-  const timestamp = fmtDate(msg.timestamp);
+  const { locale } = useI18n();
+  const taskText = getAgentTownText(locale).tasks;
+  const timestamp = fmtDate(msg.timestamp, locale);
   const isUser = msg.role === 'user';
   const isAssistant = msg.role === 'assistant';
   const isTool = msg.role === 'tool_call';
@@ -671,7 +682,7 @@ function TaskDetailMessage({ msg }) {
       {(isUser || isAssistant) && msg.content_text ? (
         <div className={`tc-task-detail-bubble ${isUser ? 'tc-task-detail-bubble-user' : 'tc-task-detail-bubble-assistant'}`}>
           <div className="tc-task-detail-bubble-head">
-            <span className="tc-task-detail-role">{isUser ? 'USER' : 'ASSISTANT'}</span>
+            <span className="tc-task-detail-role">{isUser ? taskText.userTag : taskText.assistantTag}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
           <div className="tc-task-detail-text">{msg.content_text}</div>
@@ -684,24 +695,24 @@ function TaskDetailMessage({ msg }) {
         >
           <div className="tc-task-detail-tool-head tc-task-detail-tool-head-main">
             <span className="tc-task-detail-tool-tag">
-              {msg.result_pending ? 'RUNNING' : msg.is_error ? 'ERROR' : 'TOOL'}
+              {msg.result_pending ? taskText.runningTag : msg.is_error ? taskText.errorTag : taskText.toolTag}
             </span>
-            <span className="tc-task-detail-tool-name">{msg.tool_name || 'tool-call'}</span>
+            <span className="tc-task-detail-tool-name">{msg.tool_name || taskText.toolCallFallback}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
           {(hasToolCall || hasToolResult) ? (
             <div className="tc-task-detail-tool-body">
               {hasToolCall ? (
                 <div className="tc-task-detail-tool-block tc-task-detail-tool-block-call">
-                  <div className="tc-task-detail-tool-subhead">Tool call</div>
+                  <div className="tc-task-detail-tool-subhead">{taskText.toolCall}</div>
                   <pre className="tc-task-detail-tool-payload">{stringifyTaskValue(msg.tool_arguments)}</pre>
                 </div>
               ) : null}
               {hasToolResult ? (
                 <div className="tc-task-detail-tool-block tc-task-detail-tool-block-result">
-                  <div className="tc-task-detail-tool-subhead">Tool result</div>
+                  <div className="tc-task-detail-tool-subhead">{taskText.toolResult}</div>
                   <pre className="tc-task-detail-tool-payload">
-                    {msg.result_pending ? 'Running...' : stringifyTaskValue(msg.tool_result)}
+                    {msg.result_pending ? taskText.runningResult : stringifyTaskValue(msg.tool_result)}
                   </pre>
                 </div>
               ) : null}
@@ -753,6 +764,9 @@ function TasksTab({
   onTaskDetailChange,
   taskStatusMeta = TASK_STATUS_META,
 }) {
+  const { locale } = useI18n();
+  const townText = getAgentTownText(locale);
+  const taskText = townText.tasks;
   const [selectedTask, setSelectedTask] = useState(null);
   const [detailMessages, setDetailMessages] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -820,13 +834,13 @@ function TasksTab({
       task: matchingEvent || null,
       charName,
       agentId,
-      agentName: liveAgent?.name || `Agent-${shortId(agentId)}`,
+      agentName: liveAgent?.name || `${taskText.agentFallbackPrefix}-${shortId(agentId)}`,
       promptSnippet: extractPendingContextSnippet(item),
     });
     setDetailMessages([]);
     setDetailError('');
     setDetailEventData(null);
-  }, [agentsBySessionKey, charNameMap, dashboardEvents]);
+  }, [agentsBySessionKey, charNameMap, dashboardEvents, taskText.agentFallbackPrefix]);
 
   const openDashboardTask = useCallback((task, index) => {
     const liveAgent = agentsById[task.session_id];
@@ -839,12 +853,12 @@ function TasksTab({
       task,
       charName,
       agentId: liveAgent?.id || task.session_id,
-      agentName: liveAgent?.name || `Agent-${shortId(task.session_id)}`,
-      promptSnippet: dashboardTaskListSnippet(task),
+      agentName: liveAgent?.name || `${taskText.agentFallbackPrefix}-${shortId(task.session_id)}`,
+      promptSnippet: dashboardTaskListSnippet(task, taskText.userMessageShort),
     });
     setDetailError('');
     setDetailEventData(null);
-  }, [agentsById, charNameMap]);
+  }, [agentsById, charNameMap, taskText.agentFallbackPrefix, taskText.userMessageShort]);
 
   useEffect(() => {
     if (!selectedTask) return undefined;
@@ -883,7 +897,7 @@ function TasksTab({
       try {
         const response = await fetch(`/api/events/${eventId}`, { cache: 'no-store' });
         if (!response.ok) {
-          throw new Error(`Task detail request failed: ${response.status}`);
+          throw new Error(`${taskText.loadFailedWithStatus}: ${response.status}`);
         }
         const payload = await response.json();
         if (disposed) return;
@@ -895,7 +909,7 @@ function TasksTab({
         if (disposed) return;
         setDetailEventData(null);
         setDetailMessages([]);
-        setDetailError(err instanceof Error ? err.message : 'Failed to load task detail.');
+        setDetailError(err instanceof Error ? err.message : taskText.loadFailed);
       } finally {
         if (!disposed) setDetailLoading(false);
       }
@@ -903,7 +917,7 @@ function TasksTab({
 
     loadDetail();
     return () => { disposed = true; };
-  }, [selectedTask]);
+  }, [selectedTask, taskText.loadFailed, taskText.loadFailedWithStatus]);
 
   const detailTask = (selectedTask?.kind === 'dashboard' || selectedTask?.kind === 'pending')
     ? (detailEventData || selectedTask.task)
@@ -917,27 +931,27 @@ function TasksTab({
       <section className="tc-ornate-panel tc-task-lane tc-task-lane-pending">
         <div className="tc-task-lane-head">
           <div>
-            <div className="tc-task-lane-overline">MANUAL REVIEW</div>
-            <div className="tc-task-lane-title">Pending</div>
+            <div className="tc-task-lane-overline">{taskText.pendingOverline}</div>
+            <div className="tc-task-lane-title">{taskText.pendingTitle}</div>
           </div>
           <div className="tc-task-lane-count tc-task-lane-count-pending">{unresolvedApprovals.length}</div>
         </div>
         <div className="tc-task-lane-note">
-          Guard-blocked tool calls stay here until a reviewer approves, rejects, or modifies them.
+          {taskText.pendingNote}
         </div>
         {!guardEnabled && (
           <div className="tc-guard-off-banner">
             <span className="tc-guard-off-icon">⚠</span>
             <div className="tc-guard-off-text">
-              <strong>Guard is OFF</strong>
-              <span>Tool calls are passing through without safety checks. Enable Guard to activate risk review.</span>
+              <strong>{taskText.guardOffTitle}</strong>
+              <span>{taskText.guardOffDescription}</span>
             </div>
-            <button className="tc-guard-off-btn" onClick={onToggleGuard}>Enable Guard</button>
+            <button className="tc-guard-off-btn" onClick={onToggleGuard}>{taskText.enableGuard}</button>
           </div>
         )}
         <div className="tc-task-lane-list tc-task-lane-list-pending">
           {unresolvedApprovals.length === 0 ? (
-            <div className="tc-empty tc-task-empty-pending">No tasks are waiting on human review.</div>
+            <div className="tc-empty tc-task-empty-pending">{taskText.noPending}</div>
           ) : unresolvedApprovals.map((item, index) => {
             const liveAgent = agentsBySessionKey[item.session_key];
             const charName = liveAgent
@@ -946,7 +960,7 @@ function TasksTab({
             const promptSnippet = extractPendingContextSnippet(item)
               || item.failure_mode
               || item.risk_source
-              || 'Awaiting reviewer guidance before this step can continue.';
+              || taskText.waitingReviewer;
             return (
               <div
                 key={item.id}
@@ -960,19 +974,19 @@ function TasksTab({
                   <div className="tc-task-card-top">
                     <div className="tc-task-card-main">
                       <div className="tc-task-head">
-                        <span className="tc-task-badge tc-task-flagged">PENDING</span>
-                        <span className="tc-task-badge tc-task-pending-marker">HUMAN REVIEW</span>
+                        <span className="tc-task-badge tc-task-flagged">{taskText.pendingBadge}</span>
+                        <span className="tc-task-badge tc-task-pending-marker">{taskText.humanReviewBadge}</span>
                       </div>
-                      <div className="tc-task-title">Task {formatTaskId(item.id)}</div>
+                      <div className="tc-task-title">{taskText.taskLabel} {formatTaskId(item.id)}</div>
                       <div className="tc-task-card-meta">
-                        <div>START</div>
-                        <span>{fmtTime((item.created_at || 0) * 1000)}</span>
-                        <div>END</div>
+                        <div>{taskText.start}</div>
+                        <span>{fmtTime((item.created_at || 0) * 1000, locale)}</span>
+                        <div>{taskText.end}</div>
                         <span>---</span>
                       </div>
                     </div>
                     <div className="tc-task-card-side">
-                      <div className="tc-task-exact-time">{fmtExactDate((item.created_at || 0) * 1000)}</div>
+                      <div className="tc-task-exact-time">{fmtExactDate((item.created_at || 0) * 1000, locale)}</div>
                       <TaskActorStrip
                         charName={charName}
                         agentId={liveAgent?.id || item.session_key || item.id}
@@ -984,9 +998,9 @@ function TasksTab({
                     const eff = getEffectiveRisk(item) || {};
                     return (
                       <div className="tc-task-risk-row">
-                        <span className="tc-task-risk-tag tc-task-risk-tag-risk"><b>Risk Source</b> {eff.risk_source || 'None'}</span>
-                        <span className="tc-task-risk-tag tc-task-risk-tag-failure"><b>Failure Mode</b> {eff.failure_mode || 'None'}</span>
-                        <span className="tc-task-risk-tag tc-task-risk-tag-harm"><b>Real World Harm</b> {eff.real_world_harm || 'None'}</span>
+                        <span className="tc-task-risk-tag tc-task-risk-tag-risk"><b>{taskText.riskSource}</b> {eff.risk_source || taskText.none}</span>
+                        <span className="tc-task-risk-tag tc-task-risk-tag-failure"><b>{taskText.failureMode}</b> {eff.failure_mode || taskText.none}</span>
+                        <span className="tc-task-risk-tag tc-task-risk-tag-harm"><b>{taskText.realWorldHarm}</b> {eff.real_world_harm || taskText.none}</span>
                       </div>
                     );
                   })()}
@@ -1001,7 +1015,7 @@ function TasksTab({
                       resolvePending(item, 'approved');
                     }}
                   >
-                    {guardResolvingId === item.id ? '…' : 'Approve'}
+                    {guardResolvingId === item.id ? '…' : taskText.approve}
                   </button>
                   <button
                     type="button"
@@ -1012,7 +1026,7 @@ function TasksTab({
                       resolvePending(item, 'rejected');
                     }}
                   >
-                    Reject
+                    {taskText.reject}
                   </button>
                 </div>
               </div>
@@ -1025,30 +1039,24 @@ function TasksTab({
         <section className="tc-ornate-panel tc-task-board">
           <div className="tc-task-board-head">
             <div>
-              <div className="tc-task-lane-overline">EVENT STATUS</div>
-              <div className="tc-task-lane-title">Task Flow</div>
+              <div className="tc-task-lane-overline">{taskText.boardOverline}</div>
+              <div className="tc-task-lane-title">{taskText.boardTitle}</div>
             </div>
             <div className="tc-task-board-summary">
-              <span>{taskBoardSummary.running} running</span>
-              <span>{taskBoardSummary.pending} pending</span>
-              <span>{taskBoardSummary.completed} completed</span>
-              <span>{taskBoardSummary.failed} failed</span>
-              <span>{taskBoardSummary.error} error</span>
+              <span>{taskBoardSummary.running} {taskText.summaryRunning}</span>
+              <span>{taskBoardSummary.pending} {taskText.summaryPending}</span>
+              <span>{taskBoardSummary.completed} {taskText.summaryCompleted}</span>
+              <span>{taskBoardSummary.failed} {taskText.summaryFailed}</span>
+              <span>{taskBoardSummary.error} {taskText.summaryError}</span>
             </div>
           </div>
-          <div className="tc-task-board-note">
-            From <code className="tc-task-board-note-code">GET /api/events</code> — each row is an{' '}
-            <strong>Event</strong>; sorted by{' '}
-            <code className="tc-task-board-note-code">started_at</code>. Summary uses{' '}
-            <code className="tc-task-board-note-code">Event.status</code> across all agents (not{' '}
-            <code className="tc-task-board-note-code">/api/trace</code>).
-          </div>
+          <div className="tc-task-board-note">{taskText.boardNote}</div>
           <div className="tc-task-board-grid">
             {sortedDashboardEvents.length === 0 ? (
-              <div className="tc-empty tc-task-board-empty">No Event rows in this window.</div>
+              <div className="tc-empty tc-task-board-empty">{taskText.noEvents}</div>
             ) : sortedDashboardEvents.map((task, index) => {
               const liveAgent = agentsById[task.session_id];
-              const promptSnippet = dashboardTaskListSnippet(task);
+              const promptSnippet = dashboardTaskListSnippet(task, taskText.userMessageShort);
               const charName = liveAgent
                 ? (charNameMap[liveAgent.id] || CHAR_NAMES[index % CHAR_NAMES.length])
                 : CHAR_NAMES[index % CHAR_NAMES.length];
@@ -1067,16 +1075,16 @@ function TasksTab({
                       <div className="tc-task-head">
                         <span className={`tc-task-badge ${statusMeta.className}`}>{statusMeta.label}</span>
                       </div>
-                      <div className="tc-task-title">Task {formatTaskId(task.id)}</div>
+                      <div className="tc-task-title">{taskText.taskLabel} {formatTaskId(task.id)}</div>
                       <div className="tc-task-card-meta">
-                        <div>START</div>
-                        <span>{fmtTime(task.started_at)}</span>
-                        <div>END</div>
-                        <span>{task.completed_at ? fmtTime(task.completed_at) : '---'}</span>
+                        <div>{taskText.start}</div>
+                        <span>{fmtTime(task.started_at, locale)}</span>
+                        <div>{taskText.end}</div>
+                        <span>{task.completed_at ? fmtTime(task.completed_at, locale) : '---'}</span>
                       </div>
                     </div>
                     <div className="tc-task-card-side">
-                      <div className="tc-task-exact-time">{fmtExactDate(task.started_at)}</div>
+                      <div className="tc-task-exact-time">{fmtExactDate(task.started_at, locale)}</div>
                       <TaskActorStrip
                         charName={charName}
                         agentId={liveAgent?.id || task.session_id}
@@ -1100,12 +1108,12 @@ function TasksTab({
             <div className="tc-task-modal-head">
               <div>
                 <div className="tc-task-lane-overline">
-                  {selectedTask.kind === 'pending' ? 'PENDING APPROVAL' : 'TASK DETAIL'}
+                  {selectedTask.kind === 'pending' ? taskText.pendingApprovalOverline : taskText.taskDetailOverline}
                 </div>
                 <div className="tc-task-lane-title">
                   {selectedTask.kind === 'pending'
-                    ? `Task ${formatTaskId(selectedTask.item.id)}`
-                    : `Task ${formatTaskId(selectedTask.task.id)}`}
+                    ? `${taskText.taskLabel} ${formatTaskId(selectedTask.item.id)}`
+                    : `${taskText.taskLabel} ${formatTaskId(selectedTask.task.id)}`}
                 </div>
               </div>
               <button
@@ -1117,44 +1125,44 @@ function TasksTab({
                   closeTaskDetail();
                 }}
               >
-                CLOSE
+                {taskText.close}
               </button>
             </div>
 
             {selectedTask.kind === 'pending' ? (
               <>
                 <div className="tc-task-detail-summary tc-task-detail-summary-flat">
-                  <TaskDetailFact label="Task ID" value={formatTaskId(detailTask?.id || selectedTask.item.id, 18)} mono featured />
-                  <TaskDetailFact label="Agent" value={selectedTask.agentName} featured />
-                  <TaskDetailFact label="Session" value={detailTask?.session_id || selectedTask.item.session_key || '---'} mono tone="info" />
-                  <TaskDetailFact label="User Message" value={detailTask?.user_message_id || '---'} mono />
+                  <TaskDetailFact label={taskText.taskId} value={formatTaskId(detailTask?.id || selectedTask.item.id, 18)} mono featured />
+                  <TaskDetailFact label={taskText.agent} value={selectedTask.agentName} featured />
+                  <TaskDetailFact label={taskText.session} value={detailTask?.session_id || selectedTask.item.session_key || '---'} mono tone="info" />
+                  <TaskDetailFact label={taskText.userMessage} value={detailTask?.user_message_id || '---'} mono />
                   <TaskDetailFact
-                    label="Status"
-                    value="PENDING REVIEW"
+                    label={taskText.status}
+                    value={taskText.pendingReview}
                     featured
                     tone="warn"
                   />
-                  <TaskDetailFact label="Started At" value={fmtDate(detailTask?.started_at || (selectedTask.item.created_at || 0) * 1000)} />
-                  <TaskDetailFact label="Completed At" value="---" />
-                  <TaskDetailFact label="Duration" value={durationStr(detailTask?.started_at || (selectedTask.item.created_at || 0) * 1000, null)} />
-                  <TaskDetailFact label="Total Messages" value={String(detailTask?.total_messages ?? '---')} />
-                  <TaskDetailFact label="Assistant Msgs" value={String(detailTask?.total_assistant_messages ?? '---')} />
-                  <TaskDetailFact label="Tool Result Msgs" value={String(detailTask?.total_tool_result_messages ?? '---')} />
-                  <TaskDetailFact label="Tool Calls" value={String(detailTask?.total_tool_calls ?? '---')} tone="tool" />
-                  <TaskDetailFact label="Input Tokens" value={fmtTokens(detailTask?.total_input_tokens)} />
-                  <TaskDetailFact label="Output Tokens" value={fmtTokens(detailTask?.total_output_tokens)} />
-                  <TaskDetailFact label="Total Tokens" value={fmtTokens(detailTask?.total_tokens)} featured tone="info" />
+                  <TaskDetailFact label={taskText.startedAt} value={fmtDate(detailTask?.started_at || (selectedTask.item.created_at || 0) * 1000, locale)} />
+                  <TaskDetailFact label={taskText.completedAt} value="---" />
+                  <TaskDetailFact label={taskText.duration} value={durationStr(detailTask?.started_at || (selectedTask.item.created_at || 0) * 1000, null, locale)} />
+                  <TaskDetailFact label={taskText.totalMessages} value={String(detailTask?.total_messages ?? '---')} />
+                  <TaskDetailFact label={taskText.assistantMessages} value={String(detailTask?.total_assistant_messages ?? '---')} />
+                  <TaskDetailFact label={taskText.toolResultMessages} value={String(detailTask?.total_tool_result_messages ?? '---')} />
+                  <TaskDetailFact label={taskText.toolCalls} value={String(detailTask?.total_tool_calls ?? '---')} tone="tool" />
+                  <TaskDetailFact label={taskText.inputTokens} value={fmtTokens(detailTask?.total_input_tokens)} />
+                  <TaskDetailFact label={taskText.outputTokens} value={fmtTokens(detailTask?.total_output_tokens)} />
+                  <TaskDetailFact label={taskText.totalTokens} value={fmtTokens(detailTask?.total_tokens)} featured tone="info" />
                 </div>
 
                 {(() => {
                   const eff = getEffectiveRisk(selectedTask.item) || {};
                   return (
                     <div className="tc-task-detail-alert tc-task-detail-risk-box">
-                      <div className="tc-task-detail-context-title">GUARD RISK DETAIL</div>
+                      <div className="tc-task-detail-context-title">{taskText.guardRiskDetail}</div>
                       <div className="tc-task-detail-risk-grid">
-                        <TaskDetailFact label="Risk Source" value={eff.risk_source || 'None'} tone="warn" />
-                        <TaskDetailFact label="Failure Mode" value={eff.failure_mode || 'None'} tone="danger" />
-                        <TaskDetailFact label="Real World Harm" value={eff.real_world_harm || 'None'} tone="danger" />
+                        <TaskDetailFact label={taskText.riskSource} value={eff.risk_source || taskText.none} tone="warn" />
+                        <TaskDetailFact label={taskText.failureMode} value={eff.failure_mode || taskText.none} tone="danger" />
+                        <TaskDetailFact label={taskText.realWorldHarm} value={eff.real_world_harm || taskText.none} tone="danger" />
                       </div>
                     </div>
                   );
@@ -1162,7 +1170,7 @@ function TasksTab({
 
                 <div className="tc-task-detail-stream">
                   {detailLoading ? (
-                    <div className="tc-empty">Loading task detail…</div>
+                    <div className="tc-empty">{taskText.loadingDetail}</div>
                   ) : detailMessages.length > 0 ? (
                     detailMessages.map((msg) => (
                       <TaskDetailMessage key={msg.message_id} msg={msg} />
@@ -1170,22 +1178,22 @@ function TasksTab({
                   ) : selectedTask.item.session_context ? (
                     <div className="tc-task-detail-tool tc-task-detail-tool-card tc-task-detail-tool--pending">
                       <div className="tc-task-detail-tool-head tc-task-detail-tool-head-main">
-                        <span className="tc-task-detail-tool-tag">TOOL</span>
-                        <span className="tc-task-detail-tool-name">{selectedTask.item.tool_name || 'tool-call'}</span>
+                        <span className="tc-task-detail-tool-tag">{taskText.toolTag}</span>
+                        <span className="tc-task-detail-tool-name">{selectedTask.item.tool_name || taskText.toolCallFallback}</span>
                       </div>
                       <div className="tc-task-detail-tool-body">
                         <div className="tc-task-detail-tool-block tc-task-detail-tool-block-call">
-                          <div className="tc-task-detail-tool-subhead">Tool call parameters</div>
+                          <div className="tc-task-detail-tool-subhead">{taskText.toolCallParameters}</div>
                           <pre className="tc-task-detail-tool-payload">{stringifyTaskValue(selectedTask.item.params || {})}</pre>
                         </div>
                         <div className="tc-task-detail-tool-block tc-task-detail-tool-block-result">
-                          <div className="tc-task-detail-tool-subhead">Session context</div>
+                          <div className="tc-task-detail-tool-subhead">{taskText.sessionContext}</div>
                           <pre className="tc-task-detail-tool-payload">{selectedTask.item.session_context}</pre>
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="tc-empty">{detailError || 'No detail messages available for this pending task.'}</div>
+                    <div className="tc-empty">{detailError || taskText.noPendingDetail}</div>
                   )}
                 </div>
 
@@ -1196,7 +1204,7 @@ function TasksTab({
                     disabled={guardResolvingId === selectedTask.item.id}
                     onClick={() => resolvePending(selectedTask.item, 'approved')}
                   >
-                    {guardResolvingId === selectedTask.item.id ? '…' : 'Approve'}
+                    {guardResolvingId === selectedTask.item.id ? '…' : taskText.approve}
                   </button>
                   <button
                     type="button"
@@ -1204,47 +1212,47 @@ function TasksTab({
                     disabled={guardResolvingId === selectedTask.item.id}
                     onClick={() => resolvePending(selectedTask.item, 'rejected')}
                   >
-                    Reject
+                    {taskText.reject}
                   </button>
                 </div>
               </>
             ) : (
               <>
                 <div className="tc-task-detail-summary tc-task-detail-summary-flat">
-                  <TaskDetailFact label="Task ID" value={formatTaskId(detailTask?.id || selectedTask.task.id, 18)} mono featured />
-                  <TaskDetailFact label="Agent" value={selectedTask.agentName} featured />
-                  <TaskDetailFact label="Session" value={detailTask?.session_id || selectedTask.task.session_id} mono tone="info" />
-                  <TaskDetailFact label="User Message" value={detailTask?.user_message_id || selectedTask.task.user_message_id || '---'} mono />
+                  <TaskDetailFact label={taskText.taskId} value={formatTaskId(detailTask?.id || selectedTask.task.id, 18)} mono featured />
+                  <TaskDetailFact label={taskText.agent} value={selectedTask.agentName} featured />
+                  <TaskDetailFact label={taskText.session} value={detailTask?.session_id || selectedTask.task.session_id} mono tone="info" />
+                  <TaskDetailFact label={taskText.userMessage} value={detailTask?.user_message_id || selectedTask.task.user_message_id || '---'} mono />
                   <TaskDetailFact
-                    label="Status"
+                    label={taskText.status}
                     value={(taskStatusMeta[detailStatusId] || taskStatusMeta.running).label}
                     featured
                     tone={taskDetailToneFromStatus(detailStatusId)}
                   />
-                  <TaskDetailFact label="Started At" value={fmtDate(detailTask?.started_at || selectedTask.task.started_at)} />
-                  <TaskDetailFact label="Completed At" value={(detailTask?.completed_at || selectedTask.task.completed_at) ? fmtDate(detailTask?.completed_at || selectedTask.task.completed_at) : '---'} />
-                  <TaskDetailFact label="Duration" value={durationStr(detailTask?.started_at || selectedTask.task.started_at, detailTask?.completed_at || selectedTask.task.completed_at)} />
-                  <TaskDetailFact label="Total Messages" value={String(detailTask?.total_messages ?? selectedTask.task.total_messages ?? 0)} />
-                  <TaskDetailFact label="Assistant Msgs" value={String(detailTask?.total_assistant_messages ?? '---')} />
-                  <TaskDetailFact label="Tool Result Msgs" value={String(detailTask?.total_tool_result_messages ?? '---')} />
-                  <TaskDetailFact label="Tool Calls" value={String(detailTask?.total_tool_calls ?? selectedTask.task.total_tool_calls ?? 0)} tone="tool" />
-                  <TaskDetailFact label="Input Tokens" value={fmtTokens(detailTask?.total_input_tokens)} />
-                  <TaskDetailFact label="Output Tokens" value={fmtTokens(detailTask?.total_output_tokens)} />
-                  <TaskDetailFact label="Total Tokens" value={fmtTokens(detailTask?.total_tokens ?? selectedTask.task.total_tokens)} featured tone="info" />
+                  <TaskDetailFact label={taskText.startedAt} value={fmtDate(detailTask?.started_at || selectedTask.task.started_at, locale)} />
+                  <TaskDetailFact label={taskText.completedAt} value={(detailTask?.completed_at || selectedTask.task.completed_at) ? fmtDate(detailTask?.completed_at || selectedTask.task.completed_at, locale) : '---'} />
+                  <TaskDetailFact label={taskText.duration} value={durationStr(detailTask?.started_at || selectedTask.task.started_at, detailTask?.completed_at || selectedTask.task.completed_at, locale)} />
+                  <TaskDetailFact label={taskText.totalMessages} value={String(detailTask?.total_messages ?? selectedTask.task.total_messages ?? 0)} />
+                  <TaskDetailFact label={taskText.assistantMessages} value={String(detailTask?.total_assistant_messages ?? '---')} />
+                  <TaskDetailFact label={taskText.toolResultMessages} value={String(detailTask?.total_tool_result_messages ?? '---')} />
+                  <TaskDetailFact label={taskText.toolCalls} value={String(detailTask?.total_tool_calls ?? selectedTask.task.total_tool_calls ?? 0)} tone="tool" />
+                  <TaskDetailFact label={taskText.inputTokens} value={fmtTokens(detailTask?.total_input_tokens)} />
+                  <TaskDetailFact label={taskText.outputTokens} value={fmtTokens(detailTask?.total_output_tokens)} />
+                  <TaskDetailFact label={taskText.totalTokens} value={fmtTokens(detailTask?.total_tokens ?? selectedTask.task.total_tokens)} featured tone="info" />
                 </div>
 
                 {detailTask?.error_message || selectedTask.task.error_message ? (
                   <div className="tc-task-detail-alert">
-                    <div className="tc-task-detail-context-title">ERROR</div>
+                    <div className="tc-task-detail-context-title">{taskText.errorTitle}</div>
                     <div className="tc-task-detail-alert-copy">{detailTask?.error_message || selectedTask.task.error_message}</div>
                   </div>
                 ) : null}
 
                 <div className="tc-task-detail-stream">
                   {detailLoading ? (
-                    <div className="tc-empty">Loading task detail…</div>
+                    <div className="tc-empty">{taskText.loadingDetail}</div>
                   ) : detailMessages.length === 0 ? (
-                    <div className="tc-empty">{detailError || 'No task detail messages found.'}</div>
+                    <div className="tc-empty">{detailError || taskText.noTaskDetail}</div>
                   ) : (
                     detailMessages.map((msg) => (
                       <TaskDetailMessage key={msg.message_id} msg={msg} />
