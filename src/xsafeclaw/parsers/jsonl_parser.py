@@ -102,12 +102,30 @@ class JSONLEntry(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "JSONLEntry":
-        """Create JSONLEntry from dict."""
-        entry_type = data.get("type", "unknown")
+        """Create JSONLEntry from dict.
+
+        Handles two JSONL layouts:
+        - **OpenClaw**: ``{"type":"message", "id":"...", "timestamp":"...", "message":{...}}``
+        - **Hermes**:   ``{"role":"user", "content":"...", "timestamp":"..."}`` (flat)
+        """
+        entry_type = data.get("type", "")
+        if not entry_type and "role" in data:
+            role = data["role"]
+            if role == "tool":
+                entry_type = "toolResult"
+            else:
+                entry_type = "message"
+
+        if not entry_type:
+            entry_type = "unknown"
+
         timestamp_str = data.get("timestamp")
-        
-        # Parse timestamp
-        timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00")) if timestamp_str else datetime.utcnow()
+        if isinstance(timestamp_str, str):
+            timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        elif isinstance(timestamp_str, (int, float)):
+            timestamp = datetime.fromtimestamp(timestamp_str)
+        else:
+            timestamp = datetime.utcnow()
         
         return cls(
             raw_data=data,
@@ -119,7 +137,7 @@ class JSONLEntry(BaseModel):
 
 
 class JSONLParser:
-    """Parser for OpenClaw JSONL session files."""
+    """Parser for OpenClaw / Hermes JSONL session files."""
 
     def __init__(self, file_path: Path | str):
         """Initialize parser with file path."""

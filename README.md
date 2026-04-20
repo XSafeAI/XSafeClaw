@@ -20,7 +20,7 @@
 > **XSafeClaw** is built for that reality. It is an open-source defense platform that treats agent security as a live control problem, not a postmortem exercise. In the agent era, capability without defense is not progress. It is unmanaged exposure.
 
 🚀 <a href="#-quick-start">Get Started</a> &nbsp;·&nbsp;
-📖 <a href="docs/installation.pdf">Documentation</a> &nbsp;·&nbsp;
+📖 <a href="docs/installation.md">Documentation</a> &nbsp;·&nbsp;
 🌐 <a href="https://xsafeclaw.ai">Project Website</a> &nbsp;·&nbsp;
 ▶️ <a href="https://youtu.be/HIqwFVeuiKs">YouTube Demo</a>
 
@@ -82,7 +82,7 @@ xsafeclaw start --host 0.0.0.0           # accessible from LAN
 xsafeclaw start --no-browser --reload    # headless dev mode
 ```
 
-<!-- <p align="center"><img src="assets/comon_option.png" width="580" /></p> -->
+<p align="center"><img src="assets/comon_option.png" width="580" /></p>
 
 ---
 
@@ -158,7 +158,7 @@ Full API docs available at `http://localhost:6874/docs` when running.
 
 ## 📦 Installation
 
-For detailed installation procedures, see the **[installation guide](docs/installation.pdf)**.
+For detailed installation procedures, see the **[installation guide](docs/installation.md)**.
 
 > [!TIP]
 > Requires Python 3.11+. The frontend is pre-built and bundled — no Node.js needed for production.

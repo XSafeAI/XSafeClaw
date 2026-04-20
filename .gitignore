@@ -46,6 +46,7 @@ external/
 # Logs
 *.log
 logs/
+.logs/
 
 # OS
 .DS_Store
@@ -70,3 +71,10 @@ dmypy.json
 
 *.gz
 debug/
+
+# Local dev helpers
+start.sh
+
+# Optional downloaded map skins (fetched at runtime, not shipped in repo)
+src/xsafeclaw/static/Map-opensorce/Map[2-9].png
+frontend/public/Map-opensorce/Map[2-9].png

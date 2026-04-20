@@ -20,6 +20,7 @@ from ..runtime import (
     namespace_session_id,
     namespace_tool_call_id,
 )
+from ..runtime.hermes import parse_hermes_session_file
 from ..runtime.nanobot import parse_nanobot_session_file
 from ..runtime.openclaw import parse_openclaw_session_file
 from ..runtime.parsing import ParsedMessage, ParsedSessionBatch, ParsedSessionInfo, ParsedToolResult
@@ -112,8 +113,11 @@ class RuntimeSyncWorker:
 
         if self.instance.platform == "openclaw":
             source_session_id = file_path.stem
-        else:
+        elif self.instance.platform == "nanobot":
             batch = await parse_nanobot_session_file(file_path, start_line=0)
+            source_session_id = batch.session.source_session_id
+        else:
+            batch = await parse_hermes_session_file(file_path, start_line=0)
             source_session_id = batch.session.source_session_id
         self._file_to_source_session[file_path_str] = source_session_id
         return source_session_id
@@ -232,6 +236,8 @@ class RuntimeSyncWorker:
     async def _parse_file(self, file_path: Path, start_line: int) -> ParsedSessionBatch:
         if self.instance.platform == "openclaw":
             return await parse_openclaw_session_file(file_path, start_line=start_line)
+        if self.instance.platform == "hermes":
+            return await parse_hermes_session_file(file_path, start_line=start_line)
         return await parse_nanobot_session_file(file_path, start_line=start_line)
 
     async def _sync_file(self, file_path: Path, *, full_sync: bool = False) -> None:

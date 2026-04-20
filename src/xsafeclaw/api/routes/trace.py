@@ -21,6 +21,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
+from ...config import settings
 from ...database import get_db
 from ...models import Message, Session, ToolCall
 from ...models.event import Event
@@ -30,7 +31,11 @@ router = APIRouter()
 
 RUNNING_CUTOFF = dt.timedelta(hours=1)
 IDLE_CUTOFF = dt.timedelta(hours=24)
-_SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
+
+if settings.is_hermes:
+    _SESSIONS_JSON = settings.hermes_sessions_dir / "sessions.json"
+else:
+    _SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
 
 
 # ---------------------------------------------------------------------------

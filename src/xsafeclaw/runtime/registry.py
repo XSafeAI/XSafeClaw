@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..config import settings
+from .hermes import check_hermes_health, discover_hermes_instance, hermes_capabilities
 from .models import RuntimeInstance
 from .nanobot import check_nanobot_health, discover_nanobot_instances, nanobot_capabilities
 from .openclaw import discover_openclaw_instance, openclaw_capabilities
@@ -31,6 +33,18 @@ class RuntimeRegistry:
                         **openclaw,
                         "discovery_mode": "auto",
                         "capabilities": openclaw_capabilities(),
+                    }
+                )
+            )
+
+        hermes = discover_hermes_instance()
+        if hermes:
+            instances.append(
+                RuntimeInstance.model_validate(
+                    {
+                        **hermes,
+                        "discovery_mode": "auto",
+                        "capabilities": hermes_capabilities(),
                     }
                 )
             )
@@ -79,6 +93,9 @@ class RuntimeRegistry:
                     attach_state = "readonly"
             elif instance.platform == "openclaw":
                 attach_state = "guard_blocking_ready"
+            elif instance.platform == "hermes":
+                health_status, healthy = await check_hermes_health()
+                attach_state = "chat_ready" if healthy else "readonly"
             refreshed.append(
                 instance.model_copy(
                     update={
@@ -101,9 +118,10 @@ class RuntimeRegistry:
         enabled = [instance for instance in instances if instance.enabled]
         if not enabled:
             return
+        preferred_platform = settings.resolved_platform if settings.resolved_platform in {"openclaw", "hermes"} else "openclaw"
         preferred = next(
-            (instance for instance in enabled if instance.platform == "openclaw"),
-            enabled[0],
+            (instance for instance in enabled if instance.platform == preferred_platform),
+            next((instance for instance in enabled if instance.platform == "openclaw"), enabled[0]),
         )
         for index, instance in enumerate(instances):
             instances[index] = instance.model_copy(

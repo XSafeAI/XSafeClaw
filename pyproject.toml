@@ -1,7 +1,7 @@
 [project]
 name = "xsafeclaw"
-version = "1.0.0"
-description = "XSafeClaw - Real-time monitoring and security for local OpenClaw and nanobot AI agents."
+version = "1.0.2"
+description = "XSafeClaw - Keeping Your Claw Safe. Real-time monitoring and security for OpenClaw, Hermes, and nanobot AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
 keywords = [

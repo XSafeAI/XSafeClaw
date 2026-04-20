@@ -14,8 +14,7 @@ export default function World() {
         if (cancelled) return;
         const d = res.data as any;
 
-        const anyInstalled = d.openclaw_installed || d.nanobot_installed;
-        if (!anyInstalled) {
+        if (!d.openclaw_installed && !d.nanobot_installed && !d.hermes_installed) {
           navigate('/setup', { replace: true });
           return;
         }

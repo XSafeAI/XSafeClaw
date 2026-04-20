@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-RuntimePlatform = Literal["openclaw", "nanobot"]
+RuntimePlatform = Literal["openclaw", "nanobot", "hermes"]
 
 CAPABILITY_KEYS = (
     "monitoring",

@@ -1295,6 +1295,17 @@ export default function TownConsole({
   const [catalogAuthProviders, setCatalogAuthProviders] = useState([]);
   const [catalogModelProviders, setCatalogModelProviders] = useState([]);
   const [onboardDefaults, setOnboardDefaults] = useState(null);
+  // Per-provider endpoint presets (§33). Today only ``alibaba`` populates
+  // a bundle here so the modal can show the DashScope-vs-Coding-Plan picker
+  // that keeps standard DashScope keys from 401-ing under Hermes's
+  // hardcoded coding-intl default. Empty object on OpenClaw / older
+  // backends and the modal treats that as "no picker needed".
+  const [providerEndpoints, setProviderEndpoints] = useState({});
+  // Reported by the Hermes branch of /system/onboard-scan (§36).  Empty
+  // string until the first scan resolves.  Used to gate Hermes-only UI
+  // affordances (e.g. the per-model delete × in the model deck) so they
+  // never render under OpenClaw.
+  const [platform, setPlatform] = useState('');
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -1494,7 +1505,7 @@ export default function TownConsole({
         gateway_auth_mode: 'token',
         gateway_token: '',
         tailscale_mode: 'off',
-        workspace: '~/.openclaw/workspace',
+        workspace: '',
         install_daemon: true,
         remote_url: '',
         remote_token: '',
@@ -1516,10 +1527,29 @@ export default function TownConsole({
       setCatalogAuthProviders(Array.isArray(data.auth_providers) ? data.auth_providers : []);
       setCatalogModelProviders(Array.isArray(data.model_providers) ? data.model_providers : []);
       setOnboardDefaults(data.defaults || {});
+      // ``provider_endpoints`` is a Hermes-only field; OpenClaw scan payloads
+      // won't carry it and we just hold an empty map so the modal's picker
+      // branch stays dormant.
+      setProviderEndpoints(
+        data.provider_endpoints && typeof data.provider_endpoints === 'object'
+          ? data.provider_endpoints
+          : {},
+      );
+      // ``platform`` is also Hermes-only on the wire; OpenClaw scans omit
+      // it so we leave the state empty and the Hermes-only delete button
+      // stays hidden (§36).
+      setPlatform(typeof data.platform === 'string' ? data.platform : '');
       setModelCatalogLoaded(true);
     } catch (err) {
       console.warn('[TownConsole] onboard-scan fetch error:', err);
       setModelCatalogError(err?.response?.data?.detail || err?.message || 'Failed to discover configure-time models.');
+      try {
+        const st = await systemAPI.status();
+        const dw = st.data?.default_workspace;
+        if (dw) {
+          setOnboardDefaults((prev) => ({ ...prev, workspace: prev.workspace || dw }));
+        }
+      } catch { /* ignore */ }
     } finally {
       setModelCatalogLoading(false);
     }
@@ -1629,6 +1659,33 @@ export default function TownConsole({
     if (!modelSetupOpen) return;
     loadModelCatalog();
   }, [loadModelCatalog, modelSetupOpen]);
+
+  // Cross-surface model-config sync. The Configure page (/configure) and
+  // the Hermes-specific flows in there write a new default model to
+  // ~/.hermes/config.yaml and restart the Hermes gateway. They also
+  // broadcast two signals after a successful save:
+  //   1. ``window`` custom event ``xs-hermes-model-updated``  — same tab
+  //   2. ``localStorage.setItem('xs_hermes_cfg_ping', ...)``   — cross tab
+  //      (``storage`` event fires in *other* tabs on write)
+  // We listen to both here so the model dropdown / default-badge / agent
+  // creation form reflect the new model without a hard refresh. Also
+  // reload the catalog so the "Add new model" picker shows it as
+  // configured.
+  useEffect(() => {
+    const refresh = () => {
+      loadAvailableModels();
+      loadModelCatalog(true);
+    };
+    const onStorage = (event) => {
+      if (event.key === 'xs_hermes_cfg_ping') refresh();
+    };
+    window.addEventListener('xs-hermes-model-updated', refresh);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('xs-hermes-model-updated', refresh);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [loadAvailableModels, loadModelCatalog]);
 
   const { agents: traceAgents, events } = traceData;
 
@@ -2224,6 +2281,49 @@ export default function TownConsole({
     setCreateError('');
   }, []);
 
+  // §36 — drop one entry from the XSafeClaw configured-model ledger.
+  // Hermes-only: gated by ``platform === 'hermes'`` at the call site so
+  // OpenClaw never even renders the trigger.  Refuses (server-side, HTTP
+  // 409) when the target is the active model in ~/.hermes/config.yaml; we
+  // surface that as a ``createError`` rather than a silent no-op so the
+  // user understands they need to switch active first.  The local lists
+  // are mutated optimistically AFTER the server confirms the delete, so
+  // a network failure leaves the picker untouched.
+  const handleDeleteConfiguredModel = useCallback(async (modelId, modelName) => {
+    if (!modelId) return;
+    if (platform !== 'hermes') return;
+    const label = modelName || modelId;
+    if (typeof window !== 'undefined') {
+      const ok = window.confirm(
+        `Remove "${label}" from your configured models?\n\n`
+        + 'The provider API key stays in ~/.hermes/.env, so any agent already '
+        + 'created with this model keeps working. Only the picker is affected.',
+      );
+      if (!ok) return;
+    }
+    try {
+      await systemAPI.removeConfiguredModel(modelId);
+      setAvailableModels((prev) => prev.filter((m) => m.id !== modelId));
+      setPendingModelId((prev) => (prev === modelId ? '' : prev));
+      // ``lastUsedConfiguredModelId`` is derived (useMemo over agents'
+      // pinned model_ids), so it'll self-update on the next render now
+      // that ``availableModels`` no longer carries the deleted entry.
+      if (recentlyConfiguredModelId === modelId) setRecentlyConfiguredModelId('');
+      setCreateError('');
+      // Re-pull from the server so the next auto-pick sees the same source
+      // of truth the picker now reflects (and so any cache layers between
+      // us and ``/api/chat/available-models`` stay coherent).
+      loadAvailableModels();
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.message || 'Failed to remove model.';
+      setCreateError(String(detail));
+    }
+  }, [
+    platform,
+    loadAvailableModels,
+    recentlyConfiguredModelId,
+  ]);
+
   const handleModelConfigured = useCallback(async ({ modelId, modelName, provider, reasoning, modelReady }) => {
     const normalizedModel = {
       id: modelId,
@@ -2651,6 +2751,13 @@ export default function TownConsole({
                   filteredModels={filteredModels}
                   pendingModelId={pendingModelId}
                   onPickModel={handlePickModel}
+                  // §36 — Hermes-only delete affordance.  CrewTab uses
+                  // ``isHermes`` to decide whether to render the × button
+                  // at all; ``onDeleteModel`` is wired to the same ledger
+                  // endpoint that POST /system/quick-model-config writes,
+                  // and refuses (HTTP 409) on the active model.
+                  isHermes={platform === 'hermes'}
+                  onDeleteModel={handleDeleteConfiguredModel}
                   onOpenModelSetup={handleOpenModelSetup}
                   onCreateAgent={handleCreateAgent}
                   createAgentDisabled={createAgentDisabled}
@@ -2721,6 +2828,7 @@ export default function TownConsole({
         open={modelSetupOpen}
         authProviders={catalogAuthProviders}
         modelProviders={catalogModelProviders}
+        providerEndpoints={providerEndpoints}
         defaults={onboardDefaults}
         loading={modelCatalogLoading && !modelCatalogLoaded}
         loadingError={modelCatalogLoaded ? '' : modelCatalogError}

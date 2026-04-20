@@ -25,7 +25,12 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:6874',
+        // start.sh exports BACKEND_PORT before launching Vite so the proxy
+        // follows whatever port the FastAPI process is actually bound to
+        // (since §27 that's 3022 by default). Falling back to 6874 keeps
+        // "vite dev" standalone against "python run.py" working exactly
+        // as it did before the port swap.
+        target: `http://localhost:${process.env.BACKEND_PORT || 6874}`,
         changeOrigin: true,
         timeout: 180000,
       },

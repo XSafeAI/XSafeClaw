@@ -9,8 +9,10 @@ import {
   Shield, Zap, Settings2, Key, Server, Plug, Wrench, CheckCircle,
   ChevronRight, ChevronLeft, Eye, EyeOff, Loader2, XCircle,
   RefreshCw, Trash2, Globe, FolderOpen, Search, Rocket,
+  Sparkles, Copy, AlertTriangle,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
+import type { SystemStatusResponse } from '../services/api';
 import { useI18n } from '../i18n';
 import type { Translations } from '../i18n/locales/en';
 
@@ -18,11 +20,12 @@ import type { Translations } from '../i18n/locales/en';
 interface AuthMethod { id: string; label: string; hint?: string; modelProviders?: string[]; }
 interface AuthProviderInfo { id: string; name: string; hint: string; supported?: boolean; methods?: AuthMethod[]; }
 interface ModelInfo { id: string; name: string; contextWindow: number; reasoning: boolean; available: boolean; input: string; }
-interface ModelProviderInfo { id: string; name: string; models: ModelInfo[]; keyUrl?: string; }
+interface ModelProviderInfo { id: string; name: string; models: ModelInfo[]; keyUrl?: string; available?: boolean; requiresCredentials?: boolean; }
 interface ChannelInfo { id: string; name: string; configured: boolean; }
 interface SkillInfo { name: string; description: string; emoji: string; eligible: boolean; disabled: boolean; missing: { bins?: string[]; anyBins?: string[]; env?: string[]; os?: string[]; config?: string[] }; source: string; bundled: boolean; }
 interface HookInfo { name: string; description: string; emoji: string; enabled: boolean; }
 interface SearchProviderInfo { id: string; name: string; hint: string; placeholder: string; }
+type HermesStatusSnapshot = Record<string, unknown> & Partial<SystemStatusResponse>;
 
 interface FormData {
   mode: string;
@@ -72,7 +75,7 @@ interface FormData {
 const INITIAL: FormData = {
   mode: 'local', authProvider: '', authMethod: '', apiKey: '', modelFilter: '', modelId: '',
   gatewayPort: 18789, gatewayBind: 'loopback', gatewayAuthMode: 'token', gatewayToken: '',
-  channels: [], hooks: [], workspace: '~/.openclaw/workspace',
+  channels: [], hooks: [], workspace: '',
   installDaemon: true, tailscaleMode: 'off',
   searchProvider: '', searchApiKey: '', remoteUrl: '', remoteToken: '',
   selectedSkills: [], wizardMode: 'quickstart', configAction: 'update', resetScope: '',
@@ -982,10 +985,1248 @@ function ReviewStep({ form, authProviders, submitting }: { form: FormData; authP
   );
 }
 
+const SETUP_PLATFORM_KEY = 'xsafeclaw_setup_platform';
+
+/** Hermes: guided wizard (security → mode → status → API key → model → bot → done). OpenClaw onboard is not used. */
+function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSnapshot }) {
+  const { t } = useI18n();
+  const h = t.configure.hermes;
+  // 7 steps:
+  //   0 security, 1 mode (quickstart/manual), 2 status+apply,
+  //   3 api key (required in manual, auto-provisioned & skipped in quickstart),
+  //   4 model (optional), 5 external bot (optional), 6 done.
+  const TOTAL_STEPS = 7;
+  // Step indices — name them so the re-index of future changes stays sane.
+  const STEP_SECURITY = 0;
+  const STEP_MODE = 1;
+  const STEP_STATUS = 2;
+  const STEP_APIKEY = 3;
+  const STEP_MODEL = 4;
+  const STEP_BOT = 5;
+  const STEP_DONE = 6;
+  const [step, setStep] = useState(0);
+  const [st, setSt] = useState<HermesStatusSnapshot>(initialStatus);
+  const [riskAccepted, setRiskAccepted] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Wizard mode mirrors OpenClaw's Configure step 1. Quickstart path has
+  // the API-key step auto-provisioned & visually skipped; Manual keeps the
+  // original "paste/generate/reveal your own key" experience from §17.
+  const [wizardMode, setWizardMode] = useState<'quickstart' | 'manual'>('quickstart');
+  // Surfaced on the Done page when Quickstart auto-generated a new key so
+  // the user can copy it instead of having to open a terminal later.
+  const [autoProvisionedKey, setAutoProvisionedKey] = useState('');
+  const [autoProvisioning, setAutoProvisioning] = useState(false);
+  const [autoProvisionError, setAutoProvisionError] = useState('');
+
+  const [hermesApiKey, setHermesApiKey] = useState('');
+  const [showHermesKey, setShowHermesKey] = useState(false);
+  const [savingKey, setSavingKey] = useState(false);
+  const [keySaveResult, setKeySaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const [keySaveError, setKeySaveError] = useState('');
+  const [generatingKey, setGeneratingKey] = useState(false);
+  const [revealingKey, setRevealingKey] = useState(false);
+  const [generatedKey, setGeneratedKey] = useState('');
+  const [revealedKey, setRevealedKey] = useState('');
+  const [copyNotice, setCopyNotice] = useState('');
+  const keyAlreadyConfigured = st.hermes_api_key_configured === true;
+
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<'idle' | 'ok' | 'fail' | 'not_running'>('idle');
+  const [applyLog, setApplyLog] = useState('');
+  const [applyLogOpen, setApplyLogOpen] = useState(false);
+
+  // "Enable API Server" recovery flow — shown when the backend reports
+  // hermes_api_server_enabled === false. Hermes ships with the flag off by
+  // default so a brand-new install looks fine to `hermes status` but cannot
+  // be reached on :8642. One-click fix writes API_SERVER_ENABLED=true and
+  // restarts the gateway. See backend POST /system/hermes-enable-api-server.
+  const [enablingApi, setEnablingApi] = useState(false);
+  const [enableApiResult, setEnableApiResult] = useState<'idle' | 'ok' | 'fail' | 'partial'>('idle');
+  const [enableApiMsg, setEnableApiMsg] = useState('');
+
+  // ── Model step state ──────────────────────────────────────────────────
+  // Populated lazily from /system/onboard-scan when the user first enters
+  // step 3.  Skipping the step is always allowed — the entire step is
+  // optional and Hermes comes with a pre-written config.yaml.
+  const [modelProviders, setModelProviders] = useState<ModelProviderInfo[]>([]);
+  const [modelDefaultId, setModelDefaultId] = useState('');
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelProviderId, setModelProviderId] = useState('');
+  const [modelId, setModelId] = useState('');
+  const [modelApiKey, setModelApiKey] = useState('');
+  const [modelShowKey, setModelShowKey] = useState(false);
+  const [savingModel, setSavingModel] = useState(false);
+  const [modelSaveResult, setModelSaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const [modelSaveError, setModelSaveError] = useState('');
+  const [modelSaveNote, setModelSaveNote] = useState('');
+
+  // Per-provider endpoint presets shipped by the backend (§33).  Shape is
+  // keyed by provider id; only ``alibaba`` populates anything today because
+  // Hermes's adapter there hardcodes the Alibaba Coding Plan endpoint, which
+  // 401s standard DashScope keys.  ``current`` is whatever's already in
+  // ~/.hermes/.env so re-saving without touching the dropdown doesn't
+  // silently clobber a value the user hand-edited.
+  type ProviderEndpointPreset = { id: string; label: string; hint?: string; base_url: string };
+  type ProviderEndpointBundle = { env_key: string; current: string; presets: ProviderEndpointPreset[] };
+  const [providerEndpoints, setProviderEndpoints] = useState<Record<string, ProviderEndpointBundle>>({});
+  // User's current endpoint pick, keyed by provider id.  Separate from
+  // ``providerEndpoints`` (which is server-owned) so we can let the user
+  // mutate the dropdown without round-tripping through the scan cache.
+  const [providerEndpointSel, setProviderEndpointSel] = useState<Record<string, string>>({});
+
+  // ── Bot step state ────────────────────────────────────────────────────
+  // The Hermes backend owns the platform schema (list of fields per
+  // platform) so we can add new platforms without a frontend redeploy.
+  type HermesBotField = {
+    key: string;
+    label: string;
+    required: boolean;
+    secret: boolean;
+    placeholder?: string;
+    configured: boolean;
+  };
+  type HermesBotPlatform = {
+    id: string;
+    name: string;
+    hint: string;
+    docUrl: string;
+    configured: boolean;
+    fields: HermesBotField[];
+  };
+  const [botPlatforms, setBotPlatforms] = useState<HermesBotPlatform[]>([]);
+  const [botPlatformsLoading, setBotPlatformsLoading] = useState(false);
+  const [botPlatformId, setBotPlatformId] = useState('');
+  const [botFields, setBotFields] = useState<Record<string, string>>({});
+  const [botSecretReveal, setBotSecretReveal] = useState<Record<string, boolean>>({});
+  const [savingBot, setSavingBot] = useState(false);
+  const [botSaveResult, setBotSaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const [botSaveError, setBotSaveError] = useState('');
+  const [botSaveNote, setBotSaveNote] = useState('');
+
+  async function applyToHermes() {
+    setApplying(true);
+    setApplyResult('idle');
+    setApplyLog('');
+    try {
+      const res = await systemAPI.hermesApply();
+      if (!res.data.api_was_running && !res.data.restart_ok) {
+        setApplyResult('not_running');
+      } else if (res.data.success || res.data.restart_ok) {
+        setApplyResult('ok');
+        await refreshStatus();
+      } else {
+        setApplyResult('fail');
+      }
+      setApplyLog(res.data.output || '');
+    } catch (err: any) {
+      setApplyResult('fail');
+      setApplyLog(err?.response?.data?.detail || String(err));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  async function enableHermesApiServer() {
+    setEnablingApi(true);
+    setEnableApiResult('idle');
+    setEnableApiMsg('');
+    try {
+      const res = await systemAPI.hermesEnableApiServer();
+      const d = res.data;
+      if (d.api_reachable) {
+        setEnableApiResult('ok');
+      } else if (d.restart_succeeded) {
+        // Flag was flipped + restart worked, but /health hasn't bound yet.
+        // Usually it takes another 1–3 s; let the status refresh pick it up.
+        setEnableApiResult('partial');
+      } else {
+        setEnableApiResult('fail');
+      }
+      setEnableApiMsg(d.restart_detail || '');
+      await refreshStatus();
+    } catch (err: any) {
+      setEnableApiResult('fail');
+      setEnableApiMsg(err?.response?.data?.detail || String(err));
+    } finally {
+      setEnablingApi(false);
+    }
+  }
+
+  const hermesLabels = [
+    h.steps.security,
+    h.steps.mode,
+    h.steps.status,
+    h.steps.apiKey,
+    h.steps.model,
+    h.steps.bot,
+    h.steps.done,
+  ];
+  // Progress-bar greys out skipped steps; goNext/goBack fast-forwards over
+  // them. In Quickstart only the Model step requires user input — Status,
+  // API-Key (auto-provisioned behind the scenes) and Bot (optional extra)
+  // are all grey and fast-forwarded. Manual keeps every step active.
+  const hermesSkipped = new Set<number>();
+  if (wizardMode === 'quickstart') {
+    hermesSkipped.add(STEP_STATUS);
+    hermesSkipped.add(STEP_APIKEY);
+    hermesSkipped.add(STEP_BOT);
+  }
+
+  // Lazy-load providers for the model step and platform schema for the
+  // bot step the first time the user enters those steps — keeps the
+  // initial wizard render fast and avoids hitting the CLI scan when the
+  // user only cares about the API-key setup.
+  useEffect(() => {
+    if (step === STEP_MODEL && modelProviders.length === 0 && !modelLoading) {
+      setModelLoading(true);
+      systemAPI.onboardScan()
+        .then(res => {
+          const d = res.data as any;
+          const providers: ModelProviderInfo[] = d.model_providers || [];
+          setModelProviders(providers);
+          const def: string = d.default_model || '';
+          setModelDefaultId(def);
+
+          // Pull the per-provider endpoint bundles the backend ships (see
+          // §33).  We also seed ``providerEndpointSel`` so a provider with
+          // a value already in ~/.hermes/.env shows that as pre-selected
+          // instead of snapping to the first preset — otherwise a user
+          // who previously chose "China" and is just re-saving the key
+          // would silently flip back to "International".
+          const endpoints = (d.provider_endpoints || {}) as Record<string, ProviderEndpointBundle>;
+          setProviderEndpoints(endpoints);
+          const initialSel: Record<string, string> = {};
+          for (const [pid, bundle] of Object.entries(endpoints)) {
+            const current = (bundle.current || '').trim();
+            if (current) {
+              initialSel[pid] = current;
+            } else if (bundle.presets.length > 0) {
+              initialSel[pid] = bundle.presets[0].base_url;
+            }
+          }
+          setProviderEndpointSel(initialSel);
+
+          if (!modelProviderId && !modelId && def) {
+            // Prefill the form with the currently configured default so
+            // the user can see "this is what Hermes is using" at a glance.
+            const provId = def.includes('/') ? def.split('/')[0] : '';
+            const match = providers.find(p => p.id === provId);
+            if (match) {
+              setModelProviderId(match.id);
+              if (match.models.some(m => m.id === def)) setModelId(def);
+            }
+          }
+        })
+        .catch(() => { /* ignore — user can still skip */ })
+        .finally(() => setModelLoading(false));
+    }
+    if (step === STEP_BOT && botPlatforms.length === 0 && !botPlatformsLoading) {
+      setBotPlatformsLoading(true);
+      systemAPI.hermesBotPlatforms()
+        .then(res => setBotPlatforms(res.data.platforms || []))
+        .catch(() => { /* ignore — user can still skip */ })
+        .finally(() => setBotPlatformsLoading(false));
+    }
+    // Intentionally exclude fetched-list deps to avoid re-fetch loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  const selectedBotPlatform = botPlatforms.find(p => p.id === botPlatformId);
+  // ``modelProviders`` carries the full probe payload (including providers
+  // whose credentials aren't configured yet — those come back with
+  // ``available === false``). In the STEP_MODEL dropdown the user is picking
+  // a provider *to actually run with*, so unauth'd providers are pure noise
+  // — they can't be selected and just crowd the list. We filter them out
+  // here rather than disabling-and-labelling them (the old behaviour). Auth
+  // providers for the API-Key step live in a separate ``authProviders``
+  // list and are unaffected, so greying them out of the run-picker doesn't
+  // hide the provider from the setup flow.
+  const selectableModelProviders = modelProviders.filter(
+    p => p.available !== false && p.requiresCredentials !== true,
+  );
+  const selectedModelProvider = modelProviders.find(p => p.id === modelProviderId);
+
+  function onPickBotPlatform(pid: string) {
+    setBotPlatformId(pid);
+    setBotSaveResult('idle');
+    setBotSaveError('');
+    setBotSaveNote('');
+    const plat = botPlatforms.find(p => p.id === pid);
+    // Reset field values; secret fields always start blank so users paste
+    // a fresh value rather than editing whatever was previously stored.
+    const init: Record<string, string> = {};
+    for (const f of plat?.fields || []) init[f.key] = '';
+    setBotFields(init);
+    setBotSecretReveal({});
+  }
+
+  function onPickModelProvider(pid: string) {
+    setModelProviderId(pid);
+    setModelId('');
+    setModelApiKey('');
+    setModelSaveResult('idle');
+    setModelSaveError('');
+    setModelSaveNote('');
+  }
+
+  async function saveModelToHermes() {
+    if (!modelProviderId || !modelId) return;
+    setSavingModel(true);
+    setModelSaveResult('idle');
+    setModelSaveError('');
+    setModelSaveNote('');
+    try {
+      // Only forward base_url when the provider we're saving has a preset
+      // bundle (today that's just ``alibaba`` — §33).  Sending it for a
+      // provider with no preset would be a no-op on the backend but makes
+      // the request payload noisier to reason about in logs.
+      const endpointBundle = providerEndpoints[modelProviderId];
+      const endpointBaseUrl = endpointBundle
+        ? (providerEndpointSel[modelProviderId] || endpointBundle.current || endpointBundle.presets[0]?.base_url || '')
+        : '';
+
+      const res = await systemAPI.quickModelConfig({
+        provider: modelProviderId,
+        model_id: modelId,
+        api_key: modelApiKey.trim() || undefined,
+        base_url: endpointBaseUrl || undefined,
+      });
+      setModelSaveResult('ok');
+      setModelDefaultId(modelId);
+      // Surface the restart / model-ready state as a user-facing note so
+      // the wizard matches the CMD UI's "即配即用" feedback.
+      const bits: string[] = [];
+      if (res.data.applied) bits.push(h.modelApplyRestarted);
+      if (res.data.model_ready) bits.push(h.modelApplyReady);
+      if (!res.data.applied && res.data.api_reachable === false) {
+        bits.push(h.modelApplyNotRunning);
+      }
+      setModelSaveNote(bits.join(' · '));
+      // Notify any CMD-UI instance that's already mounted (same-tab custom
+      // event) or living in another browser tab (localStorage ``storage``
+      // event) that the default model changed. TownConsole listens for
+      // both signals and re-pulls /api/chat/available-models so the
+      // dropdown, "default" badge and agent-creation form see the new
+      // model without the user having to refresh manually.
+      try {
+        const detail = { model_id: modelId, provider: modelProviderId, ts: Date.now() };
+        window.dispatchEvent(new CustomEvent('xs-hermes-model-updated', { detail }));
+        // localStorage writes trigger the 'storage' event in *other* tabs
+        // only, which is exactly what we want for cross-tab syncing.
+        localStorage.setItem('xs_hermes_cfg_ping', String(detail.ts));
+      } catch { /* non-fatal — the notification is best-effort */ }
+    } catch (err: any) {
+      setModelSaveResult('fail');
+      setModelSaveError(err?.response?.data?.detail || String(err));
+    } finally {
+      setSavingModel(false);
+    }
+  }
+
+  async function saveBotToHermes() {
+    if (!botPlatformId || !selectedBotPlatform) return;
+    const missing = selectedBotPlatform.fields
+      .filter(f => f.required && !(botFields[f.key] || '').trim())
+      .map(f => f.label);
+    if (missing.length) {
+      setBotSaveResult('fail');
+      setBotSaveError(`${h.botMissingFields}: ${missing.join(', ')}`);
+      return;
+    }
+    setSavingBot(true);
+    setBotSaveResult('idle');
+    setBotSaveError('');
+    setBotSaveNote('');
+    try {
+      const res = await systemAPI.hermesBotConfig({
+        platform: botPlatformId,
+        fields: Object.fromEntries(
+          Object.entries(botFields).filter(([, v]) => (v || '').trim() !== ''),
+        ),
+      });
+      setBotSaveResult('ok');
+      // Refresh the platform card so "configured" badge updates immediately.
+      try {
+        const platRes = await systemAPI.hermesBotPlatforms();
+        setBotPlatforms(platRes.data.platforms || []);
+      } catch { /* ignore */ }
+      const bits: string[] = [];
+      if (res.data.applied) bits.push(h.modelApplyRestarted);
+      if (!res.data.applied && res.data.api_reachable === false) {
+        bits.push(h.modelApplyNotRunning);
+      }
+      setBotSaveNote(bits.join(' · '));
+    } catch (err: any) {
+      setBotSaveResult('fail');
+      setBotSaveError(err?.response?.data?.detail || String(err));
+    } finally {
+      setSavingBot(false);
+    }
+  }
+
+  async function refreshStatus() {
+    setRefreshing(true);
+    try {
+      const res = await systemAPI.status();
+      setSt(res.data as HermesStatusSnapshot);
+    } catch { /* ignore */ }
+    finally { setRefreshing(false); }
+  }
+
+  async function saveHermesApiKey() {
+    setSavingKey(true);
+    setKeySaveResult('idle');
+    setKeySaveError('');
+    try {
+      await systemAPI.saveHermesApiKey(hermesApiKey.trim());
+      setKeySaveResult('ok');
+      setSt(prev => ({ ...prev, hermes_api_key_configured: !!hermesApiKey.trim() }));
+      setRevealedKey('');
+    } catch (err: any) {
+      setKeySaveResult('fail');
+      setKeySaveError(err?.response?.data?.detail || String(err));
+    } finally {
+      setSavingKey(false);
+    }
+  }
+
+  async function generateHermesApiKey() {
+    setGeneratingKey(true);
+    setKeySaveResult('idle');
+    setKeySaveError('');
+    try {
+      const res = await systemAPI.generateHermesApiKey();
+      const newKey = res.data.api_key || '';
+      setGeneratedKey(newKey);
+      setHermesApiKey(newKey);
+      setRevealedKey('');
+      setKeySaveResult('ok');
+      setShowHermesKey(true);
+      setSt(prev => ({ ...prev, hermes_api_key_configured: true }));
+    } catch (err: any) {
+      setKeySaveResult('fail');
+      setKeySaveError(err?.response?.data?.detail || String(err));
+    } finally {
+      setGeneratingKey(false);
+    }
+  }
+
+  async function revealHermesApiKey() {
+    setRevealingKey(true);
+    setKeySaveError('');
+    try {
+      const res = await systemAPI.revealHermesApiKey();
+      setRevealedKey(res.data.api_key || '');
+      setShowHermesKey(true);
+    } catch (err: any) {
+      setKeySaveError(err?.response?.data?.detail || String(err));
+    } finally {
+      setRevealingKey(false);
+    }
+  }
+
+  async function copyToClipboard(text: string) {
+    if (!text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setCopyNotice(h.apiKeyCopied);
+      setTimeout(() => setCopyNotice(''), 2000);
+    } catch {
+      setCopyNotice(h.apiKeyCopyFailed);
+      setTimeout(() => setCopyNotice(''), 2000);
+    }
+  }
+
+  const canNextHermes = (): boolean => {
+    if (step === STEP_SECURITY) return riskAccepted;
+    if (step === STEP_MODE) return !!wizardMode;
+    // Manual mode — API-key step is mandatory and already-configured or
+    // freshly-saved satisfies it. Quickstart visually skips this step, so
+    // this branch never gets hit in that path.
+    if (step === STEP_APIKEY) return keyAlreadyConfigured || keySaveResult === 'ok';
+    // Model and bot steps are optional — "Next" acts as a Skip button.
+    return true;
+  };
+
+  /**
+   * Auto-provision the Hermes API key for the Quickstart path.
+   *
+   * Behaviour:
+   *  - If a key is already configured on either side (XSafeClaw's .env or
+   *    ~/.hermes/.env), we surface it via ``reveal`` so both sides match
+   *    and the user doesn't get a surprise "401 Unauthorized" later — no
+   *    write happens.
+   *  - Otherwise we call ``generateHermesApiKey`` which writes a fresh
+   *    random key to BOTH ``~/.hermes/.env::API_SERVER_KEY`` and
+   *    XSafeClaw's ``.env::HERMES_API_KEY``, matching §17's behaviour.
+   *
+   * Called from ``goNextHermes`` when the user leaves step 2 in Quickstart
+   * mode. Returns true on success, false on failure (navigation aborts).
+   */
+  async function ensureQuickstartApiKey(): Promise<boolean> {
+    if (keyAlreadyConfigured || keySaveResult === 'ok') {
+      // Already provisioned. Try to fetch it so the Done page can show
+      // it for copy-paste, but don't block navigation if the reveal
+      // endpoint fails for any reason.
+      try {
+        const res = await systemAPI.revealHermesApiKey();
+        if (res.data.api_key) setAutoProvisionedKey(res.data.api_key);
+      } catch { /* ignore — key stays hidden on the Done page */ }
+      return true;
+    }
+    setAutoProvisioning(true);
+    setAutoProvisionError('');
+    try {
+      const res = await systemAPI.generateHermesApiKey();
+      const newKey = res.data.api_key || '';
+      setAutoProvisionedKey(newKey);
+      setSt(prev => ({ ...prev, hermes_api_key_configured: true }));
+      setKeySaveResult('ok');
+      return true;
+    } catch (err: any) {
+      setAutoProvisionError(err?.response?.data?.detail || String(err));
+      return false;
+    } finally {
+      setAutoProvisioning(false);
+    }
+  }
+
+  /**
+   * Skip-aware forward navigation. In Quickstart mode STATUS, APIKEY and
+   * BOT are all in ``hermesSkipped`` so the progress bar greys them out;
+   * we intercept the transition ``MODE → ...`` to auto-provision the
+   * Hermes API key before fast-forwarding all the way to the Model step.
+   */
+  async function goNextHermes() {
+    // Auto-provision hook: runs when leaving the Mode step in Quickstart
+    // so that by the time the user lands on the Model step, ~/.hermes/.env
+    // and XSafeClaw's .env both carry a matching HERMES_API_KEY /
+    // API_SERVER_KEY. Skipping behind the user's back is fine — we surface
+    // the key on the Done page so they can copy-paste it later.
+    if (step === STEP_MODE && wizardMode === 'quickstart') {
+      const ok = await ensureQuickstartApiKey();
+      if (!ok) return;
+    }
+    let n = step + 1;
+    while (n < TOTAL_STEPS && hermesSkipped.has(n)) n++;
+    if (n > STEP_DONE) n = STEP_DONE;
+    setStep(n);
+  }
+
+  function goBackHermes() {
+    let n = step - 1;
+    while (n > 0 && hermesSkipped.has(n)) n--;
+    if (n < 0) n = 0;
+    setStep(n);
+  }
+
+  const hermesPath = (st.hermes_path as string) || '—';
+  const version = (st.openclaw_version as string) || '—';
+  const apiPort = (st.hermes_api_port as number) ?? '—';
+  const cfgPath = (st.hermes_config_path as string) || '—';
+  const home = (st.hermes_home as string) || '—';
+  const gwOk = st.daemon_running === true;
+  const cfgExists = st.config_exists === true;
+
+  return (
+    <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
+      <div className="w-full max-w-4xl">
+        <div className="flex flex-col items-center gap-2 mb-6">
+          <img src="/logo.png" alt="XSafeClaw" className="w-12 h-12 object-contain rounded-xl shadow-lg shadow-accent/25" />
+          <p className="text-[15px] font-semibold text-text-primary">{h.pageTitle}</p>
+          <p className="text-[12px] text-text-muted text-center max-w-lg">{h.pageSubtitle}</p>
+        </div>
+        <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
+          <StepProgress current={step} skipped={hermesSkipped} labels={hermesLabels} />
+
+          {step === STEP_SECURITY && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2"><Shield className="w-5 h-5 text-warning" /><h3 className="text-lg font-bold text-text-primary">{h.security.title}</h3></div>
+              <div className="bg-warning/5 border border-warning/20 rounded-xl p-5 text-[12px] text-text-secondary leading-relaxed space-y-2">
+                <p className="font-semibold text-text-primary">{h.security.prompt}</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  {h.security.items.map((item: string, i: number) => <li key={i}>{item}</li>)}
+                </ul>
+                <p className="text-[11px] text-text-muted">{h.security.recommend}</p>
+              </div>
+              <label className="flex items-center gap-3 cursor-pointer p-3 rounded-lg border border-border hover:border-violet-500/30 transition-all">
+                <input type="checkbox" checked={riskAccepted} onChange={e => setRiskAccepted(e.target.checked)} className="w-4 h-4 rounded accent-violet-500" />
+                <span className="text-[13px] font-medium text-text-primary">{h.security.checkbox}</span>
+              </label>
+            </div>
+          )}
+
+          {step === STEP_MODE && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Rocket className="w-5 h-5 text-violet-400" />
+                <h3 className="text-lg font-bold text-text-primary">{t.configure.mode.title}</h3>
+              </div>
+              <p className="text-[13px] text-text-muted">{h.modeSubtitle}</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {([
+                  { id: 'quickstart', icon: Zap, title: t.configure.mode.quickstart, desc: h.modeQuickstartDesc },
+                  { id: 'manual', icon: Settings2, title: t.configure.mode.manual, desc: h.modeManualDesc },
+                ] as const).map(o => {
+                  const Icon = o.icon;
+                  const active = wizardMode === o.id;
+                  return (
+                    <button
+                      key={o.id}
+                      type="button"
+                      onClick={() => setWizardMode(o.id)}
+                      className={`p-5 rounded-xl border-2 text-left transition-all ${
+                        active ? 'border-violet-500 bg-violet-500/5' : 'border-border hover:border-violet-500/30'
+                      }`}
+                    >
+                      <Icon className={`w-6 h-6 mb-3 ${active ? 'text-violet-400' : 'text-text-muted'}`} />
+                      <p className="text-[14px] font-semibold text-text-primary">{o.title}</p>
+                      <p className="text-[11px] text-text-muted mt-1 leading-relaxed">{o.desc}</p>
+                    </button>
+                  );
+                })}
+              </div>
+              {wizardMode === 'quickstart' && (
+                <div className="bg-violet-500/5 border border-violet-500/20 rounded-xl p-4 text-[12px] text-text-secondary leading-relaxed flex items-start gap-2">
+                  <Sparkles className="w-4 h-4 mt-0.5 flex-shrink-0 text-violet-300" />
+                  <span>{h.modeQuickstartNote}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {step === STEP_STATUS && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h3 className="text-lg font-bold text-text-primary">{h.statusTitle}</h3>
+                  <p className="text-[12px] text-text-muted mt-1">{h.statusDesc}</p>
+                </div>
+                <button type="button" onClick={refreshStatus} disabled={refreshing}
+                  className="flex items-center gap-2 px-3 py-2 text-[12px] font-medium rounded-lg border border-border hover:bg-surface-2 text-text-secondary">
+                  <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} /> {h.refresh}
+                </button>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                {[
+                  [h.labelBinary, hermesPath],
+                  [h.labelVersion, version],
+                  [h.labelHome, home],
+                  [h.labelConfig, cfgPath],
+                  [h.labelApiPort, String(apiPort)],
+                  [h.labelGateway, gwOk ? h.gatewayUp : h.gatewayDown],
+                  [h.labelConfigStatus, cfgExists ? h.configPresent : h.configMissing],
+                ].map(([k, v], i) => (
+                  <div key={i} className="bg-surface-0 border border-border rounded-xl p-3">
+                    <p className="text-[10px] uppercase tracking-wide text-text-muted font-medium">{k}</p>
+                    <p className="text-[12px] text-text-primary font-mono break-all mt-1">{v}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* API_SERVER_ENABLED recovery card — surfaces only when the
+                  gateway is installed but the HTTP listener flag is off,
+                  which is the default on a fresh Hermes install. */}
+              {st.hermes_installed === true && st.hermes_api_server_enabled === false && (
+                <div className="bg-warning/5 border border-warning/30 rounded-xl p-4 space-y-3">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0 text-warning" />
+                    <div className="space-y-1">
+                      <p className="text-[12px] font-semibold text-text-primary">{h.apiServerDisabledTitle}</p>
+                      <p className="text-[11px] text-text-muted leading-relaxed">{h.apiServerDisabledBody}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <button type="button" onClick={enableHermesApiServer} disabled={enablingApi}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold rounded-lg bg-warning/20 hover:bg-warning/30 disabled:opacity-40 text-warning transition-all">
+                      {enablingApi ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                      {enablingApi ? h.apiServerEnablingBtn : h.apiServerEnableBtn}
+                    </button>
+                    {enableApiResult === 'ok' && (
+                      <span className="text-[12px] text-emerald-400 flex items-center gap-1">
+                        <CheckCircle className="w-3.5 h-3.5" /> {h.apiServerEnableSuccess}
+                      </span>
+                    )}
+                    {enableApiResult === 'partial' && (
+                      <span className="text-[12px] text-warning flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5" /> {h.apiServerEnablePartial}
+                      </span>
+                    )}
+                    {enableApiResult === 'fail' && (
+                      <span className="text-[12px] text-red-400 flex items-center gap-1">
+                        <XCircle className="w-3.5 h-3.5" /> {h.apiServerEnableFailed}
+                      </span>
+                    )}
+                  </div>
+                  {enableApiMsg && (
+                    <pre className="max-h-32 overflow-auto bg-surface-1 border border-border rounded-lg px-3 py-2 text-[11px] font-mono text-text-secondary whitespace-pre-wrap">
+                      {enableApiMsg}
+                    </pre>
+                  )}
+                </div>
+              )}
+
+              <div className="bg-violet-500/5 border border-violet-500/20 rounded-xl p-4 space-y-2">
+                <p className="text-[12px] font-semibold text-text-primary">{h.envHintTitle}</p>
+                <p className="text-[11px] text-text-muted leading-relaxed">{h.envHintBody}</p>
+              </div>
+
+              <div className="bg-surface-0 border border-border rounded-xl p-4 space-y-3">
+                <div>
+                  <p className="text-[12px] font-semibold text-text-primary">{h.applyTitle}</p>
+                  <p className="text-[11px] text-text-muted leading-relaxed mt-1">{h.applyDesc}</p>
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button type="button" onClick={applyToHermes} disabled={applying}
+                    className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white transition-all">
+                    {applying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    {applying ? h.applyRunning : h.applyBtn}
+                  </button>
+                  {applyResult === 'ok' && (
+                    <span className="text-[12px] text-emerald-400 flex items-center gap-1">
+                      <CheckCircle className="w-3.5 h-3.5" /> {h.applySuccess}
+                    </span>
+                  )}
+                  {applyResult === 'fail' && (
+                    <span className="text-[12px] text-red-400 flex items-center gap-1">
+                      <XCircle className="w-3.5 h-3.5" /> {h.applyFailed}
+                    </span>
+                  )}
+                  {applyResult === 'not_running' && (
+                    <span className="text-[12px] text-warning flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5" /> {h.applyNotRunning}
+                    </span>
+                  )}
+                </div>
+                {applyLog && (
+                  <div>
+                    <button type="button" onClick={() => setApplyLogOpen(o => !o)}
+                      className="text-[11px] text-text-muted hover:text-text-primary underline underline-offset-2">
+                      {applyLogOpen ? h.applyHideLog : h.applyShowLog}
+                    </button>
+                    {applyLogOpen && (
+                      <pre className="mt-2 max-h-48 overflow-auto bg-surface-1 border border-border rounded-lg px-3 py-2 text-[11px] font-mono text-text-secondary whitespace-pre-wrap">
+                        {applyLog}
+                      </pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {step === STEP_APIKEY && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Key className="w-5 h-5 text-violet-400" />
+                <h3 className="text-lg font-bold text-text-primary">{h.apiKeyTitle}</h3>
+                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                  {h.apiKeyRequiredBadge}
+                </span>
+              </div>
+              <p className="text-[13px] text-text-secondary leading-relaxed">{h.apiKeyDesc}</p>
+
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button type="button" onClick={generateHermesApiKey} disabled={generatingKey || savingKey}
+                  className="flex items-start gap-3 text-left px-4 py-3 bg-violet-600/10 hover:bg-violet-600/20 disabled:opacity-40 border border-violet-500/30 rounded-xl transition-all">
+                  {generatingKey ? <Loader2 className="w-4 h-4 mt-0.5 text-violet-300 animate-spin" /> : <Sparkles className="w-4 h-4 mt-0.5 text-violet-300" />}
+                  <span className="flex-1">
+                    <span className="block text-[13px] font-semibold text-text-primary">{h.apiKeyGenerateBtn}</span>
+                    <span className="block text-[11px] text-text-muted mt-0.5 leading-relaxed">{h.apiKeyGenerateDesc}</span>
+                  </span>
+                </button>
+                <button type="button" onClick={revealHermesApiKey} disabled={revealingKey || !keyAlreadyConfigured}
+                  className="flex items-start gap-3 text-left px-4 py-3 bg-surface-0 hover:bg-surface-2 disabled:opacity-40 border border-border rounded-xl transition-all">
+                  {revealingKey ? <Loader2 className="w-4 h-4 mt-0.5 text-text-secondary animate-spin" /> : <Eye className="w-4 h-4 mt-0.5 text-text-secondary" />}
+                  <span className="flex-1">
+                    <span className="block text-[13px] font-semibold text-text-primary">{h.apiKeyRevealBtn}</span>
+                    <span className="block text-[11px] text-text-muted mt-0.5 leading-relaxed">
+                      {keyAlreadyConfigured ? h.apiKeyRevealDesc : h.apiKeyRevealDisabled}
+                    </span>
+                  </span>
+                </button>
+              </div>
+
+              {(generatedKey || revealedKey) && (
+                <div className="bg-emerald-500/5 border border-emerald-500/30 rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-[12px] font-semibold text-emerald-300">
+                      {generatedKey ? h.apiKeyGeneratedTitle : h.apiKeyRevealedTitle}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => copyToClipboard(generatedKey || revealedKey)}
+                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-md bg-surface-1 hover:bg-surface-2 border border-border text-text-secondary">
+                        <Copy className="w-3 h-3" /> {h.apiKeyCopyBtn}
+                      </button>
+                      {copyNotice && <span className="text-[11px] text-emerald-400">{copyNotice}</span>}
+                    </div>
+                  </div>
+                  <code className="block text-[12px] font-mono break-all text-text-primary bg-surface-0 border border-border rounded-lg px-3 py-2">
+                    {generatedKey || revealedKey}
+                  </code>
+                  {generatedKey && (
+                    <p className="text-[11px] text-text-muted leading-relaxed">{h.apiKeyGeneratedNote}</p>
+                  )}
+                </div>
+              )}
+
+              <div className="bg-surface-0 border border-border rounded-xl p-4 text-[12px] text-text-muted space-y-2 leading-relaxed">
+                <p className="font-semibold text-text-primary">{h.apiKeyManualTitle}</p>
+                <ol className="list-decimal pl-4 space-y-1">
+                  {h.apiKeyGuideSteps.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                </ol>
+              </div>
+
+              {keyAlreadyConfigured && keySaveResult !== 'ok' && (
+                <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-4 py-3 text-[12px] text-emerald-400">
+                  <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{h.apiKeyAlreadySet}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="text-[12px] font-semibold text-text-primary block mb-1.5">{h.apiKeyLabel}</label>
+                <div className="relative">
+                  <input
+                    type={showHermesKey ? 'text' : 'password'}
+                    value={hermesApiKey}
+                    onChange={e => { setHermesApiKey(e.target.value); setKeySaveResult('idle'); setGeneratedKey(''); }}
+                    placeholder={keyAlreadyConfigured ? h.apiKeyPlaceholderUpdate : h.apiKeyPlaceholder}
+                    className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 pr-10 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                  />
+                  <button onClick={() => setShowHermesKey(!showHermesKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary">
+                    {showHermesKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-text-muted mt-1.5">{h.apiKeyHint}</p>
+              </div>
+
+              <div className="flex items-center gap-3 flex-wrap">
+                <button type="button" onClick={saveHermesApiKey} disabled={savingKey || !hermesApiKey.trim()}
+                  className="flex items-center gap-1.5 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[12px] font-semibold rounded-lg transition-all">
+                  {savingKey ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Key className="w-3.5 h-3.5" />}
+                  {h.apiKeySaveBtn}
+                </button>
+                {keySaveResult === 'ok' && <span className="text-[12px] text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />{h.apiKeySaved}</span>}
+                {keySaveResult === 'fail' && <span className="text-[12px] text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{keySaveError || h.apiKeySaveFailed}</span>}
+              </div>
+
+              <p className="text-[11px] text-text-muted">{h.apiKeyRequiredHint}</p>
+            </div>
+          )}
+
+          {step === STEP_MODEL && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Zap className="w-5 h-5 text-violet-400" />
+                <h3 className="text-lg font-bold text-text-primary">{h.modelTitle}</h3>
+                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-surface-2 text-text-muted border border-border">
+                  {h.optionalBadge}
+                </span>
+              </div>
+              <p className="text-[13px] text-text-secondary leading-relaxed">{h.modelDesc}</p>
+
+              {modelDefaultId && (
+                <div className="flex items-center gap-2 bg-violet-500/5 border border-violet-500/20 rounded-xl px-4 py-3 text-[12px] text-text-secondary">
+                  <Sparkles className="w-4 h-4 flex-shrink-0 text-violet-300" />
+                  <span>
+                    {h.modelCurrent}: <code className="text-text-primary font-mono">{modelDefaultId}</code>
+                  </span>
+                </div>
+              )}
+
+              {modelLoading && (
+                <div className="flex items-center gap-2 text-[12px] text-text-muted">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> {h.modelLoading}
+                </div>
+              )}
+
+              {!modelLoading && modelProviders.length === 0 && (
+                <div className="bg-surface-0 border border-border rounded-xl p-4 text-[12px] text-text-muted">
+                  {h.modelNoProviders}
+                </div>
+              )}
+
+              {/* Probe returned providers but none are authenticated — most
+                  commonly a brand-new install where the user hasn't configured
+                  any API key yet. Point them at the previous step rather than
+                  rendering an empty dropdown that silently does nothing. */}
+              {!modelLoading && modelProviders.length > 0 && selectableModelProviders.length === 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-[12px] text-amber-300 flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span>{h.modelNoAuthedProviders}</span>
+                </div>
+              )}
+
+              {!modelLoading && selectableModelProviders.length > 0 && (
+                <>
+                  <div>
+                    <label className="text-[12px] font-semibold text-text-primary block mb-1.5">
+                      {h.modelProviderLabel}
+                    </label>
+                    <select
+                      value={modelProviderId}
+                      onChange={e => onPickModelProvider(e.target.value)}
+                      className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 text-[13px] text-text-primary focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                    >
+                      <option value="">{h.modelProviderPlaceholder}</option>
+                      {selectableModelProviders.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {selectedModelProvider && selectedModelProvider.models.length === 0 && (
+                    <div className="bg-surface-0 border border-border rounded-xl p-3 text-[12px] text-text-muted">
+                      {h.modelProviderEmptyHint}
+                    </div>
+                  )}
+
+                  {/* Per-provider endpoint preset picker (§33).  Only renders
+                      when the backend shipped a preset bundle for the
+                      currently-selected provider — today that's alibaba's
+                      three DashScope URLs.  Placed above the model dropdown
+                      because a wrong base URL bricks chat regardless of
+                      which model you pick. */}
+                  {selectedModelProvider && providerEndpoints[selectedModelProvider.id] && (() => {
+                    const bundle = providerEndpoints[selectedModelProvider.id];
+                    const currentSel = providerEndpointSel[selectedModelProvider.id] || bundle.presets[0]?.base_url || '';
+                    const activePreset = bundle.presets.find(p => p.base_url === currentSel);
+                    return (
+                      <div className="bg-surface-0 border border-border rounded-xl p-3 space-y-2">
+                        <label className="text-[12px] font-semibold text-text-primary block">
+                          {h.modelEndpointLabel}
+                        </label>
+                        <select
+                          value={currentSel}
+                          onChange={e => {
+                            setProviderEndpointSel(prev => ({
+                              ...prev,
+                              [selectedModelProvider.id]: e.target.value,
+                            }));
+                            setModelSaveResult('idle');
+                          }}
+                          className="w-full bg-surface-1 border border-border rounded-lg px-3 py-2 text-[13px] text-text-primary focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                        >
+                          {bundle.presets.map(p => (
+                            <option key={p.id} value={p.base_url}>{p.label}</option>
+                          ))}
+                        </select>
+                        {activePreset?.hint && (
+                          <p className="text-[11px] text-text-muted">{activePreset.hint}</p>
+                        )}
+                        <p className="text-[11px] text-text-muted font-mono break-all">
+                          {bundle.env_key}={currentSel}
+                        </p>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedModelProvider && selectedModelProvider.models.length > 0 && (
+                    <div>
+                      <label className="text-[12px] font-semibold text-text-primary block mb-1.5">
+                        {h.modelSelectLabel}
+                      </label>
+                      <select
+                        value={modelId}
+                        onChange={e => { setModelId(e.target.value); setModelSaveResult('idle'); }}
+                        className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 text-[13px] text-text-primary focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                      >
+                        <option value="">{h.modelSelectPlaceholder}</option>
+                        {selectedModelProvider.models.map(m => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}{m.reasoning ? '  (reasoning)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {selectedModelProvider && (
+                    <div>
+                      <label className="text-[12px] font-semibold text-text-primary block mb-1.5">
+                        {h.modelApiKeyLabel}
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={modelShowKey ? 'text' : 'password'}
+                          value={modelApiKey}
+                          onChange={e => { setModelApiKey(e.target.value); setModelSaveResult('idle'); }}
+                          placeholder={h.modelApiKeyPlaceholder}
+                          className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 pr-10 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setModelShowKey(!modelShowKey)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                        >
+                          {modelShowKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-text-muted mt-1.5">{h.modelApiKeyHint}</p>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={saveModelToHermes}
+                      disabled={savingModel || !modelProviderId || !modelId}
+                      className="flex items-center gap-1.5 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[12px] font-semibold rounded-lg transition-all"
+                    >
+                      {savingModel ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                      {h.modelSaveBtn}
+                    </button>
+                    {modelSaveResult === 'ok' && (
+                      <span className="text-[12px] text-emerald-400 flex items-center gap-1">
+                        <CheckCircle className="w-3.5 h-3.5" /> {h.modelSaveSuccess}
+                      </span>
+                    )}
+                    {modelSaveResult === 'fail' && (
+                      <span className="text-[12px] text-red-400 flex items-center gap-1">
+                        <XCircle className="w-3.5 h-3.5" /> {modelSaveError || h.modelSaveFailed}
+                      </span>
+                    )}
+                  </div>
+                  {modelSaveNote && (
+                    <p className="text-[11px] text-text-muted">{modelSaveNote}</p>
+                  )}
+                </>
+              )}
+
+              <p className="text-[11px] text-text-muted">{h.skipHint}</p>
+            </div>
+          )}
+
+          {step === STEP_BOT && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Plug className="w-5 h-5 text-violet-400" />
+                <h3 className="text-lg font-bold text-text-primary">{h.botTitle}</h3>
+                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-surface-2 text-text-muted border border-border">
+                  {h.optionalBadge}
+                </span>
+              </div>
+              <p className="text-[13px] text-text-secondary leading-relaxed">{h.botDesc}</p>
+
+              {botPlatformsLoading && (
+                <div className="flex items-center gap-2 text-[12px] text-text-muted">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> {h.botLoading}
+                </div>
+              )}
+
+              {!botPlatformsLoading && botPlatforms.length > 0 && (
+                <>
+                  <div className="grid sm:grid-cols-2 gap-2">
+                    {botPlatforms.map(plat => (
+                      <button
+                        key={plat.id}
+                        type="button"
+                        onClick={() => onPickBotPlatform(plat.id)}
+                        className={`flex items-start gap-3 text-left px-4 py-3 rounded-xl border transition-all ${
+                          botPlatformId === plat.id
+                            ? 'bg-violet-600/10 border-violet-500/50'
+                            : 'bg-surface-0 hover:bg-surface-2 border-border'
+                        }`}
+                      >
+                        <Plug className={`w-4 h-4 mt-0.5 flex-shrink-0 ${botPlatformId === plat.id ? 'text-violet-300' : 'text-text-muted'}`} />
+                        <span className="flex-1 min-w-0">
+                          <span className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[13px] font-semibold text-text-primary">{plat.name}</span>
+                            {plat.configured && (
+                              <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                                {h.botConfiguredBadge}
+                              </span>
+                            )}
+                          </span>
+                          <span className="block text-[11px] text-text-muted mt-0.5 leading-relaxed">
+                            {plat.hint}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {selectedBotPlatform && (
+                    <div className="space-y-3 bg-surface-0 border border-border rounded-xl p-4">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <p className="text-[12px] font-semibold text-text-primary">{selectedBotPlatform.name}</p>
+                        {selectedBotPlatform.docUrl && (
+                          <a
+                            href={selectedBotPlatform.docUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[11px] text-violet-300 hover:text-violet-200 underline underline-offset-2"
+                          >
+                            {h.botOpenDocs}
+                          </a>
+                        )}
+                      </div>
+                      {selectedBotPlatform.fields.map(field => (
+                        <div key={field.key}>
+                          <label className="text-[12px] font-semibold text-text-primary block mb-1.5">
+                            {field.label}
+                            {field.required && <span className="text-red-400 ml-1">*</span>}
+                            {field.configured && (
+                              <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                                {h.botFieldAlreadySet}
+                              </span>
+                            )}
+                          </label>
+                          <div className="relative">
+                            <input
+                              type={field.secret && !botSecretReveal[field.key] ? 'password' : 'text'}
+                              value={botFields[field.key] || ''}
+                              onChange={e => {
+                                setBotFields(prev => ({ ...prev, [field.key]: e.target.value }));
+                                setBotSaveResult('idle');
+                              }}
+                              placeholder={
+                                field.configured
+                                  ? h.botFieldPlaceholderUpdate
+                                  : (field.placeholder || '')
+                              }
+                              className="w-full bg-surface-1 border border-border rounded-lg px-3 py-2.5 pr-10 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                            />
+                            {field.secret && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setBotSecretReveal(prev => ({ ...prev, [field.key]: !prev[field.key] }))
+                                }
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                              >
+                                {botSecretReveal[field.key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={saveBotToHermes}
+                          disabled={savingBot}
+                          className="flex items-center gap-1.5 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[12px] font-semibold rounded-lg transition-all"
+                        >
+                          {savingBot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plug className="w-3.5 h-3.5" />}
+                          {h.botSaveBtn}
+                        </button>
+                        {botSaveResult === 'ok' && (
+                          <span className="text-[12px] text-emerald-400 flex items-center gap-1">
+                            <CheckCircle className="w-3.5 h-3.5" /> {h.botSaveSuccess}
+                          </span>
+                        )}
+                        {botSaveResult === 'fail' && (
+                          <span className="text-[12px] text-red-400 flex items-center gap-1">
+                            <XCircle className="w-3.5 h-3.5" /> {botSaveError || h.botSaveFailed}
+                          </span>
+                        )}
+                      </div>
+                      {botSaveNote && (
+                        <p className="text-[11px] text-text-muted">{botSaveNote}</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+
+              <p className="text-[11px] text-text-muted">{h.skipHint}</p>
+            </div>
+          )}
+
+          {step === STEP_DONE && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2"><CheckCircle className="w-5 h-5 text-emerald-400" /><h3 className="text-lg font-bold text-text-primary">{h.doneTitle}</h3></div>
+              <p className="text-[13px] text-text-secondary leading-relaxed">{h.doneDesc}</p>
+
+              {wizardMode === 'quickstart' && autoProvisionedKey && (
+                <div className="bg-emerald-500/5 border border-emerald-500/30 rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-[12px] font-semibold text-emerald-300">
+                      {h.quickstartKeyReadyTitle}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => copyToClipboard(autoProvisionedKey)}
+                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] rounded-md bg-surface-1 hover:bg-surface-2 border border-border text-text-secondary">
+                        <Copy className="w-3 h-3" /> {h.apiKeyCopyBtn}
+                      </button>
+                      {copyNotice && <span className="text-[11px] text-emerald-400">{copyNotice}</span>}
+                    </div>
+                  </div>
+                  <code className="block text-[12px] font-mono break-all text-text-primary bg-surface-0 border border-border rounded-lg px-3 py-2">
+                    {autoProvisionedKey}
+                  </code>
+                  <p className="text-[11px] text-text-muted leading-relaxed">{h.quickstartKeyReadyNote}</p>
+                </div>
+              )}
+
+              <div className="bg-surface-0 border border-border rounded-xl p-4 space-y-2">
+                <p className="text-[12px] font-semibold text-text-primary">{h.hintTitle}</p>
+                <p className="text-[12px] text-text-muted leading-relaxed">{h.hintBody}</p>
+              </div>
+              <button type="button" onClick={() => window.location.replace('/agent-valley')}
+                className="flex items-center gap-2 px-8 py-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
+                <Settings2 className="w-4 h-4" /> {t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {autoProvisionError && (step === STEP_MODE || step === STEP_STATUS) && (
+            <div className="mt-3 flex items-start gap-2 bg-red-500/5 border border-red-500/30 rounded-xl p-3 text-[12px] text-red-300">
+              <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <span>
+                <strong>{h.quickstartKeyFailed}</strong>
+                <span className="block text-[11px] text-red-200/80 mt-0.5">{autoProvisionError}</span>
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between mt-6 pt-4 border-t border-border">
+            <button type="button" onClick={goBackHermes} disabled={step === 0 || autoProvisioning}
+              className="flex items-center gap-1.5 px-4 py-2 text-[13px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-30 transition-all">
+              <ChevronLeft className="w-4 h-4" /> {t.common.back}
+            </button>
+            {step < TOTAL_STEPS - 1 ? (
+              <button type="button" onClick={goNextHermes} disabled={!canNextHermes() || autoProvisioning}
+                className="flex items-center gap-1.5 px-6 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[13px] font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
+                {autoProvisioning ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> {h.quickstartProvisioning}
+                  </>
+                ) : (
+                  <>
+                    {t.common.next} <ChevronRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <p className="text-center text-[11px] text-text-muted mt-6">{t.common.poweredBy}</p>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Main ─── */
 export default function Configure() {
   const navigate = useNavigate();
   const { t } = useI18n();
+  const [agentFlow, setAgentFlow] = useState<'loading' | 'openclaw' | 'hermes'>('loading');
+  const [hermesStatusSnapshot, setHermesStatusSnapshot] = useState<HermesStatusSnapshot | null>(null);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormData>(INITIAL);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -1003,9 +2244,35 @@ export default function Configure() {
   const [done, setDone] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
       try {
+        const statusRes = await systemAPI.status();
+        if (cancelled) return;
+
+        const st = statusRes.data as HermesStatusSnapshot;
+        const pref = typeof localStorage !== 'undefined' ? localStorage.getItem(SETUP_PLATFORM_KEY) : null;
+
+        const useHermes =
+          st.platform === 'hermes'
+          || (pref === 'hermes' && st.hermes_installed === true)
+          || (st.hermes_installed === true && st.openclaw_installed !== true);
+
+        if (useHermes) {
+          if (typeof localStorage !== 'undefined') localStorage.removeItem(SETUP_PLATFORM_KEY);
+          setHermesStatusSnapshot(st);
+          setAgentFlow('hermes');
+          return;
+        }
+
+        if (typeof localStorage !== 'undefined' && pref === 'openclaw') {
+          localStorage.removeItem(SETUP_PLATFORM_KEY);
+        }
+
         const res = await systemAPI.onboardScan();
+        if (cancelled) return;
+
         const d = res.data as any;
         setAuthProviders(d.auth_providers || []);
         setModelProviders(d.model_providers || []);
@@ -1027,9 +2294,15 @@ export default function Configure() {
           searchProvider: defs.search_provider || prev.searchProvider,
           searchApiKey: defs.search_api_key || prev.searchApiKey,
         }));
-      } catch { /* ignore */ }
-      setLoading(false);
+        setAgentFlow('openclaw');
+      } catch {
+        if (!cancelled) setAgentFlow('openclaw');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
+
+    return () => { cancelled = true; };
   }, [navigate]);
 
   const skipped = new Set<number>();
@@ -1133,6 +2406,10 @@ export default function Configure() {
   }
 
   if (loading) return <div className="min-h-screen bg-surface-0 flex items-center justify-center"><Loader2 className="w-8 h-8 text-accent animate-spin" /></div>;
+
+  if (agentFlow === 'hermes' && hermesStatusSnapshot) {
+    return <HermesConfigureFlow initialStatus={hermesStatusSnapshot} />;
+  }
 
   if (done) return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
