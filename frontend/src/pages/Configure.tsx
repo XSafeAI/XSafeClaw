@@ -12,6 +12,7 @@ import {
   Sparkles, Copy, AlertTriangle,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
+import type { SystemStatusResponse } from '../services/api';
 import { useI18n } from '../i18n';
 import type { Translations } from '../i18n/locales/en';
 
@@ -24,6 +25,7 @@ interface ChannelInfo { id: string; name: string; configured: boolean; }
 interface SkillInfo { name: string; description: string; emoji: string; eligible: boolean; disabled: boolean; missing: { bins?: string[]; anyBins?: string[]; env?: string[]; os?: string[]; config?: string[] }; source: string; bundled: boolean; }
 interface HookInfo { name: string; description: string; emoji: string; enabled: boolean; }
 interface SearchProviderInfo { id: string; name: string; hint: string; placeholder: string; }
+type HermesStatusSnapshot = Record<string, unknown> & Partial<SystemStatusResponse>;
 
 interface FormData {
   mode: string;
@@ -67,6 +69,7 @@ interface FormData {
   customModelId: string;
   customProviderId: string;
   customCompatibility: string;
+  customContextWindow: number;
 }
 
 const INITIAL: FormData = {
@@ -81,7 +84,7 @@ const INITIAL: FormData = {
   feishuGroupAllowFrom: '', feishuVerificationToken: '', feishuWebhookPath: '/feishu/events',
   cfAccountId: '', cfGatewayId: '', litellmBaseUrl: 'http://localhost:4000',
   vllmBaseUrl: 'http://127.0.0.1:8000/v1', vllmModelId: '', customBaseUrl: '', customModelId: '',
-  customProviderId: '', customCompatibility: 'openai',
+  customProviderId: '', customCompatibility: 'openai', customContextWindow: 204800,
 };
 
 const AGGREGATOR_PROVIDERS = new Set([
@@ -362,7 +365,7 @@ function AuthProviderStep({ form, setForm, authProviders, modelProviders, showKe
               apiKey: '', modelId: '',
               cfAccountId: '', cfGatewayId: '', litellmBaseUrl: 'http://localhost:4000',
               vllmBaseUrl: 'http://127.0.0.1:8000/v1', vllmModelId: '',
-              customBaseUrl: '', customModelId: '', customProviderId: '', customCompatibility: 'openai',
+              customBaseUrl: '', customModelId: '', customProviderId: '', customCompatibility: 'openai', customContextWindow: 204800,
             });
             setManual(false);
           }}
@@ -495,6 +498,14 @@ function AuthProviderStep({ form, setForm, authProviders, modelProviders, showKe
             <input type="text" value={form.customModelId} onChange={e => setForm({ ...form, customModelId: e.target.value })}
               placeholder={t.configure.auth.customModelIdPlaceholder}
               className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-accent/30" />
+          </div>
+          <div>
+            <label className="text-[12px] font-semibold text-text-primary block mb-1.5">{t.configure.auth.customContextWindow}</label>
+            <input type="number" min={16000} step={1024} value={form.customContextWindow}
+              onChange={e => setForm({ ...form, customContextWindow: Math.max(16000, Number(e.target.value) || 204800) })}
+              placeholder="204800"
+              className="w-full bg-surface-0 border border-border rounded-lg px-3 py-2.5 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-accent/30" />
+            <p className="text-[11px] text-text-muted mt-1">{t.configure.auth.customContextWindowHint}</p>
           </div>
           <div>
             <label className="text-[12px] font-semibold text-text-primary block mb-1.5">{t.configure.auth.compatibility}</label>
@@ -977,7 +988,7 @@ function ReviewStep({ form, authProviders, submitting }: { form: FormData; authP
 const SETUP_PLATFORM_KEY = 'xsafeclaw_setup_platform';
 
 /** Hermes: guided wizard (security → mode → status → API key → model → bot → done). OpenClaw onboard is not used. */
-function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, unknown> }) {
+function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSnapshot }) {
   const { t } = useI18n();
   const h = t.configure.hermes;
   // 7 steps:
@@ -994,7 +1005,7 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
   const STEP_BOT = 5;
   const STEP_DONE = 6;
   const [step, setStep] = useState(0);
-  const [st, setSt] = useState<Record<string, unknown>>(initialStatus);
+  const [st, setSt] = useState<HermesStatusSnapshot>(initialStatus);
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -1358,7 +1369,7 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: Record<string, 
     setRefreshing(true);
     try {
       const res = await systemAPI.status();
-      setSt(res.data as Record<string, unknown>);
+      setSt(res.data as HermesStatusSnapshot);
     } catch { /* ignore */ }
     finally { setRefreshing(false); }
   }
@@ -2215,7 +2226,7 @@ export default function Configure() {
   const navigate = useNavigate();
   const { t } = useI18n();
   const [agentFlow, setAgentFlow] = useState<'loading' | 'openclaw' | 'hermes'>('loading');
-  const [hermesStatusSnapshot, setHermesStatusSnapshot] = useState<Record<string, unknown> | null>(null);
+  const [hermesStatusSnapshot, setHermesStatusSnapshot] = useState<HermesStatusSnapshot | null>(null);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<FormData>(INITIAL);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -2240,11 +2251,7 @@ export default function Configure() {
         const statusRes = await systemAPI.status();
         if (cancelled) return;
 
-        const st = statusRes.data as Record<string, unknown> & {
-          platform?: string;
-          hermes_installed?: boolean;
-          openclaw_installed?: boolean;
-        };
+        const st = statusRes.data as HermesStatusSnapshot;
         const pref = typeof localStorage !== 'undefined' ? localStorage.getItem(SETUP_PLATFORM_KEY) : null;
 
         const useHermes =
@@ -2390,6 +2397,7 @@ export default function Configure() {
         vllm_base_url: form.vllmBaseUrl, vllm_model_id: form.vllmModelId,
         custom_base_url: form.customBaseUrl, custom_model_id: form.customModelId,
         custom_provider_id: form.customProviderId, custom_compatibility: form.customCompatibility,
+        custom_context_window: form.customContextWindow,
       });
       setDone(true);
     } catch (err: any) {

@@ -10,16 +10,24 @@ export default function World() {
 
     (async () => {
       try {
-        const res = await systemAPI.status();
+        const res = await systemAPI.installStatus();
         if (cancelled) return;
         const d = res.data as any;
 
-        if (!d.openclaw_installed && !d.hermes_installed) {
+        if (!d.openclaw_installed && !d.nanobot_installed && !d.hermes_installed) {
           navigate('/setup', { replace: true });
           return;
         }
-        if (!d.config_exists) {
-          navigate('/configure', { replace: true });
+        if (d.requires_configure && d.requires_nanobot_configure) {
+          navigate('/configure_select', { replace: true });
+          return;
+        }
+        if (d.requires_nanobot_configure) {
+          navigate('/nanobot_configure', { replace: true });
+          return;
+        }
+        if (d.requires_configure) {
+          navigate('/openclaw_configure', { replace: true });
           return;
         }
       } catch {

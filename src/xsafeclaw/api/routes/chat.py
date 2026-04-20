@@ -19,8 +19,11 @@ from ...database import get_db_context
 from ...gateway_client import GatewayClient
 from ...hermes_client import HermesClient
 from ...models import Message, Session
+from ...nanobot_gateway_client import NanobotGatewayClient
+from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_session_key
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
+from ..runtime_helpers import resolve_instance, serialize_instance
 
 # ── Platform-aware paths ──────────────────────────────────────────────────
 _OPENCLAW_DIR = Path.home() / ".openclaw"
@@ -46,6 +49,19 @@ _available_models_cache: dict[str, object] = {
     "last_success": None,
 }
 _available_models_lock = None
+_NANOBOT_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
+
+
+def _nanobot_gateway_unavailable_detail(instance: RuntimeInstance) -> str:
+    health_url = str(
+        instance.meta.get("gateway_health_url") or "http://127.0.0.1:18790/health"
+    )
+    return (
+        f"nanobot gateway is {instance.health_status} for instance '{instance.display_name}'. "
+        f"Start nanobot gateway in another terminal with: "
+        f"nanobot gateway --port 18790 --verbose "
+        f"(expected health endpoint: {health_url})."
+    )
 
 
 def _get_available_models_lock() -> asyncio.Lock:
@@ -53,6 +69,367 @@ def _get_available_models_lock() -> asyncio.Lock:
     if _available_models_lock is None:
         _available_models_lock = asyncio.Lock()
     return _available_models_lock
+
+
+def _safe_nanobot_filename(name: str) -> str:
+    return _NANOBOT_UNSAFE_CHARS.sub("_", name).strip()
+
+
+async def _resolve_chat_runtime(
+    *,
+    session_key: str | None = None,
+    instance_id: str | None = None,
+) -> tuple[RuntimeInstance, str, str]:
+    instance = await resolve_instance(
+        instance_id=instance_id,
+        session_key=session_key,
+        capability="chat",
+    )
+    if instance.platform == "nanobot" and instance.health_status != "healthy":
+        raise HTTPException(
+            status_code=503,
+            detail=_nanobot_gateway_unavailable_detail(instance),
+        )
+    _, _, local_session_key = decode_chat_session_key(session_key or "")
+    if not local_session_key:
+        local_session_key = session_key or f"chat-{uuid.uuid4().hex[:12]}"
+    public_session_key = encode_chat_session_key(instance, local_session_key)
+    return instance, local_session_key, public_session_key
+
+
+def _nanobot_storage_session_keys(local_session_key: str) -> tuple[str, ...]:
+    return (
+        f"websocket:{local_session_key}",
+        f"api:{local_session_key}",
+        local_session_key,
+    )
+
+
+def _find_nanobot_session_file(
+    instance: RuntimeInstance,
+    local_session_key: str,
+) -> Path | None:
+    sessions_dir = Path(instance.sessions_path or "")
+    if not sessions_dir.exists():
+        return None
+
+    for candidate_key in _nanobot_storage_session_keys(local_session_key):
+        file_name = f"{_safe_nanobot_filename(candidate_key.replace(':', '_'))}.jsonl"
+        candidate = sessions_dir / file_name
+        if candidate.exists():
+            return candidate
+
+    for candidate in sessions_dir.glob("*.jsonl"):
+        try:
+            first_line = candidate.read_text(encoding="utf-8").splitlines()[0]
+            data = json.loads(first_line)
+        except Exception:
+            continue
+        if data.get("_type") != "metadata":
+            continue
+        key = str(data.get("key") or "")
+        if key in set(_nanobot_storage_session_keys(local_session_key)):
+            return candidate
+    return None
+
+
+def _nanobot_result_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        if parts:
+            return "".join(parts)
+    if isinstance(content, (dict, list)):
+        return json.dumps(content, ensure_ascii=False)
+    return str(content or "")
+
+
+def _read_nanobot_history_from_jsonl(
+    instance: RuntimeInstance,
+    local_session_key: str,
+    limit: int = 100,
+) -> list[dict]:
+    file_path = _find_nanobot_session_file(instance, local_session_key)
+    if file_path is None:
+        return []
+
+    messages = []
+    pending_tool_calls: dict[str, dict] = {}
+    queued_tool_calls: list[dict] = []
+
+    try:
+        for line_index, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines()):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if line_index == 0 and entry.get("_type") == "metadata":
+                continue
+
+            role = str(entry.get("role") or "")
+            timestamp = entry.get("timestamp")
+            message_id = f"line-{line_index + 1}"
+
+            if role == "user":
+                messages.extend(queued_tool_calls)
+                queued_tool_calls = []
+                text = _nanobot_result_text(entry.get("content")).strip()
+                if text:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": text,
+                            "timestamp": timestamp,
+                            "id": message_id,
+                        }
+                    )
+                continue
+
+            if role == "assistant":
+                for tool_call in entry.get("tool_calls") or []:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                    tool_id = str(tool_call.get("id") or "")
+                    if not tool_id:
+                        continue
+                    args = function.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {"raw": args}
+                    pending_tool_calls[tool_id] = {
+                        "type": "tool_call",
+                        "role": "tool_call",
+                        "content": "",
+                        "tool_id": tool_id,
+                        "tool_name": str(function.get("name") or tool_call.get("name") or "tool"),
+                        "args": args,
+                        "result": None,
+                        "is_error": False,
+                        "result_pending": True,
+                        "timestamp": timestamp,
+                        "id": f"tool-{tool_id}",
+                    }
+
+                text = _nanobot_result_text(entry.get("content")).strip()
+                if text:
+                    messages.extend(queued_tool_calls)
+                    queued_tool_calls = []
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": text,
+                            "timestamp": timestamp,
+                            "id": message_id,
+                        }
+                    )
+                continue
+
+            if role == "tool":
+                tool_id = str(entry.get("tool_call_id") or "")
+                if tool_id and tool_id in pending_tool_calls:
+                    tool_msg = dict(pending_tool_calls.pop(tool_id))
+                    tool_msg["result"] = _nanobot_result_text(entry.get("content"))
+                    tool_msg["is_error"] = str(tool_msg["result"]).startswith("Error")
+                    tool_msg["result_pending"] = False
+                    queued_tool_calls.append(tool_msg)
+
+        messages.extend(queued_tool_calls)
+    except Exception:
+        return []
+
+    if limit and len(messages) > limit:
+        messages = messages[-limit:]
+    return messages
+
+
+def _read_nanobot_tool_calls_from_jsonl(
+    instance: RuntimeInstance,
+    local_session_key: str,
+) -> list[dict]:
+    file_path = _find_nanobot_session_file(instance, local_session_key)
+    if file_path is None:
+        return []
+
+    try:
+        entries = []
+        for raw_line in file_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+        last_user_idx = -1
+        for index, entry in enumerate(entries):
+            if entry.get("role") == "user":
+                last_user_idx = index
+
+        if last_user_idx < 0:
+            return []
+
+        recent = entries[last_user_idx + 1:]
+        tool_calls: dict[str, dict] = {}
+        for entry in recent:
+            role = entry.get("role")
+            if role == "assistant":
+                for block in entry.get("tool_calls") or []:
+                    if not isinstance(block, dict):
+                        continue
+                    function = block.get("function") if isinstance(block.get("function"), dict) else {}
+                    tool_id = str(block.get("id") or "")
+                    if tool_id:
+                        args = function.get("arguments")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                args = {"raw": args}
+                        tool_calls[tool_id] = {
+                            "tool_id": tool_id,
+                            "tool_name": str(function.get("name") or block.get("name") or "tool"),
+                            "args": args,
+                            "result": None,
+                            "is_error": False,
+                        }
+            elif role == "tool":
+                tool_id = str(entry.get("tool_call_id") or "")
+                if tool_id and tool_id in tool_calls:
+                    tool_calls[tool_id]["result"] = _nanobot_result_text(entry.get("content"))
+                    tool_calls[tool_id]["is_error"] = str(tool_calls[tool_id]["result"]).startswith("Error")
+
+        events = []
+        for tool_call in tool_calls.values():
+            events.append(
+                {
+                    "type": "tool_start",
+                    "tool_id": tool_call["tool_id"],
+                    "tool_name": tool_call["tool_name"],
+                    "args": tool_call["args"],
+                }
+            )
+            if tool_call["result"] is not None:
+                events.append(
+                    {
+                        "type": "tool_result",
+                        "tool_id": tool_call["tool_id"],
+                        "tool_name": tool_call["tool_name"],
+                        "result": tool_call["result"],
+                        "is_error": tool_call["is_error"],
+                    }
+                )
+        return events
+    except Exception:
+        return []
+
+
+def _build_nanobot_message_content(
+    message: str,
+    images: list["ImageAttachment"] | None = None,
+) -> str | list[dict[str, object]]:
+    if not images:
+        return message
+    content: list[dict[str, object]] = []
+    if message:
+        content.append({"type": "text", "text": message})
+    for image in images:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image.mime_type};base64,{image.data}",
+                },
+            }
+        )
+    return content
+
+
+def _nanobot_response_text(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return str(content or "")
+
+
+async def _send_nanobot_chat(
+    instance: RuntimeInstance,
+    *,
+    local_session_key: str,
+    message: str,
+    images: list["ImageAttachment"] | None = None,
+    timeout_s: float = 120.0,
+) -> dict:
+    if images:
+        raise HTTPException(
+            status_code=400,
+            detail="nanobot gateway websocket channel currently supports text messages only",
+        )
+    client = await _connect_nanobot_gateway(instance)
+    try:
+        return await client.send_chat(message, timeout_s=timeout_s)
+    finally:
+        await client.disconnect()
+
+
+async def _nanobot_available_models(instance: RuntimeInstance) -> dict:
+    configured_model = str(instance.meta.get("model") or "nanobot")
+    provider = str(instance.meta.get("provider") or configured_model.split("/", 1)[0])
+    models = {
+        configured_model: {
+            "id": configured_model,
+            "name": configured_model.split("/", 1)[-1],
+            "provider": provider,
+            "reasoning": False,
+        }
+    }
+
+    return {
+        "models": list(models.values()),
+        "default_model": configured_model,
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+        "capabilities": instance.capabilities,
+        "instance": serialize_instance(instance),
+        "supports_session_patch": False,
+    }
+
+
+def _decorate_models_payload(
+    payload: dict,
+    instance: RuntimeInstance,
+    *,
+    supports_session_patch: bool,
+) -> dict:
+    return {
+        **payload,
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+        "capabilities": instance.capabilities,
+        "instance": serialize_instance(instance),
+        "supports_session_patch": supports_session_patch,
+    }
 
 
 def _build_risk_rule_chat_block_message(message: str, reason: str) -> str:
@@ -801,6 +1178,63 @@ def _ws_is_open(ws: object) -> bool:
 # NOTE: This is in-memory and will reset on server reload.
 # send-message handles the "client missing" case by reconnecting.
 _gateway_sessions: dict[str, GatewayClient | HermesClient] = {}
+_nanobot_gateway_sessions: dict[str, NanobotGatewayClient] = {}
+
+
+def _nanobot_gateway_websocket_url(instance: RuntimeInstance) -> str:
+    websocket_url = str(
+        instance.gateway_base_url or instance.meta.get("websocket_url") or ""
+    ).strip()
+    if not websocket_url:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "nanobot websocket channel is not configured. "
+                "Open /nanobot_configure and save the Nanobot runtime config, "
+                "or add channels.websocket to ~/.nanobot/config.json."
+            ),
+        )
+    return websocket_url
+
+
+async def _connect_nanobot_gateway(instance: RuntimeInstance) -> NanobotGatewayClient:
+    websocket_url = _nanobot_gateway_websocket_url(instance)
+    client = NanobotGatewayClient(
+        websocket_url,
+        client_id=str(instance.meta.get("websocket_client_id") or "xsafeclaw"),
+        token=str(instance.meta.get("websocket_token") or ""),
+    )
+    try:
+        await client.connect()
+        return client
+    except Exception as exc:
+        await client.disconnect()
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Failed to connect to nanobot gateway websocket at {websocket_url}: {exc}. "
+                "Start nanobot gateway with: nanobot gateway --port 18790 --verbose"
+            ),
+        ) from exc
+
+
+async def _get_nanobot_gateway_session(
+    public_session_key: str,
+    instance: RuntimeInstance,
+) -> NanobotGatewayClient:
+    client = _nanobot_gateway_sessions.get(public_session_key)
+    if client is not None and client.is_open:
+        return client
+    if client is not None:
+        await client.disconnect()
+        _nanobot_gateway_sessions.pop(public_session_key, None)
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "nanobot gateway websocket session is not connected. "
+            "Create a new nanobot session from the Chat page."
+        ),
+    )
 
 
 async def _connect_gateway_with_retries() -> GatewayClient | HermesClient:
@@ -861,6 +1295,9 @@ async def _get_or_create_client(session_key: str) -> GatewayClient | HermesClien
 class StartSessionResponse(BaseModel):
     session_key: str
     status: str = "connected"
+    instance_id: str
+    platform: str
+    instance: dict | None = None
 
 
 class ModelReadinessResponse(BaseModel):
@@ -871,6 +1308,7 @@ class ModelReadinessResponse(BaseModel):
 
 
 class StartSessionRequest(BaseModel):
+    instance_id: str | None = None
     label: str | None = None
     model_override: str | None = None
     provider_override: str | None = None
@@ -1051,12 +1489,27 @@ async def _persist_hermes_chat_turn(
 @router.post("/start-session", response_model=StartSessionResponse)
 async def start_session(request: StartSessionRequest | None = None):
     """
-    Create a new gateway chat session.
+    Create a new runtime chat session.
     Returns a session_key for subsequent send-message calls.
     """
     body = request or StartSessionRequest()
-    session_key = f"chat-{uuid.uuid4().hex[:12]}"
-    client = await _get_or_create_client(session_key)
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime(
+        instance_id=body.instance_id,
+    )
+    if instance.platform == "nanobot":
+        client = await _connect_nanobot_gateway(instance)
+        local_session_key = client.chat_id or local_session_key
+        public_session_key = encode_chat_session_key(instance, local_session_key)
+        _nanobot_gateway_sessions[public_session_key] = client
+        return StartSessionResponse(
+            session_key=public_session_key,
+            status="connected",
+            instance_id=instance.instance_id,
+            platform=instance.platform,
+            instance=serialize_instance(instance),
+        )
+
+    client = await _get_or_create_client(public_session_key)
     initial_model = body.model_override
     if initial_model and body.provider_override and "/" not in initial_model:
         initial_model = f"{body.provider_override.rstrip('/')}/{initial_model.lstrip('/')}"
@@ -1064,7 +1517,7 @@ async def start_session(request: StartSessionRequest | None = None):
     if body.model_override or body.provider_override or body.label:
         try:
             await client.patch_session(
-                session_key,
+                local_session_key,
                 label=body.label,
                 model=initial_model,
                 provider_override=body.provider_override if not initial_model else None,
@@ -1076,22 +1529,22 @@ async def start_session(request: StartSessionRequest | None = None):
                 detail=f"Failed to initialize session model override: {exc}",
             ) from exc
     else:
-        await client.enable_verbose(session_key)
+        await client.enable_verbose(local_session_key)
 
     # Hermes: create the Session row eagerly so it appears in Agent Town right away
-    if settings.is_hermes:
+    if instance.platform == "hermes":
         model_provider = body.provider_override
         model_name = body.model_override
         if initial_model and "/" in initial_model:
             model_provider = initial_model.split("/", 1)[0]
             model_name = initial_model.split("/", 1)[1]
-        _hermes_session_model_info[session_key] = {
+        _hermes_session_model_info[public_session_key] = {
             "provider": model_provider or "hermes",
             "model": model_name or "hermes-agent",
         }
         try:
             await _persist_hermes_session(
-                session_key,
+                public_session_key,
                 None,
                 model_provider=model_provider or "hermes",
                 model_name=model_name or "hermes-agent",
@@ -1099,14 +1552,19 @@ async def start_session(request: StartSessionRequest | None = None):
         except Exception as exc:
             print(f"[hermes-persist] session create warning: {exc}")
 
-    return StartSessionResponse(session_key=session_key, status="connected")
+    return StartSessionResponse(
+        session_key=public_session_key,
+        status="connected",
+        instance_id=instance.instance_id,
+        platform=instance.platform,
+        instance=serialize_instance(instance),
+    )
 
 
 @router.post("/send-message", response_model=SendMessageResponse)
 async def send_message(request: SendMessageRequest):
     """
-    Send a message to the OpenClaw agent and wait for the full response.
-    Automatically reconnects if the session client was lost (e.g. server reload).
+    Send a message to the selected runtime and wait for the full response.
     """
     blocked_response = _risk_rule_message_precheck(request.message)
     if blocked_response:
@@ -1118,21 +1576,33 @@ async def send_message(request: SendMessageRequest):
             stop_reason="blocked_by_persistent_rule",
         )
 
-    client = await _get_or_create_client(request.session_key)
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime(
+        session_key=request.session_key,
+    )
 
     try:
-        result = await client.send_chat(
-            session_key=request.session_key,
-            message=request.message,
-            timeout_ms=120_000,
-        )
+        if instance.platform == "nanobot":
+            if request.images:
+                raise HTTPException(
+                    status_code=400,
+                    detail="nanobot gateway websocket channel currently supports text messages only",
+                )
+            client = await _get_nanobot_gateway_session(public_session_key, instance)
+            result = await client.send_chat(request.message, timeout_s=120.0)
+        else:
+            client = await _get_or_create_client(public_session_key)
+            result = await client.send_chat(
+                session_key=local_session_key,
+                message=request.message,
+                timeout_ms=120_000,
+            )
 
         # Hermes: persist turn directly to DB
-        if settings.is_hermes and result.get("state") == "final":
+        if instance.platform == "hermes" and result.get("state") == "final":
             hermes_sid = client.last_session_id if isinstance(client, HermesClient) else None
             try:
                 await _persist_hermes_chat_turn(
-                    request.session_key,
+                    public_session_key,
                     hermes_sid,
                     request.message,
                     result.get("response_text", ""),
@@ -1155,6 +1625,8 @@ async def send_message(request: SendMessageRequest):
             state="timeout",
             response_text="[Timeout] Agent did not respond within 120 seconds.",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         return SendMessageResponse(
             run_id="",
@@ -1188,7 +1660,9 @@ async def send_message_stream(request: SendMessageRequest):
             },
         )
 
-    client = await _get_or_create_client(request.session_key)
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime(
+        session_key=request.session_key,
+    )
 
     # Convert image attachments to OpenClaw's format
     attachments = None
@@ -1205,25 +1679,39 @@ async def send_message_stream(request: SendMessageRequest):
 
     async def event_generator():
         final_text = ""
+        client: GatewayClient | HermesClient | NanobotGatewayClient | None = None
         try:
-            async for chunk in client.stream_chat(
-                session_key=request.session_key,
-                message=request.message,
-                attachments=attachments,
-            ):
-                if chunk["type"] == "final":
-                    final_text = chunk.get("text", "")
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            if instance.platform == "nanobot":
+                if request.images:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="nanobot gateway websocket channel currently supports text messages only",
+                )
+                client = await _get_nanobot_gateway_session(public_session_key, instance)
+                async for chunk in client.stream_chat(request.message, timeout_s=120.0):
+                    if isinstance(chunk, dict) and chunk.get("text"):
+                        final_text = str(chunk["text"])
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            else:
+                client = await _get_or_create_client(public_session_key)
+                async for chunk in client.stream_chat(
+                    session_key=local_session_key,
+                    message=request.message,
+                    attachments=attachments,
+                ):
+                    if isinstance(chunk, dict) and chunk.get("text"):
+                        final_text = str(chunk["text"])
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
             return
 
         # Hermes: persist turn directly to DB after streaming completes
-        if settings.is_hermes and final_text:
+        if instance.platform == "hermes" and final_text:
             hermes_sid = client.last_session_id if isinstance(client, HermesClient) else None
             try:
                 await _persist_hermes_chat_turn(
-                    request.session_key,
+                    public_session_key,
                     hermes_sid,
                     request.message,
                     final_text,
@@ -1233,7 +1721,11 @@ async def send_message_stream(request: SendMessageRequest):
 
         # After the final response, read tool calls from the JSONL file.
         try:
-            tool_events = _read_tool_calls_from_jsonl(request.session_key)
+            tool_events = (
+                _read_nanobot_tool_calls_from_jsonl(instance, local_session_key)
+                if instance.platform == "nanobot"
+                else _read_tool_calls_from_jsonl(local_session_key)
+            )
             for evt in tool_events:
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
         except Exception:
@@ -1260,17 +1752,9 @@ async def transcribe_clean(request: TranscribeCleanRequest):
     We do NOT store any user message into the main chat session; instead, this
     uses a temporary OpenClaw gateway session for post-processing only.
     """
-    session_key = f"voice-{uuid.uuid4().hex[:12]}"
-    client = await _get_or_create_client(session_key)
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime()
 
     try:
-        # Keep same model/thinking style if the client requested it.
-        await client.patch_session(
-            session_key,
-            model=request.model or None,
-            thinking_level=request.thinking_level,
-        )
-
         prompt = (
             "You are a professional Speech-to-Text (STT) Post-Processor. Your goal is to rewrite raw, fragmented transcripts into clean, coherent, and natural text.\n\n"
             "### STRICT EDITING RULES:\n"
@@ -1286,21 +1770,36 @@ async def transcribe_clean(request: TranscribeCleanRequest):
             f"Raw Transcript:\n{request.text}"
         )
 
-        result = await client.send_chat(
-            session_key=session_key,
-            message=prompt,
-            timeout_ms=60_000,
-        )
+        if instance.platform == "nanobot":
+            result = await _send_nanobot_chat(
+                instance,
+                local_session_key=f"voice-{uuid.uuid4().hex[:12]}",
+                message=prompt,
+                timeout_s=60.0,
+            )
+        else:
+            client = await _get_or_create_client(public_session_key)
+            await client.patch_session(
+                local_session_key,
+                model=request.model or None,
+                thinking_level=request.thinking_level,
+            )
+            result = await client.send_chat(
+                session_key=local_session_key,
+                message=prompt,
+                timeout_ms=60_000,
+            )
 
         cleaned = (result.get("response_text") or "").strip()
         return TranscribeCleanResponse(raw_text=request.text, cleaned_text=cleaned)
     finally:
-        # Cleanup temporary session.
-        _gateway_sessions.pop(session_key, None)
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        if instance.platform == "openclaw":
+            client = _gateway_sessions.pop(public_session_key, None)
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
 
 @router.get("/history")
@@ -1309,26 +1808,41 @@ async def get_history(
     limit: int = 100,
 ):
     """
-    Load chat history for a session by reading OpenClaw's local .jsonl files.
-
-    NOTE: The chat.history WebSocket API only returns the active LLM context
-    window. For full persistent history we read the .jsonl log files directly:
-      ~/.openclaw/agents/main/sessions/<sessionId>.jsonl
+    Load chat history for a session by reading the runtime's local session files.
     """
-    messages = _read_history_from_jsonl(session_key, limit=limit)
-    return {"session_key": session_key, "messages": messages}
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime(session_key=session_key)
+    messages = (
+        _read_nanobot_history_from_jsonl(instance, local_session_key, limit=limit)
+        if instance.platform == "nanobot"
+        else _read_history_from_jsonl(local_session_key, limit=limit)
+    )
+    return {
+        "session_key": public_session_key,
+        "messages": messages,
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+    }
 
 
 @router.post("/close-session")
 async def close_session(session_key: str = Query(..., description="Session key to close")):
-    """Close an OpenClaw gateway chat session."""
-    client = _gateway_sessions.pop(session_key, None)
+    """Close a runtime chat session."""
+    instance, _, public_session_key = await _resolve_chat_runtime(session_key=session_key)
+    if instance.platform in {"openclaw", "hermes"}:
+        client = _gateway_sessions.pop(public_session_key, None)
+    else:
+        client = _nanobot_gateway_sessions.pop(public_session_key, None)
     if client:
         try:
             await client.disconnect()
         except Exception:
             pass
-    return {"status": "closed", "session_key": session_key}
+    return {
+        "status": "closed",
+        "session_key": public_session_key,
+        "instance_id": instance.instance_id,
+        "platform": instance.platform,
+    }
 
 
 # --------------- Session settings ---------------
@@ -1342,10 +1856,34 @@ class PatchSessionRequest(BaseModel):
 @router.post("/patch-session")
 async def patch_session(request: PatchSessionRequest):
     """Update session settings (model, thinking level) on the fly."""
-    client = await _get_or_create_client(request.session_key)
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime(
+        session_key=request.session_key,
+    )
+    if instance.platform == "nanobot":
+        configured_model = str(instance.meta.get("model") or "")
+        requested_model = str(request.model or "").strip()
+        if requested_model and configured_model and requested_model != configured_model:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"nanobot gateway currently uses a single fixed model '{configured_model}', "
+                    f"so switching to '{requested_model}' is not supported."
+                ),
+            )
+        return {
+            "status": "ok",
+            "result": {
+                "message": "nanobot gateway uses a fixed per-instance model; no session patch applied",
+                "session_key": public_session_key,
+                "instance_id": instance.instance_id,
+                "platform": instance.platform,
+            },
+        }
+
+    client = await _get_or_create_client(public_session_key)
     try:
         result = await client.patch_session(
-            request.session_key,
+            local_session_key,
             model=request.model,
             thinking_level=request.thinking_level,
         )
@@ -1385,7 +1923,9 @@ async def _build_available_models_from_hermes_api() -> dict:
 
 
 @router.get("/available-models")
-async def available_models():
+async def available_models(
+    instance_id: str | None = Query(None, description="Optional runtime instance override"),
+):
     """Return the saved model deck for Agent Valley.
 
     Priority:
@@ -1398,20 +1938,24 @@ async def available_models():
     because that list is for discovery/configuration, not for the "already
     configured models" deck in Agent Valley.
     """
+    instance = await resolve_instance(instance_id=instance_id, capability="model_list")
+    if instance.platform == "nanobot":
+        return await _nanobot_available_models(instance)
+
     from .system import _run_openclaw_json
 
     now = time.monotonic()
     expires_at = float(_available_models_cache.get("expires_at", 0.0) or 0.0)
     cached_payload = _available_models_cache.get("payload")
     if now < expires_at and isinstance(cached_payload, dict):
-        return cached_payload
+        return _decorate_models_payload(cached_payload, instance, supports_session_patch=True)
 
     async with _get_available_models_lock():
         now = time.monotonic()
         expires_at = float(_available_models_cache.get("expires_at", 0.0) or 0.0)
         cached_payload = _available_models_cache.get("payload")
         if now < expires_at and isinstance(cached_payload, dict):
-            return cached_payload
+            return _decorate_models_payload(cached_payload, instance, supports_session_patch=True)
 
         config_payload = _build_available_models_payload_from_config()
         if config_payload["models"]:
@@ -1419,16 +1963,16 @@ async def available_models():
             _available_models_cache["payload"] = config_payload
             _available_models_cache["last_success"] = config_payload
             _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
-            return config_payload
+            return _decorate_models_payload(config_payload, instance, supports_session_patch=True)
 
-        if settings.is_hermes:
+        if instance.platform == "hermes":
             hermes_payload = await _build_available_models_from_hermes_api()
             if hermes_payload["models"]:
                 print("[available-models] using live Hermes API model catalog")
                 _available_models_cache["payload"] = hermes_payload
                 _available_models_cache["last_success"] = hermes_payload
                 _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
-                return hermes_payload
+                return _decorate_models_payload(hermes_payload, instance, supports_session_patch=True)
         else:
             raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
             status_raw = await _run_openclaw_json(["models", "status"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT) if raw else None
@@ -1438,30 +1982,55 @@ async def available_models():
                 _available_models_cache["payload"] = payload
                 _available_models_cache["last_success"] = payload
                 _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
-                return payload
+                return _decorate_models_payload(payload, instance, supports_session_patch=True)
 
         last_success = _available_models_cache.get("last_success")
         if isinstance(last_success, dict) and last_success.get("models"):
             print("[available-models] using last known good model list (live source returned nothing)")
             _available_models_cache["payload"] = last_success
             _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
-            return last_success
+            return _decorate_models_payload(last_success, instance, supports_session_patch=True)
 
         print("[available-models] no models found from any source")
         empty_payload = {"models": [], "default_model": ""}
         _available_models_cache["payload"] = empty_payload
         _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
-        return empty_payload
+        return _decorate_models_payload(empty_payload, instance, supports_session_patch=True)
+
+    # Unreachable, but keeps mypy sane.
+    return _decorate_models_payload(
+        {"models": [], "default_model": ""},
+        instance,
+        supports_session_patch=True,
+    )
 
 
 @router.get("/model-readiness", response_model=ModelReadinessResponse)
 async def model_readiness(
     model_id: str = Query(..., description="Model in provider/model format"),
+    instance_id: str | None = Query(None, description="Optional runtime instance override"),
 ):
     """Check whether the running gateway currently accepts a model selection."""
     target_model_id = str(model_id or "").strip()
     if not target_model_id:
         raise HTTPException(status_code=400, detail="model_id is required")
+
+    instance = await resolve_instance(instance_id=instance_id, capability="model_list")
+    if instance.platform == "nanobot":
+        if instance.health_status != "healthy":
+            return ModelReadinessResponse(
+                model_id=target_model_id,
+                ready=False,
+                reason=f"nanobot gateway is {instance.health_status}",
+            )
+        payload = await _nanobot_available_models(instance)
+        matched, visible_model_id = _runtime_catalog_match(payload["models"], target_model_id)
+        return ModelReadinessResponse(
+            model_id=target_model_id,
+            ready=matched,
+            visible_model_id=visible_model_id,
+            reason=None if matched else "Model is not configured for the current nanobot gateway instance",
+        )
 
     client: GatewayClient | HermesClient | None = None
     try:
@@ -1473,7 +2042,7 @@ async def model_readiness(
         # reports "hermes-agent" regardless of the backend model the user
         # configured.  As long as the API server is reachable and exposes at
         # least one model, the gateway is ready to accept requests.
-        if settings.is_hermes and models:
+        if instance.platform == "hermes" and models:
             return ModelReadinessResponse(
                 model_id=target_model_id,
                 ready=True,

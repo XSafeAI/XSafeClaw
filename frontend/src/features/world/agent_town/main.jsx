@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import ReactDOM from 'react-dom/client';
+import { I18nProvider } from '../../../i18n';
 import App from './App';
 import './App.css';
 
@@ -31,7 +32,9 @@ class ErrorBoundary extends Component {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(
-  <ErrorBoundary>
-    <App />
-  </ErrorBoundary>
+  <I18nProvider>
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  </I18nProvider>
 );

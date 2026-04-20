@@ -30,12 +30,28 @@ class Event(Base, TimestampMixin):
 
     # Primary identification (same as triggering user message ID)
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, comment="Event ID (same as user_message_id)"
+        String(255),
+        primary_key=True,
+        comment="Internal namespaced event ID (same as user_message_id)",
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(32),
+        default="openclaw",
+        index=True,
+        comment="Runtime platform: openclaw / nanobot",
+    )
+
+    instance_id: Mapped[str] = mapped_column(
+        String(128),
+        default="openclaw-default",
+        index=True,
+        comment="Runtime instance ID",
     )
 
     # Session relationship
     session_id: Mapped[str] = mapped_column(
-        String(36),
+        String(255),
         ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -44,7 +60,7 @@ class Event(Base, TimestampMixin):
 
     # Triggering user message
     user_message_id: Mapped[str] = mapped_column(
-        String(36),
+        String(255),
         ForeignKey("messages.message_id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
@@ -111,6 +127,7 @@ class Event(Base, TimestampMixin):
 
     # Indexes
     __table_args__ = (
+        Index("ix_events_platform_instance", "platform", "instance_id"),
         Index("ix_events_session_started", "session_id", "started_at"),
         Index("ix_events_status", "status"),
     )

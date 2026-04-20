@@ -20,6 +20,10 @@ import { useI18n } from '../i18n';
 /* ============ Types ============ */
 interface SessionItem {
   session_id: string;
+  platform?: string;
+  instance_id?: string;
+  source_session_id?: string | null;
+  display_session_id?: string;
   first_seen_at: string;
   last_activity_at: string;
   cwd: string;
@@ -32,6 +36,8 @@ interface SessionItem {
 interface EventItem {
   id: string;
   session_id: string;
+  platform?: string;
+  instance_id?: string;
   user_message_id: string;
   started_at: string;
   completed_at: string | null;
@@ -137,6 +143,18 @@ function monitorEventStatusBadgeClass(status: string | undefined): string {
   if (key === 'pending') return 'bg-amber-500/15 text-amber-400';
   if (key === 'running') return 'bg-sky-500/15 text-sky-400';
   return 'bg-yellow-500/15 text-yellow-400';
+}
+
+/** Badge for agent source platform (openclaw / nanobot). */
+function PlatformBadge({ platform }: { platform: string }) {
+  const isNanobot = platform === 'nanobot';
+  return (
+    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+      isNanobot ? 'bg-cyan-500/15 text-cyan-400' : 'bg-blue-500/15 text-blue-400'
+    }`}>
+      {platform}
+    </span>
+  );
 }
 
 /** Determine which sessions are "active" based on their most-recent event time. */
@@ -299,6 +317,7 @@ function SkillsPanel() {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [unavailableReason, setUnavailableReason] = useState('');
   const [filter, setFilter] = useState<'all' | 'eligible' | 'unavailable' | 'disabled'>('all');
   const [search, setSearch] = useState('');
   const [toggling, setToggling] = useState<Set<string>>(new Set());
@@ -324,6 +343,7 @@ function SkillsPanel() {
     try {
       const res = await skillsAPI.list();
       const payload = res.data;
+      setUnavailableReason(payload.unavailable ? (payload.reason || 'Unavailable for the current runtime.') : '');
       if (payload.error) setError(payload.error);
       const merged = (payload.skills || []).map((s: any) => {
         const scan = s.scanStatus;
@@ -428,6 +448,11 @@ function SkillsPanel() {
 
   return (
     <div className="space-y-4">
+      {unavailableReason && (
+        <div className="px-4 py-3 bg-surface-1 border border-border rounded-lg text-[12px] text-text-muted">
+          {unavailableReason}
+        </div>
+      )}
       {error && (
         <div className="px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-[12px] text-red-400 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {error}
@@ -449,7 +474,7 @@ function SkillsPanel() {
         </div>
         <button
           onClick={scanAllSkills}
-          disabled={scanning}
+          disabled={scanning || !!unavailableReason}
           className="flex items-center gap-2 px-4 py-2 bg-accent/10 text-accent text-[12px] font-semibold rounded-lg hover:bg-accent/20 disabled:opacity-50 transition-all"
         >
           {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
@@ -595,6 +620,7 @@ function MemoryPanel() {
   const [files, setFiles] = useState<MemoryFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [unavailableReason, setUnavailableReason] = useState('');
   const [catFilter, setCatFilter] = useState<'all' | 'memory' | 'workspace'>('all');
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [expandedContent, setExpandedContent] = useState('');
@@ -606,6 +632,7 @@ function MemoryPanel() {
   const fetchFiles = useCallback(async () => {
     try {
       const res = await memoryAPI.list();
+      setUnavailableReason(res.data.unavailable ? (res.data.reason || 'Unavailable for the current runtime.') : '');
       const merged = (res.data.files || []).map((f: any) => {
         const scan = f.scan;
         if (scan && typeof scan === 'object') {
@@ -696,6 +723,11 @@ function MemoryPanel() {
 
   return (
     <div className="space-y-4">
+      {unavailableReason && (
+        <div className="px-4 py-3 bg-surface-1 border border-border rounded-lg text-[12px] text-text-muted">
+          {unavailableReason}
+        </div>
+      )}
       {error && (
         <div className="px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-lg text-[12px] text-red-400 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {error}
@@ -713,7 +745,7 @@ function MemoryPanel() {
           )}
           <div className="flex items-center gap-1.5 text-[12px] text-text-muted">{scanCounts.unscanned} {t.monitor.memory.pending}</div>
         </div>
-        <button onClick={scanAll} disabled={scanning}
+        <button onClick={scanAll} disabled={scanning || !!unavailableReason}
           className="flex items-center gap-2 px-4 py-2 bg-accent/10 text-accent text-[12px] font-semibold rounded-lg hover:bg-accent/20 disabled:opacity-50 transition-all">
           {scanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
           {scanning ? scanProgress : t.monitor.memory.scanAll}
@@ -1440,12 +1472,20 @@ export default function Monitor() {
                             style={{ width: LABEL_W, minHeight: 56 }}
                           >
                             <p className="text-[11px] font-mono truncate" style={{ color: c.text }}>
-                              {row.sessionId.slice(0, 14)}
+                              {(row.session?.display_session_id || row.session?.source_session_id || row.sessionId).slice(0, 14)}
                             </p>
                             <p className="text-[10px] text-text-muted mt-0.5">
                               {row.events.length} task{row.events.length !== 1 && 's'}
                               {row.session && ` · ${fmtTokens(row.session.total_tokens)}`}
                             </p>
+                            {row.session?.platform && (
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <PlatformBadge platform={row.session.platform} />
+                                {row.session.instance_id && (
+                                  <span className="text-[10px] text-text-muted">{row.session.instance_id}</span>
+                                )}
+                              </div>
+                            )}
                           </div>
 
                           {/* Bar area */}

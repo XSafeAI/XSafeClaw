@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from ...database import get_db
 from ...models import Event, Message, ToolCall
+from ..runtime_helpers import apply_runtime_filters
 
 router = APIRouter()
 
@@ -186,6 +187,8 @@ class EventResponse(BaseModel):
 
     id: str
     session_id: str
+    platform: str
+    instance_id: str
     user_message_id: str
     started_at: datetime
     completed_at: datetime | None
@@ -247,11 +250,13 @@ async def list_events(
     db: Annotated[AsyncSession, Depends(get_db)],
     session_id: str | None = Query(None, description="Filter by session ID"),
     status: str | None = Query(None, description="Filter by status"),
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(500, ge=1, le=5000, description="Max records to return"),
 ) -> EventListResponse:
     """List events with optional filters."""
-    query = select(Event)
+    query = apply_runtime_filters(select(Event), Event, platform=platform, instance_id=instance_id)
 
     if session_id:
         query = query.where(Event.session_id == session_id)
@@ -372,9 +377,11 @@ async def get_event(
 async def get_event_stats(
     db: Annotated[AsyncSession, Depends(get_db)],
     session_id: str | None = Query(None, description="Filter by session ID"),
+    platform: str | None = Query(None, description="Filter by runtime platform"),
+    instance_id: str | None = Query(None, description="Filter by runtime instance"),
 ) -> EventStatsResponse:
     """Get overall event statistics."""
-    query = select(Event)
+    query = apply_runtime_filters(select(Event), Event, platform=platform, instance_id=instance_id)
     if session_id:
         query = query.where(Event.session_id == session_id)
 

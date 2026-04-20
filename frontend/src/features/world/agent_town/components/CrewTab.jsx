@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CHAR_BASE, CHAR_NAMES } from '../config/constants';
+import { getAgentTownText } from '../i18n';
 
 const FILTER_META = [
   { id: 'working', label: 'WORKING' },
@@ -721,6 +722,12 @@ export default function CrewTab({
   onSelectAgent,
   modelPickerOpen,
   onToggleModelPicker,
+  runtimeInstances = [],
+  selectedRuntimeId = '',
+  selectedRuntime = null,
+  onChangeRuntime,
+  selectedRuntimeUnavailable = false,
+  runtimeUnavailableMessage = '',
   modelSearch,
   onChangeModelSearch,
   filteredModels,
@@ -750,6 +757,9 @@ export default function CrewTab({
   onRemoveImage,
   fileInputRef,
   onTaskDetailChange,
+  imagesDisabled = false,
+  imagesDisabledReason = '',
+  townText = getAgentTownText('en'),
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
   const chatEndRef = useRef(null);
@@ -861,25 +871,55 @@ export default function CrewTab({
     <div className="tc-crew-layout">
       <aside className="tc-crew-sidebar">
         <section className="tc-ornate-panel tc-sidebar-section tc-summon-panel tc-summon-panel-top">
-          <BannerHeader label="CREATE AGENT" tone="light" size="long" />
-          <div className="tc-panel-microcopy">Forge a new operative from the model deck.</div>
+          <BannerHeader label={townText.create.title} tone="light" size="long" />
+          <div className="tc-panel-microcopy">{townText.create.description}</div>
           <button type="button" className="tc-summon-toggle" onClick={onToggleModelPicker}>
-            <span>{modelPickerOpen ? 'Hide Model Deck' : 'Summon From Model Deck'}</span>
+            <span>{modelPickerOpen ? townText.create.hideModels : townText.create.showModels}</span>
             <span>{modelPickerOpen ? '▲' : '▼'}</span>
           </button>
 
           {modelPickerOpen ? (
             <div className="tc-model-drawer">
+              <div className="tc-runtime-picker">
+                <div className="tc-runtime-picker-head">
+                  <span>{townText.create.runtimeLabel}</span>
+                  <small>{selectedRuntime ? selectedRuntime.platform : townText.create.runtimeEmpty}</small>
+                </div>
+                <div className="tc-runtime-options">
+                  {runtimeInstances.length === 0 ? (
+                    <div className="tc-model-empty">{townText.create.runtimeEmpty}</div>
+                  ) : runtimeInstances.map((instance) => {
+                    const selected = instance.instance_id === selectedRuntimeId;
+                    const unhealthy = instance.platform === 'nanobot' && instance.health_status !== 'healthy';
+                    return (
+                      <button
+                        key={instance.instance_id}
+                        type="button"
+                        className={`tc-runtime-option ${selected ? 'tc-runtime-option-active' : ''} ${unhealthy ? 'tc-runtime-option-offline' : ''}`}
+                        onClick={() => onChangeRuntime?.(instance.instance_id)}
+                        aria-pressed={selected}
+                      >
+                        <span className="tc-runtime-option-name">{instance.display_name || instance.instance_id}</span>
+                        <span className="tc-runtime-option-meta">
+                          {instance.platform}
+                          {unhealthy ? ` · ${townText.create.runtimeOffline}` : ''}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="tc-runtime-hint">{townText.create.runtimeHint}</div>
+              </div>
               <input
                 type="text"
                 className="tc-model-search"
                 value={modelSearch}
                 onChange={(e) => onChangeModelSearch(e.target.value)}
-                placeholder="Search model..."
+                placeholder={townText.create.searchPlaceholder}
               />
               <div className="tc-model-list">
                 {filteredModels.length === 0 ? (
-                  <div className="tc-model-empty">No configured model matched this search.</div>
+                  <div className="tc-model-empty">{townText.create.modelEmpty}</div>
                 ) : (
                   filteredModels.map((model) => {
                     const isSelected = pendingModelId === model.id;
@@ -905,10 +945,10 @@ export default function CrewTab({
                             {model.isNew || model.isLastUsed ? (
                               <span className="tc-model-option-flags">
                                 {model.isNew ? (
-                                  <span className="tc-model-option-flag tc-model-option-flag-new">NEW</span>
+                                  <span className="tc-model-option-flag tc-model-option-flag-new">{townText.create.newFlag}</span>
                                 ) : null}
                                 {model.isLastUsed ? (
-                                  <span className="tc-model-option-flag tc-model-option-flag-last-used">LAST USED</span>
+                                  <span className="tc-model-option-flag tc-model-option-flag-last-used">{townText.create.lastUsedFlag}</span>
                                 ) : null}
                               </span>
                             ) : null}
@@ -931,7 +971,7 @@ export default function CrewTab({
                         {isSelected ? (
                           <div className="tc-model-option-expand">
                             <div className="tc-model-option-expand-row">
-                              <span className="tc-model-option-expand-label">Provider</span>
+                              <span className="tc-model-option-expand-label">{townText.create.provider}</span>
                               <span className="tc-model-option-expand-value">{model.providerLabel || model.provider}</span>
                             </div>
                           </div>
@@ -947,7 +987,7 @@ export default function CrewTab({
                   className="tc-summon-secondary"
                   onClick={onOpenModelSetup}
                 >
-                  Configure New Model
+                  {townText.create.configureNewModel}
                 </button>
                 <button
                   type="button"
@@ -957,20 +997,36 @@ export default function CrewTab({
                 >
                   {createAgentLabel}
                 </button>
-                {createError ? <div className="tc-inline-error">{createError}</div> : null}
+                {selectedRuntimeUnavailable && runtimeUnavailableMessage ? (
+                  <div className="tc-inline-error">{runtimeUnavailableMessage}</div>
+                ) : null}
+                {createError ? (
+                  <div className="tc-inline-error">
+                    <span className="tc-inline-error-text">{createError}</span>
+                    {(createError.includes('not installed') || createError.includes('未安装')) && (
+                      <button
+                        type="button"
+                        className="tc-inline-error-link"
+                        onClick={() => { window.location.href = '/setup'; }}
+                      >
+                        前往安装
+                      </button>
+                    )}
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
         </section>
 
         <section className="tc-ornate-panel tc-sidebar-section tc-status-panel">
-          <BannerHeader label="STATUS" />
-          <div className="tc-panel-microcopy">Signal routing and roster visibility.</div>
+          <BannerHeader label={townText.sidebar.statusTitle} />
+          <div className="tc-panel-microcopy">{townText.sidebar.statusDescription}</div>
           <div className="tc-status-filter-col">
             {FILTER_META.map((item) => (
               <StatusFilterOption
                 key={item.id}
-                label={item.label}
+                label={townText.filters[item.id] || item.label}
                 count={countsByFilter[item.id] || 0}
                 selected={filter === item.id}
                 onClick={() => onFilterChange(item.id)}
@@ -979,11 +1035,11 @@ export default function CrewTab({
           </div>
         </section>
         <section className="tc-ornate-panel tc-sidebar-section tc-roster-panel">
-          <BannerHeader label="ROSTER" />
-          <div className="tc-panel-microcopy">Select one operative to expand details.</div>
+          <BannerHeader label={townText.sidebar.rosterTitle} />
+          <div className="tc-panel-microcopy">{townText.sidebar.rosterDescription}</div>
           <div className="tc-roster-list">
             {agents.length === 0 ? (
-              <div className="tc-empty">No agent matched this status.</div>
+              <div className="tc-empty">{townText.sidebar.rosterEmpty}</div>
             ) : (
               agents.map((agent) => (
                 <RosterCard
@@ -1020,7 +1076,7 @@ export default function CrewTab({
               </div>
 
               <div className="tc-stage-info-panel">
-                <div className="tc-stage-overline">TACTICAL PROFILE</div>
+                <div className="tc-stage-overline">{townText.stage.tacticalProfile}</div>
                 <div className="tc-stage-info-head">
                   <div>
                     <div className="tc-stage-agent-name-row">
@@ -1031,50 +1087,50 @@ export default function CrewTab({
                       <button
                         type="button"
                         className="tc-crew-delete-btn-inline"
-                        onClick={() => { if (window.confirm('Delete this agent and its session?')) onDeleteAgent?.(currentAgent); }}
+                        onClick={() => { if (window.confirm(townText.stage.deleteConfirm)) onDeleteAgent?.(currentAgent); }}
                       >
-                        Delete Agent
+                        {townText.stage.deleteAgent}
                       </button>
                     </div>
                     <div className="tc-stage-identity-inline tc-stage-identity-inline-top">
                       <div className="tc-stage-identity-chip">
-                        <span className="tc-stage-identity-label">SESSION ID</span>
+                        <span className="tc-stage-identity-label">{townText.stage.sessionId}</span>
                         <span className="tc-stage-identity-value tc-stage-identity-value-mono" title={sessionIdValue}>{sessionIdValue}</span>
                         <button
                           type="button"
                           className="tc-stage-copy-btn"
                           onClick={() => handleCopyField('session-id', sessionIdValue)}
                         >
-                          {copiedField === 'session-id' ? 'COPIED' : 'COPY'}
+                          {copiedField === 'session-id' ? townText.stage.copied : townText.stage.copy}
                         </button>
                       </div>
                       <div className="tc-stage-identity-chip">
-                        <span className="tc-stage-identity-label">SESSION KEY</span>
+                        <span className="tc-stage-identity-label">{townText.stage.sessionKey}</span>
                         <span className="tc-stage-identity-value tc-stage-identity-value-mono" title={sessionKeyValue}>{sessionKeyValue}</span>
                         <button
                           type="button"
                           className="tc-stage-copy-btn"
                           onClick={() => handleCopyField('session-key', sessionKeyValue)}
                         >
-                          {copiedField === 'session-key' ? 'COPIED' : 'COPY'}
+                          {copiedField === 'session-key' ? townText.stage.copied : townText.stage.copy}
                         </button>
                       </div>
                     </div>
                     <div className="tc-stage-meta-strip tc-stage-meta-strip-top">
                       <div className="tc-stage-meta-pill">
-                        <span className="tc-stage-meta-pill-label">Provider</span>
+                        <span className="tc-stage-meta-pill-label">{townText.stage.provider}</span>
                         <span className="tc-stage-meta-pill-value">{currentAgent.provider || 'unknown'}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
-                        <span className="tc-stage-meta-pill-label">Model</span>
+                        <span className="tc-stage-meta-pill-label">{townText.stage.model}</span>
                         <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.model || 'model pending'}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
-                        <span className="tc-stage-meta-pill-label">Channel</span>
+                        <span className="tc-stage-meta-pill-label">{townText.stage.channel}</span>
                         <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.channel || 'default'}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
-                        <span className="tc-stage-meta-pill-label">Tokens</span>
+                        <span className="tc-stage-meta-pill-label">{townText.stage.tokens}</span>
                         <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{fmtStageTokens(tokensByAgent[currentAgent.id])}</span>
                       </div>
                     </div>
@@ -1082,11 +1138,11 @@ export default function CrewTab({
                 </div>
 
                 <div className="tc-stage-summary-grid">
-                  <SummaryTile label="Running" value={currentSummary.running} tone="tc-summary-live" />
-                  <SummaryTile label="Pending" value={currentSummary.pending} tone="tc-summary-warn" />
-                  <SummaryTile label="Completed" value={currentSummary.completed} tone="tc-summary-good" />
-                  <SummaryTile label="Failed" value={currentSummary.failed} tone="tc-summary-failed" />
-                  <SummaryTile label="Error" value={currentSummary.error} tone="tc-summary-error" />
+                  <SummaryTile label={townText.stage.running} value={currentSummary.running} tone="tc-summary-live" />
+                  <SummaryTile label={townText.stage.pending} value={currentSummary.pending} tone="tc-summary-warn" />
+                  <SummaryTile label={townText.stage.completed} value={currentSummary.completed} tone="tc-summary-good" />
+                  <SummaryTile label={townText.stage.failed} value={currentSummary.failed} tone="tc-summary-failed" />
+                  <SummaryTile label={townText.stage.error} value={currentSummary.error} tone="tc-summary-error" />
                 </div>
 
                 <SessionHeatCard
@@ -1100,11 +1156,11 @@ export default function CrewTab({
 
             <section className="tc-stage-bottom">
               <div className="tc-ornate-panel tc-ledger-panel">
-                <BannerHeader label="TASK LEDGER" tone="light" size="long" />
-                <div className="tc-panel-microcopy">Recent tasks from dashboard events (same source as Monitor).</div>
+                <BannerHeader label={townText.stage.taskLedger} tone="light" size="long" />
+                <div className="tc-panel-microcopy">{townText.stage.taskLedgerDescription}</div>
                 <div className="tc-ledger-list">
                   {currentEvents.length === 0 ? (
-                    <div className="tc-empty">This agent has no recorded task yet.</div>
+                    <div className="tc-empty">{townText.stage.noTask}</div>
                   ) : (
                     currentEvents.map((event) => {
                       const statusMeta = taskStatusMeta[event.status] || taskStatusMeta.running;
@@ -1135,15 +1191,15 @@ export default function CrewTab({
               <section className="console-dialog-shell">
                 <div className="console-dialog-frame">
                   <div className="console-dialog-head">
-                    <div className="console-dialog-title">CONVERSATION</div>
-                    <div className="console-dialog-status">{sending ? 'TRANSMITTING' : loadingHistory ? 'SYNCING' : 'READY'}</div>
+                    <div className="console-dialog-title">{townText.stage.conversation}</div>
+                    <div className="console-dialog-status">{sending ? townText.stage.transmitting : loadingHistory ? townText.stage.syncing : townText.stage.ready}</div>
                   </div>
 
                   <div className="console-dialog-log">
                     {loadingHistory ? (
-                      <div className="console-dialog-empty">Syncing session log...</div>
+                      <div className="console-dialog-empty">{townText.stage.syncingLog}</div>
                     ) : conversationMessages.length === 0 ? (
-                      <div className="console-dialog-empty">No session messages yet.</div>
+                      <div className="console-dialog-empty">{townText.stage.noMessages}</div>
                     ) : (
                       conversationMessages.map((msg) => (
                         <ChatBubble key={msg.id} msg={msg} helpers={helpers} />
@@ -1197,7 +1253,7 @@ export default function CrewTab({
                               type="button"
                               className="console-dialog-img-remove"
                               onClick={() => onRemoveImage(img.id)}
-                              title="Remove image"
+                              title={townText.stage.removeImage}
                             >×</button>
                           </div>
                         ))}
@@ -1210,14 +1266,14 @@ export default function CrewTab({
                         accept="image/*"
                         multiple
                         style={{ display: 'none' }}
-                        onChange={(e) => { if (e.target.files) onAddImages(e.target.files); e.target.value = ''; }}
+                        onChange={(e) => { if (e.target.files && !imagesDisabled) onAddImages(e.target.files); e.target.value = ''; }}
                       />
                       <button
                         type="button"
                         className="console-dialog-img-btn"
                         onClick={() => fileInputRef.current?.click()}
-                        disabled={!helpers.getAgentSessionKey(currentAgent) || pendingImages.length >= 8}
-                        title="Attach image"
+                        disabled={imagesDisabled || !helpers.getAgentSessionKey(currentAgent) || pendingImages.length >= 8}
+                        title={imagesDisabled ? (imagesDisabledReason || townText.stage.nanobotTextOnly) : townText.stage.attachImage}
                       >
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                           <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
@@ -1243,6 +1299,7 @@ export default function CrewTab({
                         onPaste={(e) => {
                           const items = e.clipboardData?.items;
                           if (!items) return;
+                          if (imagesDisabled) return;
                           const imageFiles = [];
                           for (let i = 0; i < items.length; i++) {
                             if (items[i].type.startsWith('image/')) {
@@ -1255,7 +1312,7 @@ export default function CrewTab({
                             onAddImages(imageFiles);
                           }
                         }}
-                        placeholder="Reply in this session..."
+                        placeholder={imagesDisabled ? townText.stage.replyTextOnlyPlaceholder : townText.stage.replyPlaceholder}
                         disabled={!helpers.getAgentSessionKey(currentAgent)}
                       />
                       <button
@@ -1263,8 +1320,8 @@ export default function CrewTab({
                         className={`console-dialog-send ${sending ? 'console-dialog-send-stop' : ''}`}
                         onClick={sending ? onStopTask : onSendTask}
                         disabled={sending ? false : !helpers.getAgentSessionKey(currentAgent) || (!currentInput.trim() && pendingImages.length === 0)}
-                        aria-label={sending ? 'Stop current response' : 'Send message'}
-                        title={sending ? 'Stop current response' : 'Send message'}
+                        aria-label={sending ? townText.stage.stopResponse : townText.stage.sendMessage}
+                        title={sending ? townText.stage.stopResponse : townText.stage.sendMessage}
                       >
                         {sending ? (
                           <svg className="console-dialog-send-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -1284,7 +1341,7 @@ export default function CrewTab({
             </section>
           </>
         ) : (
-          <div className="tc-empty tc-stage-empty">Select or summon an agent to open the command console.</div>
+          <div className="tc-empty tc-stage-empty">{townText.stage.selectAgent}</div>
         )}
       </section>
 

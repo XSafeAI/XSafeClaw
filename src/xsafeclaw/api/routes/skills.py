@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ...config import settings
 from ...services import skill_scan_service
+from ..runtime_helpers import get_default_instance
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,11 @@ else:
 # ---------------------------------------------------------------------------
 
 def _build_env() -> dict:
-    """Build env dict with nvm Node paths."""
+    """Build env dict with nvm Node paths (cross-platform)."""
     env = {**os.environ}
+    path_sep = os.pathsep
+
+    # nvm-sh (Linux/macOS/WSL): ~/.nvm/versions/node/v22.x.x/bin
     nvm_versions = Path.home() / ".nvm" / "versions" / "node"
     if nvm_versions.exists():
         version_dirs = sorted(
@@ -45,21 +49,72 @@ def _build_env() -> dict:
             latest_bin = str(version_dirs[-1] / "bin")
             current_path = env.get("PATH", "")
             if latest_bin not in current_path:
-                env["PATH"] = latest_bin + ":" + current_path
+                env["PATH"] = latest_bin + path_sep + current_path
+
+    # nvm-windows: %NVM_HOME% symlinks to current Node, versions under %NVM_HOME%\..\versions\node
+    nvm_home = os.environ.get("NVM_HOME") or os.environ.get("NVM_SYMLINK")
+    if nvm_home:
+        nvm_home_path = Path(nvm_home)
+        # nvm-windows stores versions under the parent of NVM_HOME: e.g. C:\ProgramData\nvm
+        nvm_windows_versions = nvm_home_path.parent / "versions" / "node"
+        if nvm_windows_versions.exists():
+            v22_dirs = sorted(
+                [d for d in nvm_windows_versions.iterdir() if d.is_dir() and d.name.startswith("v22")],
+                reverse=True,
+            )
+            if v22_dirs:
+                # On Windows nvm-windows, Node.exe lives directly in the version dir (no /bin subfolder)
+                v22_bin = str(v22_dirs[0])
+                current_path = env.get("PATH", "")
+                if v22_bin not in current_path:
+                    env["PATH"] = v22_bin + path_sep + current_path
+
     return env
 
 
 def _find_openclaw() -> str | None:
-    """Find the openclaw binary."""
+    """Find the openclaw binary (cross-platform)."""
     found = shutil.which("openclaw")
     if found:
         return found
+
+    # nvm-sh (Linux/macOS/WSL)
     nvm_versions = Path.home() / ".nvm" / "versions" / "node"
     if nvm_versions.exists():
         for vdir in sorted(nvm_versions.iterdir(), reverse=True):
             candidate = vdir / "bin" / "openclaw"
-            if candidate.is_file() and os.access(candidate, os.X_OK):
+            if candidate.is_file():
+                if os.name != "nt" and not os.access(candidate, os.X_OK):
+                    continue
                 return str(candidate)
+
+    # nvm-windows: %NVM_HOME% symlinks to current Node, versions under %NVM_HOME%\..\versions\node
+    nvm_home = os.environ.get("NVM_HOME") or os.environ.get("NVM_SYMLINK")
+    if nvm_home:
+        nvm_home_path = Path(nvm_home)
+        nvm_windows_versions = nvm_home_path.parent / "versions" / "node"
+        if nvm_windows_versions.exists():
+            for vdir in sorted(nvm_windows_versions.iterdir(), reverse=True):
+                # On Windows nvm-windows, openclaw lives directly in the version dir (no /bin subfolder)
+                for suffix in ("", ".cmd", ".bat", ".exe"):
+                    candidate = vdir / f"openclaw{suffix}"
+                    if candidate.is_file():
+                        return str(candidate)
+
+    # Also search in Python env Scripts/bin dirs
+    import sys as _sys
+    prefixes = [Path(_sys.prefix), Path(_sys.executable).resolve().parent]
+    for prefix in prefixes:
+        if os.name == "nt":
+            candidates = [prefix / "Scripts", prefix]
+        else:
+            candidates = [prefix / "bin", prefix]
+        for base in candidates:
+            for suffix in (".cmd", ".bat", ".exe", "") if os.name == "nt" else ("",):
+                candidate = base / f"openclaw{suffix}"
+                if candidate.is_file():
+                    return str(candidate)
+
     return None
 
 
@@ -232,6 +287,16 @@ class ScanOneRequest(BaseModel):
 @router.get("/list")
 async def list_skills():
     """List skills/tools via agent CLI and enrich with config / scan data."""
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform == "nanobot":
+        return {
+            "skills": [],
+            "unavailable": True,
+            "reason": "Skill management is currently only available for OpenClaw or Hermes runtimes.",
+        }
     agent_bin = _find_agent_binary()
     if not agent_bin:
         platform_name = "hermes" if settings.is_hermes else "openclaw"
@@ -287,12 +352,22 @@ async def list_skills():
                     scan_entry = {**scan_entry, "status": "outdated"}
             skill["scanStatus"] = scan_entry
 
-    return {"skills": skills_list}
+    return {"skills": skills_list, "unavailable": False}
 
 
 @router.get("/check")
 async def check_skills():
     """Check skill/tool eligibility via agent CLI."""
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform == "nanobot":
+        return {
+            "checks": [],
+            "unavailable": True,
+            "reason": "Skill checks are currently only available for OpenClaw or Hermes runtimes.",
+        }
     agent_bin = _find_agent_binary()
     if not agent_bin:
         platform_name = "hermes" if settings.is_hermes else "openclaw"
@@ -320,6 +395,16 @@ async def check_skills():
 @router.post("/scan-all")
 async def scan_all_skills(body: ScanAllRequest):
     """Trigger security scan on all (or selected) skills."""
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "results": [],
+            "unavailable": True,
+            "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
+        }
     skill_paths = _build_skill_paths()
     if body.keys:
         skill_paths = {k: v for k, v in skill_paths.items() if k in body.keys}
@@ -339,7 +424,17 @@ async def scan_all_skills(body: ScanAllRequest):
 @router.get("/scan-status")
 async def scan_status():
     """Return cached scan status for all skills."""
-    return {"results": skill_scan_service.get_all_cached()}
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    if instance and instance.platform != "openclaw":
+        return {
+            "results": {},
+            "unavailable": True,
+            "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
+        }
+    return {"results": skill_scan_service.get_all_cached(), "unavailable": False}
 
 
 @router.post("/{skill_key}/update")

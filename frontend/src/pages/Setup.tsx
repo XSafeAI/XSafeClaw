@@ -1,29 +1,25 @@
 /**
- * Setup page — detect and install an agent framework (OpenClaw or Hermes).
- * If no framework is found, the user chooses which one to install.
- * - OpenClaw: auto-installed via npm (Node.js bootstrapped if needed).
- * - Hermes: manual install guide (pip install).
- * After installation completes, redirects to /configure for onboard wizard.
+ * Setup page — detect and install OpenClaw CLI and/or Nanobot CLI.
+ * If at least one platform is installed, user can skip to the main app.
+ * After installation completes, redirects to the platform-specific configure wizard.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  CheckCircle, Download, Loader2, XCircle, ChevronRight, AlertTriangle, Terminal,
-  ArrowDownToLine, Box, Code2,
+  CheckCircle, Download, Loader2, XCircle, ChevronRight, Terminal,
+  ArrowDownToLine, Zap, Bot, SkipForward, Code2,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
 
-type Stage =
-  | 'checking'
-  | 'not_installed'
-  | 'hermes_guide'
-  | 'hermes_verifying'
-  | 'downloading_node'
-  | 'installing'
-  | 'installing_hermes'
-  | 'install_failed'
-  | 'install_hermes_failed';
+type Stage = 'checking' | 'selecting' | 'downloading_node' | 'installing_openclaw' | 'installing_nanobot' | 'installing_hermes' | 'install_failed' | 'install_hermes_failed';
+type Platform = 'openclaw' | 'nanobot' | 'hermes';
+
+interface PlatformInfo {
+  installed: boolean | null;
+  version?: string;
+  configured?: boolean;
+}
 
 interface LogLine { id: number; text: string; kind: 'output' | 'info' | 'success' | 'error'; }
 let _lid = 0;
@@ -88,13 +84,100 @@ interface NodeStatus {
   progressText?: string;
 }
 
+interface SetupCardProps {
+  platform: Platform;
+  info: PlatformInfo;
+  installing: boolean;
+  onInstall: () => void;
+  t: any;
+}
+
+function SetupCard({ platform, info, installing, onInstall, t }: SetupCardProps) {
+  const isOpenClaw = platform === 'openclaw';
+  const isHermes = platform === 'hermes';
+  const name = isOpenClaw ? 'OpenClaw' : isHermes ? 'Hermes Agent' : 'Nanobot';
+  const Icon = isOpenClaw ? Zap : isHermes ? Code2 : Bot;
+  const isInstalled = info.installed === true;
+  const isUnknown = info.installed === null;
+  const accentColor = isOpenClaw ? 'border-blue-500/30 bg-blue-500/5' : isHermes ? 'border-violet-500/30 bg-violet-500/5' : 'border-cyan-500/30 bg-cyan-500/5';
+  const iconBg = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : 'bg-cyan-500/15 text-cyan-400';
+  const badgeInstalled = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : 'bg-cyan-500/15 text-cyan-400';
+  const badgeNotInstalled = 'bg-surface-2 text-text-muted';
+
+  return (
+    <div className={`border rounded-2xl p-6 transition-all ${isInstalled ? 'border-emerald-500/30 bg-emerald-500/5' : accentColor}`}>
+      <div className="flex items-start gap-4">
+        <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${isInstalled ? 'bg-emerald-500/15' : iconBg}`}>
+          {isInstalled ? (
+            <CheckCircle className="w-6 h-6 text-emerald-400" />
+          ) : installing ? (
+            <Loader2 className="w-6 h-6 text-text-muted animate-spin" />
+          ) : isUnknown ? (
+            <XCircle className="w-6 h-6 text-text-muted" />
+          ) : (
+            <Icon className="w-6 h-6" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <h3 className="text-base font-bold text-text-primary">{name}</h3>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase ${isInstalled ? badgeInstalled : badgeNotInstalled}`}>
+              {isInstalled ? (info.configured ? 'ready' : 'installed') : isUnknown ? 'unknown' : 'not installed'}
+            </span>
+          </div>
+          <p className="text-[12px] text-text-muted leading-relaxed">
+            {isOpenClaw
+              ? t.setup.openclawDesc
+              : isHermes
+                ? (t.setup as any).hermesDesc
+                : t.setup.nanobotDesc}
+          </p>
+          {isInstalled && info.version && (
+            <p className="text-[11px] text-text-muted mt-1 font-mono">
+              v{info.version}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {info.installed === false && !installing && (
+        <button
+          onClick={onInstall}
+          className={`w-full mt-4 flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-[13px] transition-all shadow ${
+            isOpenClaw
+              ? 'bg-blue-500 hover:bg-blue-600 text-white shadow-blue-500/25'
+              : isHermes
+                ? 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-600/25'
+                : 'bg-cyan-500 hover:bg-cyan-600 text-white shadow-cyan-500/25'
+          }`}
+        >
+          <Download className="w-4 h-4" />
+          {isOpenClaw ? t.setup.installOpenClaw : isHermes ? ((t.setup as any).hermesGuideTitle || 'Install Hermes Agent') : t.setup.installNanobot}
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      )}
+
+      {installing && (
+        <div className="mt-4 flex items-center gap-2 text-[12px] text-text-muted">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          {isOpenClaw ? t.setup.installing : isHermes ? ((t.setup as any).hermesInstalling || 'Installing Hermes Agent...') : t.setup.nanobotInstalling}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Setup() {
   const navigate = useNavigate();
   const { t } = useI18n();
   const [stage, setStage] = useState<Stage>('checking');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
-  const [hermesError, setHermesError] = useState('');
+  const [openclawInfo, setOpenclawInfo] = useState<PlatformInfo>({ installed: null });
+  const [nanobotInfo, setNanobotInfo] = useState<PlatformInfo>({ installed: null, configured: false });
+  const [hermesInfo, setHermesInfo] = useState<PlatformInfo>({ installed: null, configured: false });
+  const [installingPlatform, setInstallingPlatform] = useState<Platform | null>(null);
+  const [detectionError, setDetectionError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
 
   const addLog = (text: string, kind: LogLine['kind'] = 'output') => {
@@ -102,24 +185,50 @@ export default function Setup() {
     setLogs(prev => [...prev, { id: ++_lid, text, kind }]);
   };
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await systemAPI.status();
-        const d = res.data as any;
-        if (d.openclaw_installed || d.hermes_installed) {
-          navigate('/configure', { replace: true });
-        } else {
-          setStage('not_installed');
-        }
-      } catch {
-        setStage('not_installed');
-      }
-    })();
-  }, [navigate]);
+  const detectInstallStatus = useCallback(async () => {
+    setStage('checking');
+    setDetectionError('');
+    try {
+      const res = await systemAPI.installStatus();
+      const d = res.data as any;
+      const openclawOk = Boolean(d.openclaw_installed);
+      const nanobotOk = Boolean(d.nanobot_installed);
+      const hermesOk = Boolean(d.hermes_installed);
 
+      setOpenclawInfo({
+        installed: openclawOk,
+        version: d.openclaw_version || undefined,
+        configured: d.config_exists || false,
+      });
+      setNanobotInfo({
+        installed: nanobotOk,
+        version: d.nanobot_version || undefined,
+        configured: nanobotOk && !Boolean(d.requires_nanobot_configure),
+      });
+      setHermesInfo({
+        installed: hermesOk,
+        version: d.hermes_version || undefined,
+        configured: hermesOk && Boolean(d.config_exists),
+      });
+    } catch {
+      setOpenclawInfo({ installed: null });
+      setNanobotInfo({ installed: null, configured: false });
+      setHermesInfo({ installed: null, configured: false });
+      setDetectionError(t.setup.detectFailed || 'Runtime detection failed. Check the backend and retry.');
+    } finally {
+      setStage('selecting');
+    }
+  }, [t]);
+
+  // Initial detection
+  useEffect(() => {
+    detectInstallStatus();
+  }, [detectInstallStatus]);
+
+  // OpenClaw install (existing SSE flow)
   const handleInstallOpenClaw = async () => {
-    setStage('installing');
+    setInstallingPlatform('openclaw');
+    setStage('installing_openclaw');
     setLogs([]);
     setNodeStatus(null);
 
@@ -155,15 +264,15 @@ export default function Setup() {
             } else if (d.type === 'node_progress') {
               setNodeStatus(prev => prev ? { ...prev, percent: d.percent, progressText: d.text } : prev);
             } else if (d.type === 'npm_install_start') {
-              setStage('installing');
+              setStage('installing_openclaw');
               setNodeStatus(null);
             } else if (d.type === 'output' && d.text) {
               addLog(d.text);
             } else if (d.type === 'done') {
               if (d.success) {
-                addLog(t.setup.installComplete, 'success');
-                try { localStorage.setItem('xsafeclaw_setup_platform', 'openclaw'); } catch { /* ignore */ }
-                setTimeout(() => navigate('/configure', { replace: true }), 1000);
+                addLog(t.setup.openclawInstallComplete, 'success');
+                setOpenclawInfo(prev => ({ ...prev, installed: true, version: d.version, configured: false }));
+                setTimeout(() => navigate('/openclaw_configure', { replace: true }), 1500);
               } else {
                 addLog(`npm exited with code ${d.exit_code}`, 'error');
                 setStage('install_failed');
@@ -180,17 +289,86 @@ export default function Setup() {
         addLog(String(err), 'error');
         setStage('install_failed');
       }
+    } finally {
+      setInstallingPlatform(null);
+    }
+  };
+
+  // Nanobot install (SSE flow only; config is created later in /nanobot_configure)
+  const handleInstallNanobot = async () => {
+    setInstallingPlatform('nanobot');
+    setStage('installing_nanobot');
+    setLogs([]);
+    addLog(t.setup.nanobotInitStart, 'info');
+
+    try {
+      const resp = await fetch('/api/system/nanobot/install', { method: 'POST' });
+      if (!resp.ok || !resp.body) {
+        addLog(`HTTP ${resp.status} ${resp.statusText}`, 'error');
+        addLog(t.setup.nanobotInstallFailedHint, 'info');
+        setStage('install_failed');
+        return;
+      }
+      const reader = resp.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let success = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop() ?? '';
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          try {
+            const d = JSON.parse(line.slice(5).trim());
+            if (d.type === 'output' && d.text) addLog(d.text);
+            else if (d.type === 'done') {
+              success = d.success;
+              if (success) addLog(t.setup.nanobotInitSuccess, 'success');
+              else addLog(`uv exited with code ${d.exit_code}`, 'error');
+            } else if (d.type === 'error') {
+              addLog(d.message, 'error');
+              success = false;
+            }
+          } catch {}
+        }
+      }
+
+      if (success) {
+        addLog(t.setup.nanobotCliInstallComplete || t.setup.nanobotInitSuccess, 'success');
+        setNanobotInfo(prev => ({ ...prev, installed: true, configured: false }));
+        setTimeout(() => navigate('/nanobot_configure', { replace: true }), 1200);
+      } else {
+        // Show manual install hint
+        addLog(t.setup.nanobotInstallFailedHint, 'info');
+        setStage('install_failed');
+      }
+    } catch (err: any) {
+      addLog(String(err), 'error');
+      setStage('install_failed');
+    } finally {
+      setInstallingPlatform(null);
     }
   };
 
   const handleInstallHermes = async () => {
+    setInstallingPlatform('hermes');
     setStage('installing_hermes');
     setLogs([]);
 
     abortRef.current = new AbortController();
     try {
       const resp = await fetch('/api/system/install-hermes', { method: 'POST', signal: abortRef.current.signal });
-      const reader = resp.body!.getReader();
+      if (!resp.ok || !resp.body) {
+        addLog(`HTTP ${resp.status} ${resp.statusText}`, 'error');
+        setStage('install_hermes_failed');
+        return;
+      }
+      const reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
       while (true) {
@@ -209,7 +387,8 @@ export default function Setup() {
             } else if (d.type === 'done') {
               if (d.success) {
                 addLog((t.setup as any).hermesInstallComplete ?? 'Hermes installation complete!', 'success');
-                try { localStorage.setItem('xsafeclaw_setup_platform', 'hermes'); } catch { /* ignore */ }
+                setHermesInfo(prev => ({ ...prev, installed: true, configured: true }));
+                try { localStorage.setItem('xsafeclaw_setup_platform', 'hermes'); } catch {}
                 setTimeout(() => navigate('/configure', { replace: true }), 1000);
               } else {
                 addLog(`Install exited with code ${d.exit_code}`, 'error');
@@ -227,25 +406,31 @@ export default function Setup() {
         addLog(String(err), 'error');
         setStage('install_hermes_failed');
       }
+    } finally {
+      setInstallingPlatform(null);
     }
   };
 
-  const handleVerifyHermes = async () => {
-    setStage('hermes_verifying');
-    setHermesError('');
-    try {
-      const res = await systemAPI.status();
-      const d = res.data as any;
-      if (d.hermes_installed) {
-        navigate('/configure', { replace: true });
-      } else {
-        setHermesError((t.setup as any).hermesNotDetected ?? 'Hermes not detected');
-        setStage('hermes_guide');
-      }
-    } catch {
-      setHermesError((t.setup as any).hermesNotDetected ?? 'Hermes not detected');
-      setStage('hermes_guide');
+  const handleSkip = () => {
+    const openclawNeedsConfigure = openclawInfo.installed === true && openclawInfo.configured === false;
+    const nanobotNeedsConfigure = nanobotInfo.installed === true && nanobotInfo.configured === false;
+    if (openclawNeedsConfigure && nanobotNeedsConfigure) {
+      navigate('/configure_select', { replace: true });
+    } else if (nanobotNeedsConfigure) {
+      navigate('/nanobot_configure', { replace: true });
+    } else if (openclawNeedsConfigure) {
+      navigate('/openclaw_configure', { replace: true });
+    } else if (hermesInfo.installed === true) {
+      navigate('/configure', { replace: true });
+    } else {
+      navigate('/agent-valley', { replace: true });
     }
+  };
+
+  const handleRetry = () => {
+    setLogs([]);
+    setNodeStatus(null);
+    detectInstallStatus();
   };
 
   const steps = [
@@ -255,12 +440,11 @@ export default function Setup() {
   ];
 
   const stepActive =
-    stage === 'checking' || stage === 'not_installed' ? 1
-    : stage === 'hermes_guide' || stage === 'hermes_verifying' || stage === 'downloading_node' ? 2
+    stage === 'checking' || stage === 'selecting' ? 1
+    : stage === 'downloading_node' ? 2
     : 3;
 
-  const isHermesInstalling = stage === 'installing_hermes';
-  const isHermesFailed = stage === 'install_hermes_failed';
+  const hasAnyInstalled = openclawInfo.installed === true || nanobotInfo.installed === true || hermesInfo.installed === true;
 
   return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
@@ -284,133 +468,116 @@ export default function Setup() {
             </div>
           )}
 
-          {/* Not installed — choose framework */}
-          {stage === 'not_installed' && (
-            <div className="flex flex-col gap-6">
-              <div className="flex items-start gap-4 p-4 bg-warning/10 border border-warning/30 rounded-xl">
-                <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.notFound}</p>
-                  <p className="text-[12px] text-text-muted mt-1">{t.setup.notFoundDesc}</p>
-                </div>
-              </div>
-
-              <p className="text-[13px] font-semibold text-text-primary text-center">
-                {(t.setup as any).chooseTitle}
-              </p>
-
-              <div className="grid grid-cols-2 gap-4">
-                {/* OpenClaw card */}
-                <button
-                  onClick={handleInstallOpenClaw}
-                  className="flex flex-col items-center gap-3 p-5 bg-surface-2 hover:bg-surface-2/80 border border-border hover:border-accent/50 rounded-xl transition-all group"
-                >
-                  <div className="w-12 h-12 rounded-xl bg-sky-500/15 flex items-center justify-center">
-                    <Box className="w-6 h-6 text-sky-400" />
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors">
-                      {(t.setup as any).openclawName}
-                    </p>
-                    <p className="text-[11px] text-text-muted mt-1 leading-relaxed">
-                      {(t.setup as any).openclawDesc}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-accent font-medium opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Download className="w-3 h-3" /> {t.setup.installBtn} <ChevronRight className="w-3 h-3" />
-                  </div>
-                </button>
-
-                {/* Hermes card */}
-                <button
-                  onClick={handleInstallHermes}
-                  className="flex flex-col items-center gap-3 p-5 bg-surface-2 hover:bg-surface-2/80 border border-border hover:border-violet-500/50 rounded-xl transition-all group"
-                >
-                  <div className="w-12 h-12 rounded-xl bg-violet-500/15 flex items-center justify-center">
-                    <Code2 className="w-6 h-6 text-violet-400" />
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm font-semibold text-text-primary group-hover:text-violet-400 transition-colors">
-                      {(t.setup as any).hermesName}
-                    </p>
-                    <p className="text-[11px] text-text-muted mt-1 leading-relaxed">
-                      {(t.setup as any).hermesDesc}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-violet-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Download className="w-3 h-3" /> {(t.setup as any).hermesGuideTitle} <ChevronRight className="w-3 h-3" />
-                  </div>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Hermes install guide */}
-          {(stage === 'hermes_guide' || stage === 'hermes_verifying') && (
+          {/* Selecting platform */}
+          {(stage === 'selecting' || stage === 'install_failed' || stage === 'install_hermes_failed') && (
             <div className="flex flex-col gap-5">
-              <div className="flex items-start gap-4 p-4 bg-violet-500/10 border border-violet-500/30 rounded-xl">
-                <Code2 className="w-5 h-5 text-violet-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-text-primary">{(t.setup as any).hermesGuideTitle}</p>
-                  <p className="text-[12px] text-text-muted mt-1">{(t.setup as any).hermesGuideDesc}</p>
-                </div>
+              <div className="text-center mb-2">
+                <p className="text-[14px] font-semibold text-text-primary">{t.setup.selectTitle}</p>
+                <p className="text-[12px] text-text-muted mt-1">{t.setup.selectDesc}</p>
               </div>
 
-              <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
-                <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
-                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
-                </p>
-                <div className="space-y-1.5 font-mono text-[12px]">
-                  <p className="text-text-secondary">
-                    <span className="text-text-muted select-none"># </span>
-                    <span className="text-sky-400">{(t.setup as any).commentHermes}</span>
-                  </p>
-                  <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
-                  <p className="text-text-secondary mt-2">
-                    <span className="text-text-muted select-none"># </span>
-                    <span className="text-sky-400">GitHub</span>
-                  </p>
-                  <p className="text-emerald-400 select-all">https://github.com/NousResearch/hermes-agent</p>
-                </div>
-              </div>
-
-              {hermesError && (
-                <div className="flex items-start gap-3 p-3 bg-red-500/10 border border-red-500/30 rounded-xl">
-                  <XCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
-                  <p className="text-[12px] text-red-400">{hermesError}</p>
+              {detectionError && (
+                <div className="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+                  <XCircle className="w-5 h-5 text-amber-300 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-text-primary">{t.setup.detectFailedTitle || 'Detection failed'}</p>
+                    <p className="text-[12px] text-text-muted mt-1">{detectionError}</p>
+                  </div>
                 </div>
               )}
 
-              <div className="flex gap-3">
+              <SetupCard
+                platform="openclaw"
+                info={openclawInfo}
+                installing={installingPlatform === 'openclaw'}
+                onInstall={handleInstallOpenClaw}
+                t={t}
+              />
+              <SetupCard
+                platform="nanobot"
+                info={nanobotInfo}
+                installing={installingPlatform === 'nanobot'}
+                onInstall={handleInstallNanobot}
+                t={t}
+              />
+              <SetupCard
+                platform="hermes"
+                info={hermesInfo}
+                installing={installingPlatform === 'hermes'}
+                onInstall={handleInstallHermes}
+                t={t}
+              />
+
+              {(stage === 'install_failed' || stage === 'install_hermes_failed') && (
+                <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+                  <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
+                    <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
+                  </div>
+                </div>
+              )}
+
+              {(stage === 'install_failed' || stage === 'install_hermes_failed') && logs.length > 0 && (
+                <TerminalLog lines={logs} waitingText={t.setup.waiting} />
+              )}
+
+              {(stage === 'install_failed' || stage === 'install_hermes_failed') && (
+                <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
+                  <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
+                    <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
+                  </p>
+                  <div className="space-y-1.5 font-mono text-[12px]">
+                    <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNode}</span></p>
+                    <p className="text-emerald-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
+                    <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
+                    <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
+                    <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNanobot}</span></p>
+                    <p className="text-emerald-400 select-all">uv tool install nanobot-ai --with-editable &lt;repo-root&gt; --force</p>
+                    <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
+                    <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
+                  </div>
+                </div>
+              )}
+
+              {stage === 'install_failed' && nanobotInfo.installed === true && nanobotInfo.configured === false && (
                 <button
-                  onClick={() => { setHermesError(''); setStage('not_installed'); }}
-                  className="flex-1 py-2.5 border border-border hover:bg-surface-2 text-text-secondary font-medium rounded-xl transition-all text-sm"
+                  onClick={() => navigate('/nanobot_configure', { replace: true })}
+                  className="w-full py-2.5 bg-cyan-500 hover:bg-cyan-600 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-cyan-500/25"
                 >
-                  {t.setup.steps.detect}
+                  {t.setup.nanobotContinueConfigure || 'Continue to Nanobot Configure'}
                 </button>
+              )}
+
+              {hasAnyInstalled && stage !== 'install_failed' && (
                 <button
-                  onClick={handleVerifyHermes}
-                  disabled={stage === 'hermes_verifying'}
-                  className="flex-[2] flex items-center justify-center gap-2 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-violet-600/25"
+                  onClick={handleSkip}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 text-[13px] text-text-muted hover:text-text-primary transition-colors"
                 >
-                  {stage === 'hermes_verifying' ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" /> {(t.setup as any).hermesVerifying}</>
-                  ) : (
-                    <><CheckCircle className="w-4 h-4" /> {(t.setup as any).hermesVerifyBtn}</>
-                  )}
+                  <SkipForward className="w-4 h-4" />
+                  {t.setup.skipBtn}
                 </button>
-              </div>
+              )}
+
+              {(stage === 'install_failed' || stage === 'install_hermes_failed' || detectionError) && (
+                <button onClick={handleRetry}
+                  className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
+                  {detectionError ? (t.setup.retryDetect || 'Retry detection') : t.setup.retryInstall}
+                </button>
+              )}
             </div>
           )}
 
-          {/* Downloading / installing Node.js (OpenClaw path) */}
+          {/* Downloading / installing Node.js */}
           {stage === 'downloading_node' && nodeStatus && (
             <div className="flex flex-col gap-5">
               <div className="flex items-start gap-4 p-4 bg-sky-500/10 border border-sky-500/30 rounded-xl">
                 <ArrowDownToLine className="w-5 h-5 text-sky-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-semibold text-text-primary">{t.setup.nodeSetup}</p>
-                  <p className="text-[12px] text-text-muted mt-1">{t.setup.nodeSetupDesc}</p>
+                  <p className="text-[12px] text-text-muted mt-1">
+                    {t.setup.nodeSetupDesc}
+                  </p>
                 </div>
               </div>
 
@@ -468,12 +635,12 @@ export default function Setup() {
           )}
 
           {/* Installing OpenClaw via npm */}
-          {stage === 'installing' && (
+          {stage === 'installing_openclaw' && (
             <div className="flex flex-col gap-4">
               <div className="flex items-center gap-3">
                 <Loader2 className="w-5 h-5 text-accent animate-spin flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.installing}</p>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.installingOpenClaw}</p>
                   <p className="text-[12px] text-text-muted">{t.setup.installingDesc}</p>
                 </div>
               </div>
@@ -481,8 +648,22 @@ export default function Setup() {
             </div>
           )}
 
-          {/* Installing Hermes via pip */}
-          {isHermesInstalling && (
+          {/* Installing Nanobot */}
+          {stage === 'installing_nanobot' && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-3">
+                <Loader2 className="w-5 h-5 text-cyan-400 animate-spin flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{t.setup.nanobotInstalling}</p>
+                  <p className="text-[12px] text-text-muted">{t.setup.nanobotInstallingDesc}</p>
+                </div>
+              </div>
+              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
+            </div>
+          )}
+
+          {/* Installing Hermes */}
+          {stage === 'installing_hermes' && (
             <div className="flex flex-col gap-4">
               <div className="flex items-center gap-3">
                 <Loader2 className="w-5 h-5 text-violet-400 animate-spin flex-shrink-0" />
@@ -492,71 +673,6 @@ export default function Setup() {
                 </div>
               </div>
               <TerminalLog lines={logs} waitingText={t.setup.waiting} />
-            </div>
-          )}
-
-          {/* OpenClaw install failed */}
-          {stage === 'install_failed' && (
-            <div className="flex flex-col gap-4">
-              <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
-                <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
-                  <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
-                </div>
-              </div>
-              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
-
-              <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
-                <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
-                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
-                </p>
-                <div className="space-y-1.5 font-mono text-[12px]">
-                  <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNode}</span></p>
-                  <p className="text-emerald-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
-                  <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
-                  <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
-                </div>
-              </div>
-
-              <button onClick={() => { setLogs([]); setNodeStatus(null); setStage('not_installed'); }}
-                className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
-                {t.setup.retryInstall}
-              </button>
-            </div>
-          )}
-
-          {/* Hermes install failed */}
-          {isHermesFailed && (
-            <div className="flex flex-col gap-4">
-              <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
-                <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-text-primary">{t.setup.installFailed}</p>
-                  <p className="text-[12px] text-text-muted mt-1">{t.setup.installFailedDesc}</p>
-                </div>
-              </div>
-              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
-
-              <div className="bg-[#0d0d0d] border border-border rounded-xl p-4 space-y-2">
-                <p className="text-[11px] text-text-muted font-medium uppercase tracking-wide flex items-center gap-1.5">
-                  <Terminal className="w-3.5 h-3.5" /> {t.setup.manualCommands}
-                </p>
-                <div className="space-y-1.5 font-mono text-[12px]">
-                  <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
-                  <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
-                  <p className="text-text-secondary mt-2">
-                    <span className="text-text-muted select-none"># </span>
-                    <span className="text-sky-400">GitHub</span>
-                  </p>
-                  <p className="text-emerald-400 select-all">https://github.com/NousResearch/hermes-agent</p>
-                </div>
-              </div>
-
-              <button onClick={() => { setLogs([]); setStage('not_installed'); }}
-                className="w-full py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-violet-600/25">
-                {t.setup.retryInstall}
-              </button>
             </div>
           )}
         </div>

@@ -13,6 +13,8 @@ import api from '../services/api';
 
 interface SessionRow {
   session_id: string;
+  platform?: string;
+  instance_id?: string;
   first_seen_at: string;
   last_activity_at: string | null;
   cwd: string | null;
@@ -114,6 +116,17 @@ function fmtTokens(n: number | null | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
+}
+
+function PlatformBadge({ platform }: { platform: string }) {
+  const isNanobot = platform === 'nanobot';
+  return (
+    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+      isNanobot ? 'bg-cyan-500/15 text-cyan-400' : 'bg-blue-500/15 text-blue-400'
+    }`}>
+      {platform}
+    </span>
+  );
 }
 
 function truncate(s: string | null | undefined, len = 120): string {
@@ -880,11 +893,12 @@ export default function ActivityTab() {
                       <TH>Model</TH>
                       <TH>Messages</TH>
                       <TH>Tokens</TH>
+                      <TH>Source</TH>
                     </tr>
                   </thead>
                   <tbody>
                     {sessions.length === 0 && (
-                      <tr><td colSpan={7} className="text-center py-16 text-text-muted text-sm">No chats found</td></tr>
+                      <tr><td colSpan={8} className="text-center py-16 text-text-muted text-sm">No chats found</td></tr>
                     )}
                     {sessions.map(s => (
                       <>
@@ -905,10 +919,11 @@ export default function ActivityTab() {
                           </TD>
                           <TD>{s.total_runs}</TD>
                           <TD>{fmtTokens(s.total_tokens)}</TD>
+                          <TD>{s.platform ? <PlatformBadge platform={s.platform} /> : null}</TD>
                         </tr>
                         {expandedId === s.session_id && (
                           <tr key={s.session_id + '_detail'}>
-                            <td colSpan={7} className="p-0"><ChatDetail s={s} /></td>
+                            <td colSpan={8} className="p-0"><ChatDetail s={s} /></td>
                           </tr>
                         )}
                       </>

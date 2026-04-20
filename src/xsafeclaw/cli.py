@@ -39,19 +39,23 @@ console = Console()
 
 
 def _open_browser_landing(host: str, port: int) -> None:
-    """Open ``/setup`` / ``/configure`` / home based on backend status."""
+    """Open setup, configure, picker, or home based on backend status."""
     base = f"http://{host}:{port}"
     try:
         req = urllib.request.Request(
-            f"{base}/api/system/status",
+            f"{base}/api/system/install-status",
             headers={"Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
-        if not data.get("openclaw_installed"):
+        if data.get("requires_setup") or not (data.get("openclaw_installed") or data.get("nanobot_installed")):
             webbrowser.open(f"{base}/setup")
-        elif not data.get("config_exists"):
-            webbrowser.open(f"{base}/configure")
+        elif data.get("requires_configure") and data.get("requires_nanobot_configure"):
+            webbrowser.open(f"{base}/configure_select")
+        elif data.get("requires_nanobot_configure"):
+            webbrowser.open(f"{base}/nanobot_configure")
+        elif data.get("requires_configure"):
+            webbrowser.open(f"{base}/openclaw_configure")
         else:
             webbrowser.open(base)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):

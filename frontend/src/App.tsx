@@ -10,8 +10,10 @@ import RiskTest from './pages/RiskTest';
 import Chat from './pages/Chat';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
+import ConfigureSelector from './pages/ConfigureSelector';
+import NanobotConfigure from './pages/NanobotConfigure';
+import { systemAPI, type InstallStatusResponse } from './services/api';
 import SelectFramework from './pages/SelectFramework';
-import { systemAPI } from './services/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,13 +25,19 @@ const queryClient = new QueryClient({
   },
 });
 
-type CheckState = 'pending' | 'picker' | 'setup' | 'configure' | 'ok';
+type CheckState = 'pending' | 'picker' | 'setup' | 'openclaw_configure' | 'nanobot_configure' | 'configure_select' | 'ok';
 
-// Paths that bypass the install-status redirect. /select-framework is here so
-// that when the picker-mode guard forwards the user to it, our secondary
-// /setup /configure redirects don't bounce them back out again.
-const EXEMPT_PATHS = ['/setup', '/configure', '/select-framework'];
+const EXEMPT_PATHS = ['/setup', '/configure', '/openclaw_configure', '/nanobot_configure', '/configure_select', '/select-framework'];
 const PICKER_PATH = '/select-framework';
+
+function configureStateForStatus(status: InstallStatusResponse): CheckState {
+  const needsOpenClaw = Boolean(status.requires_configure);
+  const needsNanobot = Boolean(status.requires_nanobot_configure);
+  if (needsOpenClaw && needsNanobot) return 'configure_select';
+  if (needsNanobot) return 'nanobot_configure';
+  if (needsOpenClaw) return 'openclaw_configure';
+  return 'ok';
+}
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
@@ -63,21 +71,14 @@ function AppRoutes() {
       }
 
       try {
-        const res = await Promise.race([
-          systemAPI.status(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('timeout')), 3000)
-          ),
-        ]);
+        const res = await systemAPI.installStatus();
         if (cancelled) return;
         const d = res.data as any;
 
-        if (!d.openclaw_installed && !d.hermes_installed) {
+        if (d.requires_setup || (!d.openclaw_installed && !d.nanobot_installed && !d.hermes_installed)) {
           setCheckState('setup');
-        } else if (!d.config_exists) {
-          setCheckState('configure');
         } else {
-          setCheckState('ok');
+          setCheckState(configureStateForStatus(d));
         }
       } catch {
         if (!cancelled) setCheckState('ok');
@@ -102,8 +103,12 @@ function AppRoutes() {
 
     if (checkState === 'setup') {
       navigate('/setup', { replace: true });
-    } else if (checkState === 'configure') {
-      navigate('/configure', { replace: true });
+    } else if (checkState === 'openclaw_configure') {
+      navigate('/openclaw_configure', { replace: true });
+    } else if (checkState === 'nanobot_configure') {
+      navigate('/nanobot_configure', { replace: true });
+    } else if (checkState === 'configure_select') {
+      navigate('/configure_select', { replace: true });
     }
   }, [checkState, location.pathname, navigate]);
 
@@ -114,12 +119,16 @@ function AppRoutes() {
       <Route path="/select-framework" element={<SelectFramework />} />
       <Route path="/setup" element={<Setup />} />
       <Route path="/configure" element={<Configure />} />
+      <Route path="/openclaw_configure" element={<Configure />} />
+      <Route path="/nanobot_configure" element={<NanobotConfigure />} />
+      <Route path="/configure_select" element={<ConfigureSelector />} />
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />
       <Route path="/world" element={<World />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/monitor" element={<Monitor />} />
+        <Route path="/instances" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/assets" element={<Assets />} />
         <Route path="/risk-test" element={<RiskTest />} />
         <Route path="/safety-rehearsal" element={<RiskScanner />} />

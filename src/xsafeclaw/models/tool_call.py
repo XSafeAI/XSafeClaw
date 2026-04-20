@@ -22,7 +22,37 @@ class ToolCall(Base, TimestampMixin):
 
     # Primary identification
     id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, comment="Tool call ID from JSONL (e.g., call_xxx)"
+        String(255),
+        primary_key=True,
+        comment="Internal namespaced tool-call ID",
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(32),
+        default="openclaw",
+        index=True,
+        comment="Runtime platform: openclaw / nanobot",
+    )
+
+    instance_id: Mapped[str] = mapped_column(
+        String(128),
+        default="openclaw-default",
+        index=True,
+        comment="Runtime instance ID",
+    )
+
+    source_session_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="Original runtime session ID/key",
+    )
+
+    source_tool_call_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="Original runtime tool-call ID",
     )
 
     # Foreign key - associate with the assistant message that initiated the tool call
@@ -36,11 +66,11 @@ class ToolCall(Base, TimestampMixin):
     
     # JSONL message ID for easy reference
     initiating_message_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True, comment="JSONL message ID of the assistant message that initiated this tool call"
+        String(255), nullable=True, index=True, comment="Internal message ID of the assistant message that initiated this tool call"
     )
     
     result_message_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True, comment="JSONL message ID of the toolResult message"
+        String(255), nullable=True, index=True, comment="Internal message ID of the tool-result message"
     )
 
     # Tool information
@@ -57,7 +87,7 @@ class ToolCall(Base, TimestampMixin):
         Text, nullable=True, comment="Tool execution result text"
     )
     
-    result_json: Mapped[dict[str, Any] | None] = mapped_column(
+    result_json: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(
         JSON, nullable=True, comment="Tool execution result as JSON (for structured data)"
     )
 
@@ -101,6 +131,8 @@ class ToolCall(Base, TimestampMixin):
 
     # Indexes
     __table_args__ = (
+        Index("ix_tool_calls_platform_instance", "platform", "instance_id"),
+        Index("ix_tool_calls_platform_instance_source", "platform", "instance_id", "source_tool_call_id"),
         Index("ix_tool_calls_message_started", "message_id", "started_at"),
         Index("ix_tool_calls_name_status", "tool_name", "status"),
         Index("ix_tool_calls_error", "is_error", "tool_name"),

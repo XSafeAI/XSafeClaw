@@ -43,22 +43,23 @@
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
+|  🐈   | 2026-04-18 | **nanobot local runtime support** — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show OpenClaw / nanobot sessions together in Agent Valley. |
 |  🚀   | 2026-04-13 | **v 1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
 
 ---
 
 ## 🔍 What is XSafeClaw?
 
-XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command.
+XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command. The current runtime integration targets one local OpenClaw instance and one local nanobot instance on the host machine.
 
 | Module               | Description                                                  |
 | :------------------- | :----------------------------------------------------------- |
-| **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning |
-| **Safe Chat**        | Secure gateway to chat with your OpenClaw agent with built-in guard protection |
+| **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning across OpenClaw and nanobot sessions |
+| **Safe Chat**        | Secure gateway to chat with your OpenClaw or nanobot agent with built-in guard protection |
 | **Asset Shield**     | File system scanning with risk classification (L0–L3), software audit, hardware inventory |
 | **Guard (AgentDoG)** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval |
 | **Agent Office**     | PixiJS-powered 2D visualization of all agents' status and activities |
-| **Onboard Setup**    | Interactive wizard to install and configure OpenClaw CLI     |
+| **Onboard Setup**    | Interactive wizard to install and configure OpenClaw CLI and initialize the local nanobot config / hook |
 
 ---
 
@@ -135,10 +136,12 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
          SQLite DB        OpenClaw Sessions
        ~/.xsafeclaw/       ~/.openclaw/
 
-           OpenClaw Agent
-               │ before_tool_call hook
-               ▼
-       safeclaw-guard plugin ──► POST /api/guard/tool-check
+           OpenClaw Agent                         nanobot Agent
+               │ before_tool_call hook                │ configured hook
+               ▼                                      ▼
+       safeclaw-guard plugin ──► POST /api/guard/tool-check ◄── XSafeClaw nanobot hook
+                                                      │
+                                             nanobot gateway websocket
 ```
 
 | Layer       | Technology                                        |
@@ -147,6 +150,7 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
 | Frontend    | React 19, TypeScript, Vite, Tailwind CSS 4        |
 | Database    | SQLite (via aiosqlite)                            |
 | Guard Model | AgentDoG (configurable base URL & model)          |
+| Runtimes    | Local OpenClaw plus local nanobot via `nanobot gateway` |
 
 Full API docs available at `http://localhost:6874/docs` when running.
 
@@ -177,7 +181,7 @@ cd XSafeClaw && pip install -e ".[dev]"
 
 ### 🔌 Install the Guard Plugin
 
-To enable real-time tool-call interception in OpenClaw:
+To enable real-time tool-call interception in OpenClaw, install the OpenClaw plugin:
 
 ```bash
 cp -r plugins/safeclaw-guard ~/.openclaw/extensions/safeclaw-guard
@@ -197,6 +201,34 @@ Then add to `~/.openclaw/openclaw.json`:
 }
 ```
 
+For nanobot, do **not** copy `plugins/safeclaw-guard`. nanobot is integrated through a Python hook written into `~/.nanobot/config.json`. In development, install nanobot as a uv tool with this repository editable so the hook module is importable from the nanobot tool environment:
+
+```bash
+uv tool install nanobot-ai --with-editable . --force
+```
+
+When XSafeClaw is running from a source checkout, the `/setup` page now uses the same editable-install command automatically so the nanobot tool environment can import the local XSafeClaw hook modules.
+
+`pyproject.toml` also exposes an optional `nanobot` extra for users who intentionally want `nanobot-ai` installed inside the active project environment. For this repository's developer workflow, the uv-tool command above is preferred because it matches how the `nanobot` CLI is usually run.
+
+Then start XSafeClaw. The `/setup` page only installs the Nanobot CLI and then redirects to `/nanobot_configure`. The Nanobot config file is created only when you click Save on the Nanobot configuration page. Provider, model, and API key are intentionally blank on first load.
+
+For compatibility, the setup endpoint still exists and creates only a skeleton config without provider/model defaults:
+
+```bash
+curl -X POST http://127.0.0.1:6874/api/system/nanobot/init-default
+```
+
+For manual testing, run nanobot gateway in a separate terminal:
+
+```bash
+nanobot gateway --port 18790 --verbose
+```
+
+XSafeClaw uses `nanobot gateway` for Chat and Agent Valley. `nanobot serve` is not required for the current integration.
+
+The Web UI also provides a nanobot configuration page for the default local runtime. It writes `~/.nanobot/config.json`, including workspace, provider/model, API key, gateway, WebSocket channel, optional WebSocket token, and XSafeClaw Guard hook settings. On first run, the page pre-fills only infrastructure defaults such as workspace, ports, WebSocket, and Guard; it does not auto-select a model provider or API key. Saving only the base config is allowed, but Nanobot will still remain in a needs-config state until provider and model are set. Restart `nanobot gateway` after changing gateway, WebSocket, provider, or token settings so the running gateway loads the latest config.
+
 ---
 
 ## ⚙️ Configuration
@@ -208,10 +240,11 @@ XSafeClaw works out of the box with sensible defaults. Copy `.env.example` to `.
 | `API_PORT`              | `6874`                             | Server port                |
 | `API_HOST`              | `0.0.0.0`                          | Bind address               |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session directory |
+| `~/.nanobot/config.json` | *(created when saved in Nanobot Configure)* | nanobot config, gateway, workspace, and XSafeClaw hook settings |
 | `GUARD_BASE_URL`        | *(auto-detected)*                  | Guard model API base URL   |
 | `GUARD_BASE_MODEL`      | *(auto-detected)*                  | Guard model ID             |
 
-If guard variables are not set, XSafeClaw reads model configuration from `~/.openclaw/openclaw.json` automatically. See `.env.example` for the full list.
+If guard variables are not set, XSafeClaw reads model configuration from `~/.openclaw/openclaw.json` automatically. nanobot runtime configuration is stored in `~/.nanobot/config.json`, not in `.env`. See `.env.example` for the full list.
 
 ---
 
@@ -231,8 +264,12 @@ git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw
 uv venv && uv pip install -e ".[dev]"
 python run.py                    # http://localhost:6874, auto-reload
 
+# Optional nanobot CLI for local runtime testing
+uv tool install nanobot-ai --with-editable . --force
+nanobot gateway --port 18790 --verbose
+
 # Frontend (separate terminal)
-cd frontend && npm install && npm run dev   # http://localhost:3000, HMR
+cd frontend && npm install && npm run dev   # http://localhost:3003, HMR
 
 # Build frontend for production
 cd frontend && npm run build     # outputs to src/xsafeclaw/static/

@@ -38,6 +38,187 @@ export interface DirectoryBrowseResult {
   entries: DirectoryBrowseEntry[];
 }
 
+export interface RuntimeInstance {
+  instance_id: string;
+  platform: 'openclaw' | 'nanobot' | 'hermes';
+  display_name: string;
+  config_path: string | null;
+  workspace_path: string | null;
+  sessions_path: string | null;
+  serve_base_url: string | null;
+  gateway_base_url: string | null;
+  discovery_mode: 'auto' | 'manual';
+  enabled: boolean;
+  is_default: boolean;
+  capabilities: Record<string, boolean>;
+  attach_state: string;
+  health_status: string;
+  meta: Record<string, any>;
+}
+
+export interface SystemStatusResponse {
+  platform?: string;
+  openclaw_installed: boolean;
+  hermes_installed?: boolean;
+  openclaw_version: string | null;
+  hermes_path?: string | null;
+  hermes_api_port?: number;
+  hermes_config_path?: string;
+  hermes_home?: string;
+  hermes_api_key_configured?: boolean;
+  hermes_api_server_enabled?: boolean;
+  nanobot_installed: boolean;
+  nanobot_version: string | null;
+  nanobot_path: string | null;
+  nanobot_config_exists: boolean;
+  nanobot_model_configured: boolean;
+  daemon_running: boolean;
+  openclaw_path: string | null;
+  node_version: string;
+  config_exists: boolean;
+  has_instances: boolean;
+  requires_setup: boolean;
+  requires_configure: boolean;
+  requires_nanobot_setup: boolean;
+  requires_nanobot_configure: boolean;
+  default_instance: RuntimeInstance | null;
+  instances: RuntimeInstance[];
+  runtime_summary: {
+    total: number;
+    enabled: number;
+    openclaw: number;
+    nanobot: number;
+    hermes?: number;
+    chat_ready: number;
+  };
+  error?: string;
+}
+
+export interface InstallStatusResponse {
+  openclaw_installed: boolean;
+  hermes_installed?: boolean;
+  openclaw_version: string | null;
+  openclaw_error?: string | null;
+  openclaw_path: string | null;
+  nanobot_installed: boolean;
+  nanobot_version: string | null;
+  nanobot_error?: string | null;
+  nanobot_path: string | null;
+  config_exists: boolean;
+  nanobot_config_exists: boolean;
+  nanobot_model_configured: boolean;
+  requires_setup: boolean;
+  requires_configure: boolean;
+  requires_nanobot_setup: boolean;
+  requires_nanobot_configure: boolean;
+  node_version: string;
+}
+
+export interface RuntimeInstanceHealth {
+  instance_id: string;
+  platform: 'openclaw' | 'nanobot' | 'hermes';
+  display_name: string;
+  health_status: string;
+  attach_state: string;
+  chat_ready: boolean;
+}
+
+export interface RuntimeInstanceCapabilitiesResponse {
+  instance_id: string;
+  platform: 'openclaw' | 'nanobot' | 'hermes';
+  display_name: string;
+  capabilities: Record<string, boolean>;
+  attach_state: string;
+}
+
+export interface NanobotGuardConfigResponse {
+  instance_id: string;
+  platform: 'nanobot';
+  display_name: string;
+  mode: 'disabled' | 'observe' | 'blocking';
+  enabled: boolean;
+  hook_present: boolean;
+  hook_valid: boolean;
+  class_path: string | null;
+  base_url: string;
+  timeout_s: number;
+  configured_instance_id: string | null;
+  default_base_url?: string;
+  default_timeout_s?: number;
+  instance?: RuntimeInstance;
+  instances?: RuntimeInstance[];
+}
+
+export type NanobotGuardMode = 'disabled' | 'observe' | 'blocking';
+
+export interface NanobotProviderOption {
+  id: string;
+  name: string;
+  default_model: string;
+}
+
+export interface NanobotProviderConfigState {
+  has_api_key: boolean;
+  api_base: string | null;
+}
+
+export interface NanobotConfigResponse {
+  success?: boolean;
+  config_exists: boolean;
+  config_path: string;
+  workspace: string;
+  provider: string;
+  model: string;
+  model_configured: boolean;
+  api_base: string | null;
+  provider_options: NanobotProviderOption[];
+  provider_configs: Record<string, NanobotProviderConfigState>;
+  gateway: {
+    host: string;
+    port: number;
+    health_url: string;
+  };
+  websocket: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    path: string;
+    url: string;
+    requires_token: boolean;
+    has_token: boolean;
+  };
+  guard: {
+    mode: NanobotGuardMode;
+    enabled: boolean;
+    hook_present: boolean;
+    hook_valid: boolean;
+    base_url: string;
+    timeout_s: number;
+    configured_instance_id: string | null;
+  };
+  instances?: RuntimeInstance[];
+}
+
+export interface NanobotConfigPayload {
+  workspace: string;
+  provider?: string | null;
+  model?: string | null;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+  api_base?: string | null;
+  gateway_host: string;
+  gateway_port: number;
+  websocket_enabled: boolean;
+  websocket_host: string;
+  websocket_port: number;
+  websocket_path: string;
+  websocket_requires_token: boolean;
+  websocket_token?: string | null;
+  guard_mode: NanobotGuardMode;
+  guard_base_url: string;
+  guard_timeout_s: number;
+}
+
 // Sessions API
 export const sessionsAPI = {
   list: (params?: { page?: number; page_size?: number }) =>
@@ -292,8 +473,8 @@ export const redteamAPI = {
 
 // Chat API (direct OpenClaw gateway session)
 export const chatAPI = {
-  startSession: () =>
-    api.post<{ session_key: string; status: string }>('/chat/start-session'),
+  startSession: (data?: { instance_id?: string; label?: string | null; model_override?: string | null; provider_override?: string | null }) =>
+    api.post<{ session_key: string; status: string; instance_id: string; platform: string; instance?: RuntimeInstance }>('/chat/start-session', data ?? {}),
 
   sendMessage: (sessionKey: string, message: string) =>
     api.post<{
@@ -318,11 +499,20 @@ export const chatAPI = {
   patchSession: (sessionKey: string, data: { model?: string | null; thinking_level?: string | null }) =>
     api.post<{ status: string }>('/chat/patch-session', { session_key: sessionKey, ...data }),
 
-  availableModels: () =>
+  availableModels: (instanceId?: string) =>
     api.get<{
       models: { id: string; name: string; provider: string; reasoning: boolean }[];
       default_model: string;
-    }>('/chat/available-models'),
+      instance_id: string;
+      platform: string;
+      supports_session_patch: boolean;
+      instance?: RuntimeInstance;
+    }>('/chat/available-models', { params: instanceId ? { instance_id: instanceId } : {} }),
+
+  modelReadiness: (modelId: string, instanceId?: string) =>
+    api.get<{ model_id: string; ready: boolean; visible_model_id?: string | null; reason?: string | null }>('/chat/model-readiness', {
+      params: instanceId ? { model_id: modelId, instance_id: instanceId } : { model_id: modelId },
+    }),
 };
 
 // Voice / speech-to-text helpers
@@ -376,23 +566,32 @@ export const guardAPI = {
 
 // System API (agent install / onboard / status)
 export const systemAPI = {
-  /** Check whether an agent framework (OpenClaw or Hermes) is installed. */
-  status: () =>
-    api.get<{
-      platform: string;
-      openclaw_installed: boolean;
-      hermes_installed?: boolean;
-      openclaw_version: string | null;
-      daemon_running: boolean;
-      openclaw_path: string | null;
-      hermes_path?: string | null;
-      config_exists?: boolean;
-      hermes_api_port?: number;
-      hermes_config_path?: string;
-      hermes_home?: string;
-      hermes_api_key_configured?: boolean;
-      hermes_api_server_enabled?: boolean;
-    }>("/system/status", { timeout: 8000 }),
+  /** Check whether an agent framework is installed. */
+  status: () => api.get<SystemStatusResponse>("/system/status", { timeout: 30000 }),
+
+  /** Fast install/config probe used by setup and route guards. */
+  installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
+
+  instances: () =>
+    api.get<{ instances: RuntimeInstance[]; total: number }>('/system/instances'),
+
+  getInstance: (instanceId: string) =>
+    api.get<{ instance: RuntimeInstance }>(`/system/instances/${instanceId}`),
+
+  getInstanceHealth: (instanceId: string) =>
+    api.get<RuntimeInstanceHealth>(`/system/instances/${instanceId}/health`),
+
+  getInstanceCapabilities: (instanceId: string) =>
+    api.get<RuntimeInstanceCapabilitiesResponse>(`/system/instances/${instanceId}/capabilities`),
+
+  getNanobotGuard: (instanceId: string) =>
+    api.get<NanobotGuardConfigResponse>(`/system/instances/${instanceId}/nanobot-guard`),
+
+  setNanobotGuard: (
+    instanceId: string,
+    payload: { mode: 'disabled' | 'observe' | 'blocking'; base_url?: string | null; timeout_s?: number | null }
+  ) =>
+    api.post<NanobotGuardConfigResponse>(`/system/instances/${instanceId}/nanobot-guard`, payload),
 
   /**
    * Force-enable the Hermes HTTP API server (API_SERVER_ENABLED=true in
@@ -415,6 +614,31 @@ export const systemAPI = {
 
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',
+
+  /** SSE URL for nanobot install stream (use with fetch). */
+  nanobotInstallUrl: () => '/api/system/nanobot/install',
+
+  /** Create a skeleton nanobot config/workspace for compatibility flows. */
+  nanobotInitDefault: () =>
+    api.post<{
+      success: boolean;
+      created: boolean;
+      model_configured?: boolean;
+      config_path: string;
+      workspace_path: string;
+      guard?: Record<string, any>;
+      install_command?: string;
+      output?: string;
+      instances?: RuntimeInstance[];
+    }>('/system/nanobot/init-default'),
+
+  /** Read default nanobot config with secrets redacted. */
+  getNanobotConfig: () =>
+    api.get<NanobotConfigResponse>('/system/nanobot/config'),
+
+  /** Create/update the default nanobot config used by XSafeClaw. */
+  setNanobotConfig: (payload: NanobotConfigPayload) =>
+    api.post<NanobotConfigResponse>('/system/nanobot/config', payload),
 
   /** SSE URL for pip install hermes stream (use with fetch). */
   installHermesUrl: () => '/api/system/install-hermes',
@@ -482,6 +706,7 @@ export const systemAPI = {
     custom_model_id?: string;
     custom_provider_id?: string;
     custom_compatibility?: string;
+    custom_context_window?: number;
   }) => api.post('/system/onboard-config', data),
 
   /** Test Feishu credentials. */
@@ -666,7 +891,7 @@ export const systemAPI = {
 };
 
 export const skillsAPI = {
-  list: () => api.get<{ skills: any[]; error?: string }>('/skills/list'),
+  list: () => api.get<{ skills: any[]; error?: string; unavailable?: boolean; reason?: string }>('/skills/list'),
   check: () => api.get<{ checks: any[] }>('/skills/check'),
   update: (skillKey: string, data: { enabled?: boolean; api_key?: string; env?: Record<string, string> }) =>
     api.post(`/skills/${skillKey}/update`, data),
@@ -681,7 +906,7 @@ export const skillsAPI = {
 };
 
 export const memoryAPI = {
-  list: () => api.get<{ files: any[] }>('/memory/list'),
+  list: () => api.get<{ files: any[]; unavailable?: boolean; reason?: string }>('/memory/list'),
   content: (fileKey: string) =>
     api.get<{ key: string; content: string; sizeBytes: number; modifiedAt: number }>(`/memory/content/${fileKey}`),
   scanAll: (keys?: string[], force?: boolean) =>

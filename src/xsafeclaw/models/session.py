@@ -1,4 +1,4 @@
-"""Session model representing OpenClaw agent sessions."""
+"""Session model representing multi-runtime agent sessions."""
 
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -14,25 +14,43 @@ if TYPE_CHECKING:
 
 
 class Session(Base, TimestampMixin):
-    """OpenClaw session metadata.
-    
-    Represents a continuous conversation session between user and agent.
-    Maps to a single .jsonl file in OpenClaw's sessions directory.
-    """
+    """Runtime-agnostic session metadata."""
 
     __tablename__ = "sessions"
 
     # Primary identification
     session_id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, comment="UUID from JSONL"
+        String(255),
+        primary_key=True,
+        comment="Internal namespaced session ID",
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(32),
+        default="openclaw",
+        index=True,
+        comment="Runtime platform: openclaw / nanobot",
+    )
+
+    instance_id: Mapped[str] = mapped_column(
+        String(128),
+        default="openclaw-default",
+        index=True,
+        comment="Runtime instance ID",
+    )
+
+    source_session_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="Original session ID/key from the runtime",
     )
     
     session_key: Mapped[str | None] = mapped_column(
         String(255),
-        unique=True,
         nullable=True,
         index=True,
-        comment="Session key like 'agent:main:webchat:123'",
+        comment="Runtime session key or chat key",
     )
 
     # Agent context
@@ -98,6 +116,8 @@ class Session(Base, TimestampMixin):
 
     # Indexes
     __table_args__ = (
+        Index("ix_sessions_platform_instance", "platform", "instance_id"),
+        Index("ix_sessions_platform_instance_source", "platform", "instance_id", "source_session_id"),
         Index("ix_sessions_agent_channel", "agent_id", "channel"),
         Index("ix_sessions_activity", "last_activity_at", "deleted_at"),
     )

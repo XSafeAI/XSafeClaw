@@ -68,6 +68,8 @@ class EventSyncService:
                 # Start new event
                 current_event = {
                     "event_id": msg.message_id,
+                    "platform": msg.platform,
+                    "instance_id": msg.instance_id,
                     "user_message_id": msg.message_id,
                     "started_at": msg.timestamp,
                     "completed_at": msg.timestamp,  # Will be updated
@@ -161,6 +163,8 @@ class EventSyncService:
 
         if existing_event:
             # Update existing event
+            existing_event.platform = event_data["platform"]
+            existing_event.instance_id = event_data["instance_id"]
             existing_event.completed_at = event_data["completed_at"]
             existing_event.total_messages = event_data["total_messages"]
             existing_event.total_assistant_messages = event_data[
@@ -181,6 +185,8 @@ class EventSyncService:
             # Create new event
             new_event = Event(
                 id=event_id,
+                platform=event_data["platform"],
+                instance_id=event_data["instance_id"],
                 session_id=session_id,
                 user_message_id=event_data["user_message_id"],
                 started_at=event_data["started_at"],
