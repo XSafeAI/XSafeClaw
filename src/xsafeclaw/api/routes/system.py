@@ -1936,6 +1936,68 @@ def _persist_hermes_api_key(key_value: str) -> None:
         _ensure_hermes_api_server_env()
 
 
+def _ensure_hermes_api_key_synced() -> tuple[str, str]:
+    """Make XSafeClaw and Hermes share the same Hermes-API bearer token.
+
+    §43b — fixes the "fresh-XSafeClaw-on-existing-Hermes" 401 trap.
+
+    Background: Hermes ships an HTTP server that requires
+    ``Authorization: Bearer <API_SERVER_KEY>`` on every ``/v1/*`` call.
+    XSafeClaw's HermesClient reads its bearer from
+    ``settings.hermes_api_key`` (mirrored from XSafeClaw's own ``.env``
+    as ``HERMES_API_KEY``). Both sides MUST hold the same value or every
+    agent-creation request 401s — exactly what users see when they reinstall
+    XSafeClaw against an already-configured Hermes box.
+
+    Pre-§43b only the *Hermes* side was checked: if Hermes had a key but
+    XSafeClaw did not, no code path mirrored it back, so the picker stayed
+    silently broken until the user knew to hit Configure → API Key → Reveal
+    + paste it into XSafeClaw manually. This helper makes that automatic.
+
+    Decision matrix (chosen to never silently overwrite a user-set value
+    unless Hermes itself disagrees, in which case Hermes always wins because
+    its server enforces the value at request time):
+
+    | Hermes side | XSafeClaw side | Action                                  |
+    |-------------|----------------|-----------------------------------------|
+    | empty       | empty          | generate new key, persist to both       |
+    | set         | empty          | mirror Hermes  → XSafeClaw              |
+    | empty       | set            | mirror XSafeClaw → Hermes               |
+    | set, equal  | set, equal     | no-op                                   |
+    | set, differ | set, differ    | trust Hermes, overwrite XSafeClaw       |
+
+    Returns ``(action, key_value)`` where ``action`` is one of
+    ``"noop"`` / ``"mirrored_from_hermes"`` / ``"mirrored_to_hermes"`` /
+    ``"synced_to_hermes_value"`` / ``"generated"``. Callers may surface this
+    in their response for observability; the helper itself never raises.
+    """
+    hermes_key = (_read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY") or "").strip()
+    xs_key = (settings.hermes_api_key or "").strip()
+
+    if hermes_key and xs_key and hermes_key == xs_key:
+        return ("noop", hermes_key)
+
+    if hermes_key and not xs_key:
+        _persist_hermes_api_key(hermes_key)
+        return ("mirrored_from_hermes", hermes_key)
+
+    if xs_key and not hermes_key:
+        _persist_hermes_api_key(xs_key)
+        return ("mirrored_to_hermes", xs_key)
+
+    if hermes_key and xs_key and hermes_key != xs_key:
+        # Conflict: Hermes wins because its server enforces the bearer at
+        # request time. XSafeClaw's stale value would 401 forever otherwise.
+        _persist_hermes_api_key(hermes_key)
+        return ("synced_to_hermes_value", hermes_key)
+
+    # Both empty — first-time bring-up.
+    import secrets
+    new_key = secrets.token_urlsafe(32)
+    _persist_hermes_api_key(new_key)
+    return ("generated", new_key)
+
+
 @router.get("/hermes-api-key-status")
 async def hermes_api_key_status():
     """Return whether a Hermes API key is currently configured (never exposes the value)."""
@@ -2026,12 +2088,15 @@ async def hermes_enable_api_server():
     Returns whether ``/health`` came back up after the restart.
     """
     touched = _ensure_hermes_api_server_env()
-    # Ensure we have an API_SERVER_KEY too; otherwise /v1/* would 401.
-    existing_key = _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
-    if not existing_key:
-        import secrets
-        _persist_hermes_api_key(secrets.token_urlsafe(32))
-        touched.append("API_SERVER_KEY")
+    # §43b: ensure the Hermes-API bearer token agrees on BOTH sides — not
+    # just the Hermes side. Pre-§43b this only generated a new key when
+    # ~/.hermes/.env was missing API_SERVER_KEY; if Hermes already had a
+    # key but XSafeClaw's .env did not (fresh XSafeClaw on existing
+    # Hermes box), the listener would come up cleanly yet every XSafeClaw
+    # /v1/* call would 401. The unified helper covers all four cases.
+    key_action, _ = _ensure_hermes_api_key_synced()
+    if key_action != "noop":
+        touched.append(f"API_SERVER_KEY({key_action})")
 
     restarted, restart_detail = await _restart_hermes_api_server(timeout_s=25.0)
     api_reachable = await _hermes_api_reachable()
@@ -2658,16 +2723,24 @@ async def _hermes_bring_up_api(env: dict):
     else:
         yield f"data: {json.dumps({'type': 'output', 'text': '✓ ~/.hermes/.env already has API_SERVER_ENABLED=true'})}\n\n"
 
-    # Ensure an API_SERVER_KEY exists so the first HTTP call is authorized.
-    # If XSafeClaw already has HERMES_API_KEY we mirror that; otherwise a
-    # random key is generated and mirrored back to XSafeClaw's own .env so
-    # the Configure/API-Key page picks it up.
-    existing_key = _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
-    if not existing_key:
-        from secrets import token_urlsafe
-        new_key = token_urlsafe(32)
-        _persist_hermes_api_key(new_key)
+    # §43b: bring the Hermes-API bearer token into agreement on both sides.
+    # Pre-§43b this branch only generated a new key when Hermes's side was
+    # missing — it never mirrored an existing Hermes key back into
+    # XSafeClaw's .env, nor reconciled a mismatch. ``_ensure_hermes_api_key_synced``
+    # now handles all four cases (see its docstring) so a fresh XSafeClaw
+    # against an existing Hermes install no longer 401s on the first agent
+    # creation.
+    key_action, _ = _ensure_hermes_api_key_synced()
+    if key_action == "generated":
         yield f"data: {json.dumps({'type': 'output', 'text': '▸ Generated API_SERVER_KEY and mirrored to both .env files'})}\n\n"
+    elif key_action == "mirrored_from_hermes":
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Mirrored existing Hermes API_SERVER_KEY into XSafeClaw .env'})}\n\n"
+    elif key_action == "mirrored_to_hermes":
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Mirrored XSafeClaw HERMES_API_KEY into Hermes .env'})}\n\n"
+    elif key_action == "synced_to_hermes_value":
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ XSafeClaw HERMES_API_KEY differed from Hermes; overwrote XSafeClaw side to match Hermes'})}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'output', 'text': '✓ Hermes API_SERVER_KEY already in sync with XSafeClaw'})}\n\n"
 
     if await _hermes_api_reachable():
         yield f"data: {json.dumps({'type': 'output', 'text': f'✓ Hermes API already listening on :{port}; no bring-up needed.'})}\n\n"
@@ -3663,6 +3736,12 @@ _HERMES_DIR = settings.hermes_home
 # simultaneously instead of being pinned to one platform per process.
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+
+# §43: dedicated Hermes-config alias. ``_CONFIG_PATH`` above is the OpenClaw
+# JSON5 file; treating it as ``~/.hermes/config.yaml`` (yaml.safe_load /
+# yaml.dump) corrupts the OpenClaw runtime — see §43 for the post-mortem.
+# Hermes-only flows below MUST read/write through this constant instead.
+_HERMES_CONFIG_PATH = Path(settings.hermes_config_path).expanduser()
 
 
 def _config_path_for_platform(platform: str | None) -> Path:
@@ -5137,11 +5216,16 @@ def _build_onboard_scan_data_hermes() -> dict:
     # Without this, Configure would read ``anthropic/claude-opus-4.7`` and
     # try to match provider ``"anthropic"`` against the catalog, which lists
     # the route as ``"openrouter"`` and silently drops the pre-selection.
+    # §43: this is the Hermes onboard-scan path, so the "currently configured
+    # default model" must come from ~/.hermes/config.yaml — NOT _CONFIG_PATH
+    # (= openclaw.json). Pre-§43 the Configure UI was hydrating itself with
+    # whatever model OpenClaw had picked, which masked the real Hermes value
+    # and made post-Configure pre-selection appear stuck on a Hermes-foreign id.
     default_model = ""
     try:
-        if _CONFIG_PATH.exists():
+        if _HERMES_CONFIG_PATH.exists():
             import yaml
-            cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+            cfg = yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
             model_cfg = cfg.get("model", "")
             if isinstance(model_cfg, dict):
                 raw_default = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
@@ -6304,12 +6388,18 @@ async def delete_configured_model(body: RemoveConfiguredModelRequest):
     # "auto-detect main provider" path, which is exactly the lottery
     # that produced the §35 Kimi-zombie surprise.  Forcing the user to
     # explicitly switch active first keeps the deletion path side-effect-free.
+    # §43: the active-model probe is Hermes-specific, so it must read
+    # ~/.hermes/config.yaml — NOT _CONFIG_PATH (= openclaw.json). Pre-§43
+    # this read OpenClaw's model.default by mistake, which made the §36
+    # "refuse to delete the active model" guard compare against the wrong
+    # file: it could either let users delete the truly-active Hermes model
+    # or 409 on a model that wasn't actually active.
     active_slug = ""
     active_bare = ""
-    if _CONFIG_PATH.exists():
+    if _HERMES_CONFIG_PATH.exists():
         try:
             import yaml as _yaml_lib
-            cfg_yaml = _yaml_lib.safe_load(_CONFIG_PATH.read_text("utf-8")) or {}
+            cfg_yaml = _yaml_lib.safe_load(_HERMES_CONFIG_PATH.read_text("utf-8")) or {}
             mcfg = cfg_yaml.get("model", "")
             if isinstance(mcfg, dict):
                 active_bare = str(mcfg.get("default", "") or mcfg.get("model", "")).strip()
@@ -6470,6 +6560,14 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
     # Idempotent — only writes when the flag is missing or false.
     _ensure_hermes_api_server_env()
 
+    # §43b: bring the Hermes-API bearer token into agreement on both sides
+    # BEFORE writing model/provider config. Otherwise a fresh XSafeClaw
+    # install on a host that already had Hermes set up would happily save
+    # the model picker, but every subsequent /v1/* call from XSafeClaw's
+    # HermesClient would 401 because settings.hermes_api_key is still empty.
+    # See ``_ensure_hermes_api_key_synced`` for the full decision matrix.
+    key_action, _ = _ensure_hermes_api_key_synced()
+
     # Strip the "-api-key" suffix that the frontend auth method ID carries
     # (e.g. "anthropic-api-key" → "anthropic")
     raw_provider = re.sub(r"-api-key$", "", body.provider)
@@ -6516,10 +6614,13 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         )
 
     # --- 2. Write model + provider to config.yaml ---
+    # §43: target Hermes's own config.yaml, NOT _CONFIG_PATH (which is
+    # ~/.openclaw/openclaw.json, a JSON5 file). Mixing the two corrupted
+    # OpenClaw's config — see §43 for the post-mortem.
     config: dict = {}
-    if _CONFIG_PATH.exists():
+    if _HERMES_CONFIG_PATH.exists():
         try:
-            config = _yaml.safe_load(_CONFIG_PATH.read_text("utf-8")) or {}
+            config = _yaml.safe_load(_HERMES_CONFIG_PATH.read_text("utf-8")) or {}
         except Exception:
             config = {}
 
@@ -6550,8 +6651,18 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         "provider": hermes_provider,
     }
 
-    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CONFIG_PATH.write_text(
+    # §43: hard guard — refuse to yaml-dump into anything under ~/.openclaw.
+    # OpenClaw parses its config with JSON5; YAML output starts with ``agents:``
+    # which JSON5 rejects at column 1. Without this assert the original §39
+    # regression silently overwrote the user's openclaw.json on every Hermes
+    # quick-config save.
+    assert "openclaw" not in str(_HERMES_CONFIG_PATH).lower(), (
+        f"refusing to yaml-dump into {_HERMES_CONFIG_PATH} — "
+        "this would corrupt OpenClaw's JSON5 config (see §43)"
+    )
+
+    _HERMES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _HERMES_CONFIG_PATH.write_text(
         _yaml.dump(config, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -6632,6 +6743,11 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         "applied": bool(body.auto_apply and restart_ok),
         "api_was_running": api_was_running,
         "api_reachable": await _hermes_api_reachable(),
+        # §43b: surface what we did to the Hermes-API bearer token so the
+        # frontend can show a one-line status (e.g. "Mirrored existing
+        # Hermes key into XSafeClaw"). Values come from
+        # ``_ensure_hermes_api_key_synced``.
+        "api_key_action": key_action,
         "output": output,
     }
 
