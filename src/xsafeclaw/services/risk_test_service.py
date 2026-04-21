@@ -19,11 +19,17 @@ Locale = Literal["zh", "en"]
 _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _RISK_RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-if settings.is_hermes:
-    _SESSIONS_DIR = settings.hermes_sessions_dir
-else:
-    _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
-_SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+# Session JSONL probing across multiple frameworks.
+#
+# Risk-test previews need to inspect the most recent tool attempts in the
+# user's session, but with three runtimes monitored at once we can't pin a
+# single ``_SESSIONS_DIR`` at import time. Instead we walk every known
+# session-store location (OpenClaw + Hermes; Nanobot has no JSONL store) and
+# pick the first one whose ``sessions.json`` resolves the requested key.
+_SESSION_STORE_LOCATIONS: tuple[Path, ...] = (
+    Path.home() / ".openclaw" / "agents" / "main" / "sessions",
+    Path(settings.hermes_sessions_dir).expanduser(),
+)
 _RISK_LEVEL_PATTERNS = (
     ("high", re.compile(r"风险判断\s*[:：]\s*高风险", re.IGNORECASE)),
     ("low", re.compile(r"风险判断\s*[:：]\s*低风险", re.IGNORECASE)),
@@ -634,26 +640,37 @@ def _build_dry_run_wrapper(prompt: str, locale: Locale) -> str:
 
 
 def _resolve_session_jsonl(session_key: str) -> Path | None:
-    if not _SESSIONS_JSON.exists():
-        return None
-    try:
-        sessions_index = json.loads(_SESSIONS_JSON.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    """Return the JSONL transcript path for ``session_key`` or ``None``.
 
-    session_info = (
-        sessions_index.get(session_key)
-        or sessions_index.get(f"agent:main:{session_key}")
-    )
-    if not session_info:
-        return None
+    Probes every entry in :data:`_SESSION_STORE_LOCATIONS` so OpenClaw and
+    Hermes sessions can both be resolved by the risk-test preview without
+    a global platform pin.
+    """
+    for sessions_dir in _SESSION_STORE_LOCATIONS:
+        sessions_json = sessions_dir / "sessions.json"
+        if not sessions_json.exists():
+            continue
+        try:
+            sessions_index = json.loads(sessions_json.read_text(encoding="utf-8"))
+        except Exception:
+            continue
 
-    session_id = session_info.get("sessionId")
-    if not session_id:
-        return None
+        session_info = (
+            sessions_index.get(session_key)
+            or sessions_index.get(f"agent:main:{session_key}")
+        )
+        if not session_info:
+            continue
 
-    jsonl_path = _SESSIONS_DIR / f"{session_id}.jsonl"
-    return jsonl_path if jsonl_path.exists() else None
+        session_id = session_info.get("sessionId")
+        if not session_id:
+            continue
+
+        jsonl_path = sessions_dir / f"{session_id}.jsonl"
+        if jsonl_path.exists():
+            return jsonl_path
+
+    return None
 
 
 def _read_recent_tool_attempts(session_key: str) -> list[dict[str, Any]]:

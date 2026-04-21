@@ -1,34 +1,29 @@
 """XSafeClaw CLI — ``xsafeclaw start`` launches the server.
 
-§38 supervisor model
---------------------
-The heavy lifting lives in ``_supervisor.py`` so that both entry points
-(``xsafeclaw start`` here and ``python -m xsafeclaw`` in ``__main__.py``)
-get identical behaviour:
+Since §42 (Hermes-as-a-first-class-citizen) the §38 framework picker is gone.
+XSafeClaw monitors OpenClaw, Hermes and Nanobot simultaneously through the
+multi-runtime registry, and the user picks per-session which runtime to
+talk to from Agent Town.
 
-  * Both frameworks installed and no platform pin → spawn picker subprocess,
-    wait for user's choice, then spawn the real server with ``PLATFORM``
-    fixed.
-  * Otherwise → directly run the main server (preserves pre-§38 behaviour).
+The shared ``_supervisor.run_server`` helper now just wraps ``uvicorn.run``
+with the small bit of platform-pin propagation we need; both this command
+and ``python -m xsafeclaw`` (``__main__.py``) call into it so behaviour
+stays in lock-step.
 
-This file adds CLI ergonomics on top: ``--platform`` flag, ``--no-browser``,
-Rich console messages, and auto-opening of the right URL (picker vs landing).
+The ``--platform`` flag is preserved as a *default-instance hint* for the
+registry — it picks which runtime is shown first in Agent Town but does not
+hide the others. ``--no-browser`` and ``--reload`` keep their old meanings.
 """
 
 import json
 import urllib.error
 import urllib.request
 import webbrowser
-from pathlib import Path
 
 import typer
 from rich.console import Console
 
-from ._supervisor import (
-    DATA_DIR,
-    detect_installed_platforms,
-    run_server_with_supervisor,
-)
+from ._supervisor import DATA_DIR, run_server
 
 app = typer.Typer(
     name="xsafeclaw",
@@ -39,7 +34,7 @@ console = Console()
 
 
 def _open_browser_landing(host: str, port: int) -> None:
-    """Open setup, configure, picker, or home based on backend status."""
+    """Open setup, configure or home based on backend status."""
     base = f"http://{host}:{port}"
     try:
         req = urllib.request.Request(
@@ -48,27 +43,38 @@ def _open_browser_landing(host: str, port: int) -> None:
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
-        if data.get("requires_setup") or not (data.get("openclaw_installed") or data.get("nanobot_installed")):
+
+        # Nothing installed at all → setup wizard.
+        if data.get("requires_setup") or not (
+            data.get("openclaw_installed")
+            or data.get("nanobot_installed")
+            or data.get("hermes_installed")
+        ):
             webbrowser.open(f"{base}/setup")
-        elif data.get("requires_configure") and data.get("requires_nanobot_configure"):
+            return
+
+        # Multiple installed runtimes still need their first-time configure
+        # step → drop the user on the multi-card selector. Single-runtime
+        # cases land directly on that runtime's configure page.
+        unconfigured = [
+            ("openclaw", data.get("requires_configure")),
+            ("hermes", data.get("requires_hermes_configure")),
+            ("nanobot", data.get("requires_nanobot_configure")),
+        ]
+        unconfigured = [name for name, flag in unconfigured if flag]
+
+        if len(unconfigured) >= 2:
             webbrowser.open(f"{base}/configure_select")
-        elif data.get("requires_nanobot_configure"):
+        elif unconfigured == ["nanobot"]:
             webbrowser.open(f"{base}/nanobot_configure")
-        elif data.get("requires_configure"):
+        elif unconfigured == ["hermes"]:
+            webbrowser.open(f"{base}/configure")
+        elif unconfigured == ["openclaw"]:
             webbrowser.open(f"{base}/openclaw_configure")
         else:
             webbrowser.open(base)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
         webbrowser.open(base)
-
-
-def _open_picker_browser(host: str, port: int) -> None:
-    """Open the SelectFramework page directly — bypasses /api/system/status.
-
-    The status endpoint is blocked by the picker-mode middleware, so the
-    normal landing heuristic can't work here.
-    """
-    webbrowser.open(f"http://{host}:{port}/select-framework")
 
 
 @app.command()
@@ -80,31 +86,17 @@ def start(
     platform: str = typer.Option(
         None,
         "--platform",
-        help="Pin platform to 'openclaw' or 'hermes' and skip the framework picker.",
+        help=(
+            "Default-instance hint for Agent Town: one of "
+            "'openclaw' / 'hermes' / 'nanobot'. All discovered runtimes "
+            "remain selectable; this only sets which one is shown first."
+        ),
     ),
 ) -> None:
     """Start the XSafeClaw server."""
     url = f"http://{host}:{port}"
     console.print(f"[bold green]🐾 XSafeClaw[/bold green] starting at [link={url}]{url}[/link]")
     console.print(f"   Database: {DATA_DIR / 'data.db'}")
-
-    # Pre-check both-frameworks detection so the console hint is accurate
-    # before we hand control to the shared supervisor. The supervisor does
-    # the same check internally; we just want a Rich-formatted heads-up.
-    installed = detect_installed_platforms()
-    if platform is None and len(installed) >= 2:
-        console.print(
-            "[bold cyan]🧭 Both OpenClaw and Hermes detected — launching framework picker[/bold cyan]"
-        )
-        console.print(
-            f"   Picker URL: [link={url}/select-framework]{url}/select-framework[/link]"
-        )
-
-    def _on_picker_start() -> None:
-        if not no_browser:
-            import threading
-
-            threading.Timer(1.5, lambda: _open_picker_browser(host, port)).start()
 
     def _on_server_start() -> None:
         if not no_browser:
@@ -113,12 +105,11 @@ def start(
             threading.Timer(1.5, lambda: _open_browser_landing(host, port)).start()
 
     try:
-        run_server_with_supervisor(
+        run_server(
             host=host,
             port=port,
             reload=reload,
             platform_override=platform,
-            on_picker_start=_on_picker_start,
             on_server_start=_on_server_start,
         )
     except ValueError as exc:

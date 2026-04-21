@@ -1309,11 +1309,15 @@ export default function TownConsole({
   // hardcoded coding-intl default. Empty object on OpenClaw / older
   // backends and the modal treats that as "no picker needed".
   const [providerEndpoints, setProviderEndpoints] = useState({});
-  // Reported by the Hermes branch of /system/onboard-scan (§36).  Empty
-  // string until the first scan resolves.  Used to gate Hermes-only UI
-  // affordances (e.g. the per-model delete × in the model deck) so they
-  // never render under OpenClaw.
-  const [platform, setPlatform] = useState('');
+  // §42: ``platform`` is now derived from the user-selected runtime instance
+  // below (``selectedRuntime?.platform``), not from the global onboard-scan
+  // payload. The old single-platform server design exposed ``data.platform``
+  // on /system/onboard-scan (§36) so the UI could gate Hermes-only buttons;
+  // with three runtimes alive at once we want those affordances to react
+  // instantly when the user switches the active runtime in Agent Town.
+  // ``onboardScanPlatform`` keeps the legacy value as a fallback in case
+  // ``selectedRuntime`` hasn't resolved yet (e.g. during initial mount).
+  const [onboardScanPlatform, setOnboardScanPlatform] = useState('');
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -1360,10 +1364,18 @@ export default function TownConsole({
     || null
   ), [runtimeInstances, selectedRuntimeId]);
 
+  // §42: drive every Hermes-only UI affordance off the user's currently
+  // selected runtime instead of the global onboard-scan field. Falls back
+  // to the legacy onboard-scan value during the initial mount window where
+  // ``selectedRuntime`` is still null.
+  const platform = selectedRuntime?.platform || onboardScanPlatform;
+
   const selectedRuntimeUnavailable = Boolean(
     selectedRuntime
-    && selectedRuntime.platform === 'nanobot'
-    && selectedRuntime.health_status !== 'healthy',
+    && (
+      (selectedRuntime.platform === 'nanobot' && selectedRuntime.health_status !== 'healthy')
+      || (selectedRuntime.platform === 'hermes' && selectedRuntime.health_status === 'unreachable')
+    ),
   );
   const runtimeUnavailableMessage = selectedRuntimeUnavailable
     ? townText.create.nanobotGatewayOffline
@@ -1543,10 +1555,9 @@ export default function TownConsole({
           ? data.provider_endpoints
           : {},
       );
-      // ``platform`` is also Hermes-only on the wire; OpenClaw scans omit
-      // it so we leave the state empty and the Hermes-only delete button
-      // stays hidden (§36).
-      setPlatform(typeof data.platform === 'string' ? data.platform : '');
+      // Legacy single-platform onboard-scan field — kept only as a
+      // fallback. Real platform-gating now reads ``selectedRuntime``.
+      setOnboardScanPlatform(typeof data.platform === 'string' ? data.platform : '');
       setModelCatalogLoaded(true);
     } catch (err) {
       console.warn('[TownConsole] onboard-scan fetch error:', err);

@@ -584,6 +584,45 @@ def _status_flags(
     return False, False
 
 
+def _hermes_runtime_detected() -> bool:
+    """True when Hermes is *available on this host*, regardless of pin.
+
+    Used by the Hermes-only POST endpoints to decide whether to accept a
+    request when the server is running in multi-platform mode (the pre-§42
+    guards used ``settings.is_hermes`` which only succeeded when Hermes was
+    the *active* runtime — that broke OpenClaw + Hermes side-by-side
+    Configure flows).
+    """
+    if Path(settings.hermes_home).expanduser().is_dir():
+        return True
+    return shutil.which("hermes") is not None
+
+
+def _hermes_model_configured() -> bool:
+    """Return True when ``~/.hermes/config.yaml`` already names a usable model.
+
+    Mirrors the spirit of ``_nanobot_config_flags()`` so the install-status
+    response can flag "Hermes is installed but Configure was never run" the
+    same way it does for OpenClaw and Nanobot. We treat the platform as
+    *configured* once ``model.default`` (or a bare ``model:`` string) is
+    populated — this is the value §33/§34 write through
+    ``_quick_model_config_hermes`` after a successful Configure step.
+    """
+    config_path = Path(settings.hermes_config_path).expanduser()
+    if not config_path.exists():
+        return False
+    try:
+        import yaml
+        config = yaml.safe_load(config_path.read_text("utf-8")) or {}
+    except Exception:
+        return False
+    model_cfg = config.get("model", "")
+    if isinstance(model_cfg, dict):
+        default_value = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+        return bool(default_value)
+    return bool(str(model_cfg).strip())
+
+
 def _decode_first_line(stdout: bytes | None, stderr: bytes | None) -> tuple[str, str | None]:
     raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
     first_line = raw.splitlines()[0] if raw else None
@@ -703,6 +742,7 @@ async def get_install_status():
 
     config_exists = _CONFIG_PATH.exists()
     hermes_ready = bool(hermes_path) or hermes_home.is_dir()
+    hermes_model_configured = _hermes_model_configured() if hermes_ready else False
     nanobot_config_exists, nanobot_model_configured, _, _ = _nanobot_config_flags()
     requires_setup, requires_configure = _status_flags(
         openclaw_installed=openclaw_ready,
@@ -719,6 +759,8 @@ async def get_install_status():
         "hermes_installed": hermes_ready,
         "hermes_path": hermes_path,
         "hermes_version": None,
+        "hermes_config_path": str(settings.hermes_config_path),
+        "hermes_model_configured": hermes_model_configured,
         "nanobot_installed": nanobot_ready,
         "nanobot_version": nanobot_version,
         "nanobot_error": nanobot_error,
@@ -730,6 +772,7 @@ async def get_install_status():
         "requires_configure": requires_configure,
         "requires_nanobot_setup": not nanobot_ready,
         "requires_nanobot_configure": nanobot_ready and not nanobot_model_configured,
+        "requires_hermes_configure": hermes_ready and not hermes_model_configured,
         "node_version": _find_node_version(),
     }
 
@@ -2023,8 +2066,8 @@ async def hermes_apply(body: HermesApplyRequest | None = None):
     endpoint is useful after manual edits of ``~/.hermes/.env`` or when the
     UI wants to offer an explicit "Apply to Hermes" button.
     """
-    if not settings.is_hermes:
-        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+    if not _hermes_runtime_detected():
+        raise HTTPException(status_code=400, detail="Hermes runtime not detected on this host")
 
     api_was_running = await _hermes_api_reachable()
     restart_ok, output = await _restart_hermes_api_server()
@@ -2138,8 +2181,8 @@ async def hermes_bot_platforms():
     from the Configure wizard.  Also reports which env vars already have
     a value in ``~/.hermes/.env`` so the UI can surface "already set" hints.
     """
-    if not settings.is_hermes:
-        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+    if not _hermes_runtime_detected():
+        raise HTTPException(status_code=400, detail="Hermes runtime not detected on this host")
 
     env_path = _hermes_env_path()
     configured: dict[str, bool] = {}
@@ -2191,8 +2234,8 @@ async def hermes_bot_config(body: HermesBotConfigRequest):
     restarted so the gateway re-reads the updated credentials.  Otherwise
     the configuration is stored but requires a manual restart.
     """
-    if not settings.is_hermes:
-        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+    if not _hermes_runtime_detected():
+        raise HTTPException(status_code=400, detail="Hermes runtime not detected on this host")
 
     spec = _HERMES_BOT_PLATFORMS.get(body.platform)
     if not spec:
@@ -3611,12 +3654,35 @@ _OPENCLAW_MIN_CONTEXT_WINDOW = 16000
 _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW = 204800
 _HERMES_DIR = settings.hermes_home
 
-if settings.is_hermes:
-    _CONFIG_PATH = settings.hermes_config_path
-    _EXPLICIT_MODELS_PATH = _HERMES_DIR / "xsafeclaw-explicit-models.json"
-else:
-    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
-    _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+# OpenClaw is the historical "main" runtime, so the module-level constants
+# default to the OpenClaw paths. Anything that needs Hermes (or a non-default
+# OpenClaw instance) should derive its paths through ``_config_path_for(...)``
+# / ``_explicit_models_path_for(...)`` below — driven by the resolved
+# ``RuntimeInstance``, not by ``settings.is_hermes`` at import time. This is
+# what lets a single XSafeClaw process serve OpenClaw + Hermes + Nanobot
+# simultaneously instead of being pinned to one platform per process.
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+
+
+def _config_path_for_platform(platform: str | None) -> Path:
+    """Return the runtime config file path for the given platform name.
+
+    OpenClaw → ``~/.openclaw/openclaw.json``
+    Hermes   → ``settings.hermes_config_path``
+    Anything else falls back to the OpenClaw default so legacy callers keep
+    working unchanged.
+    """
+    if platform == "hermes":
+        return Path(settings.hermes_config_path).expanduser()
+    return _OPENCLAW_DIR / "openclaw.json"
+
+
+def _explicit_models_path_for_platform(platform: str | None) -> Path:
+    """Per-platform path to the XSafeClaw explicit-models ledger (§35)."""
+    if platform == "hermes":
+        return _HERMES_DIR / "xsafeclaw-explicit-models.json"
+    return _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 
 # ── Hermes model / provider catalog ──────────────────────────────────────────
 # Static catalog derived from Hermes's official provider documentation.
@@ -5382,6 +5448,10 @@ class OnboardConfigRequest(BaseModel):
     provider: str = ""
     api_key: str = ""
     model_id: str = ""
+    # Explicit runtime selector — same semantics as ``QuickModelConfigRequest.platform``.
+    # Optional so single-platform clients keep working unchanged; the new
+    # ConfigureSelector multi-card UI sets this explicitly per cardclick.
+    platform: Literal["openclaw", "hermes"] | None = None
     gateway_port: int = Field(default=18789, ge=1, le=65535)
     gateway_bind: str = "loopback"
     gateway_auth_mode: str = "token"
@@ -5980,15 +6050,21 @@ async def _auto_approve_devices() -> None:
         print(f"⚠️  Device auto-approve skipped: {e}")
 
 
-def _install_safeclaw_guard_plugin() -> None:
-    """Install the XSafeClaw guard plugin for the active platform.
+def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> None:
+    """Install the XSafeClaw guard plugin for the requested platform.
 
     - **OpenClaw**: copies TS plugin to ``~/.openclaw/extensions/safeclaw-guard/``
     - **Hermes**: copies Python plugin to ``~/.hermes/plugins/safeclaw-guard/``
+
+    ``platform`` lets callers explicitly target one runtime when several are
+    installed (multi-platform Configure flow). When omitted we fall back to
+    ``settings.is_hermes`` so the legacy single-platform call sites keep
+    working unchanged.
     """
     plugins_root = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugins"
+    target = platform or ("hermes" if settings.is_hermes else "openclaw")
 
-    if settings.is_hermes:
+    if target == "hermes":
         src_dir = plugins_root / "safeclaw-guard-hermes"
         if not src_dir.is_dir():
             return
@@ -6146,6 +6222,12 @@ class QuickModelConfigRequest(BaseModel):
     provider: str
     api_key: str = ""
     model_id: str
+    # Explicit runtime selector — used by the new ConfigureSelector UI to
+    # target a specific framework when the user has more than one installed
+    # (e.g. OpenClaw + Hermes side-by-side after the §42 first-class-Hermes
+    # rollout). When ``None`` the endpoint falls back to ``settings.is_hermes``
+    # for backwards compatibility with single-platform clients.
+    platform: Literal["openclaw", "hermes"] | None = None
     # Optional Hermes-side endpoint override.  Currently only the ``alibaba``
     # provider consumes it (see §33 — Hermes's hardcoded ``coding-intl``
     # default traps standard DashScope keys); other providers ignore it.  The
@@ -6188,10 +6270,10 @@ async def delete_configured_model(body: RemoveConfiguredModelRequest):
 
     See §36.
     """
-    if not settings.is_hermes:
+    if not _hermes_runtime_detected():
         raise HTTPException(
             status_code=400,
-            detail="Configured-model deletion is only available on the Hermes platform.",
+            detail="Configured-model deletion requires Hermes to be installed on this host.",
         )
 
     # 1. Resolve (slug, bare_id) from whichever shape the caller used.
@@ -6278,7 +6360,9 @@ async def quick_model_config(body: QuickModelConfigRequest):
     if not body.model_id or not body.provider:
         raise HTTPException(status_code=400, detail="provider and model_id are required")
 
-    if settings.is_hermes:
+    target_platform = body.platform or ("hermes" if settings.is_hermes else "openclaw")
+
+    if target_platform == "hermes":
         return await _quick_model_config_hermes(body)
 
     # ── OpenClaw path ─────────────────────────────────────────────────────
@@ -6559,17 +6643,20 @@ async def onboard_config(body: OnboardConfigRequest):
     - **Hermes**: delegates to the same fast-path as ``quick-model-config``.
     - **OpenClaw**: runs ``openclaw onboard --non-interactive``.
     """
-    if settings.is_hermes:
+    target_platform = body.platform or ("hermes" if settings.is_hermes else "openclaw")
+
+    if target_platform == "hermes":
         quick_body = QuickModelConfigRequest(
             provider=body.provider or "",
             api_key=body.api_key or "",
             model_id=body.model_id or "",
+            platform="hermes",
         )
         result = await _quick_model_config_hermes(quick_body)
-        _install_safeclaw_guard_plugin()
+        _install_safeclaw_guard_plugin(platform="hermes")
         return {
             "success": True,
-            "config_path": str(_CONFIG_PATH),
+            "config_path": str(_config_path_for_platform("hermes")),
             "workspace": str(_HERMES_DIR / "workspace"),
             "output": result.get("output", ""),
         }
@@ -6665,7 +6752,7 @@ async def onboard_config(body: OnboardConfigRequest):
     _patch_config_extras(body)
 
     # ── Install XSafeClaw Guard plugin into OpenClaw extensions ─────────
-    _install_safeclaw_guard_plugin()
+    _install_safeclaw_guard_plugin(platform="openclaw")
 
     # ── Deploy SAFETY.md & PERMISSION.md into workspace ──────────────
     _deploy_safety_files(body.workspace)
@@ -6697,132 +6784,14 @@ async def onboard_config(body: OnboardConfigRequest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §38  Runtime platform picker
+# §38 framework picker — REMOVED in §42
 #
-# When the CLI supervisor detects both OpenClaw and Hermes installed, it
-# launches the server as a subprocess with ``XSAFECLAW_PICKER_MODE=1``. The
-# middleware in ``api/main.py`` then blocks every /api/* route except the two
-# endpoints below. Once the user makes a choice:
-#   1. we persist the answer to ``~/.xsafeclaw/.runtime-platform-pin``;
-#   2. we schedule ``os._exit(_PICKER_EXIT_CODE)`` via a background thread so
-#      the HTTP response has time to flush;
-#   3. the CLI supervisor sees the magic exit code, reads and deletes the pin
-#      file, then spawns the real server with ``PLATFORM`` fixed.
+# The two endpoints that used to live here (``/runtime-platform-status`` and
+# ``/runtime-platform-pick``) implemented a one-shot subprocess that pinned
+# XSafeClaw to either OpenClaw or Hermes for the rest of the session. With
+# the multi-runtime registry in place, there is no longer any "active
+# platform" to negotiate — the user picks per-session in Agent Town.
+# Discovery of installed frameworks is now done by the registry itself; the
+# install-status endpoint above exposes the per-runtime configuration flags
+# the frontend needs to decide which Configure card to show first.
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Non-zero, unique-looking return code used to signal "user picked a platform"
-# from the picker subprocess back to the CLI supervisor. Any other exit code
-# means the picker died / was cancelled, and the supervisor falls back to
-# platform auto-detection instead of blocking forever.
-_PICKER_EXIT_CODE = 42
-
-# Env var name kept in sync with ``api/main.py``; duplicated here so this
-# module doesn't have to import from the app package it lives inside of.
-_PICKER_MODE_ENV = "XSAFECLAW_PICKER_MODE"
-
-
-def _picker_mode_active() -> bool:
-    return os.environ.get(_PICKER_MODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _runtime_platform_pin_path() -> Path:
-    """CLI-supervisor <-> picker handoff file.
-
-    The pin lives under the XSafeClaw data directory (not under Hermes or
-    OpenClaw homes) so the choice is scoped to XSafeClaw and never leaks into
-    the agent frameworks themselves.
-    """
-    return Path.home() / ".xsafeclaw" / ".runtime-platform-pin"
-
-
-def _detect_installed_frameworks() -> dict:
-    """Report which agent frameworks are installed on this machine.
-
-    Consumed by the picker UI (to render two cards) and — indirectly via the
-    CLI — by the supervisor loop (to decide whether a picker is needed at
-    all). A framework counts as installed when either its binary is on PATH
-    *or* its home directory exists, matching the heuristics used by
-    ``config._detect_platform()``.
-    """
-    hermes_bin = _find_hermes()
-    openclaw_bin = _find_openclaw()
-    hermes_home = (Path.home() / ".hermes").is_dir()
-    openclaw_home = (Path.home() / ".openclaw").is_dir()
-    return {
-        "openclaw_installed": bool(openclaw_bin) or openclaw_home,
-        "hermes_installed": bool(hermes_bin) or hermes_home,
-        "openclaw_path": openclaw_bin,
-        "hermes_path": hermes_bin,
-    }
-
-
-@router.get("/runtime-platform-status")
-async def runtime_platform_status():
-    """Return picker-mode flag plus framework detection.
-
-    The frontend router guard polls this on every navigation: when
-    ``picker_mode === true``, every route except ``/select-framework`` is
-    redirected to the picker. The SelectFramework page itself uses the
-    ``*_installed`` fields to decide which cards to render (a card for a
-    missing framework is disabled / hidden rather than submittable).
-    """
-    info = _detect_installed_frameworks()
-    return {
-        "picker_mode": _picker_mode_active(),
-        **info,
-    }
-
-
-class _RuntimePlatformPickRequest(BaseModel):
-    """Body for POST /api/system/runtime-platform-pick."""
-
-    platform: str = Field(..., pattern=r"^(openclaw|hermes)$")
-
-
-@router.post("/runtime-platform-pick")
-async def runtime_platform_pick(body: _RuntimePlatformPickRequest):
-    """Accept the user's framework choice and signal the CLI supervisor.
-
-    Refuses (409) when the server is NOT in picker mode — this prevents an
-    accidental call during normal operation from triggering a hard exit.
-    On success, writes the choice atomically and schedules process exit with
-    ``_PICKER_EXIT_CODE`` after a short delay so the HTTP response can flush.
-    """
-    if not _picker_mode_active():
-        raise HTTPException(
-            status_code=409,
-            detail="XSafeClaw is not in picker mode; platform pinning is disabled.",
-        )
-
-    # Also reject choices for a framework that isn't actually installed — the
-    # supervisor would just fail to spawn the real server otherwise.
-    info = _detect_installed_frameworks()
-    if body.platform == "hermes" and not info["hermes_installed"]:
-        raise HTTPException(status_code=400, detail="Hermes is not installed on this machine.")
-    if body.platform == "openclaw" and not info["openclaw_installed"]:
-        raise HTTPException(status_code=400, detail="OpenClaw is not installed on this machine.")
-
-    pin_path = _runtime_platform_pin_path()
-    try:
-        pin_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = pin_path.with_suffix(".tmp")
-        tmp.write_text(body.platform, encoding="utf-8")
-        os.replace(tmp, pin_path)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to persist picker choice: {exc}") from exc
-
-    def _exit_after_delay() -> None:
-        # Give the response a moment to leave the socket before killing the
-        # process. ``os._exit`` bypasses uvicorn's graceful shutdown on
-        # purpose — the CLI supervisor is the one in charge of lifecycle.
-        import time as _time
-        _time.sleep(0.6)
-        os._exit(_PICKER_EXIT_CODE)
-
-    threading.Thread(target=_exit_after_delay, daemon=True).start()
-
-    return {
-        "success": True,
-        "platform": body.platform,
-        "pin_path": str(pin_path),
-    }

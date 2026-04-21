@@ -25,29 +25,84 @@ from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_r
 from ...services.event_sync_service import EventSyncService
 from ..runtime_helpers import resolve_instance, serialize_instance
 
-# ── Platform-aware paths ──────────────────────────────────────────────────
+# ── Per-instance path helpers (was: module-level platform switch) ─────────
+# Historically this module froze ``_SESSIONS_DIR`` / ``_SESSIONS_JSON`` /
+# ``_CONFIG_PATH`` at import time based on ``settings.is_hermes``. That made
+# Hermes a "second-class" runtime: even after §38's runtime registry was in
+# place, anything that read these constants was locked to one platform per
+# process, so users couldn't simultaneously monitor OpenClaw + Hermes +
+# Nanobot or hot-switch in Agent Town.
+#
+# The constants below are kept as **defaults / backwards-compatible shims**
+# (so external imports don't break) but every call site that needs platform-
+# aware paths should now go through ``_sessions_dir_for(instance)`` etc.
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _HERMES_DIR = settings.hermes_home
+_OPENCLAW_DEFAULT_SESSIONS_DIR = _OPENCLAW_DIR / "agents" / "main" / "sessions"
 
-if settings.is_hermes:
-    _SESSIONS_DIR = settings.hermes_sessions_dir
-    _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
-    _CONFIG_PATH = settings.hermes_config_path
-else:
-    _SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
-    _SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
-    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+# Backwards-compatible defaults — point at OpenClaw because that is the
+# historical "main" runtime when XSafeClaw was first written. NEW code must
+# not depend on these; use the per-instance helpers instead.
+_SESSIONS_DIR = _OPENCLAW_DEFAULT_SESSIONS_DIR
+_SESSIONS_JSON = _SESSIONS_DIR / "sessions.json"
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+
+
+def _sessions_dir_for(instance: RuntimeInstance) -> Path:
+    """Return the on-disk sessions directory for a given runtime instance."""
+    if instance.sessions_path:
+        return Path(instance.sessions_path).expanduser()
+    if instance.platform == "hermes":
+        return Path(settings.hermes_sessions_dir).expanduser()
+    if instance.platform == "openclaw":
+        return _OPENCLAW_DEFAULT_SESSIONS_DIR
+    return _OPENCLAW_DEFAULT_SESSIONS_DIR
+
+
+def _sessions_json_for(instance: RuntimeInstance) -> Path:
+    """Return the ``sessions.json`` index file for a given runtime instance."""
+    return _sessions_dir_for(instance) / "sessions.json"
+
+
+def _config_path_for(instance: RuntimeInstance) -> Path:
+    """Return the runtime config file path for a given runtime instance.
+
+    OpenClaw → ``~/.openclaw/openclaw.json``
+    Hermes   → ``~/.hermes/config.yaml``
+    Nanobot  → ``instance.config_path`` if known, else a sensible default.
+    """
+    if instance.config_path:
+        return Path(instance.config_path).expanduser()
+    if instance.platform == "hermes":
+        return Path(settings.hermes_config_path).expanduser()
+    if instance.platform == "openclaw":
+        return _OPENCLAW_DIR / "openclaw.json"
+    return _OPENCLAW_DIR / "openclaw.json"
 _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
 _GATEWAY_CONNECT_RETRY_ATTEMPTS = 6
 _GATEWAY_CONNECT_RETRY_DELAY_S = 1.0
-_available_models_cache: dict[str, object] = {
-    "expires_at": 0.0,
-    "payload": {"models": [], "default_model": ""},
-    "last_success": None,
-}
+# Per-instance cache: keyed by ``RuntimeInstance.instance_id`` so OpenClaw
+# and Hermes (and Nanobot, although it has its own short-circuit) can each
+# serve their own model list from this endpoint without trampling each
+# other's payload. Each value mirrors the legacy single-bucket schema:
+# ``{"expires_at": float, "payload": dict, "last_success": dict | None}``.
+_available_models_cache: dict[str, dict[str, object]] = {}
+
+
+def _instance_models_cache(instance_id: str) -> dict[str, object]:
+    """Return (creating if needed) the per-instance model cache bucket."""
+    bucket = _available_models_cache.get(instance_id)
+    if bucket is None:
+        bucket = {
+            "expires_at": 0.0,
+            "payload": {"models": [], "default_model": ""},
+            "last_success": None,
+        }
+        _available_models_cache[instance_id] = bucket
+    return bucket
 _available_models_lock = None
 _NANOBOT_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 
@@ -576,18 +631,23 @@ def _ensure_default_model_visible(payload: dict) -> dict:
     return {"models": [fallback, *models], "default_model": default_model}
 
 
-def _build_available_models_payload_from_config() -> dict:
-    """Fallback to configured models from platform config file.
+def _build_available_models_payload_from_config(instance: RuntimeInstance) -> dict:
+    """Fallback to configured models from the runtime's config file.
 
     Reads ``~/.openclaw/openclaw.json`` (OpenClaw) or
-    ``~/.hermes/config.yaml`` (Hermes).
+    ``~/.hermes/config.yaml`` (Hermes), using the path advertised by the
+    given instance instead of a frozen module-level constant. This lets the
+    same XSafeClaw process serve OpenClaw and Hermes side-by-side.
     """
-    if not _CONFIG_PATH.exists():
+    config_path = _config_path_for(instance)
+    is_hermes = instance.platform == "hermes"
+
+    if not config_path.exists():
         return {"models": [], "default_model": ""}
 
     try:
-        raw = _CONFIG_PATH.read_text(encoding="utf-8")
-        if settings.is_hermes:
+        raw = config_path.read_text(encoding="utf-8")
+        if is_hermes:
             import yaml
             config = yaml.safe_load(raw) or {}
         else:
@@ -595,7 +655,7 @@ def _build_available_models_payload_from_config() -> dict:
     except Exception:
         return {"models": [], "default_model": ""}
 
-    if settings.is_hermes:
+    if is_hermes:
         # Hermes config.yaml: ``model`` can be a nested dict with a
         # ``default`` key (e.g. ``model: {default: "anthropic/claude-opus-4.6", provider: "auto"}``)
         # or a bare string like ``model: "hermes-agent"``.
@@ -872,7 +932,11 @@ def _runtime_catalog_match(models: list[dict], target_model_id: str) -> tuple[bo
     return False, None
 
 
-def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
+def _read_history_from_jsonl(
+    instance: RuntimeInstance,
+    session_key: str,
+    limit: int = 100,
+) -> list[dict]:
     """
     Read chat history from agent session JSONL storage.
 
@@ -888,11 +952,14 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
         ~/.hermes/sessions/sessions.json  (key → sessionId mapping)
         ~/.hermes/sessions/<sessionId>.jsonl
     """
-    if not _SESSIONS_JSON.exists():
+    sessions_json = _sessions_json_for(instance)
+    sessions_dir = _sessions_dir_for(instance)
+
+    if not sessions_json.exists():
         return []
 
     try:
-        sessions_index = json.loads(_SESSIONS_JSON.read_text(encoding="utf-8"))
+        sessions_index = json.loads(sessions_json.read_text(encoding="utf-8"))
     except Exception:
         return []
 
@@ -910,7 +977,7 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
     if not session_id:
         return []
 
-    jsonl_path = _SESSIONS_DIR / f"{session_id}.jsonl"
+    jsonl_path = sessions_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
 
@@ -1033,15 +1100,21 @@ def _read_history_from_jsonl(session_key: str, limit: int = 100) -> list[dict]:
 
     return messages
 
-def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
+def _read_tool_calls_from_jsonl(
+    instance: RuntimeInstance,
+    session_key: str,
+) -> list[dict]:
     """
     Read the latest tool calls (since the last user message) from the JSONL file.
     Returns a list of tool_call dicts for SSE streaming.
     """
-    if not _SESSIONS_JSON.exists():
+    sessions_json = _sessions_json_for(instance)
+    sessions_dir = _sessions_dir_for(instance)
+
+    if not sessions_json.exists():
         return []
     try:
-        sessions_index = json.loads(_SESSIONS_JSON.read_text(encoding="utf-8"))
+        sessions_index = json.loads(sessions_json.read_text(encoding="utf-8"))
     except Exception:
         return []
 
@@ -1056,7 +1129,7 @@ def _read_tool_calls_from_jsonl(session_key: str) -> list[dict]:
     if not session_id:
         return []
 
-    jsonl_path = _SESSIONS_DIR / f"{session_id}.jsonl"
+    jsonl_path = sessions_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
 
@@ -1237,16 +1310,21 @@ async def _get_nanobot_gateway_session(
     )
 
 
-async def _connect_gateway_with_retries() -> GatewayClient | HermesClient:
+async def _connect_gateway_with_retries(
+    instance: RuntimeInstance,
+) -> GatewayClient | HermesClient:
     """Connect to the agent gateway, tolerating short daemon reload windows.
 
-    Returns a ``HermesClient`` when the platform is Hermes, otherwise
-    a ``GatewayClient`` (OpenClaw WebSocket).
+    Returns a ``HermesClient`` when the instance's platform is Hermes,
+    otherwise a ``GatewayClient`` (OpenClaw WebSocket). The choice is now
+    keyed off the resolved ``RuntimeInstance`` so an OpenClaw-default process
+    can still talk to a Hermes session and vice-versa.
     """
     last_error: Exception | None = None
+    is_hermes = instance.platform == "hermes"
 
     for attempt in range(1, _GATEWAY_CONNECT_RETRY_ATTEMPTS + 1):
-        if settings.is_hermes:
+        if is_hermes:
             client: GatewayClient | HermesClient = HermesClient(
                 api_key=settings.hermes_api_key or None,
             )
@@ -1265,7 +1343,7 @@ async def _connect_gateway_with_retries() -> GatewayClient | HermesClient:
             if attempt < _GATEWAY_CONNECT_RETRY_ATTEMPTS:
                 await asyncio.sleep(_GATEWAY_CONNECT_RETRY_DELAY_S)
 
-    platform_name = "Hermes API server" if settings.is_hermes else "OpenClaw gateway"
+    platform_name = "Hermes API server" if is_hermes else "OpenClaw gateway"
     detail = (
         f"Failed to connect to {platform_name} after {_GATEWAY_CONNECT_RETRY_ATTEMPTS} attempts: "
         f"{last_error}. The gateway may still be restarting."
@@ -1273,11 +1351,15 @@ async def _connect_gateway_with_retries() -> GatewayClient | HermesClient:
     raise HTTPException(status_code=503, detail=detail)
 
 
-async def _get_or_create_client(session_key: str) -> GatewayClient | HermesClient:
+async def _get_or_create_client(
+    instance: RuntimeInstance,
+    session_key: str,
+) -> GatewayClient | HermesClient:
     """Get existing client or create a fresh one if missing/dead."""
     client = _gateway_sessions.get(session_key)
+    is_hermes = instance.platform == "hermes"
 
-    if settings.is_hermes:
+    if is_hermes:
         if client is not None and isinstance(client, HermesClient):
             return client
     else:
@@ -1285,7 +1367,7 @@ async def _get_or_create_client(session_key: str) -> GatewayClient | HermesClien
             return client
 
     # Client missing or connection dead — create a new connection
-    client = await _connect_gateway_with_retries()
+    client = await _connect_gateway_with_retries(instance)
     _gateway_sessions[session_key] = client
     return client
 
@@ -1509,7 +1591,7 @@ async def start_session(request: StartSessionRequest | None = None):
             instance=serialize_instance(instance),
         )
 
-    client = await _get_or_create_client(public_session_key)
+    client = await _get_or_create_client(instance, public_session_key)
     initial_model = body.model_override
     if initial_model and body.provider_override and "/" not in initial_model:
         initial_model = f"{body.provider_override.rstrip('/')}/{initial_model.lstrip('/')}"
@@ -1590,7 +1672,7 @@ async def send_message(request: SendMessageRequest):
             client = await _get_nanobot_gateway_session(public_session_key, instance)
             result = await client.send_chat(request.message, timeout_s=120.0)
         else:
-            client = await _get_or_create_client(public_session_key)
+            client = await _get_or_create_client(instance, public_session_key)
             result = await client.send_chat(
                 session_key=local_session_key,
                 message=request.message,
@@ -1693,7 +1775,7 @@ async def send_message_stream(request: SendMessageRequest):
                         final_text = str(chunk["text"])
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             else:
-                client = await _get_or_create_client(public_session_key)
+                client = await _get_or_create_client(instance, public_session_key)
                 async for chunk in client.stream_chat(
                     session_key=local_session_key,
                     message=request.message,
@@ -1724,7 +1806,7 @@ async def send_message_stream(request: SendMessageRequest):
             tool_events = (
                 _read_nanobot_tool_calls_from_jsonl(instance, local_session_key)
                 if instance.platform == "nanobot"
-                else _read_tool_calls_from_jsonl(local_session_key)
+                else _read_tool_calls_from_jsonl(instance, local_session_key)
             )
             for evt in tool_events:
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
@@ -1778,7 +1860,7 @@ async def transcribe_clean(request: TranscribeCleanRequest):
                 timeout_s=60.0,
             )
         else:
-            client = await _get_or_create_client(public_session_key)
+            client = await _get_or_create_client(instance, public_session_key)
             await client.patch_session(
                 local_session_key,
                 model=request.model or None,
@@ -1814,7 +1896,7 @@ async def get_history(
     messages = (
         _read_nanobot_history_from_jsonl(instance, local_session_key, limit=limit)
         if instance.platform == "nanobot"
-        else _read_history_from_jsonl(local_session_key, limit=limit)
+        else _read_history_from_jsonl(instance, local_session_key, limit=limit)
     )
     return {
         "session_key": public_session_key,
@@ -1880,7 +1962,7 @@ async def patch_session(request: PatchSessionRequest):
             },
         }
 
-    client = await _get_or_create_client(public_session_key)
+    client = await _get_or_create_client(instance, public_session_key)
     try:
         result = await client.patch_session(
             local_session_key,
@@ -1944,34 +2026,36 @@ async def available_models(
 
     from .system import _run_openclaw_json
 
+    cache = _instance_models_cache(instance.instance_id)
+
     now = time.monotonic()
-    expires_at = float(_available_models_cache.get("expires_at", 0.0) or 0.0)
-    cached_payload = _available_models_cache.get("payload")
+    expires_at = float(cache.get("expires_at", 0.0) or 0.0)
+    cached_payload = cache.get("payload")
     if now < expires_at and isinstance(cached_payload, dict):
         return _decorate_models_payload(cached_payload, instance, supports_session_patch=True)
 
     async with _get_available_models_lock():
         now = time.monotonic()
-        expires_at = float(_available_models_cache.get("expires_at", 0.0) or 0.0)
-        cached_payload = _available_models_cache.get("payload")
+        expires_at = float(cache.get("expires_at", 0.0) or 0.0)
+        cached_payload = cache.get("payload")
         if now < expires_at and isinstance(cached_payload, dict):
             return _decorate_models_payload(cached_payload, instance, supports_session_patch=True)
 
-        config_payload = _build_available_models_payload_from_config()
+        config_payload = _build_available_models_payload_from_config(instance)
         if config_payload["models"]:
-            print("[available-models] using configured models from config file")
-            _available_models_cache["payload"] = config_payload
-            _available_models_cache["last_success"] = config_payload
-            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+            print(f"[available-models] using configured models from config file (instance={instance.instance_id})")
+            cache["payload"] = config_payload
+            cache["last_success"] = config_payload
+            cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
             return _decorate_models_payload(config_payload, instance, supports_session_patch=True)
 
         if instance.platform == "hermes":
             hermes_payload = await _build_available_models_from_hermes_api()
             if hermes_payload["models"]:
-                print("[available-models] using live Hermes API model catalog")
-                _available_models_cache["payload"] = hermes_payload
-                _available_models_cache["last_success"] = hermes_payload
-                _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+                print(f"[available-models] using live Hermes API model catalog (instance={instance.instance_id})")
+                cache["payload"] = hermes_payload
+                cache["last_success"] = hermes_payload
+                cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
                 return _decorate_models_payload(hermes_payload, instance, supports_session_patch=True)
         else:
             raw = await _run_openclaw_json(["models", "list"], timeout=_AVAILABLE_MODELS_CLI_TIMEOUT)
@@ -1979,22 +2063,22 @@ async def available_models(
             payload = _build_available_models_payload(raw, status_raw)
 
             if payload["models"]:
-                _available_models_cache["payload"] = payload
-                _available_models_cache["last_success"] = payload
-                _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
+                cache["payload"] = payload
+                cache["last_success"] = payload
+                cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_CACHE_TTL
                 return _decorate_models_payload(payload, instance, supports_session_patch=True)
 
-        last_success = _available_models_cache.get("last_success")
+        last_success = cache.get("last_success")
         if isinstance(last_success, dict) and last_success.get("models"):
-            print("[available-models] using last known good model list (live source returned nothing)")
-            _available_models_cache["payload"] = last_success
-            _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
+            print(f"[available-models] using last known good model list (instance={instance.instance_id})")
+            cache["payload"] = last_success
+            cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
             return _decorate_models_payload(last_success, instance, supports_session_patch=True)
 
-        print("[available-models] no models found from any source")
+        print(f"[available-models] no models found from any source (instance={instance.instance_id})")
         empty_payload = {"models": [], "default_model": ""}
-        _available_models_cache["payload"] = empty_payload
-        _available_models_cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
+        cache["payload"] = empty_payload
+        cache["expires_at"] = time.monotonic() + _AVAILABLE_MODELS_FAILURE_TTL
         return _decorate_models_payload(empty_payload, instance, supports_session_patch=True)
 
     # Unreachable, but keeps mypy sane.
@@ -2034,7 +2118,7 @@ async def model_readiness(
 
     client: GatewayClient | HermesClient | None = None
     try:
-        client = await _connect_gateway_with_retries()
+        client = await _connect_gateway_with_retries(instance)
         raw = await client.list_models()
         models = _extract_runtime_model_list(raw)
 

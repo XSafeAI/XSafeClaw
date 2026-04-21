@@ -47,10 +47,16 @@ class Settings(BaseSettings):
     )
 
     # ── Platform selection ────────────────────────────────────────────────
-    platform: Literal["auto", "openclaw", "hermes"] = Field(
+    # Since §42 this is only a *default-instance hint* for
+    # ``runtime/registry.py::_ensure_default``; XSafeClaw monitors all
+    # three runtimes simultaneously and the user can pick any of them in
+    # Agent Town regardless of this value. ``auto`` falls back to the
+    # registry's fixed priority order (openclaw → hermes → nanobot).
+    platform: Literal["auto", "openclaw", "hermes", "nanobot"] = Field(
         default="auto",
-        description="Agent platform: 'auto' detects installed platform, "
-                    "or force 'openclaw' / 'hermes'",
+        description="Default-instance hint: 'auto' uses the registry's "
+                    "priority order, or pin one of "
+                    "'openclaw' / 'hermes' / 'nanobot'",
     )
 
     # Data directory

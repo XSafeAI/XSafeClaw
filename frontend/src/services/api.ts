@@ -107,8 +107,13 @@ export interface InstallStatusResponse {
   config_exists: boolean;
   nanobot_config_exists: boolean;
   nanobot_model_configured: boolean;
+  // §42: surfaced by the backend so the multi-runtime configure selector
+  // can mark Hermes the same way it marks OpenClaw / Nanobot.
+  hermes_config_exists?: boolean;
+  hermes_model_configured?: boolean;
   requires_setup: boolean;
   requires_configure: boolean;
+  requires_hermes_configure?: boolean;
   requires_nanobot_setup: boolean;
   requires_nanobot_configure: boolean;
   node_version: string;
@@ -860,34 +865,9 @@ export const systemAPI = {
       output: string;
     }>('/system/hermes-bot-config', data),
 
-  /**
-   * §38 — Is this server running in "platform picker mode"?  Returned by the
-   * CLI supervisor's one-shot picker subprocess.  When ``picker_mode === true``
-   * the frontend must redirect every route (except /select-framework) to the
-   * framework picker and block normal navigation.
-   */
-  runtimePlatformStatus: () =>
-    api.get<{
-      picker_mode: boolean;
-      openclaw_installed: boolean;
-      hermes_installed: boolean;
-      openclaw_path: string | null;
-      hermes_path: string | null;
-    }>('/system/runtime-platform-status', { timeout: 4000 }),
-
-  /**
-   * §38 — Submit the user's framework choice to the picker server.  On
-   * success the picker schedules a hard exit (~600 ms later) so the CLI
-   * supervisor can spawn the real server with ``PLATFORM`` pinned.  The
-   * frontend should wait for the old server to drop, then reload the page
-   * (the new server will answer on the same port).
-   */
-  pickRuntimePlatform: (platform: 'openclaw' | 'hermes') =>
-    api.post<{
-      success: boolean;
-      platform: 'openclaw' | 'hermes';
-      pin_path: string;
-    }>('/system/runtime-platform-pick', { platform }),
+  // §38 framework picker (runtimePlatformStatus / pickRuntimePlatform) was
+  // removed in §42 — XSafeClaw now monitors all three runtimes
+  // simultaneously and the user picks per-session in Agent Town.
 };
 
 export const skillsAPI = {

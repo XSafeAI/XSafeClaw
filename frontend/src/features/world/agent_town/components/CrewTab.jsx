@@ -890,7 +890,14 @@ export default function CrewTab({
                     <div className="tc-model-empty">{townText.create.runtimeEmpty}</div>
                   ) : runtimeInstances.map((instance) => {
                     const selected = instance.instance_id === selectedRuntimeId;
-                    const unhealthy = instance.platform === 'nanobot' && instance.health_status !== 'healthy';
+                    // §42: a runtime is "offline" if its health probe says so. We treat
+                    // both Nanobot's "not healthy" and Hermes's "unreachable" as the same
+                    // offline condition so creating an agent against either is greyed
+                    // out the same way (the backend would 503 anyway).
+                    const unhealthy = (
+                      (instance.platform === 'nanobot' && instance.health_status !== 'healthy')
+                      || (instance.platform === 'hermes' && instance.health_status === 'unreachable')
+                    );
                     return (
                       <button
                         key={instance.instance_id}
