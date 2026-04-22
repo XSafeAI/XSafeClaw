@@ -240,6 +240,13 @@ export default function ModelSetupModal({
   // doesn't have a preset bundle (i.e. everyone except alibaba today).
   // OpenClaw scan payloads omit this field entirely.
   providerRecommendedBaseUrls = {},
+  // §53 — active runtime's platform ('openclaw' | 'hermes' | 'nanobot' | '').
+  // Forwarded to ``systemAPI.providerHasKey`` so that on a Hermes-default
+  // server ("settings.is_hermes=True") the modal still asks OpenClaw's
+  // auth store when the user is configuring an OpenClaw runtime — and
+  // vice-versa. Empty string falls through to the legacy
+  // ``settings.is_hermes`` branch on the backend.
+  runtimePlatform = '',
   defaults = null,
   loading = false,
   loadingError = '',
@@ -568,7 +575,14 @@ export default function ModelSetupModal({
                     customCompatibility: DEFAULT_FORM.customCompatibility,
                   }));
                   setManualModelEntry(false);
-                  systemAPI.providerHasKey(id).then((res) => {
+                  // §53 — pin to the active runtime's platform when known.
+                  // ``runtimePlatform`` may be 'nanobot' or '' for which
+                  // the backend has no dedicated auth-store branch yet —
+                  // fall through to ``undefined`` (legacy) in that case.
+                  const platformParam = runtimePlatform === 'openclaw' || runtimePlatform === 'hermes'
+                    ? runtimePlatform
+                    : undefined;
+                  systemAPI.providerHasKey(id, platformParam).then((res) => {
                     const hasKey = Boolean(res.data?.has_key);
                     setProviderHasExistingKey(hasKey);
                     if (hasKey) {

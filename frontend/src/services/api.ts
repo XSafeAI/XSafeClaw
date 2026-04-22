@@ -572,7 +572,21 @@ export const guardAPI = {
 // System API (agent install / onboard / status)
 export const systemAPI = {
   /** Check whether an agent framework is installed. */
-  status: () => api.get<SystemStatusResponse>("/system/status", { timeout: 30000 }),
+  /**
+   * Backend ``/system/status``.
+   *
+   * §53 — pass ``platform`` to override the global ``settings.is_hermes``
+   * branch so callers like Configure.tsx (Hermes wizard refresh button on
+   * an OpenClaw-default server) get the right platform's status shape.
+   * Omit to keep legacy behaviour for callers that only read generic
+   * fields like ``default_workspace`` (TownConsole's workspace probe,
+   * ModelSetupModal's workspace prefill).
+   */
+  status: (platform?: 'openclaw' | 'hermes') =>
+    api.get<SystemStatusResponse>(
+      "/system/status",
+      { timeout: 30000, ...(platform ? { params: { platform } } : {}) },
+    ),
 
   /** Fast install/config probe used by setup and route guards. */
   installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
@@ -784,8 +798,21 @@ export const systemAPI = {
   // 历史端点 POST /system/hermes/configured-models/delete 已下线；
   // 前端不再提供删除已配置模型的入口。
 
-  providerHasKey: (provider: string) =>
-    api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
+  /**
+   * Backend ``/system/provider-has-key``.
+   *
+   * §53 — pass ``platform`` so the per-runtime CMD UI
+   * (ModelSetupModal) can ask the right auth store on a multi-platform
+   * server. Omitting falls back to the legacy ``settings.is_hermes``
+   * branch — no behavioural change for current callers.
+   */
+  providerHasKey: (provider: string, platform?: 'openclaw' | 'hermes') => {
+    const qs = new URLSearchParams({ provider });
+    if (platform) qs.set('platform', platform);
+    return api.get<{ has_key: boolean }>(
+      `/system/provider-has-key?${qs.toString()}`,
+    );
+  },
 
   hermesApiKeyStatus: () =>
     api.get<{

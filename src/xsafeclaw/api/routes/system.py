@@ -315,12 +315,11 @@ def _find_hermes() -> Optional[str]:
     return shutil.which("hermes", path=search_path)
 
 
-def _find_agent_binary() -> Optional[str]:
-    """Locate the active platform's binary (``hermes`` or ``openclaw``)."""
-    if settings.is_hermes:
-        return _find_hermes()
-    return _find_openclaw()
-
+# §53 — removed legacy ``_find_agent_binary()``: a §38-era helper that
+# decided OpenClaw-vs-Hermes binary by global ``settings.is_hermes``.
+# Zero callers remain after the §38/§42 RuntimeRegistry rewrite — the
+# live version with the correct per-instance signature lives in
+# ``api/routes/skills.py::_find_agent_binary(instance: RuntimeInstance)``.
 
 # ── Hermes embedded-Python bridge ─────────────────────────────────────────────
 # Hermes ships its own Python package tree at ``~/.hermes/hermes-agent/`` with
@@ -778,12 +777,30 @@ async def get_install_status():
 
 
 @router.get("/status")
-async def get_system_status():
-    """Check whether the agent CLI is installed and whether its daemon is running."""
+async def get_system_status(platform: str | None = None):
+    """Check whether the agent CLI is installed and whether its daemon is running.
+
+    §53 — ``?platform=`` query parameter mirrors the §52 fix on
+    ``/onboard-scan``: the multi-platform UI (Configure.tsx in
+    Hermes-on-OpenClaw-default mode, etc.) needs to ask for a specific
+    platform's status shape regardless of the global ``settings.is_hermes``
+    flag. When omitted, falls back to the legacy ``settings.is_hermes``
+    branch so existing callers (TownConsole's workspace probe,
+    ModelSetupModal's workspace prefill, anything that just reads
+    ``default_workspace`` and doesn't care about platform-specific
+    fields) keep working unchanged.
+    """
     env = _build_env()
     platform_name = settings.resolved_platform
 
-    if settings.is_hermes:
+    requested = (platform or "").strip().lower()
+    use_hermes_status = (
+        requested == "hermes"
+        if requested in {"hermes", "openclaw"}
+        else settings.is_hermes
+    )
+
+    if use_hermes_status:
         return await _hermes_status(env)
 
     # ── OpenClaw status ───────────────────────────────────────────────────
@@ -4502,16 +4519,11 @@ def _extract_json_obj(raw: str) -> dict | list:
     raise ValueError("No valid JSON found in output")
 
 
-async def _run_agent_json(args: list[str], timeout: int = 30) -> dict | list | None:
-    """Run the active platform's CLI with --json and return parsed output.
-
-    Dispatches to ``_run_openclaw_json`` or ``_run_hermes_json`` depending
-    on the configured platform.
-    """
-    if settings.is_hermes:
-        return await _run_hermes_json(args, timeout=timeout)
-    return await _run_openclaw_json(args, timeout=timeout)
-
+# §53 — removed legacy ``_run_agent_json()``: also a §38-era helper that
+# dispatched to the OpenClaw or Hermes CLI by global ``settings.is_hermes``.
+# Zero callers remain; the live dispatch path goes through
+# ``RuntimeRegistry`` and the per-instance helpers in ``runtime/`` and
+# ``api/routes/skills.py``.
 
 async def _run_hermes_json(args: list[str], timeout: int = 30) -> dict | list | None:
     """Run a hermes CLI command with --json and return parsed output."""
@@ -6529,13 +6541,28 @@ async def feishu_test(body: FeishuTestRequest):
 
 
 @router.get("/provider-has-key")
-async def provider_has_key(provider: str = ""):
-    """Return whether a provider already has a saved API key (no key content exposed)."""
+async def provider_has_key(provider: str = "", platform: str | None = None):
+    """Return whether a provider already has a saved API key (no key content exposed).
+
+    §53 — ``?platform=`` lets the per-runtime CMD UI ask the right
+    auth store. ModelSetupModal already knows which runtime the user
+    selected (``selectedRuntime.platform``), so on a Hermes-default
+    server it can ask "does OpenClaw have a key for this provider?"
+    instead of getting Hermes's answer by accident. Same legacy
+    fallback to ``settings.is_hermes`` when the parameter is absent.
+    """
     provider = provider.strip()
     if not provider:
         return {"has_key": False}
 
-    if settings.is_hermes:
+    requested = (platform or "").strip().lower()
+    use_hermes_auth = (
+        requested == "hermes"
+        if requested in {"hermes", "openclaw"}
+        else settings.is_hermes
+    )
+
+    if use_hermes_auth:
         return {"has_key": _hermes_provider_has_key(provider)}
 
     _AGENT_STATE_DIR = _OPENCLAW_DIR / "agents" / "main" / "agent"

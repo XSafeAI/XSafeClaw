@@ -1396,7 +1396,15 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   async function refreshStatus() {
     setRefreshing(true);
     try {
-      const res = await systemAPI.status();
+      // §53 — ``refreshStatus`` only renders inside the Hermes wizard
+      // (saveModelToHermes / saveBotToHermes / saveHermesApiKey are all
+      // siblings), so always pin the request to ``hermes`` to dodge the
+      // old ``settings.is_hermes`` branch when the server defaults to
+      // OpenClaw. Without this pin, a user on /hermes_configure clicking
+      // "refresh status" against an OpenClaw-default server got an
+      // OpenClaw-shaped response cast to ``HermesStatusSnapshot`` and
+      // silently lost ``hermes_api_key_configured`` / similar fields.
+      const res = await systemAPI.status('hermes');
       setSt(res.data as HermesStatusSnapshot);
     } catch { /* ignore */ }
     finally { setRefreshing(false); }
@@ -2352,7 +2360,11 @@ export default function Configure() {
 
     (async () => {
       try {
-        const statusRes = await systemAPI.status();
+        // §53 — when the URL pins a platform we ask /system/status for
+        // *that* platform's shape (matches the §52 onboard-scan policy).
+        // Legacy /configure keeps unpinned so the original autodetect
+        // path still keys off ``st.platform === 'hermes'``.
+        const statusRes = await systemAPI.status(requestedPlatform || undefined);
         if (cancelled) return;
 
         const st = statusRes.data as HermesStatusSnapshot;

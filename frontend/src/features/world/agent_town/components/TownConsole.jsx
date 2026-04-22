@@ -2814,6 +2814,12 @@ export default function TownConsole({
         modelProviders={catalogModelProviders}
         providerEndpoints={providerEndpoints}
         providerRecommendedBaseUrls={providerRecommendedBaseUrls}
+        // §53 — pass the active runtime's platform so the modal can
+        // pin /system/provider-has-key to the right auth store on
+        // multi-platform servers (matches the §52 onboard-scan policy).
+        // Falls back to the legacy onboard-scan platform if the user
+        // hasn't picked a runtime yet (initial mount).
+        runtimePlatform={selectedRuntime?.platform || onboardScanPlatform || ''}
         defaults={onboardDefaults}
         loading={modelCatalogLoading && !modelCatalogLoaded}
         loadingError={modelCatalogLoaded ? '' : modelCatalogError}
