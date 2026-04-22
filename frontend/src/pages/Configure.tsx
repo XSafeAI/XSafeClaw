@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Configure — 14-step onboard wizard, 1:1 clone of OpenClaw's native onboard flow.
  * Steps: Security → Mode → Config → SetupType → Workspace → Provider → Model →
  *        Gateway → Channels → Search → Skills → Hooks → Finalize → Review
@@ -9,7 +9,7 @@ import {
   Shield, Zap, Settings2, Key, Server, Plug, Wrench, CheckCircle,
   ChevronRight, ChevronLeft, Eye, EyeOff, Loader2, XCircle,
   RefreshCw, Trash2, Globe, FolderOpen, Search, Rocket,
-  Sparkles, Copy, AlertTriangle,
+  Sparkles, Copy, AlertTriangle, Info,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import type { SystemStatusResponse } from '../services/api';
@@ -1844,6 +1844,23 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                   <span>
                     {h.modelCurrent}: <code className="text-text-primary font-mono">{modelDefaultId}</code>
                   </span>
+                </div>
+              )}
+
+              {/* §45: educational hint shown once a default model already
+                  exists, i.e. the user is about to add (or rotate to) a
+                  *second* Hermes model.  Surfaces the two product
+                  invariants users routinely hit:
+                    1. session model is locked at create time (§43h)
+                    2. cross-model session switches rewrite config.yaml
+                       (§43i, ~10ms per switch)
+                  Hidden on the very first install (modelDefaultId empty)
+                  so we don't scare brand-new users with concurrency talk
+                  before they've even saved their first model. */}
+              {modelDefaultId && (
+                <div className="flex items-start gap-2 bg-surface-0 border border-border rounded-xl px-4 py-3 text-[11px] text-text-muted leading-relaxed">
+                  <Info className="w-3.5 h-3.5 flex-shrink-0 text-text-muted mt-0.5" />
+                  <span>{h.modelMultipleHint}</span>
                 </div>
               )}
 

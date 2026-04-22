@@ -207,6 +207,9 @@ export const zh: Translations = {
     stopVoiceInput: '停止语音输入',
     voiceUnsupported: '当前浏览器不支持语音输入',
     pickModel: '请先在设置中选择模型',
+    sessionModelLabel: '模型',
+    hermesSwitchBanner: '已切换到使用模型 {model} 的 Hermes 会话。Hermes 同一时刻只激活一个模型，不同模型会话之间切换会触发本地配置重写（约 10 ms）。频繁交替可能略有延迟。',
+    hermesSwitchBannerDismiss: '收起',
     nanobotGatewayOffline: 'nanobot 的 Chat 页面需要 nanobot gateway 和 websocket channel。请在另一个终端运行：nanobot gateway --port 18790 --verbose；启动后页面会自动刷新状态。',
     connectFailed: '无法连接到 OpenClaw 网关，请检查是否正在运行',
     // Install modal
@@ -795,6 +798,7 @@ export const zh: Translations = {
       modelLoading: '正在加载可用提供商…',
       modelNoProviders: '未能获取提供商列表。你可以先跳过，稍后在 CMD UI 中再配置。',
       modelCurrent: '当前默认模型',
+      modelMultipleHint: '提示：每个会话在创建时绑定其模型并保持不变（聊天中不会切换）。Hermes 同一时刻只激活一个模型，不同模型的会话之间切换聊天会触发本地配置重写（约 10 ms）。建议同一时段集中使用同一模型。',
       modelProviderLabel: '提供商',
       modelProviderPlaceholder: '请选择提供商…',
       modelNoAuthedProviders: '当前 ~/.hermes/.env 里还没有任何可用凭据。请先回到上一步配置 API Key，或在终端执行 `hermes auth <provider>`，等至少有一个 key 落盘后再回到此页面。',

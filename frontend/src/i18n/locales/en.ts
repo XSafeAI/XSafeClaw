@@ -213,6 +213,9 @@ export const en = {
     stopVoiceInput: 'Stop voice input',
     voiceUnsupported: 'Voice input not supported in this browser',
     pickModel: 'Pick a model in settings first',
+    sessionModelLabel: 'Model',
+    hermesSwitchBanner: 'Switched to a Hermes session bound to {model}. Hermes activates only one model at a time, so switching between sessions of different models rewrites the local config (~10 ms). Frequent toggling may add slight latency.',
+    hermesSwitchBannerDismiss: 'Dismiss',
     nanobotGatewayOffline: 'The nanobot Chat page requires nanobot gateway and the websocket channel. Run this in another terminal: nanobot gateway --port 18790 --verbose. The page will refresh status automatically after it starts.',
     connectFailed: 'Failed to connect to OpenClaw gateway, is it running?',
     // Install modal
@@ -800,6 +803,7 @@ export const en = {
       modelLoading: 'Loading available providers…',
       modelNoProviders: 'Could not load providers. You can skip this step and configure a model later from the CMD UI.',
       modelCurrent: 'Current default model',
+      modelMultipleHint: 'Note: each session is bound to its model at creation time and never switches mid-chat. Hermes activates only one model at a time, so chatting across sessions bound to different models rewrites the local config (~10 ms) per switch. Try to stick to one model per session block.',
       modelProviderLabel: 'Provider',
       modelProviderPlaceholder: 'Select a provider…',
       modelNoAuthedProviders: 'No provider has usable credentials in ~/.hermes/.env yet. Go back to the API-Key step (or run `hermes auth <provider>` in a terminal) and return here once at least one key is saved.',
