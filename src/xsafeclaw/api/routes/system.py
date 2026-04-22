@@ -6324,6 +6324,26 @@ class QuickModelConfigRequest(BaseModel):
     # the new model is visible. Set False to batch multiple edits and call
     # POST /system/hermes/apply yourself.
     auto_apply: bool = True
+    # §43d: Custom Endpoint payload — mirror of the matching fields on
+    # ``OnboardConfigRequest``.  ModelSetupModal.jsx (the agent-town wizard)
+    # routes ``authProvider === 'custom'`` through ``/system/onboard-config``
+    # rather than ``/system/quick-model-config`` (see
+    # ``ModelSetupModal.jsx:387-415`` — custom is explicitly excluded from
+    # ``isSimpleSetup``), and ``onboard_config`` then re-packages the body as
+    # a ``QuickModelConfigRequest`` before delegating to
+    # ``_quick_model_config_hermes``.  Without these fields here, the
+    # repackaging silently drops them, ``is_custom`` (§43c) computes False on
+    # the fresh ``QuickModelConfigRequest`` (defaults are empty strings),
+    # the wrong ``model.provider`` slug is written to ~/.hermes/config.yaml,
+    # and the Hermes restart in step 4 raises → FastAPI surfaces it as a
+    # bare 500 on the ModelSetupModal "Save" button.  Defaults are
+    # intentionally identical to ``OnboardConfigRequest`` so the validator
+    # accepts payloads originating from either route.
+    custom_base_url: str = ""
+    custom_model_id: str = ""
+    custom_provider_id: str = ""
+    custom_compatibility: str = "openai"
+    custom_context_window: int = Field(default=_CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW, ge=_OPENCLAW_MIN_CONTEXT_WINDOW)
 
 
 class RemoveConfiguredModelRequest(BaseModel):
@@ -6873,11 +6893,25 @@ async def onboard_config(body: OnboardConfigRequest):
     target_platform = body.platform or ("hermes" if settings.is_hermes else "openclaw")
 
     if target_platform == "hermes":
+        # §43d: forward the Custom Endpoint payload too.  ModelSetupModal.jsx
+        # gates on ``isSimpleSetup`` (L387-389) — custom never qualifies, so
+        # the only way a custom-provider config reaches Hermes is through this
+        # branch.  Skipping these fields used to drop the user's base_url /
+        # api_key / context-window into the void, which (a) made §43c's
+        # ``is_custom`` short-circuit False, (b) wrote ``model.provider:
+        # "custom"`` with no inline credentials, and (c) crashed the
+        # subsequent Hermes restart with a 500 surfaced verbatim to the
+        # frontend ("Request failed with status code 500").
         quick_body = QuickModelConfigRequest(
             provider=body.provider or "",
             api_key=body.api_key or "",
             model_id=body.model_id or "",
             platform="hermes",
+            custom_base_url=body.custom_base_url or "",
+            custom_model_id=body.custom_model_id or "",
+            custom_provider_id=body.custom_provider_id or "",
+            custom_compatibility=body.custom_compatibility or "openai",
+            custom_context_window=body.custom_context_window or _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW,
         )
         result = await _quick_model_config_hermes(quick_body)
         _install_safeclaw_guard_plugin(platform="hermes")
