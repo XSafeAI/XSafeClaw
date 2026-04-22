@@ -6482,116 +6482,13 @@ class QuickModelConfigRequest(BaseModel):
     custom_context_window: int = Field(default=_CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW, ge=_OPENCLAW_MIN_CONTEXT_WINDOW)
 
 
-class RemoveConfiguredModelRequest(BaseModel):
-    """Body for ``POST /system/hermes/configured-models/delete``.
-
-    Either ``model_id`` (the prefixed ``slug/bare_id`` form the CMD-UI
-    already carries in its picker state) or the explicit ``slug`` +
-    ``bare_id`` pair can be passed.  ``model_id`` takes precedence when
-    both are supplied; we split it on the first ``/`` to recover the
-    routing slug, which is the same convention §34 / §35 use everywhere
-    else in the Hermes branch.
-    """
-
-    model_id: str = ""
-    slug: str = ""
-    bare_id: str = ""
-
-
-@router.post("/hermes/configured-models/delete")
-async def delete_configured_model(body: RemoveConfiguredModelRequest):
-    """Remove one entry from XSafeClaw's per-user configured-model ledger.
-
-    Hermes-only.  Refuses to delete the model currently active in
-    ``~/.hermes/config.yaml::model.default`` so we never leave Hermes
-    pointing at a model the picker won't show.  Does **not** touch
-    ``~/.hermes/.env`` — the provider's API key stays so any agent that
-    was already created with this ``model_id`` keeps working.
-
-    See §36.
-    """
-    if not _hermes_runtime_detected():
-        raise HTTPException(
-            status_code=400,
-            detail="Configured-model deletion requires Hermes to be installed on this host.",
-        )
-
-    # 1. Resolve (slug, bare_id) from whichever shape the caller used.
-    slug = (body.slug or "").strip()
-    bare_id = (body.bare_id or "").strip()
-    if body.model_id:
-        full = body.model_id.strip()
-        if "/" in full:
-            split_slug, split_bare = full.split("/", 1)
-            slug = slug or split_slug
-            bare_id = bare_id or split_bare
-        else:
-            # No slash: treat the whole thing as bare_id and require
-            # callers to also pass an explicit slug.  Hermes-side ids
-            # should always be prefixed (post-§35 the ledger normalises
-            # this), so this branch is only hit by hand-rolled requests.
-            bare_id = bare_id or full
-    if not slug or not bare_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing model_id (or slug + bare_id).",
-        )
-
-    # 2. Refuse if the request targets the currently active model.
-    #
-    # Why refuse instead of also clearing config.yaml::model.default:
-    # leaving model.default empty makes Hermes fall back to its own
-    # "auto-detect main provider" path, which is exactly the lottery
-    # that produced the §35 Kimi-zombie surprise.  Forcing the user to
-    # explicitly switch active first keeps the deletion path side-effect-free.
-    # §43: the active-model probe is Hermes-specific, so it must read
-    # ~/.hermes/config.yaml — NOT _CONFIG_PATH (= openclaw.json). Pre-§43
-    # this read OpenClaw's model.default by mistake, which made the §36
-    # "refuse to delete the active model" guard compare against the wrong
-    # file: it could either let users delete the truly-active Hermes model
-    # or 409 on a model that wasn't actually active.
-    active_slug = ""
-    active_bare = ""
-    if _HERMES_CONFIG_PATH.exists():
-        try:
-            import yaml as _yaml_lib
-            cfg_yaml = _yaml_lib.safe_load(_HERMES_CONFIG_PATH.read_text("utf-8")) or {}
-            mcfg = cfg_yaml.get("model", "")
-            if isinstance(mcfg, dict):
-                active_bare = str(mcfg.get("default", "") or mcfg.get("model", "")).strip()
-                active_slug = str(mcfg.get("provider", "") or "").strip()
-        except Exception:
-            pass
-
-    if active_slug == slug and active_bare == bare_id:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Cannot delete the model that is currently active in "
-                "~/.hermes/config.yaml. Switch to a different model first, "
-                "then delete this one."
-            ),
-        )
-
-    # 3. Remove from the ledger.
-    removed = _remove_xs_configured_model(slug=slug, bare_id=bare_id)
-
-    # 4. Drop caches so the next /api/chat/available-models read reflects
-    #    the change immediately rather than after the 30 s TTL.  Same
-    #    invalidation pair _quick_model_config_hermes uses.
-    try:
-        from .chat import _available_models_cache
-        _available_models_cache["expires_at"] = 0.0
-    except Exception:
-        pass
-    _invalidate_hermes_configured_cache()
-
-    return {
-        "success": True,
-        "removed": removed,
-        "slug": slug,
-        "bare_id": bare_id,
-    }
+# §46 — Hermes 「删除已配置模型」端点已移除（与 OpenClaw 行为对齐）。
+# 历史实现见 §36；§43 修复过 active-model 误读 openclaw.json 的 bug。
+# 当前策略：configured-model 账本只增不减，删除入口由用户在 cmd 面板内
+# 通过重新配置/覆盖来实现，避免与 §43i「session-bound model」语义打架
+# （删条目导致已绑定 session 在 _ensure_hermes_yaml_pinned_to 阶段 500）。
+# 底层 helper ``_remove_xs_configured_model`` 仍保留为 dormant infrastructure，
+# 不再有调用方；如未来重新引入删除能力可直接复用。
 
 
 @router.post("/quick-model-config")

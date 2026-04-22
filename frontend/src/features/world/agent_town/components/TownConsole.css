@@ -668,42 +668,8 @@
     0 6px 12px rgba(25, 12, 3, 0.12);
 }
 
-/* §36 — per-row delete affordance for the configured-model deck.
- * Hidden by default and revealed on hover/focus to avoid cluttering the
- * picker; sits absolutely inside ``.tc-model-entry`` (which already has
- * ``position: relative``).  Hermes-only at the React level. */
-.tc-model-entry-delete {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 220, 170, 0.65);
-  font-family: var(--px-font);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  appearance: none;
-  opacity: 0;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
-}
-
-.tc-model-entry:hover .tc-model-entry-delete,
-.tc-model-entry-delete:focus-visible {
-  opacity: 1;
-}
-
-.tc-model-entry-delete:hover {
-  background: rgba(220, 80, 80, 0.28);
-  color: #ffe4d4;
-}
+/* §46 — `.tc-model-entry-delete` 三组样式已移除（与 OpenClaw 对齐：
+ * picker 不再渲染行内删除按钮）。原 §36 注释保留在历史 commit 内。 */
 
 .tc-model-option-name {
   display: block;

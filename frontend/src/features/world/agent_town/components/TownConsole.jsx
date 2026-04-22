@@ -2300,48 +2300,9 @@ export default function TownConsole({
     setCreateError('');
   }, []);
 
-  // §36 — drop one entry from the XSafeClaw configured-model ledger.
-  // Hermes-only: gated by ``platform === 'hermes'`` at the call site so
-  // OpenClaw never even renders the trigger.  Refuses (server-side, HTTP
-  // 409) when the target is the active model in ~/.hermes/config.yaml; we
-  // surface that as a ``createError`` rather than a silent no-op so the
-  // user understands they need to switch active first.  The local lists
-  // are mutated optimistically AFTER the server confirms the delete, so
-  // a network failure leaves the picker untouched.
-  const handleDeleteConfiguredModel = useCallback(async (modelId, modelName) => {
-    if (!modelId) return;
-    if (platform !== 'hermes') return;
-    const label = modelName || modelId;
-    if (typeof window !== 'undefined') {
-      const ok = window.confirm(
-        `Remove "${label}" from your configured models?\n\n`
-        + 'The provider API key stays in ~/.hermes/.env, so any agent already '
-        + 'created with this model keeps working. Only the picker is affected.',
-      );
-      if (!ok) return;
-    }
-    try {
-      await systemAPI.removeConfiguredModel(modelId);
-      setAvailableModels((prev) => prev.filter((m) => m.id !== modelId));
-      setPendingModelId((prev) => (prev === modelId ? '' : prev));
-      // ``lastUsedConfiguredModelId`` is derived (useMemo over agents'
-      // pinned model_ids), so it'll self-update on the next render now
-      // that ``availableModels`` no longer carries the deleted entry.
-      if (recentlyConfiguredModelId === modelId) setRecentlyConfiguredModelId('');
-      setCreateError('');
-      // Re-pull from the server so the next auto-pick sees the same source
-      // of truth the picker now reflects (and so any cache layers between
-      // us and ``/api/chat/available-models`` stay coherent).
-      loadAvailableModels();
-    } catch (err) {
-      const detail = err?.response?.data?.detail || err?.message || 'Failed to remove model.';
-      setCreateError(String(detail));
-    }
-  }, [
-    platform,
-    loadAvailableModels,
-    recentlyConfiguredModelId,
-  ]);
+  // §46 — `handleDeleteConfiguredModel` 已移除（与 OpenClaw 对齐）。
+  // 历史实现：调用 systemAPI.removeConfiguredModel 删除 Hermes 账本条目。
+  // 现在 picker 不再渲染删除按钮；模型列表是只增不减的「累积视图」。
 
   const handleModelConfigured = useCallback(async ({ modelId, modelName, provider, reasoning, modelReady }) => {
     const normalizedModel = {
@@ -2770,13 +2731,8 @@ export default function TownConsole({
                   filteredModels={filteredModels}
                   pendingModelId={pendingModelId}
                   onPickModel={handlePickModel}
-                  // §36 — Hermes-only delete affordance.  CrewTab uses
-                  // ``isHermes`` to decide whether to render the × button
-                  // at all; ``onDeleteModel`` is wired to the same ledger
-                  // endpoint that POST /system/quick-model-config writes,
-                  // and refuses (HTTP 409) on the active model.
-                  isHermes={platform === 'hermes'}
-                  onDeleteModel={handleDeleteConfiguredModel}
+                  // §46 — `isHermes` / `onDeleteModel` 已不再传递（与
+                  // OpenClaw 对齐：picker 不再渲染删除按钮）。
                   onOpenModelSetup={handleOpenModelSetup}
                   onCreateAgent={handleCreateAgent}
                   createAgentDisabled={createAgentDisabled}

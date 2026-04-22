@@ -771,20 +771,9 @@ export const systemAPI = {
       output: string;
     }>('/system/hermes/apply', modelId ? { model_id: modelId } : {}),
 
-  /**
-   * Hermes only — drop one entry from the per-user configured-model ledger
-   * (~/.xsafeclaw/configured_models.json).  Refuses (HTTP 409) when the
-   * target model is the one currently active in ~/.hermes/config.yaml; the
-   * UI must switch active first.  Does NOT touch ~/.hermes/.env, so any
-   * agent already created with this `model_id` keeps working.  See §36.
-   */
-  removeConfiguredModel: (modelId: string) =>
-    api.post<{
-      success: boolean;
-      removed: boolean;
-      slug: string;
-      bare_id: string;
-    }>('/system/hermes/configured-models/delete', { model_id: modelId }),
+  // §46 — `removeConfiguredModel` 已移除（与 OpenClaw 对齐）。
+  // 历史端点 POST /system/hermes/configured-models/delete 已下线；
+  // 前端不再提供删除已配置模型的入口。
 
   providerHasKey: (provider: string) =>
     api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
