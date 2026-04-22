@@ -84,14 +84,21 @@ class HermesClient:
           {"type": "error",   "text": "<error message>"}
           {"type": "timeout", "text": "<partial text>"}
 
-        ``model`` (§43f) — the picker-selected model id forwarded by
-        ``chat.py::send_message_stream`` (e.g. ``"openrouter/moonshotai/kimi-..."``
-        or ``"custom:my-llm/gpt-4"``).  When None, we fall back to the literal
-        ``"hermes-agent"`` placeholder, which Hermes's OpenAI-compatible
-        ``/v1/chat/completions`` handler treats as "use config.yaml's
-        ``model.default``".  Without this parameter every chat call was
-        silently routed to whatever provider was *most recently* saved via
-        ``_quick_model_config_hermes`` — see §43f for the full trace.
+        ``model`` (§43f / §43i) — **cosmetic only**. Verified against
+        ``hermes-agent/gateway/platforms/api_server.py::_handle_chat_completions``
+        L715 (``model_name = body.get("model", self._model_name)``): this
+        value is used solely to fill the ``"model"`` field in the response
+        for OpenAI-client compatibility. It is NEVER passed to ``_run_agent``
+        or ``_create_agent`` and has zero effect on routing.
+        Real per-session routing is implemented in ``chat.py`` (§43i):
+        before each ``stream_chat`` call, ``chat.py`` rewrites
+        ``~/.hermes/config.yaml::model.default + provider`` under the
+        ``_HermesYamlRWLock`` to the session's bound model. Hermes re-reads
+        the yaml on every request via ``_create_agent`` (verified
+        ``api_server.py`` L529-534), so the rewrite takes effect on the
+        next outbound call with no restart and no hot-reload polling wait.
+        We still write ``body["model"]`` so the response echoes the right
+        id back to compliant OpenAI clients.
         """
         client = await self._ensure_client()
 
@@ -184,7 +191,9 @@ class HermesClient:
     ) -> dict:
         """Send a message and wait for the complete response (non-streaming).
 
-        ``model`` (§43f) — see ``stream_chat`` docstring; same contract.
+        ``model`` (§43f / §43i) — see ``stream_chat`` docstring; same contract.
+        Cosmetic only; routing comes from ``chat.py``'s yaml-pin under
+        ``_HermesYamlRWLock``.
         """
         client = await self._ensure_client()
 

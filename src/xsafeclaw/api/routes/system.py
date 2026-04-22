@@ -3744,6 +3744,142 @@ _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 _HERMES_CONFIG_PATH = Path(settings.hermes_config_path).expanduser()
 
 
+# ── §43i: Hermes config.yaml 轻量读 / 写工具 ─────────────────────────────────
+#
+# Hermes API server 的请求体 ``model`` 字段是 cosmetic（见
+# ``hermes-agent/gateway/platforms/api_server.py::_handle_chat_completions``
+# L715），真实路由由 ``~/.hermes/config.yaml::model.default + model.provider``
+# 决定。所幸 ``api_server.py::_create_agent`` (L529-534) 在 **每次**
+# ``/v1/chat/completions`` 都现场调 ``_resolve_gateway_model()`` +
+# ``_load_gateway_config()`` —— rewrite yaml 后下个请求立即生效，无需重启
+# 也无需等 hot-reload 轮询。
+#
+# 这两个 helper 是 ``chat.py`` 在 send-message 之前 yaml-pin 到 session 绑定
+# model 的最小工具集，跟 ``_quick_model_config_hermes`` 的"重型"配置保存不同：
+# 这里 **只** 改 yaml 的 ``model`` 段，不写 dotenv（密钥已存在）、不动 ledger
+# （配置时已记录）、不清缓存、不重启 Hermes。这让单次 pin 的开销降到 ~10ms
+# 文件写。
+def _read_hermes_config_yaml() -> dict:
+    """Return parsed ``~/.hermes/config.yaml`` (empty dict if missing/unreadable).
+
+    Used by ``chat.py::_refresh_hermes_active_yaml_cache_from_disk`` to
+    initialize / repair the in-memory yaml-model cache from disk on startup
+    or after an external edit.
+    """
+    import yaml as _yaml
+
+    if not _HERMES_CONFIG_PATH.exists():
+        return {}
+    try:
+        return _yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _rewrite_hermes_yaml_model_default(full_id: str, slug: str) -> None:
+    """§43i: Pin ``~/.hermes/config.yaml::model`` to (full_id, slug) atomically.
+
+    ``full_id`` is the XSafeClaw-canonical model id (``"<slug>/<bare>"``,
+    e.g. ``"openrouter/moonshotai/kimi-k2"`` or ``"custom:foo/gpt-4"``).
+    ``slug`` is the provider slug as stored in the XSafeClaw configured-models
+    ledger (e.g. ``"openrouter"``, ``"alibaba"``, ``"custom:foo"``).
+
+    For regular providers (``openrouter``, ``alibaba``, …): rewrites the
+    ``model`` block to a clean ``{default, provider}`` pair, deliberately
+    dropping any leftover ``base_url`` / ``api_key`` / ``api_mode`` from a
+    previous custom-provider session. Per-provider keys live in
+    ``~/.hermes/.env`` and aren't touched here.
+
+    For custom providers (``slug.startswith("custom:")``): looks up the
+    matching entry in ``config.yaml::custom_providers`` (by ``name``) and
+    rebuilds the ``model`` block with inline ``base_url`` + ``api_key``
+    (Hermes's contract for custom — see ``hermes_cli/main.py::_model_flow_custom``).
+    Raises ``ValueError`` if the custom provider is no longer registered.
+
+    Atomic write: writes to ``<path>.tmp`` then ``rename()`` to avoid
+    leaving a half-written yaml on disk if the process is killed mid-write.
+    Uses the same ``yaml.dump(default_flow_style=False, allow_unicode=True)``
+    contract as ``_quick_model_config_hermes`` to keep file shape stable
+    across pin and full-config flows.
+
+    NOTE: caller is responsible for serialization (the §43i RWLock in
+    ``chat.py``). This function itself is NOT thread-safe against concurrent
+    writers — two simultaneous calls can race on the tmp-rename step.
+    """
+    import yaml as _yaml
+
+    if not full_id or not slug:
+        raise ValueError("_rewrite_hermes_yaml_model_default requires non-empty full_id and slug")
+
+    config: dict = {}
+    if _HERMES_CONFIG_PATH.exists():
+        try:
+            config = _yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        except Exception:
+            config = {}
+
+    # Strip the slug prefix to get the bare id Hermes expects in
+    # ``model.default`` (Hermes hands this verbatim to the upstream API,
+    # so a double-prefixed string like ``openrouter/moonshotai/kimi-k2``
+    # would be rejected — see §34).
+    if full_id.startswith(f"{slug}/"):
+        bare_id = full_id[len(slug) + 1:]
+    else:
+        bare_id = full_id
+
+    if slug.startswith("custom:"):
+        # Custom provider — must rebuild ``model`` block with inline
+        # base_url + api_key from ``custom_providers[name=...]``.
+        custom_name = slug[len("custom:"):]
+        providers_list = config.get("custom_providers") or []
+        custom_entry: dict | None = None
+        if isinstance(providers_list, list):
+            for p in providers_list:
+                if isinstance(p, dict) and (p.get("name") or "").strip() == custom_name:
+                    custom_entry = p
+                    break
+        if not custom_entry:
+            raise ValueError(
+                f"Cannot pin to custom provider '{custom_name}': not found in "
+                f"~/.hermes/config.yaml::custom_providers. Re-configure this "
+                f"endpoint in the CMD setup panel."
+            )
+        new_model: dict = {
+            "default": bare_id,
+            "provider": "custom",
+        }
+        if custom_entry.get("base_url"):
+            new_model["base_url"] = custom_entry["base_url"]
+        if custom_entry.get("api_key"):
+            new_model["api_key"] = custom_entry["api_key"]
+        if custom_entry.get("api_mode"):
+            new_model["api_mode"] = custom_entry["api_mode"]
+    else:
+        # Regular provider — clean ``{default, provider}`` only.
+        new_model = {
+            "default": bare_id,
+            "provider": slug,
+        }
+
+    config["model"] = new_model
+
+    # §43 hard-guard (mirrors ``_quick_model_config_hermes`` L6811): refuse
+    # to yaml-dump into anything under ~/.openclaw, which would corrupt the
+    # OpenClaw JSON5 config (the bug §43 was originally written to fix).
+    assert "openclaw" not in str(_HERMES_CONFIG_PATH).lower(), (
+        f"refusing to yaml-dump into {_HERMES_CONFIG_PATH} — "
+        "this would corrupt OpenClaw's JSON5 config (see §43)"
+    )
+
+    _HERMES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _HERMES_CONFIG_PATH.with_suffix(_HERMES_CONFIG_PATH.suffix + ".tmp")
+    tmp_path.write_text(
+        _yaml.dump(config, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    tmp_path.replace(_HERMES_CONFIG_PATH)
+
+
 def _config_path_for_platform(platform: str | None) -> Path:
     """Return the runtime config file path for the given platform name.
 
@@ -6843,6 +6979,15 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
     # CMD-UI could keep showing the pre-edit deck for up to 30s after
     # quick-model-config writes to ~/.hermes/.env + config.yaml.
     _invalidate_hermes_configured_cache()
+    # §43i: this path just rewrote ``config.yaml::model.default``; resync
+    # chat.py's in-memory yaml-pin cache so the very next send_message
+    # doesn't redundantly rewrite-to-self (cache miss → no-op disk write,
+    # but we'd waste a write-lock acquire and ~10ms on the file io).
+    try:
+        from .chat import _refresh_hermes_active_yaml_cache_from_disk
+        _refresh_hermes_active_yaml_cache_from_disk()
+    except Exception:
+        pass
 
     # --- 4. Apply: restart Hermes API server + verify readiness ---
     # Mirrors the OpenClaw fast-path, which relies on `openclaw onboard`

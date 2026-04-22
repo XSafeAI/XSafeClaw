@@ -1442,6 +1442,213 @@ _hermes_session_model_info: dict[str, dict[str, str]] = {}
 _hermes_event_sync = EventSyncService()
 
 
+# ══ §43i: Hermes per-session real model routing ═══════════════════════════════
+#
+# Why this exists
+# ---------------
+# Hermes API server's ``/v1/chat/completions`` endpoint **completely ignores**
+# the ``model`` field in the request body — it's cosmetic, used only to fill
+# the ``"model"`` key in the response so OpenAI-compatible clients can echo it
+# back. Real routing comes from ``~/.hermes/config.yaml::model.default +
+# model.provider``, which Hermes re-reads on every request via
+# ``api_server.py::_create_agent`` → ``_resolve_gateway_model()`` +
+# ``_load_gateway_config()`` (verified in hermes-agent source, §43i post-mortem).
+#
+# §43f tried to fix "create agent with Kimi → still uses Deepseek" by forwarding
+# ``body["model"] = <session-bound id>``, but Hermes throws that away. The bug
+# survived. This module is the actual fix: rewrite ``config.yaml::model`` to
+# the session-bound model immediately before each ``send_chat`` call. Because
+# Hermes re-reads the file every request, the next request routes correctly
+# with **zero** wait (no restart, no hot-reload polling).
+#
+# Concurrency model: RWLock (multi-reader, single-writer)
+# -------------------------------------------------------
+# Naive ``asyncio.Lock`` would serialize every Hermes chat globally — three
+# sessions all using model A would still queue (each waits 5-30s for the
+# previous LLM call to finish). That's unacceptable for the local "many
+# concurrent agents, same model" workflow.
+#
+# Instead: send_chat under shared **read** lock when the cache already matches
+# the session's bound model (multi-session same-model fully parallel); upgrade
+# to exclusive **write** lock only on cache miss to rewrite ``config.yaml``,
+# then drop back to read lock for send. The write lock waits for all in-flight
+# readers to drain so a model A request in flight can't be hijacked when
+# someone else pins to B mid-call.
+#
+# Performance summary:
+#   • 3 sessions all on A, simultaneous chat: parallel  (read-lock concurrent)
+#   • Switch to model B for a new session:    ~10ms     (atomic yaml file write)
+#   • Re-switch back to A:                    ~10ms     (queued behind A's
+#                                                       in-flight reads)
+#   • OpenClaw / Nanobot:                     untouched (this module only fires
+#                                                       on platform == "hermes")
+
+from contextlib import asynccontextmanager
+
+
+class _HermesYamlRWLock:
+    """Async multi-reader / single-writer lock (no third-party deps).
+
+    Writer-priority: once a writer is queued, new readers block — prevents
+    writer starvation under continuous read load. ``asyncio.Condition`` is
+    used as a single coordination point; no busy-waiting.
+
+    Usage:
+        async with lock.read():
+            ...    # cache-hit fast path; multiple readers concurrent
+
+        async with lock.write():
+            ...    # exclusive; blocks until all readers drain
+
+    Not reentrant. Not safe across event loops. Single-process only — that's
+    fine for XSafeClaw's local-only deployment model.
+    """
+
+    def __init__(self) -> None:
+        self._cond = asyncio.Condition()
+        self._readers = 0
+        self._writer_waiting = False
+        self._writer_active = False
+
+    @asynccontextmanager
+    async def read(self):
+        async with self._cond:
+            while self._writer_active or self._writer_waiting:
+                await self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._cond.notify_all()
+
+    @asynccontextmanager
+    async def write(self):
+        async with self._cond:
+            self._writer_waiting = True
+            try:
+                while self._readers > 0 or self._writer_active:
+                    await self._cond.wait()
+                self._writer_waiting = False
+                self._writer_active = True
+            except BaseException:
+                # Cancellation while waiting — drop the writer-waiting flag so
+                # readers don't starve forever.
+                self._writer_waiting = False
+                self._cond.notify_all()
+                raise
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._writer_active = False
+                self._cond.notify_all()
+
+
+# Single global lock — Hermes API server is global-singleton (one
+# ~/.hermes/config.yaml across all instances), so per-instance locks would
+# still be racing on the same file. One lock matches the resource shape.
+_hermes_yaml_lock: _HermesYamlRWLock = _HermesYamlRWLock()
+
+# In-memory mirror of "what (full_id, slug) does ~/.hermes/config.yaml::model
+# currently point to?". ``None`` means we haven't observed it yet (cold start
+# before the disk-refresh helper ran, or after an unrecoverable read error).
+# Always (full_id, slug) tuple to match the cache-comparison key shape used
+# in ``_ensure_hermes_yaml_pinned_to``.
+_hermes_active_yaml_model: tuple[str, str] | None = None
+
+
+def _refresh_hermes_active_yaml_cache_from_disk() -> None:
+    """Rebuild ``_hermes_active_yaml_model`` from the current on-disk config.yaml.
+
+    Called on:
+      • module import (cold start) — so the first send_message after restart
+        compares against reality, not ``None``.
+      • after ``_quick_model_config_hermes`` writes a new model — so chat.py
+        sees the change without waiting for a yaml-rewrite cycle of its own.
+
+    Safe to call without holding the RWLock — this is a pure read + assignment
+    of a single tuple, atomic at the Python bytecode level (PEP-3130 GIL).
+    """
+    global _hermes_active_yaml_model
+    try:
+        from .system import _read_hermes_config_yaml
+        cfg = _read_hermes_config_yaml() or {}
+        model_section = cfg.get("model") or {}
+        bare = str(model_section.get("default") or "").strip()
+        slug = str(model_section.get("provider") or "").strip()
+        if bare and slug:
+            # ``slug`` from yaml is always plain (e.g. ``"openrouter"``,
+            # ``"custom"``). For custom we need to recover the
+            # ``"custom:<name>"`` ledger-form by matching base_url against
+            # the custom_providers list.
+            if slug == "custom":
+                base_url = str(model_section.get("base_url") or "").strip().rstrip("/")
+                providers_list = cfg.get("custom_providers") or []
+                if isinstance(providers_list, list):
+                    for p in providers_list:
+                        if not isinstance(p, dict):
+                            continue
+                        if (p.get("base_url") or "").strip().rstrip("/") == base_url:
+                            slug = f"custom:{(p.get('name') or '').strip()}"
+                            break
+            full = bare if bare.startswith(f"{slug}/") else f"{slug}/{bare}"
+            _hermes_active_yaml_model = (full, slug)
+        else:
+            _hermes_active_yaml_model = None
+    except Exception:
+        _hermes_active_yaml_model = None
+
+
+async def _ensure_hermes_yaml_pinned_to(full_id: str, slug: str) -> None:
+    """Idempotently pin ~/.hermes/config.yaml::model to (full_id, slug).
+
+    Caller MUST hold the WRITE side of ``_hermes_yaml_lock`` — this function
+    mutates global state and rewrites the file. The read-lock fast path in
+    callers checks the cache directly without entering this function.
+
+    Cache hit (already pinned to this target) → no-op, returns immediately.
+    Cache miss → atomic file rewrite via
+    ``system.py::_rewrite_hermes_yaml_model_default``, then update cache.
+
+    Empty ``full_id`` or ``slug`` → silent no-op (lets callers skip checking;
+    e.g. a session with no recorded model_id just inherits whatever yaml
+    currently says, preserving pre-§43i behaviour).
+
+    Hermes re-reads ``config.yaml`` on every ``/v1/chat/completions`` request
+    via ``_create_agent`` (hermes-agent ``api_server.py`` L529-534), so the
+    rewrite is effective for the **next** outbound request — no restart, no
+    polling wait.
+    """
+    global _hermes_active_yaml_model
+    full_id = (full_id or "").strip()
+    slug = (slug or "").strip()
+    if not full_id or not slug:
+        return
+    if _hermes_active_yaml_model == (full_id, slug):
+        return  # already pinned, skip the disk write
+    from .system import _rewrite_hermes_yaml_model_default
+    try:
+        _rewrite_hermes_yaml_model_default(full_id=full_id, slug=slug)
+    except Exception as exc:
+        # Surface as 500 so the user sees "couldn't switch model" instead of
+        # the much more confusing "agent silently used wrong model".
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to pin Hermes config.yaml to '{full_id}': {exc}",
+        ) from exc
+    _hermes_active_yaml_model = (full_id, slug)
+
+
+# Initialize cache from disk at module import — first request after process
+# start sees a populated cache and skips an unnecessary rewrite-to-self.
+_refresh_hermes_active_yaml_cache_from_disk()
+
+# ══ end §43i ══════════════════════════════════════════════════════════════════
+
+
 def _deterministic_message_id(session_key: str, role: str, text: str, seq: int) -> str:
     """Produce a stable 24-char hex ID so duplicate inserts are idempotent."""
     raw = f"{session_key}:{role}:{seq}:{text}".encode()
@@ -1640,6 +1847,15 @@ async def start_session(request: StartSessionRequest | None = None):
             "model": model_name or "hermes-agent",
             "model_id": raw_model_id,
         }
+        # §43i: eagerly pin yaml to this session's bound model at create time.
+        # This is a *latency optimisation*, not a correctness requirement —
+        # send_message would still pin on first turn — but doing it here means
+        # the user's first chat message after Create-Agent doesn't pay the
+        # ~10ms yaml rewrite cost (and lets the picker UX reflect immediately
+        # the new model in subsequent /v1/models polls).
+        if raw_model_id and (model_provider or "").strip():
+            async with _hermes_yaml_lock.write():
+                await _ensure_hermes_yaml_pinned_to(raw_model_id, model_provider)
         try:
             await _persist_hermes_session(
                 public_session_key,
@@ -1689,25 +1905,44 @@ async def send_message(request: SendMessageRequest):
             result = await client.send_chat(request.message, timeout_s=120.0)
         else:
             client = await _get_or_create_client(instance, public_session_key)
-            # §43f: forward the picker-selected model id (cached at
-            # ``start-session`` time) so Hermes routes per the user's pick
-            # rather than ``config.yaml::model.default``.  Non-Hermes
-            # clients (GatewayClient) accept ``model=None`` as a kwarg only
-            # if they've been updated; we therefore route ``send_chat``
-            # call sites through a per-platform lookup to keep OpenClaw's
-            # signature unchanged.
-            send_model: str | None = None
-            if instance.platform == "hermes":
-                info = _hermes_session_model_info.get(public_session_key) or {}
-                send_model = (info.get("model_id") or "").strip() or None
             chat_kwargs: dict = {
                 "session_key": local_session_key,
                 "message": request.message,
                 "timeout_ms": 120_000,
             }
-            if send_model and instance.platform == "hermes":
-                chat_kwargs["model"] = send_model
-            result = await client.send_chat(**chat_kwargs)
+            if instance.platform == "hermes":
+                # §43i: routing for Hermes is decided by ~/.hermes/config.yaml,
+                # NOT by request body. The §43f attempt to forward
+                # ``body["model"]`` was a no-op (Hermes ignores it — see the
+                # post-mortem in the §43i comment block above ``_HermesYamlRWLock``).
+                # Real fix: pin yaml to this session's bound model under the
+                # write lock if cache misses, then send under the read lock so
+                # other sessions on the SAME model can chat in parallel.
+                info = _hermes_session_model_info.get(public_session_key) or {}
+                target_full = (info.get("model_id") or "").strip()
+                target_slug = (info.get("provider") or "").strip()
+                # ``model`` kwarg to send_chat is kept (cosmetic — Hermes echoes
+                # it in the response.model field for OpenAI client compatibility),
+                # but it has zero effect on routing.
+                if target_full:
+                    chat_kwargs["model"] = target_full
+                # Acquire-or-rewrite-then-send loop: read-lock fast path for
+                # cache hits (parallel reads); write-lock to rewrite on miss
+                # (drains in-flight readers first to prevent A's request being
+                # hijacked when B pins to its own model mid-flight).
+                while True:
+                    async with _hermes_yaml_lock.read():
+                        if (
+                            not target_full
+                            or _hermes_active_yaml_model == (target_full, target_slug)
+                        ):
+                            result = await client.send_chat(**chat_kwargs)
+                            break
+                    # Cache miss → upgrade to write lock, rewrite, retry read.
+                    async with _hermes_yaml_lock.write():
+                        await _ensure_hermes_yaml_pinned_to(target_full, target_slug)
+            else:
+                result = await client.send_chat(**chat_kwargs)
 
         # Hermes: persist turn directly to DB
         if instance.platform == "hermes" and result.get("state") == "final":
@@ -1806,26 +2041,41 @@ async def send_message_stream(request: SendMessageRequest):
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             else:
                 client = await _get_or_create_client(instance, public_session_key)
-                # §43f: same per-message model forwarding as in ``send_message``.
-                # SSE streaming has the same issue — without explicit ``model``
-                # the body sent to /v1/chat/completions hardcodes
-                # ``"hermes-agent"`` and Hermes resolves it against
-                # ``config.yaml::model.default``, ignoring the picker pick.
-                stream_model: str | None = None
-                if instance.platform == "hermes":
-                    info = _hermes_session_model_info.get(public_session_key) or {}
-                    stream_model = (info.get("model_id") or "").strip() or None
                 stream_kwargs: dict = {
                     "session_key": local_session_key,
                     "message": request.message,
                     "attachments": attachments,
                 }
-                if stream_model and instance.platform == "hermes":
-                    stream_kwargs["model"] = stream_model
-                async for chunk in client.stream_chat(**stream_kwargs):
-                    if isinstance(chunk, dict) and chunk.get("text"):
-                        final_text = str(chunk["text"])
-                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                if instance.platform == "hermes":
+                    # §43i: SSE streaming variant of the same yaml-pin dance
+                    # as ``send_message``. The lock MUST cover the entire
+                    # ``async for chunk in stream_chat(...)`` loop, not just
+                    # the call setup — otherwise a concurrent send_message
+                    # could rewrite ``model.default`` mid-stream and Hermes's
+                    # next agent step would route to the wrong provider.
+                    info = _hermes_session_model_info.get(public_session_key) or {}
+                    target_full = (info.get("model_id") or "").strip()
+                    target_slug = (info.get("provider") or "").strip()
+                    if target_full:
+                        stream_kwargs["model"] = target_full  # cosmetic
+                    while True:
+                        async with _hermes_yaml_lock.read():
+                            if (
+                                not target_full
+                                or _hermes_active_yaml_model == (target_full, target_slug)
+                            ):
+                                async for chunk in client.stream_chat(**stream_kwargs):
+                                    if isinstance(chunk, dict) and chunk.get("text"):
+                                        final_text = str(chunk["text"])
+                                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                                break
+                        async with _hermes_yaml_lock.write():
+                            await _ensure_hermes_yaml_pinned_to(target_full, target_slug)
+                else:
+                    async for chunk in client.stream_chat(**stream_kwargs):
+                        if isinstance(chunk, dict) and chunk.get("text"):
+                            final_text = str(chunk["text"])
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
             return
@@ -1908,24 +2158,43 @@ async def transcribe_clean(request: TranscribeCleanRequest):
                 model=request.model or None,
                 thinking_level=request.thinking_level,
             )
-            # §43g: same per-message model forwarding as §43f.  ``transcribe_clean``
-            # uses an ad-hoc temporary session (``_resolve_chat_runtime()`` with no
-            # session_key — see L1879) that has no ``_hermes_session_model_info``
-            # entry, so we forward ``request.model`` directly.  Without this, the
-            # voice-to-text post-processing prompt would be silently routed to
-            # ``~/.hermes/config.yaml::model.default`` (i.e. the most recently
-            # *configured* model, regardless of what the chat's picker shows) —
-            # the same root cause as §43f, just on a different endpoint.
             transcribe_kwargs: dict = {
                 "session_key": local_session_key,
                 "message": prompt,
                 "timeout_ms": 60_000,
             }
             if instance.platform == "hermes":
+                # §43i: ad-hoc voice transcription session has no
+                # ``_hermes_session_model_info`` entry (it uses
+                # ``_resolve_chat_runtime()`` with no session_key — see
+                # L1879), so derive (full, slug) from ``request.model``
+                # directly. The ``model`` kwarg below is cosmetic
+                # (Hermes ignores body["model"]); real routing comes from
+                # the yaml pin under the same RWLock pattern as
+                # ``send_message`` to avoid race against concurrent chats.
                 req_model = (request.model or "").strip()
                 if req_model:
-                    transcribe_kwargs["model"] = req_model
-            result = await client.send_chat(**transcribe_kwargs)
+                    transcribe_kwargs["model"] = req_model  # cosmetic
+                    target_full = req_model
+                    target_slug = req_model.split("/", 1)[0] if "/" in req_model else ""
+                    while True:
+                        async with _hermes_yaml_lock.read():
+                            if (
+                                not target_slug
+                                or _hermes_active_yaml_model == (target_full, target_slug)
+                            ):
+                                result = await client.send_chat(**transcribe_kwargs)
+                                break
+                        async with _hermes_yaml_lock.write():
+                            await _ensure_hermes_yaml_pinned_to(target_full, target_slug)
+                else:
+                    # No explicit pick → run under whatever yaml currently
+                    # points to (read-lock just to serialize against an
+                    # in-flight writer; pin is unchanged).
+                    async with _hermes_yaml_lock.read():
+                        result = await client.send_chat(**transcribe_kwargs)
+            else:
+                result = await client.send_chat(**transcribe_kwargs)
 
         cleaned = (result.get("response_text") or "").strip()
         return TranscribeCleanResponse(raw_text=request.text, cleaned_text=cleaned)
