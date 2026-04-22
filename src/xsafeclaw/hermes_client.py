@@ -114,6 +114,7 @@ class HermesClient:
         headers["X-Hermes-Session-Id"] = session_key
 
         cumulative_text = ""
+        final_yielded = False
 
         try:
             async with client.stream(
@@ -146,6 +147,7 @@ class HermesClient:
                             "stop_reason": "stop",
                             "usage": None,
                         }
+                        final_yielded = True
                         return
                     if not line.startswith("data: "):
                         continue
@@ -174,12 +176,82 @@ class HermesClient:
                             "stop_reason": finish_reason,
                             "usage": chunk.get("usage"),
                         }
+                        final_yielded = True
                         return
 
         except httpx.TimeoutException:
             yield {"type": "timeout", "text": cumulative_text}
+            return
         except Exception as exc:
             yield {"type": "error", "text": str(exc)}
+            return
+
+        # §49 — Stream closed without [DONE] / finish_reason. This is the
+        # "[No response]" trap: Hermes (and some upstream adapters) silently
+        # drop the SSE body when the upstream API errors AFTER returning 200
+        # OK. The most common trigger is a Google quota-exceeded 429 on
+        # Gemini — ``stream=False`` puts the error message in
+        # ``choices[0].message.content`` (verified end-to-end with curl), but
+        # ``stream=True`` returns *nothing* on the wire. Without this
+        # fallback the user just sees the frontend's "[No response]" placeholder
+        # and has no way to learn that their key is out of quota / the model
+        # name is invalid / billing isn't set up.
+        if not final_yielded:
+            if cumulative_text:
+                # Stream had real content but no terminator — emit a final so
+                # callers see the same shape as a clean run.
+                yield {
+                    "type": "final",
+                    "text": cumulative_text,
+                    "stop_reason": "stop",
+                    "usage": None,
+                }
+                return
+
+            # Empty stream → retry the same request with ``stream=False`` and
+            # hand the recovered ``message.content`` back to the caller. Only
+            # fires for already-failed requests, so the doubled outbound call
+            # never affects the happy path. Any text we recover is treated as
+            # the assistant turn (it's typically an upstream error message,
+            # which is exactly what the user needs to see).
+            try:
+                fallback = await self.send_chat(
+                    session_key=session_key,
+                    message=message,
+                    timeout_ms=timeout_ms,
+                    model=model,
+                )
+            except Exception as exc:
+                yield {
+                    "type": "error",
+                    "text": (
+                        "Hermes streamed an empty response and the non-stream "
+                        f"fallback also failed: {exc}"
+                    ),
+                }
+                return
+
+            recovered = (fallback.get("response_text") or "").strip()
+            if recovered:
+                yield {"type": "delta", "text": recovered}
+                yield {
+                    "type": "final",
+                    "text": recovered,
+                    "stop_reason": fallback.get("stop_reason") or "stop",
+                    "usage": fallback.get("usage"),
+                }
+            else:
+                yield {
+                    "type": "error",
+                    "text": (
+                        "Hermes returned no content in either streaming or "
+                        "non-streaming mode. Common causes: upstream API "
+                        "quota exceeded (check your provider dashboard), an "
+                        "invalid model name, or Hermes failed to start the "
+                        "agent (see ~/.hermes/gateway.log or "
+                        "`journalctl --user -u 'hermes-*'`)."
+                    ),
+                }
 
     async def send_chat(
         self,
