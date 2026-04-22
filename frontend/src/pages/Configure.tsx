@@ -4,7 +4,7 @@
  *        Gateway → Channels → Search → Skills → Hooks → Finalize → Review
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Shield, Zap, Settings2, Key, Server, Plug, Wrench, CheckCircle,
   ChevronRight, ChevronLeft, Eye, EyeOff, Loader2, XCircle,
@@ -1193,7 +1193,12 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   useEffect(() => {
     if (step === STEP_MODEL && modelProviders.length === 0 && !modelLoading) {
       setModelLoading(true);
-      systemAPI.onboardScan()
+      // §52 — this useEffect only runs inside the Hermes wizard branch
+      // (the OpenClaw branch loads model_providers eagerly in the main
+      // useEffect above). Pin to ``hermes`` so a Hermes-on-OpenClaw-default
+      // server still returns the static Hermes catalog instead of the
+      // CLI-scan OpenClaw shape.
+      systemAPI.onboardScan('hermes')
         .then(res => {
           const d = res.data as any;
           const providers: ModelProviderInfo[] = d.model_providers || [];
@@ -2305,7 +2310,25 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
 /* ─── Main ─── */
 export default function Configure() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { t } = useI18n();
+
+  // §52 — derive the requested platform straight from the URL so a user
+  // who clicked the OpenClaw card on /setup (→ /openclaw_configure) gets
+  // the OpenClaw wizard even when ``settings.is_hermes=true`` on the
+  // server. Before §52, this component leaned entirely on
+  // ``status.platform`` which mirrors the server's global default and
+  // therefore ignored the URL the user actually navigated to.
+  //
+  // Returning ``null`` for legacy ``/configure`` keeps the original
+  // status-snapshot autodetect path alive for back-compat.
+  const requestedPlatform: 'openclaw' | 'hermes' | null = (() => {
+    const p = location.pathname;
+    if (p === '/openclaw_configure') return 'openclaw';
+    if (p === '/hermes_configure') return 'hermes';
+    return null;
+  })();
+
   const [agentFlow, setAgentFlow] = useState<'loading' | 'openclaw' | 'hermes'>('loading');
   const [hermesStatusSnapshot, setHermesStatusSnapshot] = useState<HermesStatusSnapshot | null>(null);
   const [step, setStep] = useState(0);
@@ -2335,10 +2358,19 @@ export default function Configure() {
         const st = statusRes.data as HermesStatusSnapshot;
         const pref = typeof localStorage !== 'undefined' ? localStorage.getItem(SETUP_PLATFORM_KEY) : null;
 
-        const useHermes =
-          st.platform === 'hermes'
-          || (pref === 'hermes' && st.hermes_installed === true)
-          || (st.hermes_installed === true && st.openclaw_installed !== true);
+        // §52 — URL wins. If the user landed on /openclaw_configure or
+        // /hermes_configure the platform is unambiguous and we skip the
+        // status-snapshot autodetect (which keys off
+        // ``settings.is_hermes`` and would otherwise flip an OpenClaw
+        // navigation into a Hermes wizard on a Hermes-default server).
+        // Legacy /configure keeps the original autodetect.
+        const useHermes = requestedPlatform === 'hermes' || (
+          requestedPlatform === null && (
+            st.platform === 'hermes'
+            || (pref === 'hermes' && st.hermes_installed === true)
+            || (st.hermes_installed === true && st.openclaw_installed !== true)
+          )
+        );
 
         if (useHermes) {
           if (typeof localStorage !== 'undefined') localStorage.removeItem(SETUP_PLATFORM_KEY);
@@ -2351,7 +2383,11 @@ export default function Configure() {
           localStorage.removeItem(SETUP_PLATFORM_KEY);
         }
 
-        const res = await systemAPI.onboardScan();
+        // §52 — pin the scan to OpenClaw so a Hermes-default server still
+        // returns the OpenClaw CLI scan payload (model_providers shape,
+        // gateway defaults, etc.) when the user explicitly asked for
+        // OpenClaw via /openclaw_configure or via the legacy autodetect.
+        const res = await systemAPI.onboardScan('openclaw');
         if (cancelled) return;
 
         const d = res.data as any;
@@ -2384,7 +2420,7 @@ export default function Configure() {
     })();
 
     return () => { cancelled = true; };
-  }, [navigate]);
+  }, [navigate, requestedPlatform]);
 
   const skipped = new Set<number>();
   skipped.add(9);

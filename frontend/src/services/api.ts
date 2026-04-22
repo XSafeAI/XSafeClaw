@@ -666,9 +666,18 @@ export const systemAPI = {
   onboardDefaults: () =>
     api.get('/system/onboard-defaults'),
 
-  /** Scan local environment for providers, channels, skills, hooks via openclaw CLI. */
-  onboardScan: () =>
-    api.get('/system/onboard-scan'),
+  /**
+   * Scan local environment for providers, channels, skills, hooks.
+   *
+   * §52 — pass ``platform`` to override the backend's global
+   * ``settings.is_hermes`` branch and force a specific platform's data
+   * source. Used by Configure.tsx so ``/openclaw_configure`` always
+   * gets OpenClaw scan data even on a Hermes-default server, and
+   * ``/hermes_configure`` always gets Hermes catalog regardless of
+   * which platform the user originally booted into.
+   */
+  onboardScan: (platform?: 'openclaw' | 'hermes') =>
+    api.get('/system/onboard-scan', platform ? { params: { platform } } : undefined),
 
   /** Reset config/creds/sessions based on scope. */
   configReset: (scope: string, workspace?: string) =>

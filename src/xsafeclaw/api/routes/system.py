@@ -5573,12 +5573,39 @@ def trigger_onboard_scan_preload(force: bool = False) -> None:
 
 
 @router.get("/onboard-scan")
-async def onboard_scan(refresh: bool = False):
-    """Scan the local environment for available providers, channels, skills, hooks."""
+async def onboard_scan(refresh: bool = False, platform: str | None = None):
+    """Scan the local environment for available providers, channels, skills, hooks.
+
+    §52 — ``?platform=`` query parameter lets the caller explicitly pick
+    which platform's scan payload they want, regardless of the global
+    ``settings.is_hermes`` flag. This is required because XSafeClaw now
+    monitors OpenClaw + Hermes + Nanobot **simultaneously** (see §42), so
+    a single ``settings.is_hermes`` value can't decide for routes like
+    ``/openclaw_configure`` vs ``/hermes_configure`` — the route itself
+    must drive the data source.
+
+    Accepted values:
+      - ``platform="hermes"``   → always use ``_build_onboard_scan_data_hermes()``
+      - ``platform="openclaw"`` → always use the OpenClaw CLI-scan path
+      - ``platform=None`` (legacy / no param) → fall back to
+        ``settings.is_hermes`` so existing callers (TownConsole's catalog
+        prefetch, NanobotConfigure's lazy model-list, the §33 endpoint
+        bundles consumer in ModelSetupModal) keep working unchanged.
+    """
     global _onboard_scan_cache, _onboard_scan_version, _onboard_scan_task
 
+    # Normalize the optional override. Anything outside the two known
+    # values silently falls through to the legacy branch — easier to
+    # reason about than a 4xx for an unknown platform string.
+    requested = (platform or "").strip().lower()
+    use_hermes_path = (
+        requested == "hermes"
+        if requested in {"hermes", "openclaw"}
+        else settings.is_hermes
+    )
+
     # ── Hermes fast path — static catalog, no CLI scanning needed ─────────
-    if settings.is_hermes:
+    if use_hermes_path:
         data = _build_onboard_scan_data_hermes()
 
         config_summary: list[str] = []
