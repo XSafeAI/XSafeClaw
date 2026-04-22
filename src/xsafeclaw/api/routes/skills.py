@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ...config import settings
+from ...runtime import RuntimeInstance
 from ...services import skill_scan_service
 from ..runtime_helpers import get_default_instance
 
@@ -24,10 +25,24 @@ router = APIRouter()
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _HERMES_DIR = settings.hermes_home
 
-if settings.is_hermes:
-    _CONFIG_PATH = settings.hermes_config_path
-else:
-    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+
+def _is_hermes(instance: RuntimeInstance | None) -> bool:
+    """True when the resolved runtime instance is Hermes."""
+    return bool(instance and instance.platform == "hermes")
+
+
+def _config_path_for(instance: RuntimeInstance | None) -> Path:
+    """Resolve the runtime config file for a given instance.
+
+    OpenClaw → ``~/.openclaw/openclaw.json``
+    Hermes   → ``settings.hermes_config_path`` (or ``instance.config_path``
+               if discovery filled it in).
+    """
+    if instance and instance.config_path:
+        return Path(instance.config_path).expanduser()
+    if _is_hermes(instance):
+        return Path(settings.hermes_config_path).expanduser()
+    return _OPENCLAW_DIR / "openclaw.json"
 
 
 # ---------------------------------------------------------------------------
@@ -123,20 +138,21 @@ def _find_hermes() -> str | None:
     return shutil.which("hermes")
 
 
-def _find_agent_binary() -> str | None:
-    """Find the active platform's binary."""
-    if settings.is_hermes:
+def _find_agent_binary(instance: RuntimeInstance | None) -> str | None:
+    """Find the binary that backs the given runtime instance."""
+    if _is_hermes(instance):
         return _find_hermes()
     return _find_openclaw()
 
 
-def _read_config() -> dict:
-    """Read and parse the platform config file."""
-    if not _CONFIG_PATH.exists():
+def _read_config(instance: RuntimeInstance | None) -> dict:
+    """Read and parse the runtime's config file (per-instance dispatch)."""
+    config_path = _config_path_for(instance)
+    if not config_path.exists():
         return {}
     try:
-        raw = _CONFIG_PATH.read_text("utf-8")
-        if settings.is_hermes:
+        raw = config_path.read_text("utf-8")
+        if _is_hermes(instance):
             import yaml
             return yaml.safe_load(raw) or {}
         return json.loads(raw)
@@ -144,28 +160,29 @@ def _read_config() -> dict:
         return {}
 
 
-def _write_config(config: dict) -> None:
-    """Write config dict to the platform config file."""
-    if settings.is_hermes:
+def _write_config(instance: RuntimeInstance | None, config: dict) -> None:
+    """Write config dict to the runtime's config file (per-instance dispatch)."""
+    config_path = _config_path_for(instance)
+    if _is_hermes(instance):
         import yaml
         _HERMES_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _CONFIG_PATH.with_suffix(".tmp")
+        tmp = config_path.with_suffix(".tmp")
         tmp.write_text(yaml.dump(config, allow_unicode=True, default_flow_style=False), encoding="utf-8")
-        tmp.rename(_CONFIG_PATH)
+        tmp.rename(config_path)
     else:
         _OPENCLAW_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _CONFIG_PATH.with_suffix(".tmp")
+        tmp = config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.rename(_CONFIG_PATH)
+        tmp.rename(config_path)
 
 
-def _build_skill_paths() -> dict[str, str]:
+def _build_skill_paths(instance: RuntimeInstance | None) -> dict[str, str]:
     """Scan known directories to build a skill_name -> directory_path mapping."""
     skill_map: dict[str, str] = {}
 
     scan_bases: list[Path] = []
 
-    if settings.is_hermes:
+    if _is_hermes(instance):
         # Hermes: ~/.hermes/skills/
         scan_bases.append(_HERMES_DIR / "skills")
     else:
@@ -297,15 +314,15 @@ async def list_skills():
             "unavailable": True,
             "reason": "Skill management is currently only available for OpenClaw or Hermes runtimes.",
         }
-    agent_bin = _find_agent_binary()
+    agent_bin = _find_agent_binary(instance)
     if not agent_bin:
-        platform_name = "hermes" if settings.is_hermes else "openclaw"
+        platform_name = "hermes" if _is_hermes(instance) else "openclaw"
         raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
 
     env = _build_env()
 
     # Hermes: ``hermes tools list --json`` / OpenClaw: ``openclaw skills list --json``
-    if settings.is_hermes:
+    if _is_hermes(instance):
         cmd = [agent_bin, "tools", "list", "--json"]
     else:
         cmd = [agent_bin, "skills", "list", "--json"]
@@ -327,9 +344,9 @@ async def list_skills():
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
 
-    config = _read_config()
+    config = _read_config(instance)
     skills_config = config.get("skills", {})
-    skill_paths = _build_skill_paths()
+    skill_paths = _build_skill_paths(instance)
     cached_scans = skill_scan_service.get_all_cached()
 
     skills_list = data.get("skills", []) if isinstance(data, dict) else data
@@ -368,14 +385,14 @@ async def check_skills():
             "unavailable": True,
             "reason": "Skill checks are currently only available for OpenClaw or Hermes runtimes.",
         }
-    agent_bin = _find_agent_binary()
+    agent_bin = _find_agent_binary(instance)
     if not agent_bin:
-        platform_name = "hermes" if settings.is_hermes else "openclaw"
+        platform_name = "hermes" if _is_hermes(instance) else "openclaw"
         raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
 
     env = _build_env()
 
-    if settings.is_hermes:
+    if _is_hermes(instance):
         cmd = [agent_bin, "tools", "check", "--json"]
     else:
         cmd = [agent_bin, "skills", "check", "--json"]
@@ -405,7 +422,7 @@ async def scan_all_skills(body: ScanAllRequest):
             "unavailable": True,
             "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
         }
-    skill_paths = _build_skill_paths()
+    skill_paths = _build_skill_paths(instance)
     if body.keys:
         skill_paths = {k: v for k, v in skill_paths.items() if k in body.keys}
     if not skill_paths:
@@ -440,7 +457,11 @@ async def scan_status():
 @router.post("/{skill_key}/update")
 async def update_skill(skill_key: str, body: SkillUpdateRequest):
     """Update skill configuration in platform config file."""
-    config = _read_config()
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    config = _read_config(instance)
     skills = config.setdefault("skills", {})
     entry = skills.setdefault(skill_key, {})
 
@@ -451,14 +472,18 @@ async def update_skill(skill_key: str, body: SkillUpdateRequest):
     if body.env is not None:
         entry["env"] = body.env
 
-    _write_config(config)
+    _write_config(instance, config)
     return {"success": True, "skill": skill_key, "config": entry}
 
 
 @router.get("/{skill_key}/content")
 async def get_skill_content(skill_key: str):
     """Read and return SKILL.md content for a skill."""
-    skill_paths = _build_skill_paths()
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    skill_paths = _build_skill_paths(instance)
     skill_dir = skill_paths.get(skill_key)
     if not skill_dir:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_key}' not found")
@@ -484,7 +509,11 @@ async def get_skill_content(skill_key: str):
 @router.post("/{skill_key}/scan")
 async def scan_skill(skill_key: str, body: ScanOneRequest):
     """Scan a single skill."""
-    skill_paths = _build_skill_paths()
+    try:
+        instance = await get_default_instance()
+    except HTTPException:
+        instance = None
+    skill_paths = _build_skill_paths(instance)
     skill_dir = skill_paths.get(skill_key)
     if not skill_dir:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_key}' not found")

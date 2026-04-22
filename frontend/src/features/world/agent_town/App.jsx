@@ -333,6 +333,22 @@ export default function App() {
           <span className="town-hud-label">GRD</span>
         </button>
         <span className="town-hud-sep" />
+        {/* §50 — open the Setup page in the same tab.
+            Uses ``<a href>`` (not ``navigate``) on purpose: this component
+            lives inside the Agent Town React subtree which has its own
+            route-less mount in <World/>; the parent BrowserRouter context
+            isn't reachable from here, so a plain anchor is the only
+            reliable way to leave the world. /setup is in EXEMPT_PATHS so
+            App.tsx won't bounce the user back. */}
+        <a
+          className="town-hud-btn town-hud-setup"
+          href="/setup"
+          title="Open Setup / Configure"
+        >
+          <span className="town-hud-pip" />
+          <span className="town-hud-icon">⚙</span>
+          <span className="town-hud-label">SET</span>
+        </a>
         <a
           className="town-hud-btn town-hud-home"
           href="/monitor"

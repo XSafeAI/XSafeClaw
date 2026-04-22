@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   CheckCircle, Download, Loader2, XCircle, ChevronRight, Terminal,
-  ArrowDownToLine, Zap, Bot, SkipForward, Code2,
+  ArrowDownToLine, Zap, Bot, SkipForward, Code2, Settings2,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
@@ -89,10 +89,15 @@ interface SetupCardProps {
   info: PlatformInfo;
   installing: boolean;
   onInstall: () => void;
+  // §50 — when the framework is already installed, clicking the card (or
+  // its primary CTA button) jumps straight to that platform's Configure
+  // wizard. Optional so a caller that doesn't want this behaviour (e.g.
+  // a future read-only summary view) can simply omit the prop.
+  onConfigure?: () => void;
   t: any;
 }
 
-function SetupCard({ platform, info, installing, onInstall, t }: SetupCardProps) {
+function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: SetupCardProps) {
   const isOpenClaw = platform === 'openclaw';
   const isHermes = platform === 'hermes';
   const name = isOpenClaw ? 'OpenClaw' : isHermes ? 'Hermes Agent' : 'Nanobot';
@@ -104,8 +109,33 @@ function SetupCard({ platform, info, installing, onInstall, t }: SetupCardProps)
   const badgeInstalled = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : 'bg-cyan-500/15 text-cyan-400';
   const badgeNotInstalled = 'bg-surface-2 text-text-muted';
 
+  // §50 — installed cards become a single big click target that opens the
+  // matching Configure wizard. We only enable card-level clicking when
+  // ``onConfigure`` is wired (caller decides) AND no install is in flight
+  // for this card (so a stray click while the loader spins can't accidentally
+  // navigate away from a running install). The CTA button at the bottom
+  // also calls ``onConfigure``; we ``stopPropagation`` there so React
+  // doesn't fire the parent click twice.
+  const cardClickable = isInstalled && !installing && Boolean(onConfigure);
+  const handleCardClick = cardClickable ? onConfigure : undefined;
+  const handleCardKey = cardClickable
+    ? (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onConfigure?.();
+        }
+      }
+    : undefined;
+
   return (
-    <div className={`border rounded-2xl p-6 transition-all ${isInstalled ? 'border-emerald-500/30 bg-emerald-500/5' : accentColor}`}>
+    <div
+      className={`border rounded-2xl p-6 transition-all ${isInstalled ? 'border-emerald-500/30 bg-emerald-500/5' : accentColor} ${cardClickable ? 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-emerald-500/10' : ''}`}
+      role={cardClickable ? 'button' : undefined}
+      tabIndex={cardClickable ? 0 : undefined}
+      onClick={handleCardClick}
+      onKeyDown={handleCardKey}
+      aria-label={cardClickable ? `${t.setup.openConfigureAria || 'Open configure wizard for'} ${name}` : undefined}
+    >
       <div className="flex items-start gap-4">
         <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${isInstalled ? 'bg-emerald-500/15' : iconBg}`}>
           {isInstalled ? (
@@ -153,6 +183,24 @@ function SetupCard({ platform, info, installing, onInstall, t }: SetupCardProps)
         >
           <Download className="w-4 h-4" />
           {isOpenClaw ? t.setup.installOpenClaw : isHermes ? ((t.setup as any).hermesGuideTitle || 'Install Hermes Agent') : t.setup.installNanobot}
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      )}
+
+      {/* §50 — installed → show explicit "Open Configure" CTA. The whole
+          card is also clickable above; this button is for users who scan
+          for buttons rather than realizing the card is interactive. */}
+      {isInstalled && !installing && onConfigure && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onConfigure();
+          }}
+          className="w-full mt-4 flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-[13px] transition-all shadow bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/25"
+        >
+          <Settings2 className="w-4 h-4" />
+          {t.setup.openConfigure || 'Open Configure'}
           <ChevronRight className="w-4 h-4" />
         </button>
       )}
@@ -491,6 +539,7 @@ export default function Setup() {
                 info={openclawInfo}
                 installing={installingPlatform === 'openclaw'}
                 onInstall={handleInstallOpenClaw}
+                onConfigure={() => navigate('/openclaw_configure', { replace: true })}
                 t={t}
               />
               <SetupCard
@@ -498,6 +547,7 @@ export default function Setup() {
                 info={nanobotInfo}
                 installing={installingPlatform === 'nanobot'}
                 onInstall={handleInstallNanobot}
+                onConfigure={() => navigate('/nanobot_configure', { replace: true })}
                 t={t}
               />
               <SetupCard
@@ -505,6 +555,7 @@ export default function Setup() {
                 info={hermesInfo}
                 installing={installingPlatform === 'hermes'}
                 onInstall={handleInstallHermes}
+                onConfigure={() => navigate('/hermes_configure', { replace: true })}
                 t={t}
               />
 

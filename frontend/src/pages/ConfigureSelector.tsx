@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, ChevronRight, Loader2, Settings2, Zap, type LucideIcon } from 'lucide-react';
+import { Bot, ChevronRight, Loader2, MessageCircle, Settings2, Zap, type LucideIcon } from 'lucide-react';
 import { systemAPI, type InstallStatusResponse } from '../services/api';
 import { useI18n } from '../i18n';
 
@@ -8,10 +8,13 @@ const copy = {
   zh: {
     eyebrow: '运行时配置',
     title: '选择要配置的平台',
-    subtitle: 'OpenClaw 和 Nanobot 现在是独立运行时。只配置你实际要使用的平台即可。',
+    subtitle:
+      'OpenClaw、Hermes 和 Nanobot 现在并列运行。只需配置你实际要使用的平台，未配置的平台会在 Agent Town 中以灰态展示。',
     loading: '正在读取安装状态...',
     openclawTitle: 'OpenClaw 配置向导',
     openclawDesc: '配置 OpenClaw 模型、网关、插件、渠道和 Guard 能力。',
+    hermesTitle: 'Hermes 配置向导',
+    hermesDesc: '配置 Hermes 模型、API Key 与 Guard 钩子，写入 ~/.hermes/config.yaml 与 ~/.hermes/.env。',
     nanobotTitle: 'Nanobot 配置向导',
     nanobotDesc: '写入 ~/.nanobot/config.json，配置模型、API Key、gateway、WebSocket 和 Guard hook。',
     installed: '已安装',
@@ -24,10 +27,13 @@ const copy = {
   en: {
     eyebrow: 'Runtime Configuration',
     title: 'Choose a platform to configure',
-    subtitle: 'OpenClaw and Nanobot are independent runtimes. Configure only the platform you plan to use.',
+    subtitle:
+      'OpenClaw, Hermes and Nanobot now run side by side. Configure only the runtimes you plan to use; the others stay greyed out in Agent Town.',
     loading: 'Reading install status...',
     openclawTitle: 'OpenClaw Configure',
     openclawDesc: 'Configure OpenClaw models, gateway, plugins, channels, and Guard capabilities.',
+    hermesTitle: 'Hermes Configure',
+    hermesDesc: 'Configure Hermes models, API key and Guard hook; writes ~/.hermes/config.yaml and ~/.hermes/.env.',
     nanobotTitle: 'Nanobot Configure',
     nanobotDesc: 'Write ~/.nanobot/config.json for model, API key, gateway, WebSocket, and Guard hook settings.',
     installed: 'Installed',
@@ -44,19 +50,25 @@ interface ConfigureCardProps {
   desc: string;
   installed: boolean;
   configured: boolean;
-  accent: 'blue' | 'cyan';
+  accent: 'blue' | 'cyan' | 'purple';
   icon: LucideIcon;
   onClick: () => void;
   labels: typeof copy.zh;
 }
 
 function ConfigureCard({ title, desc, installed, configured, accent, icon: Icon, onClick, labels }: ConfigureCardProps) {
-  const accentClasses = accent === 'blue'
-    ? 'border-blue-500/30 bg-blue-500/5 text-blue-300'
-    : 'border-cyan-500/30 bg-cyan-500/5 text-cyan-300';
-  const buttonClasses = accent === 'blue'
-    ? 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/25'
-    : 'bg-cyan-500 hover:bg-cyan-600 shadow-cyan-500/25';
+  const accentMap = {
+    blue: 'border-blue-500/30 bg-blue-500/5 text-blue-300',
+    cyan: 'border-cyan-500/30 bg-cyan-500/5 text-cyan-300',
+    purple: 'border-purple-500/30 bg-purple-500/5 text-purple-300',
+  } as const;
+  const buttonMap = {
+    blue: 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/25',
+    cyan: 'bg-cyan-500 hover:bg-cyan-600 shadow-cyan-500/25',
+    purple: 'bg-purple-500 hover:bg-purple-600 shadow-purple-500/25',
+  } as const;
+  const accentClasses = accentMap[accent];
+  const buttonClasses = buttonMap[accent];
 
   return (
     <button
@@ -108,6 +120,7 @@ export default function ConfigureSelector() {
   }, []);
 
   const openclawInstalled = Boolean(status?.openclaw_installed);
+  const hermesInstalled = Boolean(status?.hermes_installed);
   const nanobotInstalled = Boolean(status?.nanobot_installed);
 
   return (
@@ -142,7 +155,7 @@ export default function ConfigureSelector() {
             {labels.loading}
           </div>
         ) : (
-          <div className="mt-12 grid gap-5 md:grid-cols-2">
+          <div className="mt-12 grid gap-5 md:grid-cols-3">
             <ConfigureCard
               title={labels.openclawTitle}
               desc={labels.openclawDesc}
@@ -151,6 +164,16 @@ export default function ConfigureSelector() {
               accent="blue"
               icon={Zap}
               onClick={() => navigate(openclawInstalled ? '/openclaw_configure' : '/setup', { replace: true })}
+              labels={labels}
+            />
+            <ConfigureCard
+              title={labels.hermesTitle}
+              desc={labels.hermesDesc}
+              installed={hermesInstalled}
+              configured={hermesInstalled && !Boolean(status?.requires_hermes_configure)}
+              accent="purple"
+              icon={MessageCircle}
+              onClick={() => navigate(hermesInstalled ? '/hermes_configure' : '/setup', { replace: true })}
               labels={labels}
             />
             <ConfigureCard

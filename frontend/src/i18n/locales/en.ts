@@ -213,6 +213,9 @@ export const en = {
     stopVoiceInput: 'Stop voice input',
     voiceUnsupported: 'Voice input not supported in this browser',
     pickModel: 'Pick a model in settings first',
+    sessionModelLabel: 'Model',
+    hermesSwitchBanner: 'Switched to a Hermes session bound to {model}. Hermes activates only one model at a time, so switching between sessions of different models rewrites the local config (~10 ms). Frequent toggling may add slight latency.',
+    hermesSwitchBannerDismiss: 'Dismiss',
     nanobotGatewayOffline: 'The nanobot Chat page requires nanobot gateway and the websocket channel. Run this in another terminal: nanobot gateway --port 18790 --verbose. The page will refresh status automatically after it starts.',
     connectFailed: 'Failed to connect to OpenClaw gateway, is it running?',
     // Install modal
@@ -533,6 +536,9 @@ export const en = {
     nanobotConfigInitFailedHint: 'The Nanobot CLI is installed, but the runtime still needs manual configuration in Nanobot Configure.',
     nanobotInstallFailedHint: 'If uv is not installed, install it first: pip install uv',
     nanobotContinueConfigure: 'Continue to Nanobot Configure',
+    // §50 — installed-card click target
+    openConfigure: 'Open Configure',
+    openConfigureAria: 'Open configure wizard for',
     // Skip
     skipBtn: 'Skip, continue to use',
   },
@@ -800,6 +806,7 @@ export const en = {
       modelLoading: 'Loading available providers…',
       modelNoProviders: 'Could not load providers. You can skip this step and configure a model later from the CMD UI.',
       modelCurrent: 'Current default model',
+      modelMultipleHint: 'Note: each session is bound to its model at creation time and never switches mid-chat. Hermes activates only one model at a time, so chatting across sessions bound to different models rewrites the local config (~10 ms) per switch. Try to stick to one model per session block.',
       modelProviderLabel: 'Provider',
       modelProviderPlaceholder: 'Select a provider…',
       modelNoAuthedProviders: 'No provider has usable credentials in ~/.hermes/.env yet. Go back to the API-Key step (or run `hermes auth <provider>` in a terminal) and return here once at least one key is saved.',
@@ -810,6 +817,9 @@ export const en = {
       modelApiKeyLabel: 'Provider API key (optional — only needed if not already set)',
       modelApiKeyPlaceholder: 'Paste the provider API key (e.g. sk-…)',
       modelApiKeyHint: 'Leave blank if ~/.hermes/.env already has the matching key — we\'ll only update the default model.',
+      modelBaseUrlLabel: 'Base URL (optional — overrides the default endpoint)',
+      modelBaseUrlHint: 'Leave blank to use the recommended URL shown as placeholder above. If you\'re in mainland China without a VPN, paste a reachable proxy endpoint here (e.g. a reverse proxy that forwards api.openai.com / api.anthropic.com / generativelanguage.googleapis.com).',
+      modelBaseUrlPlaceholderEmpty: 'Hermes will pick its adapter default if left blank',
       modelSaveBtn: 'Save & apply',
       modelSaveSuccess: 'Saved & applied',
       modelSaveFailed: 'Save failed',
@@ -909,32 +919,7 @@ export const en = {
     },
   },
 
-  selectFramework: {
-    title: 'Choose Agent Framework',
-    subtitle: 'Both OpenClaw and Hermes are installed on this machine',
-    description:
-      'XSafeClaw can only monitor one framework per session. Pick the one you want to use right now — you can run XSafeClaw again later and switch back to the other.',
-    bothInstalled: 'Both frameworks detected',
-    tip: 'Tip: pass --platform openclaw or --platform hermes to xsafeclaw start to skip this screen.',
-    openclawName: 'OpenClaw',
-    openclawDesc: 'Node.js-based personal agent with the full 14-step onboarding wizard.',
-    openclawBadge: 'Full Configure flow',
-    hermesName: 'Hermes Agent',
-    hermesDesc: 'Python-based open-source agent with dynamic model catalog and gateway.',
-    hermesBadge: 'Short setup',
-    selectBtn: 'Use this framework',
-    selecting: 'Applying selection…',
-    applied: 'Selection applied — restarting XSafeClaw…',
-    waitingRestart: 'Waiting for the server to restart (this usually takes a few seconds)…',
-    restartFailed: 'The server did not come back in time.',
-    restartFailedHint: 'Check your terminal for errors, then reload this page.',
-    reloadNow: 'Reload now',
-    errorTitle: 'Selection failed',
-    errorNotPickerMode: 'The backend is not running in picker mode — selection is disabled.',
-    errorNotInstalled: 'The selected framework is not installed on this machine.',
-    errorNetwork: 'Could not reach the picker server.',
-    notInPickerMode: 'This server is not in picker mode.',
-    notInPickerModeHint: 'You reached this page by accident. Click below to go back to the main app.',
-    goHome: 'Go to home',
-  },
+  // §38 selectFramework block was removed in §42 — XSafeClaw now monitors
+  // OpenClaw, Hermes and Nanobot simultaneously and the user picks
+  // per-session in Agent Town, so the dedicated framework picker is gone.
 };

@@ -1309,13 +1309,30 @@ export default function TownConsole({
   // hardcoded coding-intl default. Empty object on OpenClaw / older
   // backends and the modal treats that as "no picker needed".
   const [providerEndpoints, setProviderEndpoints] = useState({});
-  // Reported by the Hermes branch of /system/onboard-scan (§36).  Empty
-  // string until the first scan resolves.  Used to gate Hermes-only UI
-  // affordances (e.g. the per-model delete × in the model deck) so they
-  // never render under OpenClaw.
-  const [platform, setPlatform] = useState('');
+  // §47 — XSafeClaw-pinned recommended Base URL per provider, sourced
+  // from the same /system/onboard-scan response.  Hermes-only (OpenClaw
+  // payloads omit it); empty map keeps ModelSetupModal's input dormant.
+  const [providerRecommendedBaseUrls, setProviderRecommendedBaseUrls] = useState({});
+  // §42: ``platform`` is now derived from the user-selected runtime instance
+  // below (``selectedRuntime?.platform``), not from the global onboard-scan
+  // payload. The old single-platform server design exposed ``data.platform``
+  // on /system/onboard-scan (§36) so the UI could gate Hermes-only buttons;
+  // with three runtimes alive at once we want those affordances to react
+  // instantly when the user switches the active runtime in Agent Town.
+  // ``onboardScanPlatform`` keeps the legacy value as a fallback in case
+  // ``selectedRuntime`` hasn't resolved yet (e.g. during initial mount).
+  const [onboardScanPlatform, setOnboardScanPlatform] = useState('');
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
-  const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
+  // §53 — was a single ``modelCatalogLoaded`` boolean. With three runtimes
+  // alive at once and ``settings.is_hermes`` no longer the source of truth,
+  // a server-side scan that comes back as OpenClaw shape must NOT be
+  // reused when the user later switches to a Hermes runtime (the modal
+  // would lose ``provider_endpoints`` / ``provider_recommended_base_urls``
+  // and the alibaba DashScope-vs-Coding-Plan picker stays dormant).
+  // Track the platform key the cache was loaded for so the open-modal
+  // useEffect can detect a stale cache and refetch with the right
+  // ``?platform=`` after a runtime switch.
+  const [modelCatalogLoadedFor, setModelCatalogLoadedFor] = useState(null);
   const [modelCatalogError, setModelCatalogError] = useState('');
   const [modelSetupOpen, setModelSetupOpen] = useState(false);
   const [draftAgents, setDraftAgents] = useState([]);
@@ -1360,10 +1377,18 @@ export default function TownConsole({
     || null
   ), [runtimeInstances, selectedRuntimeId]);
 
+  // §42: drive every Hermes-only UI affordance off the user's currently
+  // selected runtime instead of the global onboard-scan field. Falls back
+  // to the legacy onboard-scan value during the initial mount window where
+  // ``selectedRuntime`` is still null.
+  const platform = selectedRuntime?.platform || onboardScanPlatform;
+
   const selectedRuntimeUnavailable = Boolean(
     selectedRuntime
-    && selectedRuntime.platform === 'nanobot'
-    && selectedRuntime.health_status !== 'healthy',
+    && (
+      (selectedRuntime.platform === 'nanobot' && selectedRuntime.health_status !== 'healthy')
+      || (selectedRuntime.platform === 'hermes' && selectedRuntime.health_status === 'unreachable')
+    ),
   );
   const runtimeUnavailableMessage = selectedRuntimeUnavailable
     ? townText.create.nanobotGatewayOffline
@@ -1492,6 +1517,19 @@ export default function TownConsole({
   }, [selectedRuntimeId]);
 
   const loadModelCatalog = useCallback(async (force = false) => {
+    // §53 — compute the cache key BEFORE the mock branch so mock and live
+    // paths share the same "loaded-for" semantics — the
+    // ``modelCatalogLoadedFor === platformKey`` check the modal-prop
+    // bindings rely on stays consistent.
+    //
+    // Cache key = the platform the user is currently configuring
+    // (``selectedRuntime`` wins, ``onboardScanPlatform`` is the legacy
+    // fallback during initial mount). Empty string is a valid key —
+    // distinct from ``'openclaw'`` / ``'hermes'`` / ``'nanobot'`` / null —
+    // and represents "neither runtime resolved yet, ask the server with
+    // no ``?platform=`` and let it pick the default".
+    const platformKey = selectedRuntime?.platform || onboardScanPlatform || '';
+
     if (USE_AGENT_TOWN_MOCK) {
       setCatalogAuthProviders([]);
       setCatalogModelProviders(MOCK_MODEL_PROVIDERS.map((provider) => ({
@@ -1521,16 +1559,25 @@ export default function TownConsole({
         search_provider: '',
         search_api_key: '',
       });
-      setModelCatalogLoaded(true);
+      setModelCatalogLoadedFor(platformKey);
       setModelCatalogError('');
       return;
     }
-    if (modelCatalogLoading || (modelCatalogLoaded && !force)) return;
+
+    // Only Hermes / OpenClaw have a dedicated server-side branch in
+    // ``/system/onboard-scan`` (§52). Anything else (``nanobot``, ``''``)
+    // falls through to the legacy ``settings.is_hermes`` branch, which
+    // matches §52's "unknown ⇒ legacy" contract.
+    const apiPlatform = platformKey === 'openclaw' || platformKey === 'hermes'
+      ? platformKey
+      : undefined;
+
+    if (modelCatalogLoading || (modelCatalogLoadedFor === platformKey && !force)) return;
 
     setModelCatalogLoading(true);
     setModelCatalogError('');
     try {
-      const response = await systemAPI.onboardScan();
+      const response = await systemAPI.onboardScan(apiPlatform);
       const data = response.data || {};
       setCatalogAuthProviders(Array.isArray(data.auth_providers) ? data.auth_providers : []);
       setCatalogModelProviders(Array.isArray(data.model_providers) ? data.model_providers : []);
@@ -1543,11 +1590,15 @@ export default function TownConsole({
           ? data.provider_endpoints
           : {},
       );
-      // ``platform`` is also Hermes-only on the wire; OpenClaw scans omit
-      // it so we leave the state empty and the Hermes-only delete button
-      // stays hidden (§36).
-      setPlatform(typeof data.platform === 'string' ? data.platform : '');
-      setModelCatalogLoaded(true);
+      setProviderRecommendedBaseUrls(
+        data.provider_recommended_base_urls && typeof data.provider_recommended_base_urls === 'object'
+          ? data.provider_recommended_base_urls
+          : {},
+      );
+      // Legacy single-platform onboard-scan field — kept only as a
+      // fallback. Real platform-gating now reads ``selectedRuntime``.
+      setOnboardScanPlatform(typeof data.platform === 'string' ? data.platform : '');
+      setModelCatalogLoadedFor(platformKey);
     } catch (err) {
       console.warn('[TownConsole] onboard-scan fetch error:', err);
       setModelCatalogError(err?.response?.data?.detail || err?.message || 'Failed to discover configure-time models.');
@@ -1561,7 +1612,7 @@ export default function TownConsole({
     } finally {
       setModelCatalogLoading(false);
     }
-  }, [modelCatalogLoaded, modelCatalogLoading]);
+  }, [modelCatalogLoadedFor, modelCatalogLoading, selectedRuntime?.platform, onboardScanPlatform]);
 
   const loadConsoleData = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
@@ -2289,48 +2340,9 @@ export default function TownConsole({
     setCreateError('');
   }, []);
 
-  // §36 — drop one entry from the XSafeClaw configured-model ledger.
-  // Hermes-only: gated by ``platform === 'hermes'`` at the call site so
-  // OpenClaw never even renders the trigger.  Refuses (server-side, HTTP
-  // 409) when the target is the active model in ~/.hermes/config.yaml; we
-  // surface that as a ``createError`` rather than a silent no-op so the
-  // user understands they need to switch active first.  The local lists
-  // are mutated optimistically AFTER the server confirms the delete, so
-  // a network failure leaves the picker untouched.
-  const handleDeleteConfiguredModel = useCallback(async (modelId, modelName) => {
-    if (!modelId) return;
-    if (platform !== 'hermes') return;
-    const label = modelName || modelId;
-    if (typeof window !== 'undefined') {
-      const ok = window.confirm(
-        `Remove "${label}" from your configured models?\n\n`
-        + 'The provider API key stays in ~/.hermes/.env, so any agent already '
-        + 'created with this model keeps working. Only the picker is affected.',
-      );
-      if (!ok) return;
-    }
-    try {
-      await systemAPI.removeConfiguredModel(modelId);
-      setAvailableModels((prev) => prev.filter((m) => m.id !== modelId));
-      setPendingModelId((prev) => (prev === modelId ? '' : prev));
-      // ``lastUsedConfiguredModelId`` is derived (useMemo over agents'
-      // pinned model_ids), so it'll self-update on the next render now
-      // that ``availableModels`` no longer carries the deleted entry.
-      if (recentlyConfiguredModelId === modelId) setRecentlyConfiguredModelId('');
-      setCreateError('');
-      // Re-pull from the server so the next auto-pick sees the same source
-      // of truth the picker now reflects (and so any cache layers between
-      // us and ``/api/chat/available-models`` stay coherent).
-      loadAvailableModels();
-    } catch (err) {
-      const detail = err?.response?.data?.detail || err?.message || 'Failed to remove model.';
-      setCreateError(String(detail));
-    }
-  }, [
-    platform,
-    loadAvailableModels,
-    recentlyConfiguredModelId,
-  ]);
+  // §46 — `handleDeleteConfiguredModel` 已移除（与 OpenClaw 对齐）。
+  // 历史实现：调用 systemAPI.removeConfiguredModel 删除 Hermes 账本条目。
+  // 现在 picker 不再渲染删除按钮；模型列表是只增不减的「累积视图」。
 
   const handleModelConfigured = useCallback(async ({ modelId, modelName, provider, reasoning, modelReady }) => {
     const normalizedModel = {
@@ -2759,13 +2771,8 @@ export default function TownConsole({
                   filteredModels={filteredModels}
                   pendingModelId={pendingModelId}
                   onPickModel={handlePickModel}
-                  // §36 — Hermes-only delete affordance.  CrewTab uses
-                  // ``isHermes`` to decide whether to render the × button
-                  // at all; ``onDeleteModel`` is wired to the same ledger
-                  // endpoint that POST /system/quick-model-config writes,
-                  // and refuses (HTTP 409) on the active model.
-                  isHermes={platform === 'hermes'}
-                  onDeleteModel={handleDeleteConfiguredModel}
+                  // §46 — `isHermes` / `onDeleteModel` 已不再传递（与
+                  // OpenClaw 对齐：picker 不再渲染删除按钮）。
                   onOpenModelSetup={handleOpenModelSetup}
                   onCreateAgent={handleCreateAgent}
                   createAgentDisabled={createAgentDisabled}
@@ -2837,9 +2844,19 @@ export default function TownConsole({
         authProviders={catalogAuthProviders}
         modelProviders={catalogModelProviders}
         providerEndpoints={providerEndpoints}
+        providerRecommendedBaseUrls={providerRecommendedBaseUrls}
+        // §53 — pass the active runtime's platform so the modal can
+        // pin /system/provider-has-key to the right auth store on
+        // multi-platform servers (matches the §52 onboard-scan policy).
+        // Falls back to the legacy onboard-scan platform if the user
+        // hasn't picked a runtime yet (initial mount).
+        runtimePlatform={selectedRuntime?.platform || onboardScanPlatform || ''}
         defaults={onboardDefaults}
-        loading={modelCatalogLoading && !modelCatalogLoaded}
-        loadingError={modelCatalogLoaded ? '' : modelCatalogError}
+        // §53 — "catalog ready" is now per-platform: a cache filled for
+        // OpenClaw is "not ready" the moment the user switches to a
+        // Hermes runtime (the modal-open useEffect will refetch).
+        loading={modelCatalogLoading && modelCatalogLoadedFor !== (selectedRuntime?.platform || onboardScanPlatform || '')}
+        loadingError={modelCatalogLoadedFor === (selectedRuntime?.platform || onboardScanPlatform || '') ? '' : modelCatalogError}
         onRetry={() => loadModelCatalog(true)}
         onClose={() => setModelSetupOpen(false)}
         onConfigured={handleModelConfigured}

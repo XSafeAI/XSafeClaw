@@ -1,38 +1,30 @@
 """Entry point for ``python -m xsafeclaw`` — also the one ``start.sh`` uses.
 
-Historically this file just called ``uvicorn.run`` directly. That short-
-circuited the §38 CLI supervisor (``xsafeclaw start`` in ``cli.py``), so
-``start.sh`` users could never see the framework picker even with both
-OpenClaw and Hermes installed.
+Since §42 (Hermes-as-a-first-class-citizen) the §38 framework picker is gone:
+XSafeClaw now monitors OpenClaw, Hermes and Nanobot simultaneously and the
+user picks per-session which runtime to talk to from Agent Town. We just
+delegate to the shared ``_supervisor.run_server`` helper so this entry point
+and ``xsafeclaw start`` (``cli.py``) stay in lock-step.
 
-We now delegate to the shared ``_supervisor.run_server_with_supervisor``
-helper, giving ``python -m xsafeclaw`` exactly the same picker behaviour as
-``xsafeclaw start``. The pin/skip rules:
-
-  * ``PLATFORM=openclaw|hermes`` in the environment / .env → skip picker.
-  * ``PLATFORM=auto`` (or unset) + both frameworks installed → picker.
-  * ``PLATFORM=auto`` + one framework installed → auto-detect, no picker.
+``PLATFORM=openclaw|hermes|nanobot`` (in the environment / .env) is still
+honoured — but only as a *default-instance hint* for the registry. ``auto``
+(or unset) means "let the registry's fixed priority order
+(openclaw → hermes → nanobot) pick the default".
 """
 
-from ._supervisor import run_server_with_supervisor
+from ._supervisor import run_server
 from .config import settings
 
 
 def _platform_override_from_settings() -> str | None:
-    """Return the user's pinned platform, or None when 'auto'.
-
-    ``settings.platform`` comes from pydantic-settings and may be ``"auto"``,
-    ``"openclaw"`` or ``"hermes"``. The supervisor treats ``None`` as "run
-    the picker if both frameworks are installed", which is precisely what
-    ``"auto"`` should mean.
-    """
-    if settings.platform in ("openclaw", "hermes"):
+    """Return the user's pinned default-instance hint, or None when 'auto'."""
+    if settings.platform in ("openclaw", "hermes", "nanobot"):
         return settings.platform
     return None
 
 
 if __name__ == "__main__":
-    run_server_with_supervisor(
+    run_server(
         host=settings.api_host,
         port=settings.api_port,
         reload=settings.api_reload,

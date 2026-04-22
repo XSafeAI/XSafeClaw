@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+﻿import { useState, useRef, useEffect, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
@@ -48,6 +48,13 @@ interface StoredSession {
   instanceId?: string;
   platform?: string;
   displayName?: string;
+  // §45: model bound at session creation time. For Hermes this is the
+  // exact full_id pinned to ~/.hermes/config.yaml on first request (or
+  // eagerly at start_session, see chat.py::_ensure_hermes_yaml_pinned_to).
+  // Used by the sidebar chip + cross-session switch banner so users can see
+  // which model each session is locked to and understand why switching
+  // between different-model sessions takes ~10ms longer.
+  model?: string;
 }
 
 /* ==================== localStorage helpers ==================== */
@@ -308,6 +315,19 @@ export default function Chat() {
 
   const [guardOn, setGuardOn] = useState(true);
 
+  // §45: cross-session Hermes-switch hint.  When the user picks a session
+  // whose bound Hermes model differs from the previously-active session's
+  // model, the next chat round will trigger a ~10ms config.yaml rewrite
+  // (see chat.py::_ensure_hermes_yaml_pinned_to).  We surface that
+  // explicitly so users connect "delay" to "different model" rather than
+  // suspecting a network issue.  Auto-dismisses after 8s; manual close
+  // works too.  Tracking the *previous* Hermes model in a ref (instead of
+  // diffing against current selectedModel) avoids spurious banners caused
+  // by the picker reset that handleSelectSession performs.
+  const [hermesSwitchHint, setHermesSwitchHint] = useState<string | null>(null);
+  const prevHermesModelRef = useRef<string | null>(null);
+  const hermesHintTimerRef = useRef<number | null>(null);
+
   const [guardPending, setGuardPending] = useState<{
     id: string; tool_name: string; params: Record<string, any>;
     guard_verdict: string; session_context: string;
@@ -463,6 +483,51 @@ export default function Chat() {
   useEffect(() => {
     if (activeKey) loadHistory(activeKey);
   }, [activeKey]); // eslint-disable-line
+
+  // §45: detect Hermes-to-Hermes session switches whose bound models
+  // differ, and show the inline switch banner.  Skipped silently when:
+  //  - either side isn't Hermes (OpenClaw/nanobot have no shared-config
+  //    cost),
+  //  - either session has no recorded model (legacy sessions stored before
+  //    §45 won't carry s.model — falling back to "no banner" is safer
+  //    than guessing),
+  //  - the two models are identical (RWLock read path, no rewrite).
+  // The first activation after page load also doesn't fire since
+  // prevHermesModelRef starts null.
+  useEffect(() => {
+    if (!activeKey) {
+      prevHermesModelRef.current = null;
+      return;
+    }
+    const cur = sessions.find(s => s.key === activeKey);
+    if (!cur || cur.platform !== 'hermes' || !cur.model) {
+      prevHermesModelRef.current = cur?.platform === 'hermes' ? (cur.model || null) : null;
+      return;
+    }
+    const prevModel = prevHermesModelRef.current;
+    if (prevModel && prevModel !== cur.model) {
+      if (hermesHintTimerRef.current != null) {
+        window.clearTimeout(hermesHintTimerRef.current);
+      }
+      setHermesSwitchHint(cur.model);
+      hermesHintTimerRef.current = window.setTimeout(() => {
+        setHermesSwitchHint(null);
+        hermesHintTimerRef.current = null;
+      }, 8000);
+    }
+    prevHermesModelRef.current = cur.model;
+    return () => {
+      // Component-level cleanup is handled in the unmount effect below;
+      // here we only need to avoid stale timers between rapid switches,
+      // which the next clearTimeout above already covers.
+    };
+  }, [activeKey, sessions]);
+
+  useEffect(() => () => {
+    if (hermesHintTimerRef.current != null) {
+      window.clearTimeout(hermesHintTimerRef.current);
+    }
+  }, []);
 
   // Load initial guard state
   useEffect(() => {
@@ -641,8 +706,35 @@ export default function Chat() {
     }
     setConnecting(true);
     try {
-      const res = await chatAPI.startSession(selectedInstanceId ? { instance_id: selectedInstanceId } : undefined);
+      // §43e: forward the picker's currently-selected model as model_override.
+      // Without this, ``start_session`` (chat.py L1599-1614) skips the
+      // ``patch_session`` call when ``model_override`` / ``provider_override``
+      // / ``label`` are all blank, so the new session inherits whatever
+      // ``~/.hermes/config.yaml::model.default`` happens to be.  That default
+      // gets overwritten to the custom-endpoint model the moment the user
+      // saves a Custom Endpoint config (§43c writes
+      // ``model.{provider:custom, default:<custom_model>, ...}`` because
+      // Hermes requires the inline ``base_url``/``api_key`` for routing) —
+      // so creating the *next* agent silently picks up the custom model
+      // instead of whatever the picker shows, even though the picker UI
+      // looks fine.  Passing ``selectedModel`` here aligns the new session
+      // with the visible picker state on first creation; subsequent picker
+      // changes still flow through ``applySessionSettings`` → ``patchSession``.
+      const trimmedModel = (selectedModel || '').trim();
+      const startBody: { instance_id?: string; model_override?: string | null } = {};
+      if (selectedInstanceId) startBody.instance_id = selectedInstanceId;
+      if (trimmedModel) startBody.model_override = trimmedModel;
+      const res = await chatAPI.startSession(Object.keys(startBody).length ? startBody : undefined);
       const key = res.data.session_key;
+      // §45: capture the model the session is bound to at create time so
+      // the sidebar chip + Hermes-switch banner have a stable source of
+      // truth.  trimmedModel reflects the picker; defaultModel is the
+      // platform fallback when the picker is empty.  Backend may also
+      // return res.data.model (preferred when present).
+      const boundModel = (res.data as any)?.model
+        || trimmedModel
+        || defaultModel
+        || undefined;
       const newSession: StoredSession = {
         key,
         label: `Chat ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`,
@@ -650,6 +742,7 @@ export default function Chat() {
         instanceId: res.data.instance_id,
         platform: res.data.platform,
         displayName: res.data.instance?.display_name,
+        model: boundModel,
       };
       setSessions(prev => [newSession, ...prev]);
       setMessageMap(prev => ({ ...prev, [key]: [] }));
@@ -1112,6 +1205,29 @@ export default function Chat() {
           <span>{activeRuntimeUnavailableMessage}</span>
         </div>
       )}
+      {/* §45: Hermes per-session model switch hint. Soft info banner,
+          NOT amber/red — this is expected behaviour, not an error. */}
+      {hermesSwitchHint && (
+        <div className="flex-shrink-0 border-b border-sky-500/20 bg-sky-500/10 px-8 py-2.5 text-[12px] text-sky-200 flex items-center gap-2">
+          <Cpu className="w-4 h-4 flex-shrink-0" />
+          <span className="flex-1">{t.chat.hermesSwitchBanner.replace('{model}', hermesSwitchHint)}</span>
+          <button
+            type="button"
+            onClick={() => {
+              if (hermesHintTimerRef.current != null) {
+                window.clearTimeout(hermesHintTimerRef.current);
+                hermesHintTimerRef.current = null;
+              }
+              setHermesSwitchHint(null);
+            }}
+            className="flex-shrink-0 text-sky-300 hover:text-sky-100 transition-colors p-0.5"
+            title={t.chat.hermesSwitchBannerDismiss}
+            aria-label={t.chat.hermesSwitchBannerDismiss}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Body */}
       <div className="flex-1 flex overflow-hidden">
@@ -1160,6 +1276,25 @@ export default function Chat() {
                       {s.displayName && (
                         <p className="text-[10px] text-text-muted truncate mt-0.5">
                           {s.displayName}
+                        </p>
+                      )}
+                      {/* §45: per-session bound-model chip.  Renders for
+                          any session that recorded a model at create time
+                          (Hermes is the primary use case since chat-time
+                          model switches are blocked there; OpenClaw still
+                          benefits as a passive overview).  Hermes sessions
+                          additionally tint the chip violet so the user can
+                          spot at a glance which sessions share a model and
+                          will skip the config rewrite. */}
+                      {s.model && (
+                        <p
+                          className={`text-[10px] font-mono truncate mt-0.5 ${
+                            s.platform === 'hermes' ? 'text-violet-300/80' : 'text-text-muted'
+                          }`}
+                          title={`${t.chat.sessionModelLabel}: ${s.model}`}
+                        >
+                          <Cpu className="w-2.5 h-2.5 inline -mt-px mr-1" />
+                          {s.model.includes('/') ? s.model.split('/').pop() : s.model}
                         </p>
                       )}
                     </div>
@@ -1295,7 +1430,7 @@ export default function Chat() {
                         <div className="flex items-center gap-1.5 flex-shrink-0">
                           {selectedModel && (
                             <span
-                              onClick={e => { e.stopPropagation(); setSelectedModel(''); applySessionSettings('', thinkingLevel); }}
+                              onClick={e => { e.stopPropagation(); setSelectedModel(''); /* §43h: model is locked at session-create time; only update local state so the next New-Chat picks this up */ }}
                               className="text-text-muted hover:text-red-400 transition-colors"
                             >
                               <X className="w-3 h-3" />
@@ -1369,7 +1504,13 @@ export default function Chat() {
                                           setSelectedModel(m.id);
                                           setModelDropdownOpen(false);
                                           setModelSearch('');
-                                          applySessionSettings(m.id, thinkingLevel);
+                                          // §43h: model is locked at session-create time.  The picker
+                                          // selection only seeds the next New-Chat (handleNewSession
+                                          // forwards it as model_override).  We deliberately drop the
+                                          // applySessionSettings/patch_session call that used to live
+                                          // here so an existing session never silently switches models
+                                          // mid-conversation — aligning Chat.tsx with the Agent Town
+                                          // policy (TownConsole.jsx never patches a live session).
                                         }}
                                         className={`w-full text-left px-3 py-2 text-[11px] hover:bg-accent/10 transition-colors flex items-center justify-between gap-2 ${
                                           isSelected ? 'text-accent bg-accent/5 font-medium' : 'text-text-secondary'
@@ -1403,7 +1544,13 @@ export default function Chat() {
                             key={lvl.value}
                             onClick={() => {
                               setThinkingLevel(lvl.value);
-                              applySessionSettings(selectedModel, lvl.value);
+                              // §43h: only thinking_level may be patched on a live session;
+                              // model is locked at create time (see picker onClick above).
+                              // Passing model='' makes applySessionSettings forward
+                              // model:null to the backend, which patch_session treats
+                              // as "leave model untouched" (Hermes rejects non-null
+                              // model post-§43h, OpenClaw/nanobot are unaffected).
+                              applySessionSettings('', lvl.value);
                             }}
                             disabled={!supportsSessionPatch}
                             className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${

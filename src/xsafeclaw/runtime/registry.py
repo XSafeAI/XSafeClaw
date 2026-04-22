@@ -115,14 +115,48 @@ class RuntimeRegistry:
         raise ValueError("Manual runtime instance management is disabled")
 
     def _ensure_default(self, instances: list[RuntimeInstance]) -> None:
+        """Pick a stable default instance without forcing a single 'main' platform.
+
+        Selection rule (in order):
+
+        1. ``PLATFORM`` env var / ``settings.platform`` is explicitly pinned to
+           ``openclaw`` / ``hermes`` / ``nanobot`` (i.e. **not** ``"auto"``):
+           prefer the first enabled instance on that platform.
+        2. Otherwise walk a fixed priority order ``openclaw -> hermes -> nanobot``
+           and pick the first enabled instance.
+        3. Fall back to the first enabled instance regardless of platform.
+
+        Crucially, the explicit pin is **only a default-instance hint**: the
+        user can still pick any other discovered runtime in Agent Town. This
+        replaces the post-§38 behaviour where ``settings.is_hermes`` / ``auto``
+        decided the default exclusively between OpenClaw and Hermes, leaving
+        Nanobot out and effectively ignoring multi-runtime parity.
+        """
         enabled = [instance for instance in instances if instance.enabled]
         if not enabled:
             return
-        preferred_platform = settings.resolved_platform if settings.resolved_platform in {"openclaw", "hermes"} else "openclaw"
-        preferred = next(
-            (instance for instance in enabled if instance.platform == preferred_platform),
-            next((instance for instance in enabled if instance.platform == "openclaw"), enabled[0]),
-        )
+
+        preferred: RuntimeInstance | None = None
+
+        explicit_pin = settings.platform if settings.platform in {"openclaw", "hermes", "nanobot"} else None
+        if explicit_pin is not None:
+            preferred = next(
+                (instance for instance in enabled if instance.platform == explicit_pin),
+                None,
+            )
+
+        if preferred is None:
+            for platform in ("openclaw", "hermes", "nanobot"):
+                preferred = next(
+                    (instance for instance in enabled if instance.platform == platform),
+                    None,
+                )
+                if preferred is not None:
+                    break
+
+        if preferred is None:
+            preferred = enabled[0]
+
         for index, instance in enumerate(instances):
             instances[index] = instance.model_copy(
                 update={"is_default": instance.instance_id == preferred.instance_id}
