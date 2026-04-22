@@ -1074,6 +1074,19 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   // ``providerEndpoints`` (which is server-owned) so we can let the user
   // mutate the dropdown without round-tripping through the scan cache.
   const [providerEndpointSel, setProviderEndpointSel] = useState<Record<string, string>>({});
+  // §47 fix 2 — XSafeClaw-pinned recommended Base URL per provider, used
+  // as placeholder for the optional override input below the model
+  // dropdown.  Sourced from ``provider_recommended_base_urls`` on the
+  // onboard scan response.  Providers omitted from the map render the
+  // input with a generic placeholder; the input itself is still shown
+  // because the user might be on a network that requires a proxy
+  // endpoint regardless of which provider Hermes defaults to.
+  const [providerRecommendedBaseUrls, setProviderRecommendedBaseUrls] = useState<Record<string, string>>({});
+  // User-entered free-form Base URL override per provider.  Distinct
+  // from ``providerEndpointSel`` (which is dropdown-shaped, designed
+  // for alibaba's three preset endpoints).  Only consumed when the
+  // provider has *no* preset bundle — the dropdown wins for alibaba.
+  const [providerBaseUrlOverride, setProviderBaseUrlOverride] = useState<Record<string, string>>({});
 
   // ── Bot step state ────────────────────────────────────────────────────
   // The Hermes backend owns the platform schema (list of fields per
@@ -1207,6 +1220,10 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
           }
           setProviderEndpointSel(initialSel);
 
+          // §47 fix 2 — pull XSafeClaw-pinned recommended Base URLs.
+          const recommended = (d.provider_recommended_base_urls || {}) as Record<string, string>;
+          setProviderRecommendedBaseUrls(recommended);
+
           if (!modelProviderId && !modelId && def) {
             // Prefill the form with the currently configured default so
             // the user can see "this is what Hermes is using" at a glance.
@@ -1277,14 +1294,20 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
     setModelSaveError('');
     setModelSaveNote('');
     try {
-      // Only forward base_url when the provider we're saving has a preset
-      // bundle (today that's just ``alibaba`` — §33).  Sending it for a
-      // provider with no preset would be a no-op on the backend but makes
-      // the request payload noisier to reason about in logs.
+      // Resolve the Base URL we forward to ``quick-model-config``.
+      //   • If the provider has a preset bundle (today: alibaba), the
+      //     dropdown selection wins — that's the §33 contract.
+      //   • Otherwise, the §47 free-form override input wins; if the
+      //     user left it blank we send ``undefined`` so the backend
+      //     falls through to ``_HERMES_RECOMMENDED_BASE_URLS`` (the
+      //     XSafeClaw-pinned default for that provider).
       const endpointBundle = providerEndpoints[modelProviderId];
-      const endpointBaseUrl = endpointBundle
-        ? (providerEndpointSel[modelProviderId] || endpointBundle.current || endpointBundle.presets[0]?.base_url || '')
-        : '';
+      let endpointBaseUrl = '';
+      if (endpointBundle) {
+        endpointBaseUrl = providerEndpointSel[modelProviderId] || endpointBundle.current || endpointBundle.presets[0]?.base_url || '';
+      } else {
+        endpointBaseUrl = (providerBaseUrlOverride[modelProviderId] || '').trim();
+      }
 
       const res = await systemAPI.quickModelConfig({
         provider: modelProviderId,
@@ -1917,6 +1940,47 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                       three DashScope URLs.  Placed above the model dropdown
                       because a wrong base URL bricks chat regardless of
                       which model you pick. */}
+                  {/* §47 fix 2 — optional free-form Base URL override
+                      for providers that don't ship a preset bundle.
+                      Renders for every selectable Hermes provider except
+                      ``alibaba`` (handled by the dropdown above), ``custom``
+                      (Custom Endpoint flow has its own URL field on the
+                      auth step) and ``copilot`` (OAuth — no URL to override).
+                      Without this field the user has no in-app way to
+                      redirect ``api.openai.com`` / ``api.anthropic.com`` /
+                      ``generativelanguage.googleapis.com`` to a proxy that
+                      actually resolves from their network — the §47
+                      regression that surfaced as "[No response]" on
+                      Gemini chats from CN networks. */}
+                  {selectedModelProvider
+                    && !providerEndpoints[selectedModelProvider.id]
+                    && selectedModelProvider.id !== 'custom'
+                    && selectedModelProvider.id !== 'copilot' && (() => {
+                    const recommended = providerRecommendedBaseUrls[selectedModelProvider.id] || '';
+                    const current = providerBaseUrlOverride[selectedModelProvider.id] || '';
+                    return (
+                      <div className="bg-surface-0 border border-border rounded-xl p-3 space-y-2">
+                        <label className="text-[12px] font-semibold text-text-primary block">
+                          {h.modelBaseUrlLabel}
+                        </label>
+                        <input
+                          type="text"
+                          value={current}
+                          onChange={e => {
+                            setProviderBaseUrlOverride(prev => ({
+                              ...prev,
+                              [selectedModelProvider.id]: e.target.value,
+                            }));
+                            setModelSaveResult('idle');
+                          }}
+                          placeholder={recommended || h.modelBaseUrlPlaceholderEmpty}
+                          className="w-full bg-surface-1 border border-border rounded-lg px-3 py-2 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                        />
+                        <p className="text-[11px] text-text-muted">{h.modelBaseUrlHint}</p>
+                      </div>
+                    );
+                  })()}
+
                   {selectedModelProvider && providerEndpoints[selectedModelProvider.id] && (() => {
                     const bundle = providerEndpoints[selectedModelProvider.id];
                     const currentSel = providerEndpointSel[selectedModelProvider.id] || bundle.presets[0]?.base_url || '';

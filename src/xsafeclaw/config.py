@@ -179,6 +179,19 @@ class Settings(BaseSettings):
         default=1, description="File watcher polling interval"
     )
 
+    # §48 Runtime auto-start
+    # When True, XSafeClaw probes ~/.openclaw, ~/.hermes, ~/.nanobot at
+    # startup and best-effort starts each gateway that is installed but not
+    # yet listening on its health port. The same helpers are also called
+    # post-install (see services/runtime_autostart.py) so the user no longer
+    # needs to hop into a terminal after Setup → Install. Set to False to
+    # keep the legacy "you start it yourself" behaviour.
+    auto_start_runtimes: bool = Field(
+        default=True,
+        description="Auto-start installed framework gateways (OpenClaw / Hermes / Nanobot) "
+                    "when XSafeClaw boots and after Setup install/init endpoints succeed.",
+    )
+
     # Sync Service
     full_scan_interval_hours: int = Field(
         default=1, description="Full scan interval (hours)"

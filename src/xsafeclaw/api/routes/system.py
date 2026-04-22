@@ -2651,6 +2651,20 @@ async def init_default_nanobot():
         mode="blocking",
     )
     instances = await runtime_registry.discover()
+
+    # §48 — best-effort auto-start of the nanobot gateway now that the
+    # config file (which the gateway needs to bind its port + channels)
+    # exists. Skipped silently when ``auto_start_runtimes`` is off so the
+    # legacy "user runs the command themselves" workflow still works.
+    autostart: dict[str, str] = {"status": "disabled", "detail": "auto_start_runtimes=false"}
+    if settings.auto_start_runtimes:
+        try:
+            from ..services.runtime_autostart import autostart_nanobot
+            status, detail = await autostart_nanobot()
+            autostart = {"status": status, "detail": detail}
+        except Exception as exc:
+            autostart = {"status": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+
     return {
         "success": True,
         "created": created,
@@ -2662,6 +2676,7 @@ async def init_default_nanobot():
         "install_command": _nanobot_tool_install_command(),
         "model_configured": False,
         "instances": [serialize_instance(instance) for instance in instances],
+        "autostart": autostart,
     }
 
 
@@ -3785,9 +3800,14 @@ def _rewrite_hermes_yaml_model_default(full_id: str, slug: str) -> None:
     ledger (e.g. ``"openrouter"``, ``"alibaba"``, ``"custom:foo"``).
 
     For regular providers (``openrouter``, ``alibaba``, …): rewrites the
-    ``model`` block to a clean ``{default, provider}`` pair, deliberately
-    dropping any leftover ``base_url`` / ``api_key`` / ``api_mode`` from a
-    previous custom-provider session. Per-provider keys live in
+    ``model`` block to ``{default, provider}`` (+ preserved
+    ``base_url`` / ``api_key`` / ``api_mode`` iff the *previous* model block
+    was on the same provider — §47).  The strip-on-cross-provider semantics
+    are kept (e.g. switching from a custom session to ``alibaba`` cleanly
+    drops the custom inline credentials), but staying on the same provider
+    no longer wipes a ``model.base_url`` that ``_quick_model_config_hermes``
+    (or the user) wrote — that wipe was the §47 root cause for "[No
+    response]" on Qwen / Gemini.  Per-provider env keys still live in
     ``~/.hermes/.env`` and aren't touched here.
 
     For custom providers (``slug.startswith("custom:")``): looks up the
@@ -3855,11 +3875,34 @@ def _rewrite_hermes_yaml_model_default(full_id: str, slug: str) -> None:
         if custom_entry.get("api_mode"):
             new_model["api_mode"] = custom_entry["api_mode"]
     else:
-        # Regular provider — clean ``{default, provider}`` only.
-        new_model = {
+        # Regular provider — start with clean ``{default, provider}`` and
+        # then preserve provider-bound fields if (and only if) the previous
+        # ``model`` block was already targeting the same provider.
+        #
+        # §47: the original §43i implementation **always** stripped
+        # ``base_url`` / ``api_key`` / ``api_mode``. That was correct for
+        # the "switching from custom-* to a regular provider" case it was
+        # written for, but wrong for "user just sent another message in
+        # the same alibaba/gemini session" — pinning was wiping the very
+        # ``model.base_url`` the user (or ``_quick_model_config_hermes``
+        # via the §47 fix above) wrote, forcing Hermes to fall back to
+        # adapter defaults that 401 in CN / are blocked from CN /
+        # mismatch the user's key shape. End-user symptom: "[No response]".
+        #
+        # The fix is to keep the §43i strip semantics for the *cross-provider*
+        # transition (so a stale ``custom`` ``base_url`` can't leak into
+        # an ``alibaba`` send) and only preserve when the slug is unchanged.
+        new_model: dict = {
             "default": bare_id,
             "provider": slug,
         }
+        prev_model = config.get("model") if isinstance(config.get("model"), dict) else {}
+        prev_provider = (prev_model.get("provider") or "").strip().lower()
+        if prev_provider == slug.lower():
+            for k in ("base_url", "api_key", "api_mode"):
+                v = prev_model.get(k)
+                if v:
+                    new_model[k] = v
 
     config["model"] = new_model
 
@@ -4017,6 +4060,74 @@ _HERMES_DASHSCOPE_ENDPOINTS: list[dict] = [
 # base URL.  Kept as a module-level constant so downstream refactors don't
 # drift from the dotenv key name.
 _HERMES_DASHSCOPE_BASE_URL_ENV = "DASHSCOPE_BASE_URL"
+
+
+# ── Per-provider recommended base URLs (§47) ─────────────────────────────────
+# Authoritative source of "what should ``model.base_url`` be set to in
+# ``~/.hermes/config.yaml`` when the user picks <provider> via the XSafeClaw
+# Configure / quick-model-config flow and **does not** supply an override".
+#
+# Why this exists at all (the §47 root cause):
+# Pre-§47 ``_quick_model_config_hermes`` only wrote ``{default, provider}`` to
+# yaml and relied on Hermes's runtime to fall back through:
+#     yaml.model.base_url > os.getenv(pconfig.base_url_env_var) > pconfig.inference_base_url
+# That fallback chain is *fragile* in practice:
+#   • For ``alibaba`` we already had to wallpaper over it with §33 (pick
+#     intl/cn endpoint, write to ``~/.hermes/.env``) because Hermes's
+#     ``alibaba`` adapter has shipped at least two different ``inference_base_url``
+#     defaults across versions (``coding-intl…`` then ``dashscope-intl…``)
+#     and a wrong default 401s standard DashScope keys → "[No response]".
+#   • For ``gemini`` / ``anthropic`` / ``openai`` / ``xai`` we never wrote
+#     any per-provider env var, so the user had no way to change the
+#     endpoint short of hand-editing ``~/.hermes/.env`` — and Hermes's
+#     defaults for these are blocked in mainland China without a proxy.
+#   • §43i pins yaml on every send, but its "regular provider" branch
+#     deliberately strips ``base_url`` / ``api_key`` / ``api_mode`` from
+#     a previous custom-provider session — meaning even users who *did*
+#     hand-edit yaml saw their override silently wiped on the next message.
+#
+# The §47 fix: pin ``model.base_url`` directly in yaml so the runtime never
+# has to consult env-var fallback or the (drift-prone) Hermes hardcoded
+# default. The values below match Hermes v0.10.0's
+# ``hermes_cli/auth.py::PROVIDER_REGISTRY`` defaults; downstream we let the
+# frontend override these with a per-provider Base URL field (§47 fix 2).
+#
+# Keys MUST match ``_HERMES_MODEL_CATALOG`` provider ids. Providers omitted
+# here (``copilot``, ``custom``, ``copilot-acp``, ``qwen-oauth``) have
+# special routing semantics and intentionally fall through to Hermes's
+# adapter-specific resolution (OAuth subscription, inline custom_providers,
+# external process, etc).
+# Verified against ``hermes-agent`` v0.10.0 PROVIDER_REGISTRY
+# (``hermes_cli/auth.py`` L139-274) on 2026-04-21. Providers omitted
+# below either:
+#   • aren't first-class in PROVIDER_REGISTRY (``openai``, ``mistral``)
+#     and Hermes routes them through OpenRouter / a fallback path —
+#     pinning the wrong url here would lock those flows out;
+#   • have OAuth / external-process / custom-only routing
+#     (``copilot``, ``copilot-acp``, ``qwen-oauth``, ``custom``);
+#   • we couldn't ground-truth verify (``ai-gateway`` ships as
+#     ``ai-gateway.vercel.sh/v1`` but is rarely used — letting it fall
+#     through preserves whatever Hermes already does).
+# When in doubt, omit — caller falls through to existing env-var → Hermes
+# default chain (current behaviour, no regression).
+_HERMES_RECOMMENDED_BASE_URLS: dict[str, str] = {
+    "anthropic":      "https://api.anthropic.com",
+    "openrouter":     "https://openrouter.ai/api/v1",
+    "gemini":         "https://generativelanguage.googleapis.com/v1beta/openai",
+    "deepseek":       "https://api.deepseek.com/v1",
+    "alibaba":        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "zai":            "https://api.z.ai/api/paas/v4",
+    "kimi-coding":    "https://api.moonshot.ai/v1",
+    "kimi-coding-cn": "https://api.moonshot.cn/v1",
+    "arcee":          "https://api.arcee.ai/api/v1",
+    "minimax":        "https://api.minimax.io/anthropic",
+    "minimax-cn":     "https://api.minimaxi.com/anthropic",
+    "xai":            "https://api.x.ai/v1",
+    "opencode-zen":   "https://opencode.ai/zen/v1",
+    "huggingface":    "https://router.huggingface.co/v1",
+    "kilocode":       "https://api.kilo.ai/api/gateway",
+    "xiaomi":         "https://api.xiaomimimo.com/v1",
+}
 
 
 def _current_hermes_dashscope_base_url() -> str:
@@ -5503,6 +5614,18 @@ async def onboard_scan(refresh: bool = False):
                     "presets": _HERMES_DASHSCOPE_ENDPOINTS,
                 },
             },
+            # §47 fix 2 — per-provider recommended Base URLs for the
+            # Configure / quick-model-config flow.  Frontend renders an
+            # *optional* Base URL input for any provider the user picks
+            # (defaulting to the recommended value here as placeholder),
+            # so users in mainland China can redirect ``api.openai.com`` /
+            # ``api.anthropic.com`` / ``generativelanguage.googleapis.com``
+            # to a reachable proxy without having to hand-edit
+            # ``~/.hermes/config.yaml``.  Keys match
+            # ``_HERMES_MODEL_CATALOG`` provider ids; missing entries mean
+            # "no XSafeClaw-pinned default — frontend can still let the
+            # user supply a Base URL, the backend just won't pre-fill it".
+            "provider_recommended_base_urls": _HERMES_RECOMMENDED_BASE_URLS,
             "defaults": {
                 "mode": "local",
                 "gateway_port": settings.hermes_api_port,
@@ -6448,12 +6571,17 @@ class QuickModelConfigRequest(BaseModel):
     # rollout). When ``None`` the endpoint falls back to ``settings.is_hermes``
     # for backwards compatibility with single-platform clients.
     platform: Literal["openclaw", "hermes"] | None = None
-    # Optional Hermes-side endpoint override.  Currently only the ``alibaba``
-    # provider consumes it (see §33 — Hermes's hardcoded ``coding-intl``
-    # default traps standard DashScope keys); other providers ignore it.  The
-    # string is written verbatim into ``~/.hermes/.env`` under the per-provider
-    # env var (``DASHSCOPE_BASE_URL`` for alibaba), so callers must pass a
-    # fully-qualified URL — no path concatenation, no trailing-slash fixups.
+    # Optional Hermes-side endpoint override.  As of §47 every provider
+    # consumes it: the value is written into ``~/.hermes/config.yaml::model.base_url``
+    # (regular providers) and, for ``alibaba``, also mirrored into
+    # ``~/.hermes/.env::DASHSCOPE_BASE_URL`` for backwards compatibility
+    # with §33 (which writes that env var on every save). When omitted,
+    # ``_quick_model_config_hermes`` falls through to
+    # ``_HERMES_RECOMMENDED_BASE_URLS[provider]`` — that's the XSafeClaw-
+    # pinned default that prevents Hermes adapter defaults (``coding-intl``,
+    # ``api.openai.com`` from CN, etc.) from causing "[No response]".
+    # Callers must pass a fully-qualified URL — no path concatenation,
+    # no trailing-slash fixups (we strip a single trailing slash on save).
     base_url: str = ""
     # When True (default), Hermes path auto-restarts the API server after
     # writing ~/.hermes/.env + config.yaml and polls /v1/models to confirm
@@ -6831,10 +6959,47 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
             hermes_provider = raw_provider
             hermes_model = model_id
 
-        config["model"] = {
+        # §47 fix 1A — write ``model.base_url`` to yaml so Hermes runtime
+        # never has to consult its env-var → adapter-default fallback chain.
+        # The fallback was the source of the "Qwen / Gemini show
+        # [No response]" regression: ``alibaba`` adapters across Hermes
+        # versions ship different ``inference_base_url`` defaults
+        # (``coding-intl…`` rejects standard DashScope keys), and we never
+        # wrote per-provider env-vars for ``gemini`` / ``anthropic`` / etc
+        # so the user had no way to redirect those endpoints. Source-of-
+        # truth precedence (highest first):
+        #   1. ``body.base_url`` — explicit user pick from the new
+        #      Configure "Base URL" field (or §33 alibaba endpoint picker)
+        #   2. previous ``yaml.model.base_url`` if same provider — preserves
+        #      a hand-edited override the user may have made
+        #   3. ``_HERMES_RECOMMENDED_BASE_URLS[provider]`` — XSafeClaw's
+        #      pinned default for this provider
+        #   4. omit — fall through to Hermes adapter default (today's
+        #      behaviour for providers we haven't ground-truth verified)
+        prev_model = config.get("model") if isinstance(config.get("model"), dict) else {}
+        new_model: dict = {
             "default": hermes_model,
             "provider": hermes_provider,
         }
+        effective_base = (body.base_url or "").strip().rstrip("/")
+        if not effective_base and (prev_model.get("provider") or "").strip().lower() == hermes_provider.lower():
+            effective_base = (prev_model.get("base_url") or "").strip().rstrip("/")
+        if not effective_base:
+            effective_base = _HERMES_RECOMMENDED_BASE_URLS.get(hermes_provider, "").strip().rstrip("/")
+        if effective_base:
+            new_model["base_url"] = effective_base
+
+        # Preserve ``api_mode`` only when staying on the same provider —
+        # mirrors Hermes CLI's ``_model_flow_api_key_provider`` behaviour
+        # (sets api_mode for opencode-* family, drops it otherwise). When
+        # the user is *switching* providers, an inherited api_mode could
+        # mis-route the new provider, so we drop it.
+        if (prev_model.get("provider") or "").strip().lower() == hermes_provider.lower():
+            prev_api_mode = (prev_model.get("api_mode") or "").strip()
+            if prev_api_mode:
+                new_model["api_mode"] = prev_api_mode
+
+        config["model"] = new_model
 
     # §43: hard guard — refuse to yaml-dump into anything under ~/.openclaw.
     # OpenClaw parses its config with JSON5; YAML output starts with ``agents:``

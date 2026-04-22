@@ -1309,6 +1309,10 @@ export default function TownConsole({
   // hardcoded coding-intl default. Empty object on OpenClaw / older
   // backends and the modal treats that as "no picker needed".
   const [providerEndpoints, setProviderEndpoints] = useState({});
+  // §47 — XSafeClaw-pinned recommended Base URL per provider, sourced
+  // from the same /system/onboard-scan response.  Hermes-only (OpenClaw
+  // payloads omit it); empty map keeps ModelSetupModal's input dormant.
+  const [providerRecommendedBaseUrls, setProviderRecommendedBaseUrls] = useState({});
   // §42: ``platform`` is now derived from the user-selected runtime instance
   // below (``selectedRuntime?.platform``), not from the global onboard-scan
   // payload. The old single-platform server design exposed ``data.platform``
@@ -1553,6 +1557,11 @@ export default function TownConsole({
       setProviderEndpoints(
         data.provider_endpoints && typeof data.provider_endpoints === 'object'
           ? data.provider_endpoints
+          : {},
+      );
+      setProviderRecommendedBaseUrls(
+        data.provider_recommended_base_urls && typeof data.provider_recommended_base_urls === 'object'
+          ? data.provider_recommended_base_urls
           : {},
       );
       // Legacy single-platform onboard-scan field — kept only as a
@@ -2804,6 +2813,7 @@ export default function TownConsole({
         authProviders={catalogAuthProviders}
         modelProviders={catalogModelProviders}
         providerEndpoints={providerEndpoints}
+        providerRecommendedBaseUrls={providerRecommendedBaseUrls}
         defaults={onboardDefaults}
         loading={modelCatalogLoading && !modelCatalogLoaded}
         loadingError={modelCatalogLoaded ? '' : modelCatalogError}

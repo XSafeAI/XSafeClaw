@@ -69,7 +69,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Preload onboard-scan data in background (openclaw models list is slow)
     from .routes.system import trigger_onboard_scan_preload
     trigger_onboard_scan_preload()
-    
+
+    # §48 — Auto-start any installed framework gateway whose /health is silent.
+    # Dispatched as a background task so a slow start (e.g. systemd taking
+    # 5–10s to bind) never delays this lifespan from yielding; the rest of
+    # XSafeClaw — including its own /health — keeps serving immediately.
+    # Each helper is idempotent and best-effort; failures are logged but
+    # never raised.
+    if settings.auto_start_runtimes:
+        import asyncio as _asyncio
+        from ..services.runtime_autostart import autostart_installed_runtimes
+
+        async def _safe_autostart() -> None:
+            try:
+                summary = await autostart_installed_runtimes()
+                noteworthy = {k: v for k, v in summary.items()
+                              if v.get("status") in ("started", "failed")}
+                if noteworthy:
+                    parts = [f"{k}={v['status']}" for k, v in noteworthy.items()]
+                    print(f"🧩 Runtime autostart: {', '.join(parts)}")
+            except Exception as exc:
+                print(f"⚠️  Runtime autostart raised {type(exc).__name__}: {exc}")
+
+        _asyncio.create_task(_safe_autostart())
+
     yield
     
     # Shutdown
