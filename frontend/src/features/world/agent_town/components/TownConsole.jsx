@@ -1323,7 +1323,16 @@ export default function TownConsole({
   // ``selectedRuntime`` hasn't resolved yet (e.g. during initial mount).
   const [onboardScanPlatform, setOnboardScanPlatform] = useState('');
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
-  const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
+  // §53 — was a single ``modelCatalogLoaded`` boolean. With three runtimes
+  // alive at once and ``settings.is_hermes`` no longer the source of truth,
+  // a server-side scan that comes back as OpenClaw shape must NOT be
+  // reused when the user later switches to a Hermes runtime (the modal
+  // would lose ``provider_endpoints`` / ``provider_recommended_base_urls``
+  // and the alibaba DashScope-vs-Coding-Plan picker stays dormant).
+  // Track the platform key the cache was loaded for so the open-modal
+  // useEffect can detect a stale cache and refetch with the right
+  // ``?platform=`` after a runtime switch.
+  const [modelCatalogLoadedFor, setModelCatalogLoadedFor] = useState(null);
   const [modelCatalogError, setModelCatalogError] = useState('');
   const [modelSetupOpen, setModelSetupOpen] = useState(false);
   const [draftAgents, setDraftAgents] = useState([]);
@@ -1508,6 +1517,19 @@ export default function TownConsole({
   }, [selectedRuntimeId]);
 
   const loadModelCatalog = useCallback(async (force = false) => {
+    // §53 — compute the cache key BEFORE the mock branch so mock and live
+    // paths share the same "loaded-for" semantics — the
+    // ``modelCatalogLoadedFor === platformKey`` check the modal-prop
+    // bindings rely on stays consistent.
+    //
+    // Cache key = the platform the user is currently configuring
+    // (``selectedRuntime`` wins, ``onboardScanPlatform`` is the legacy
+    // fallback during initial mount). Empty string is a valid key —
+    // distinct from ``'openclaw'`` / ``'hermes'`` / ``'nanobot'`` / null —
+    // and represents "neither runtime resolved yet, ask the server with
+    // no ``?platform=`` and let it pick the default".
+    const platformKey = selectedRuntime?.platform || onboardScanPlatform || '';
+
     if (USE_AGENT_TOWN_MOCK) {
       setCatalogAuthProviders([]);
       setCatalogModelProviders(MOCK_MODEL_PROVIDERS.map((provider) => ({
@@ -1537,16 +1559,25 @@ export default function TownConsole({
         search_provider: '',
         search_api_key: '',
       });
-      setModelCatalogLoaded(true);
+      setModelCatalogLoadedFor(platformKey);
       setModelCatalogError('');
       return;
     }
-    if (modelCatalogLoading || (modelCatalogLoaded && !force)) return;
+
+    // Only Hermes / OpenClaw have a dedicated server-side branch in
+    // ``/system/onboard-scan`` (§52). Anything else (``nanobot``, ``''``)
+    // falls through to the legacy ``settings.is_hermes`` branch, which
+    // matches §52's "unknown ⇒ legacy" contract.
+    const apiPlatform = platformKey === 'openclaw' || platformKey === 'hermes'
+      ? platformKey
+      : undefined;
+
+    if (modelCatalogLoading || (modelCatalogLoadedFor === platformKey && !force)) return;
 
     setModelCatalogLoading(true);
     setModelCatalogError('');
     try {
-      const response = await systemAPI.onboardScan();
+      const response = await systemAPI.onboardScan(apiPlatform);
       const data = response.data || {};
       setCatalogAuthProviders(Array.isArray(data.auth_providers) ? data.auth_providers : []);
       setCatalogModelProviders(Array.isArray(data.model_providers) ? data.model_providers : []);
@@ -1567,7 +1598,7 @@ export default function TownConsole({
       // Legacy single-platform onboard-scan field — kept only as a
       // fallback. Real platform-gating now reads ``selectedRuntime``.
       setOnboardScanPlatform(typeof data.platform === 'string' ? data.platform : '');
-      setModelCatalogLoaded(true);
+      setModelCatalogLoadedFor(platformKey);
     } catch (err) {
       console.warn('[TownConsole] onboard-scan fetch error:', err);
       setModelCatalogError(err?.response?.data?.detail || err?.message || 'Failed to discover configure-time models.');
@@ -1581,7 +1612,7 @@ export default function TownConsole({
     } finally {
       setModelCatalogLoading(false);
     }
-  }, [modelCatalogLoaded, modelCatalogLoading]);
+  }, [modelCatalogLoadedFor, modelCatalogLoading, selectedRuntime?.platform, onboardScanPlatform]);
 
   const loadConsoleData = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
@@ -2821,8 +2852,11 @@ export default function TownConsole({
         // hasn't picked a runtime yet (initial mount).
         runtimePlatform={selectedRuntime?.platform || onboardScanPlatform || ''}
         defaults={onboardDefaults}
-        loading={modelCatalogLoading && !modelCatalogLoaded}
-        loadingError={modelCatalogLoaded ? '' : modelCatalogError}
+        // §53 — "catalog ready" is now per-platform: a cache filled for
+        // OpenClaw is "not ready" the moment the user switches to a
+        // Hermes runtime (the modal-open useEffect will refetch).
+        loading={modelCatalogLoading && modelCatalogLoadedFor !== (selectedRuntime?.platform || onboardScanPlatform || '')}
+        loadingError={modelCatalogLoadedFor === (selectedRuntime?.platform || onboardScanPlatform || '') ? '' : modelCatalogError}
         onRetry={() => loadModelCatalog(true)}
         onClose={() => setModelSetupOpen(false)}
         onConfigured={handleModelConfigured}
