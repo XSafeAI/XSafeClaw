@@ -530,6 +530,9 @@ export const zh: Translations = {
     nanobotConfigInitFailedHint: 'Nanobot CLI 已安装，但配置仍需在 Nanobot 配置页手动完成。',
     nanobotInstallFailedHint: '如果 uv 未安装，请先安装 uv: pip install uv',
     nanobotContinueConfigure: '继续配置 Nanobot',
+    // §50 — installed-card click target
+    openConfigure: '进入配置',
+    openConfigureAria: '打开配置向导：',
     // Skip
     skipBtn: '跳过，继续使用',
   },

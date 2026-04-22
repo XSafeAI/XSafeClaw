@@ -536,6 +536,9 @@ export const en = {
     nanobotConfigInitFailedHint: 'The Nanobot CLI is installed, but the runtime still needs manual configuration in Nanobot Configure.',
     nanobotInstallFailedHint: 'If uv is not installed, install it first: pip install uv',
     nanobotContinueConfigure: 'Continue to Nanobot Configure',
+    // §50 — installed-card click target
+    openConfigure: 'Open Configure',
+    openConfigureAria: 'Open configure wizard for',
     // Skip
     skipBtn: 'Skip, continue to use',
   },
