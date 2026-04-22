@@ -74,6 +74,7 @@ class HermesClient:
         thinking: str | None = None,
         timeout_ms: int | None = None,
         attachments: list[dict] | None = None,
+        model: str | None = None,
     ):
         """Async generator that streams chat response via SSE.
 
@@ -82,13 +83,22 @@ class HermesClient:
           {"type": "final",   "text": "<final text>", "stop_reason": ...}
           {"type": "error",   "text": "<error message>"}
           {"type": "timeout", "text": "<partial text>"}
+
+        ``model`` (§43f) — the picker-selected model id forwarded by
+        ``chat.py::send_message_stream`` (e.g. ``"openrouter/moonshotai/kimi-..."``
+        or ``"custom:my-llm/gpt-4"``).  When None, we fall back to the literal
+        ``"hermes-agent"`` placeholder, which Hermes's OpenAI-compatible
+        ``/v1/chat/completions`` handler treats as "use config.yaml's
+        ``model.default``".  Without this parameter every chat call was
+        silently routed to whatever provider was *most recently* saved via
+        ``_quick_model_config_hermes`` — see §43f for the full trace.
         """
         client = await self._ensure_client()
 
         messages: list[dict[str, str]] = [{"role": "user", "content": message}]
 
         body: dict[str, Any] = {
-            "model": "hermes-agent",
+            "model": (model or "").strip() or "hermes-agent",
             "messages": messages,
             "stream": True,
         }
@@ -170,13 +180,17 @@ class HermesClient:
         message: str,
         thinking: str | None = None,
         timeout_ms: int | None = None,
+        model: str | None = None,
     ) -> dict:
-        """Send a message and wait for the complete response (non-streaming)."""
+        """Send a message and wait for the complete response (non-streaming).
+
+        ``model`` (§43f) — see ``stream_chat`` docstring; same contract.
+        """
         client = await self._ensure_client()
 
         messages: list[dict[str, str]] = [{"role": "user", "content": message}]
         body: dict[str, Any] = {
-            "model": "hermes-agent",
+            "model": (model or "").strip() or "hermes-agent",
             "messages": messages,
             "stream": False,
         }

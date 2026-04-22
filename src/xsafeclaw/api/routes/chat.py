@@ -1620,9 +1620,25 @@ async def start_session(request: StartSessionRequest | None = None):
         if initial_model and "/" in initial_model:
             model_provider = initial_model.split("/", 1)[0]
             model_name = initial_model.split("/", 1)[1]
+        # §43f: keep the raw, un-split model_id around so per-message routing
+        # can forward it verbatim into ``HermesClient.send_chat`` /
+        # ``stream_chat``.  Without this, every chat call shipped the literal
+        # ``"hermes-agent"`` placeholder to /v1/chat/completions, which
+        # Hermes resolves against ``config.yaml::model.default`` — i.e. the
+        # **most recently saved** model, regardless of what the picker showed
+        # when this session was created.  Configuring Kimi then Deepseek and
+        # creating a Kimi agent would silently chat with Deepseek; see §43f.
+        # Stored as ``"<provider>/<bare>"`` so the catalog id round-trips
+        # unchanged through the eager DB write below and the persistence
+        # path in ``_persist_hermes_chat_turn`` (which only reads
+        # ``provider`` / ``model`` keys).
+        raw_model_id = (initial_model or "").strip()
+        if not raw_model_id and model_provider and model_name:
+            raw_model_id = f"{model_provider}/{model_name}"
         _hermes_session_model_info[public_session_key] = {
             "provider": model_provider or "hermes",
             "model": model_name or "hermes-agent",
+            "model_id": raw_model_id,
         }
         try:
             await _persist_hermes_session(
@@ -1673,11 +1689,25 @@ async def send_message(request: SendMessageRequest):
             result = await client.send_chat(request.message, timeout_s=120.0)
         else:
             client = await _get_or_create_client(instance, public_session_key)
-            result = await client.send_chat(
-                session_key=local_session_key,
-                message=request.message,
-                timeout_ms=120_000,
-            )
+            # §43f: forward the picker-selected model id (cached at
+            # ``start-session`` time) so Hermes routes per the user's pick
+            # rather than ``config.yaml::model.default``.  Non-Hermes
+            # clients (GatewayClient) accept ``model=None`` as a kwarg only
+            # if they've been updated; we therefore route ``send_chat``
+            # call sites through a per-platform lookup to keep OpenClaw's
+            # signature unchanged.
+            send_model: str | None = None
+            if instance.platform == "hermes":
+                info = _hermes_session_model_info.get(public_session_key) or {}
+                send_model = (info.get("model_id") or "").strip() or None
+            chat_kwargs: dict = {
+                "session_key": local_session_key,
+                "message": request.message,
+                "timeout_ms": 120_000,
+            }
+            if send_model and instance.platform == "hermes":
+                chat_kwargs["model"] = send_model
+            result = await client.send_chat(**chat_kwargs)
 
         # Hermes: persist turn directly to DB
         if instance.platform == "hermes" and result.get("state") == "final":
@@ -1776,11 +1806,23 @@ async def send_message_stream(request: SendMessageRequest):
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             else:
                 client = await _get_or_create_client(instance, public_session_key)
-                async for chunk in client.stream_chat(
-                    session_key=local_session_key,
-                    message=request.message,
-                    attachments=attachments,
-                ):
+                # §43f: same per-message model forwarding as in ``send_message``.
+                # SSE streaming has the same issue — without explicit ``model``
+                # the body sent to /v1/chat/completions hardcodes
+                # ``"hermes-agent"`` and Hermes resolves it against
+                # ``config.yaml::model.default``, ignoring the picker pick.
+                stream_model: str | None = None
+                if instance.platform == "hermes":
+                    info = _hermes_session_model_info.get(public_session_key) or {}
+                    stream_model = (info.get("model_id") or "").strip() or None
+                stream_kwargs: dict = {
+                    "session_key": local_session_key,
+                    "message": request.message,
+                    "attachments": attachments,
+                }
+                if stream_model and instance.platform == "hermes":
+                    stream_kwargs["model"] = stream_model
+                async for chunk in client.stream_chat(**stream_kwargs):
                     if isinstance(chunk, dict) and chunk.get("text"):
                         final_text = str(chunk["text"])
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
@@ -1969,6 +2011,32 @@ async def patch_session(request: PatchSessionRequest):
             model=request.model,
             thinking_level=request.thinking_level,
         )
+        # §43f: keep the per-session Hermes model cache in sync with picker
+        # changes that happen *after* start-session.  Hermes's own
+        # ``patch_session`` is a no-op (HermesClient L267-287 — the API
+        # server is stateless per-request), so without this update the
+        # follow-up ``send_message`` would still read the old ``model_id``
+        # written at start-session time and chat with the wrong model.
+        # ``model=None`` is the explicit "reset to config.yaml default"
+        # signal from the picker (Chat.tsx L1298), so we drop the
+        # cached id in that branch — Hermes will then resolve against
+        # ``model.default`` which is the documented behaviour for
+        # the X-icon "clear model" gesture.
+        if instance.platform == "hermes":
+            new_model_id = (request.model or "").strip()
+            info = _hermes_session_model_info.setdefault(
+                public_session_key,
+                {"provider": "hermes", "model": "hermes-agent", "model_id": ""},
+            )
+            if new_model_id:
+                info["model_id"] = new_model_id
+                if "/" in new_model_id:
+                    info["provider"] = new_model_id.split("/", 1)[0]
+                    info["model"] = new_model_id.split("/", 1)[1]
+                else:
+                    info["model"] = new_model_id
+            else:
+                info["model_id"] = ""
         return {"status": "ok", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
