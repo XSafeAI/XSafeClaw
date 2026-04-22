@@ -641,7 +641,25 @@ export default function Chat() {
     }
     setConnecting(true);
     try {
-      const res = await chatAPI.startSession(selectedInstanceId ? { instance_id: selectedInstanceId } : undefined);
+      // §43e: forward the picker's currently-selected model as model_override.
+      // Without this, ``start_session`` (chat.py L1599-1614) skips the
+      // ``patch_session`` call when ``model_override`` / ``provider_override``
+      // / ``label`` are all blank, so the new session inherits whatever
+      // ``~/.hermes/config.yaml::model.default`` happens to be.  That default
+      // gets overwritten to the custom-endpoint model the moment the user
+      // saves a Custom Endpoint config (§43c writes
+      // ``model.{provider:custom, default:<custom_model>, ...}`` because
+      // Hermes requires the inline ``base_url``/``api_key`` for routing) —
+      // so creating the *next* agent silently picks up the custom model
+      // instead of whatever the picker shows, even though the picker UI
+      // looks fine.  Passing ``selectedModel`` here aligns the new session
+      // with the visible picker state on first creation; subsequent picker
+      // changes still flow through ``applySessionSettings`` → ``patchSession``.
+      const trimmedModel = (selectedModel || '').trim();
+      const startBody: { instance_id?: string; model_override?: string | null } = {};
+      if (selectedInstanceId) startBody.instance_id = selectedInstanceId;
+      if (trimmedModel) startBody.model_override = trimmedModel;
+      const res = await chatAPI.startSession(Object.keys(startBody).length ? startBody : undefined);
       const key = res.data.session_key;
       const newSession: StoredSession = {
         key,
