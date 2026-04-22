@@ -1313,7 +1313,7 @@ export default function Chat() {
                         <div className="flex items-center gap-1.5 flex-shrink-0">
                           {selectedModel && (
                             <span
-                              onClick={e => { e.stopPropagation(); setSelectedModel(''); applySessionSettings('', thinkingLevel); }}
+                              onClick={e => { e.stopPropagation(); setSelectedModel(''); /* §43h: model is locked at session-create time; only update local state so the next New-Chat picks this up */ }}
                               className="text-text-muted hover:text-red-400 transition-colors"
                             >
                               <X className="w-3 h-3" />
@@ -1387,7 +1387,13 @@ export default function Chat() {
                                           setSelectedModel(m.id);
                                           setModelDropdownOpen(false);
                                           setModelSearch('');
-                                          applySessionSettings(m.id, thinkingLevel);
+                                          // §43h: model is locked at session-create time.  The picker
+                                          // selection only seeds the next New-Chat (handleNewSession
+                                          // forwards it as model_override).  We deliberately drop the
+                                          // applySessionSettings/patch_session call that used to live
+                                          // here so an existing session never silently switches models
+                                          // mid-conversation — aligning Chat.tsx with the Agent Town
+                                          // policy (TownConsole.jsx never patches a live session).
                                         }}
                                         className={`w-full text-left px-3 py-2 text-[11px] hover:bg-accent/10 transition-colors flex items-center justify-between gap-2 ${
                                           isSelected ? 'text-accent bg-accent/5 font-medium' : 'text-text-secondary'
@@ -1421,7 +1427,13 @@ export default function Chat() {
                             key={lvl.value}
                             onClick={() => {
                               setThinkingLevel(lvl.value);
-                              applySessionSettings(selectedModel, lvl.value);
+                              // §43h: only thinking_level may be patched on a live session;
+                              // model is locked at create time (see picker onClick above).
+                              // Passing model='' makes applySessionSettings forward
+                              // model:null to the backend, which patch_session treats
+                              // as "leave model untouched" (Hermes rejects non-null
+                              // model post-§43h, OpenClaw/nanobot are unaffected).
+                              applySessionSettings('', lvl.value);
                             }}
                             disabled={!supportsSessionPatch}
                             className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${

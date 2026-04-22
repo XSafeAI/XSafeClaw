@@ -1908,11 +1908,24 @@ async def transcribe_clean(request: TranscribeCleanRequest):
                 model=request.model or None,
                 thinking_level=request.thinking_level,
             )
-            result = await client.send_chat(
-                session_key=local_session_key,
-                message=prompt,
-                timeout_ms=60_000,
-            )
+            # §43g: same per-message model forwarding as §43f.  ``transcribe_clean``
+            # uses an ad-hoc temporary session (``_resolve_chat_runtime()`` with no
+            # session_key — see L1879) that has no ``_hermes_session_model_info``
+            # entry, so we forward ``request.model`` directly.  Without this, the
+            # voice-to-text post-processing prompt would be silently routed to
+            # ``~/.hermes/config.yaml::model.default`` (i.e. the most recently
+            # *configured* model, regardless of what the chat's picker shows) —
+            # the same root cause as §43f, just on a different endpoint.
+            transcribe_kwargs: dict = {
+                "session_key": local_session_key,
+                "message": prompt,
+                "timeout_ms": 60_000,
+            }
+            if instance.platform == "hermes":
+                req_model = (request.model or "").strip()
+                if req_model:
+                    transcribe_kwargs["model"] = req_model
+            result = await client.send_chat(**transcribe_kwargs)
 
         cleaned = (result.get("response_text") or "").strip()
         return TranscribeCleanResponse(raw_text=request.text, cleaned_text=cleaned)
@@ -2004,6 +2017,38 @@ async def patch_session(request: PatchSessionRequest):
             },
         }
 
+    # §43h: Hermes session model is **locked at create time**.  The model is
+    # bound by ``model_override`` in start_session (chat.py L1599-1614 →
+    # ``_hermes_session_model_info[public_session_key]["model_id"]``) and is
+    # the single source of truth for every subsequent ``send_message`` /
+    # ``send_message_stream`` call (post-§43f routing reads it on every turn).
+    # Allowing mid-session model swap creates two product-level issues:
+    #   1. ``Session.current_model_*`` in DB silently desyncs from what the
+    #      session actually uses (only Message rows get the new model_id;
+    #      Session row stays on the create-time snapshot — see analysis in
+    #      _persist_hermes_chat_turn L1490-1521 around ``if not session``).
+    #   2. UX promise of Agent Town ("an agent IS a model+prompt binding;
+    #      to use a different model, create a new agent") is violated only
+    #      on this single endpoint, leading to an inconsistent product
+    #      surface across Chat.tsx / TownConsole.jsx.
+    # Reject model swaps for Hermes here; thinking_level is still patchable.
+    # OpenClaw retains its existing mid-session swap support — its gateway
+    # tracks per-session model state internally so DB stays consistent —
+    # and nanobot already had its own reject branch above.  Net behaviour:
+    #   * Hermes:  model swap → 400; thinking_level swap → still works.
+    #   * OpenClaw: zero change.
+    #   * Nanobot:  zero change.
+    if instance.platform == "hermes":
+        requested_model = (request.model or "").strip()
+        if requested_model:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Hermes session model is locked at create time. "
+                    "To use a different model, create a new chat."
+                ),
+            )
+
     client = await _get_or_create_client(instance, public_session_key)
     try:
         result = await client.patch_session(
@@ -2011,32 +2056,6 @@ async def patch_session(request: PatchSessionRequest):
             model=request.model,
             thinking_level=request.thinking_level,
         )
-        # §43f: keep the per-session Hermes model cache in sync with picker
-        # changes that happen *after* start-session.  Hermes's own
-        # ``patch_session`` is a no-op (HermesClient L267-287 — the API
-        # server is stateless per-request), so without this update the
-        # follow-up ``send_message`` would still read the old ``model_id``
-        # written at start-session time and chat with the wrong model.
-        # ``model=None`` is the explicit "reset to config.yaml default"
-        # signal from the picker (Chat.tsx L1298), so we drop the
-        # cached id in that branch — Hermes will then resolve against
-        # ``model.default`` which is the documented behaviour for
-        # the X-icon "clear model" gesture.
-        if instance.platform == "hermes":
-            new_model_id = (request.model or "").strip()
-            info = _hermes_session_model_info.setdefault(
-                public_session_key,
-                {"provider": "hermes", "model": "hermes-agent", "model_id": ""},
-            )
-            if new_model_id:
-                info["model_id"] = new_model_id
-                if "/" in new_model_id:
-                    info["provider"] = new_model_id.split("/", 1)[0]
-                    info["model"] = new_model_id.split("/", 1)[1]
-                else:
-                    info["model"] = new_model_id
-            else:
-                info["model_id"] = ""
         return {"status": "ok", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

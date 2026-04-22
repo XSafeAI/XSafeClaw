@@ -6526,10 +6526,31 @@ async def quick_model_config(body: QuickModelConfigRequest):
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=500, detail="openclaw key setup timed out")
 
+    # §43g: forward Custom Endpoint payload into ``_patch_config_extras``.
+    # ``_patch_config_extras`` (system.py L5921) reads ``body.custom_base_url``
+    # / ``body.custom_model_id`` / ``body.custom_provider_id`` /
+    # ``body.custom_compatibility`` (L6013-6042) to wire up OpenClaw's
+    # ``models.providers.custom`` block — without these forwarded fields, a
+    # third-party caller hitting ``/system/quick-model-config`` with
+    # ``provider="custom-api-key"`` would silently get a no-op patch (custom
+    # branch's gate at L6013 would short-circuit on empty base_url) and
+    # ``body.model_id`` wouldn't be back-filled from
+    # ``custom_provider_id/custom_model_id`` (L6042).  Mirrors §43d but for
+    # the OpenClaw side.  Today's frontend uses ``onboardConfig`` (which
+    # passes ``body`` straight into ``_patch_config_extras`` at
+    # ``onboard_config`` L7013, no re-pack), so this only affects external
+    # callers — but the Pydantic defaults for missing fields are documented
+    # to be empty strings, so existing non-custom callers see zero
+    # behavioural change.
     full_body = OnboardConfigRequest(
         provider=body.provider,
         api_key=body.api_key,
         model_id=body.model_id,
+        custom_base_url=body.custom_base_url or "",
+        custom_model_id=body.custom_model_id or "",
+        custom_provider_id=body.custom_provider_id or "",
+        custom_compatibility=body.custom_compatibility or "openai",
+        custom_context_window=body.custom_context_window or _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW,
     )
     _patch_config_extras(full_body)
 
