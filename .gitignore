@@ -78,3 +78,23 @@ start.sh
 # Optional downloaded map skins (fetched at runtime, not shipped in repo)
 src/xsafeclaw/static/Map-opensorce/Map[2-9].png
 frontend/public/Map-opensorce/Map[2-9].png
+
+# ── Frontend build artifacts (§44) ────────────────────────────────────────
+# These are produced by `cd frontend && npm run build` (vite outputs to
+# ../src/xsafeclaw/static per vite.config.ts L9-17). Both setup.sh L44-45
+# and start.sh L80-83 regenerate them on demand, so the repo doesn't need
+# to ship them.
+#
+# Tracking them used to bite us via CRLF/LF: the build writes LF on Linux
+# but the repo's .gitattributes normalises text → on every clone Windows
+# users (and CRLF-tainted blobs from older commits) saw spurious "modified"
+# entries that blocked `git checkout other-branch` with "your local changes
+# would be overwritten" — see §43 epilogue and the bench cluster incident.
+#
+# Only text-like outputs are ignored here. The PNG/MP3 assets vite copies
+# from frontend/public/ are tracked as canonical sources (binary, no EOL
+# normalisation, so they never trigger the same conflict).
+src/xsafeclaw/static/index.html
+src/xsafeclaw/static/agent-town.html
+src/xsafeclaw/static/agent-valley.html
+src/xsafeclaw/static/assets/

@@ -6624,32 +6624,143 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         except Exception:
             config = {}
 
-    # Split the incoming "<slug>/<bare_id>" id back into the two fields
-    # Hermes's ``config.yaml`` expects — ``model.provider`` for routing and
-    # ``model.default`` for the **bare** id to forward to the upstream API.
-    #
-    # Prior behaviour wrote the full slug-prefixed string into
-    # ``model.default`` (e.g. ``openrouter/anthropic/claude-opus-4.7``).  That
-    # mis-matches Hermes's contract: the ``auxiliary_client`` takes
-    # ``model.default`` verbatim as the outbound model id, so OpenRouter (and
-    # any other provider whose bare ids already contain a ``/``) rejected the
-    # double-prefixed string with ``"... is not a valid model ID"`` and the
-    # agent returned ``[No response]``.  See §34 for the full trace.
-    #
-    # ``split("/", 1)`` cuts only the first ``/``, so aggregator bare ids with
-    # their own ``vendor/model`` form (``anthropic/claude-opus-4.7``,
-    # ``openai/gpt-5.4-mini``) survive intact and get written correctly.
-    model_id = body.model_id
-    if "/" in model_id:
-        hermes_provider, hermes_model = model_id.split("/", 1)
-    else:
-        hermes_provider = raw_provider
-        hermes_model = model_id
+    # §43c: Custom Endpoint branch.
+    # ``custom-api-key`` is the only provider whose configuration can't be
+    # expressed as "set <ENV_VAR> + write model.default/provider" — Hermes
+    # routes custom calls via an inline ``model.base_url`` + ``model.api_key``
+    # pair plus a matching ``custom_providers`` list entry (see
+    # ``hermes_cli/main.py::_save_custom_provider`` and
+    # ``_model_flow_custom``).  Before this branch existed:
+    #   • API key was silently dropped (no ``envKey`` in the catalog map).
+    #   • ``base_url`` / ``custom_model_id`` / ``custom_compatibility`` were
+    #     never read on the Hermes side (they only feed the OpenClaw
+    #     ``_patch_config_extras`` path, which Hermes never reaches).
+    #   • ``body.model_id`` arrives blank for fresh custom configs, so the
+    #     fall-through wrote ``model.default = ""`` — Hermes then refused to
+    #     apply the new model and kept whatever was previously cached, which
+    #     the user perceived as "the chat still uses my last model".
+    #   • The XSafeClaw ledger recorder early-returns on empty ``model_id``,
+    #     so nothing was persisted; on restart the CMD-UI picker had no
+    #     entry to surface and the just-configured Custom Endpoint vanished.
+    is_custom = (
+        raw_provider == "custom"
+        and (body.custom_base_url or "").strip()
+        and (body.custom_model_id or "").strip()
+    )
 
-    config["model"] = {
-        "default": hermes_model,
-        "provider": hermes_provider,
-    }
+    if is_custom:
+        custom_base_url = body.custom_base_url.strip().rstrip("/")
+        custom_model = body.custom_model_id.strip()
+        custom_api_key = (body.api_key or "").strip()
+        # api_mode mirrors Hermes's two supported wire formats. Anything
+        # other than "anthropic" → leave unset so Hermes auto-detects from
+        # the URL (matches ``_model_flow_custom`` line 1652's behaviour).
+        custom_api_mode = "anthropic" if body.custom_compatibility == "anthropic" else ""
+
+        # Display name precedence: explicit ``custom_provider_id`` from the
+        # frontend wins; otherwise derive a friendly slug from the host so
+        # the picker shows something more useful than "custom".  Stays in
+        # sync with ``_auto_provider_name`` in Hermes itself.
+        display_name = (body.custom_provider_id or "").strip()
+        if not display_name:
+            try:
+                from urllib.parse import urlparse
+                host = (urlparse(custom_base_url).hostname or "custom").strip()
+            except Exception:
+                host = "custom"
+            display_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", host).strip("-") or "custom"
+
+        ctx_len = _normalize_context_window(body.custom_context_window)
+
+        # Upsert the custom_providers entry. Match by (name) OR (base_url)
+        # so re-saving an endpoint under the same URL doesn't accumulate
+        # duplicates (mirrors ``_save_custom_provider`` line 1716-1736).
+        providers_list = config.get("custom_providers")
+        if not isinstance(providers_list, list):
+            providers_list = []
+
+        new_entry: dict = {
+            "name": display_name,
+            "base_url": custom_base_url,
+            "model": custom_model,
+            "models": {custom_model: {"context_length": ctx_len}},
+        }
+        if custom_api_key:
+            new_entry["api_key"] = custom_api_key
+        if custom_api_mode:
+            new_entry["api_mode"] = custom_api_mode
+
+        matched_idx: int | None = None
+        for i, existing in enumerate(providers_list):
+            if not isinstance(existing, dict):
+                continue
+            if (existing.get("name") or "").strip() == display_name:
+                matched_idx = i
+                break
+            if (existing.get("base_url") or "").strip().rstrip("/") == custom_base_url:
+                matched_idx = i
+                break
+        if matched_idx is None:
+            providers_list.append(new_entry)
+        else:
+            providers_list[matched_idx] = new_entry
+        config["custom_providers"] = providers_list
+
+        # Hermes's ``model`` block for custom uses literal ``provider:
+        # custom`` plus inline base_url/api_key (see
+        # ``hermes_cli/main.py`` lines 1648-1652).  api_mode left off here
+        # so the runtime auto-detects from the URL (matches Hermes itself).
+        model_block: dict = {
+            "default": custom_model,
+            "provider": "custom",
+            "base_url": custom_base_url,
+        }
+        if custom_api_key:
+            model_block["api_key"] = custom_api_key
+        config["model"] = model_block
+
+        # Slug shape ``custom:<name>`` is the contract used by
+        # ``_fetch_hermes_configured_models`` (see system.py L771 in the
+        # auth-gate probe and chat.py L771 where it's added to
+        # ``authed_slugs``).  Without the prefix the picker hides the
+        # ledger entry on the very next refresh — that's the second half
+        # of "custom model disappears after restart".
+        hermes_provider = f"custom:{display_name}"
+        hermes_model = custom_model
+        # Synthesise a ledger-stable model_id so callers downstream
+        # (``_record_xs_configured_model`` and the picker hydration in
+        # chat.py) all agree on the same identifier.
+        body.model_id = f"{hermes_provider}/{hermes_model}"
+    else:
+        # Split the incoming "<slug>/<bare_id>" id back into the two fields
+        # Hermes's ``config.yaml`` expects — ``model.provider`` for routing
+        # and ``model.default`` for the **bare** id to forward to the
+        # upstream API.
+        #
+        # Prior behaviour wrote the full slug-prefixed string into
+        # ``model.default`` (e.g. ``openrouter/anthropic/claude-opus-4.7``).
+        # That mis-matches Hermes's contract: the ``auxiliary_client``
+        # takes ``model.default`` verbatim as the outbound model id, so
+        # OpenRouter (and any other provider whose bare ids already
+        # contain a ``/``) rejected the double-prefixed string with
+        # ``"... is not a valid model ID"`` and the agent returned ``[No
+        # response]``.  See §34 for the full trace.
+        #
+        # ``split("/", 1)`` cuts only the first ``/``, so aggregator bare
+        # ids with their own ``vendor/model`` form
+        # (``anthropic/claude-opus-4.7``, ``openai/gpt-5.4-mini``) survive
+        # intact and get written correctly.
+        model_id = body.model_id
+        if "/" in model_id:
+            hermes_provider, hermes_model = model_id.split("/", 1)
+        else:
+            hermes_provider = raw_provider
+            hermes_model = model_id
+
+        config["model"] = {
+            "default": hermes_model,
+            "provider": hermes_provider,
+        }
 
     # §43: hard guard — refuse to yaml-dump into anything under ~/.openclaw.
     # OpenClaw parses its config with JSON5; YAML output starts with ``agents:``
