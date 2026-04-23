@@ -95,6 +95,52 @@ def _get_base_url() -> str:
     return os.environ.get("SAFECLAW_URL", "http://localhost:6874").rstrip("/")
 
 
+def _fetch_session_messages(session_id: str) -> list:
+    """Pull the conversation trajectory from Hermes's local SessionDB.
+
+    Hermes's ``pre_tool_call`` hook only receives ``session_id`` — it
+    does not pass the message list. Without a trajectory, XSafeClaw's
+    guard model would judge every tool call in isolation and would
+    almost always flag them as ``unsafe`` (no context = "why are we
+    doing this?" → suspicious by default), which then long-polls the
+    user for approval on **every** tool call.
+
+    Since this plugin runs inside the Hermes Python venv, we can import
+    ``hermes_state.SessionDB`` directly and read ``state.db`` to get
+    the same OpenAI-format messages the gateway uses for replay. The
+    XSafeClaw backend's ``_normalize_runtime_messages`` already handles
+    this shape (role + content/content_text + tool_calls with
+    ``function: {name, arguments}``), so we ship the rows verbatim.
+
+    Returns ``[]`` on any failure — the backend then guards on the
+    current call alone, which is still safer than no guard at all.
+    """
+    if not session_id:
+        return []
+    try:
+        from hermes_state import SessionDB  # type: ignore
+    except Exception as exc:
+        logger.debug("safeclaw-guard: hermes_state unavailable: %s", exc)
+        return []
+
+    db = None
+    try:
+        db = SessionDB()
+        return db.get_messages(session_id) or []
+    except Exception as exc:
+        logger.debug(
+            "safeclaw-guard: failed to load session %s messages: %s",
+            session_id, exc,
+        )
+        return []
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 def _pre_tool_call_handler(
     tool_name: str,
     args: Dict[str, Any],
@@ -107,6 +153,12 @@ def _pre_tool_call_handler(
 
     Returns ``{"action": "block", "message": "..."}`` when the tool call
     is deemed unsafe, or ``None`` to allow execution.
+
+    The request body is fully aligned with OpenClaw's TS plugin so the
+    backend ``check_tool_call`` runs the same risk-rule / denylist /
+    guard-model / human-approval pipeline. The only Hermes-specific
+    bit is ``messages`` — we pre-fetch trajectory locally because
+    Hermes does not pass it to ``pre_tool_call`` hooks.
     """
     import requests
 
@@ -120,6 +172,9 @@ def _pre_tool_call_handler(
                 "tool_name": tool_name,
                 "params": args if isinstance(args, dict) else {},
                 "session_key": session_id or "",
+                "platform": "hermes",
+                "instance_id": "hermes-default",
+                "messages": _fetch_session_messages(session_id),
             },
             timeout=TIMEOUT_SECONDS,
         )
