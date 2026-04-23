@@ -34,12 +34,22 @@ _file_cache: Dict[str, tuple] = {}
 
 
 def _resolve_workspace_dir() -> Optional[Path]:
-    """Resolve the workspace directory for SAFETY.md / PERMISSION.md.
+    """Resolve the workspace directory holding SAFETY.md / PERMISSION.md.
 
     Priority:
-      1. SAFECLAW_WORKSPACE env var
-      2. ``workspace`` key in ~/.hermes/config.yaml
-      3. Current working directory (if it contains a SAFETY.md)
+      1. ``SAFECLAW_WORKSPACE`` env var (operator override).
+      2. ``$HERMES_HOME/workspace`` (defaults to ``~/.hermes/workspace``) —
+         this matches XSafeClaw onboard's reported workspace path and the
+         Hermes docker entrypoint convention. It only counts as a hit when
+         the directory actually contains ``SAFETY.md`` so we don't return
+         an empty workspace and inject an empty context block.
+      3. Current working directory — kept as a last-resort fallback for
+         users who launch ``hermes`` themselves from inside a project that
+         already ships a ``SAFETY.md``.
+
+    Note: Hermes does not have a top-level ``workspace`` key in
+    ``config.yaml`` (verified against the Config schema in
+    ``hermes_cli/config.py``), so reading it would have always missed.
     """
     env_ws = os.environ.get("SAFECLAW_WORKSPACE", "").strip()
     if env_ws:
@@ -47,19 +57,12 @@ def _resolve_workspace_dir() -> Optional[Path]:
         if p.is_dir():
             return p
 
-    try:
-        import yaml
-        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-        config_path = hermes_home / "config.yaml"
-        if config_path.exists():
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-            ws = cfg.get("workspace", "")
-            if ws:
-                p = Path(ws).expanduser()
-                if p.is_dir():
-                    return p
-    except Exception:
-        pass
+    hermes_home = Path(
+        os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")
+    )
+    standard_ws = hermes_home / "workspace"
+    if standard_ws.is_dir() and (standard_ws / "SAFETY.md").exists():
+        return standard_ws
 
     cwd = Path.cwd()
     if (cwd / "SAFETY.md").exists():

@@ -7195,8 +7195,18 @@ async def onboard_config(body: OnboardConfigRequest):
             custom_compatibility=body.custom_compatibility or "openai",
             custom_context_window=body.custom_context_window or _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW,
         )
-        result = await _quick_model_config_hermes(quick_body)
+        # §54: 必须在 _quick_model_config_hermes 之前完成插件安装 + 安全文件
+        # 部署。_quick_model_config_hermes 末尾会触发 _restart_hermes_api_server
+        # （L7124-L7125），重启后的 gateway 才会执行 PluginManager.discover_and_load
+        # 扫描 ~/.hermes/plugins/。如果先重启再 copy 插件，新起的 gateway 看不到
+        # safeclaw-guard，pre_llm_call hook 不会注册，SAFETY/PERMISSION 注入对
+        # 第一轮（也常常是唯一一轮）对话失效，必须等到下一次重启才补上。
+        # 同理，SAFETY.md / PERMISSION.md 也必须在重启之前写入 workspace，
+        # 才能让插件首轮就能从 ~/.hermes/workspace 读到内容。
         _install_safeclaw_guard_plugin(platform="hermes")
+        _deploy_safety_files(str(_HERMES_DIR / "workspace"))
+
+        result = await _quick_model_config_hermes(quick_body)
         return {
             "success": True,
             "config_path": str(_config_path_for_platform("hermes")),
