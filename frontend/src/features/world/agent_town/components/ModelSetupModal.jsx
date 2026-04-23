@@ -234,6 +234,19 @@ export default function ModelSetupModal({
   // with no picker rendered. OpenClaw scan payloads omit this field
   // entirely and the default ``{}`` keeps the modal compatible.
   providerEndpoints = {},
+  // §47 — per-provider XSafeClaw-pinned recommended Base URL.  Shape:
+  // { [providerId]: "https://..." }.  Used as the placeholder for the
+  // optional Base URL override input rendered for every provider that
+  // doesn't have a preset bundle (i.e. everyone except alibaba today).
+  // OpenClaw scan payloads omit this field entirely.
+  providerRecommendedBaseUrls = {},
+  // §53 — active runtime's platform ('openclaw' | 'hermes' | 'nanobot' | '').
+  // Forwarded to ``systemAPI.providerHasKey`` so that on a Hermes-default
+  // server ("settings.is_hermes=True") the modal still asks OpenClaw's
+  // auth store when the user is configuring an OpenClaw runtime — and
+  // vice-versa. Empty string falls through to the legacy
+  // ``settings.is_hermes`` branch on the backend.
+  runtimePlatform = '',
   defaults = null,
   loading = false,
   loadingError = '',
@@ -252,6 +265,11 @@ export default function ModelSetupModal({
   // ~/.hermes/.env) so re-saving an existing alibaba config doesn't
   // silently flip DASHSCOPE_BASE_URL back to the "recommended" preset.
   const [endpointChoice, setEndpointChoice] = useState({});
+  // §47 — free-form Base URL override per provider. Distinct from
+  // ``endpointChoice`` (which is dropdown-shaped, alibaba-only).
+  // Cleared on modal open / provider switch so a stale value from a
+  // previous session can't leak into a fresh quick-model-config request.
+  const [baseUrlOverride, setBaseUrlOverride] = useState({});
 
   const availableAuthProviders = useMemo(
     () => authProviders.filter((provider) => provider.id !== 'skip'),
@@ -280,6 +298,7 @@ export default function ModelSetupModal({
       }
     }
     setEndpointChoice(seeded);
+    setBaseUrlOverride({});
   }, [open, defaults, providerEndpoints]);
 
   useEffect(() => {
@@ -395,13 +414,21 @@ export default function ModelSetupModal({
       // auth-method id (``alibaba-api-key``) the backend ultimately
       // receives.  Skipped when no bundle exists, so other providers'
       // requests stay payload-clean.
+      // §47 — Base URL resolution mirror of Configure.tsx::saveModelToHermes.
+      //   • If a preset bundle exists (alibaba), the dropdown selection wins.
+      //   • Otherwise, the free-form override input wins; blank → undefined
+      //     so the backend uses ``_HERMES_RECOMMENDED_BASE_URLS`` as the
+      //     XSafeClaw-pinned default for this provider.
       const endpointBundle = providerEndpoints?.[form.authProvider];
-      const endpointBaseUrl = endpointBundle
-        ? (endpointChoice[form.authProvider]
-            || endpointBundle.current
-            || endpointBundle.presets?.[0]?.base_url
-            || '')
-        : '';
+      let endpointBaseUrl = '';
+      if (endpointBundle) {
+        endpointBaseUrl = endpointChoice[form.authProvider]
+          || endpointBundle.current
+          || endpointBundle.presets?.[0]?.base_url
+          || '';
+      } else {
+        endpointBaseUrl = String(baseUrlOverride[form.authProvider] || '').trim();
+      }
 
       let modelReady = false;
       if (isSimpleSetup) {
@@ -548,7 +575,14 @@ export default function ModelSetupModal({
                     customCompatibility: DEFAULT_FORM.customCompatibility,
                   }));
                   setManualModelEntry(false);
-                  systemAPI.providerHasKey(id).then((res) => {
+                  // §53 — pin to the active runtime's platform when known.
+                  // ``runtimePlatform`` may be 'nanobot' or '' for which
+                  // the backend has no dedicated auth-store branch yet —
+                  // fall through to ``undefined`` (legacy) in that case.
+                  const platformParam = runtimePlatform === 'openclaw' || runtimePlatform === 'hermes'
+                    ? runtimePlatform
+                    : undefined;
+                  systemAPI.providerHasKey(id, platformParam).then((res) => {
                     const hasKey = Boolean(res.data?.has_key);
                     setProviderHasExistingKey(hasKey);
                     if (hasKey) {
@@ -636,6 +670,42 @@ export default function ModelSetupModal({
                   so the "this URL receives this key" relationship is
                   visible at a glance — that's the entire failure mode the
                   picker is here to prevent. */}
+              {/* §47 — optional free-form Base URL override for providers
+                  without a preset bundle.  Renders for every selectable
+                  Hermes provider except ``alibaba`` (covered by the
+                  dropdown below), ``custom`` (Custom Endpoint flow has
+                  its own URL field) and ``copilot`` (OAuth — no URL).
+                  Blank input → backend falls through to
+                  ``_HERMES_RECOMMENDED_BASE_URLS[provider]``.  Without
+                  this field the user has no in-app way to redirect
+                  api.openai.com / api.anthropic.com /
+                  generativelanguage.googleapis.com to a reachable proxy. */}
+              {showApiKey
+                && !providerEndpoints?.[form.authProvider]
+                && form.authProvider !== 'custom'
+                && form.authProvider !== 'copilot' ? (() => {
+                const recommended = providerRecommendedBaseUrls?.[form.authProvider] || '';
+                const current = String(baseUrlOverride[form.authProvider] || '');
+                return (
+                  <div className="tc-model-setup-field">
+                    <label className="tc-model-setup-label">Base URL (optional — overrides default endpoint)</label>
+                    <input
+                      type="text"
+                      value={current}
+                      onChange={(event) => setBaseUrlOverride((prev) => ({
+                        ...prev,
+                        [form.authProvider]: event.target.value,
+                      }))}
+                      placeholder={recommended || 'Hermes will pick its adapter default if left blank'}
+                      className="tc-model-setup-input"
+                    />
+                    <p className="tc-model-setup-hint">
+                      Leave blank to use the recommended URL shown above. If you're in mainland China without a VPN, paste a reachable proxy endpoint here (e.g. a reverse proxy that forwards api.openai.com / api.anthropic.com / generativelanguage.googleapis.com).
+                    </p>
+                  </div>
+                );
+              })() : null}
+
               {showApiKey && providerEndpoints?.[form.authProvider] ? (() => {
                 const bundle = providerEndpoints[form.authProvider];
                 const currentSel = endpointChoice[form.authProvider]

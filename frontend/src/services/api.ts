@@ -107,8 +107,13 @@ export interface InstallStatusResponse {
   config_exists: boolean;
   nanobot_config_exists: boolean;
   nanobot_model_configured: boolean;
+  // §42: surfaced by the backend so the multi-runtime configure selector
+  // can mark Hermes the same way it marks OpenClaw / Nanobot.
+  hermes_config_exists?: boolean;
+  hermes_model_configured?: boolean;
   requires_setup: boolean;
   requires_configure: boolean;
+  requires_hermes_configure?: boolean;
   requires_nanobot_setup: boolean;
   requires_nanobot_configure: boolean;
   node_version: string;
@@ -567,7 +572,21 @@ export const guardAPI = {
 // System API (agent install / onboard / status)
 export const systemAPI = {
   /** Check whether an agent framework is installed. */
-  status: () => api.get<SystemStatusResponse>("/system/status", { timeout: 30000 }),
+  /**
+   * Backend ``/system/status``.
+   *
+   * §53 — pass ``platform`` to override the global ``settings.is_hermes``
+   * branch so callers like Configure.tsx (Hermes wizard refresh button on
+   * an OpenClaw-default server) get the right platform's status shape.
+   * Omit to keep legacy behaviour for callers that only read generic
+   * fields like ``default_workspace`` (TownConsole's workspace probe,
+   * ModelSetupModal's workspace prefill).
+   */
+  status: (platform?: 'openclaw' | 'hermes') =>
+    api.get<SystemStatusResponse>(
+      "/system/status",
+      { timeout: 30000, ...(platform ? { params: { platform } } : {}) },
+    ),
 
   /** Fast install/config probe used by setup and route guards. */
   installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
@@ -661,9 +680,18 @@ export const systemAPI = {
   onboardDefaults: () =>
     api.get('/system/onboard-defaults'),
 
-  /** Scan local environment for providers, channels, skills, hooks via openclaw CLI. */
-  onboardScan: () =>
-    api.get('/system/onboard-scan'),
+  /**
+   * Scan local environment for providers, channels, skills, hooks.
+   *
+   * §52 — pass ``platform`` to override the backend's global
+   * ``settings.is_hermes`` branch and force a specific platform's data
+   * source. Used by Configure.tsx so ``/openclaw_configure`` always
+   * gets OpenClaw scan data even on a Hermes-default server, and
+   * ``/hermes_configure`` always gets Hermes catalog regardless of
+   * which platform the user originally booted into.
+   */
+  onboardScan: (platform?: 'openclaw' | 'hermes') =>
+    api.get('/system/onboard-scan', platform ? { params: { platform } } : undefined),
 
   /** Reset config/creds/sessions based on scope. */
   configReset: (scope: string, workspace?: string) =>
@@ -766,23 +794,25 @@ export const systemAPI = {
       output: string;
     }>('/system/hermes/apply', modelId ? { model_id: modelId } : {}),
 
-  /**
-   * Hermes only — drop one entry from the per-user configured-model ledger
-   * (~/.xsafeclaw/configured_models.json).  Refuses (HTTP 409) when the
-   * target model is the one currently active in ~/.hermes/config.yaml; the
-   * UI must switch active first.  Does NOT touch ~/.hermes/.env, so any
-   * agent already created with this `model_id` keeps working.  See §36.
-   */
-  removeConfiguredModel: (modelId: string) =>
-    api.post<{
-      success: boolean;
-      removed: boolean;
-      slug: string;
-      bare_id: string;
-    }>('/system/hermes/configured-models/delete', { model_id: modelId }),
+  // §46 — `removeConfiguredModel` 已移除（与 OpenClaw 对齐）。
+  // 历史端点 POST /system/hermes/configured-models/delete 已下线；
+  // 前端不再提供删除已配置模型的入口。
 
-  providerHasKey: (provider: string) =>
-    api.get<{ has_key: boolean }>(`/system/provider-has-key?provider=${encodeURIComponent(provider)}`),
+  /**
+   * Backend ``/system/provider-has-key``.
+   *
+   * §53 — pass ``platform`` so the per-runtime CMD UI
+   * (ModelSetupModal) can ask the right auth store on a multi-platform
+   * server. Omitting falls back to the legacy ``settings.is_hermes``
+   * branch — no behavioural change for current callers.
+   */
+  providerHasKey: (provider: string, platform?: 'openclaw' | 'hermes') => {
+    const qs = new URLSearchParams({ provider });
+    if (platform) qs.set('platform', platform);
+    return api.get<{ has_key: boolean }>(
+      `/system/provider-has-key?${qs.toString()}`,
+    );
+  },
 
   hermesApiKeyStatus: () =>
     api.get<{
@@ -860,34 +890,9 @@ export const systemAPI = {
       output: string;
     }>('/system/hermes-bot-config', data),
 
-  /**
-   * §38 — Is this server running in "platform picker mode"?  Returned by the
-   * CLI supervisor's one-shot picker subprocess.  When ``picker_mode === true``
-   * the frontend must redirect every route (except /select-framework) to the
-   * framework picker and block normal navigation.
-   */
-  runtimePlatformStatus: () =>
-    api.get<{
-      picker_mode: boolean;
-      openclaw_installed: boolean;
-      hermes_installed: boolean;
-      openclaw_path: string | null;
-      hermes_path: string | null;
-    }>('/system/runtime-platform-status', { timeout: 4000 }),
-
-  /**
-   * §38 — Submit the user's framework choice to the picker server.  On
-   * success the picker schedules a hard exit (~600 ms later) so the CLI
-   * supervisor can spawn the real server with ``PLATFORM`` pinned.  The
-   * frontend should wait for the old server to drop, then reload the page
-   * (the new server will answer on the same port).
-   */
-  pickRuntimePlatform: (platform: 'openclaw' | 'hermes') =>
-    api.post<{
-      success: boolean;
-      platform: 'openclaw' | 'hermes';
-      pin_path: string;
-    }>('/system/runtime-platform-pick', { platform }),
+  // §38 framework picker (runtimePlatformStatus / pickRuntimePlatform) was
+  // removed in §42 — XSafeClaw now monitors all three runtimes
+  // simultaneously and the user picks per-session in Agent Town.
 };
 
 export const skillsAPI = {

@@ -1,7 +1,13 @@
-"""Main FastAPI application."""
+"""Main FastAPI application.
+
+Since §42 (Hermes-as-a-first-class-citizen) the §38 picker-mode middleware is
+gone — XSafeClaw monitors OpenClaw, Hermes and Nanobot simultaneously through
+the multi-runtime registry, and the user picks per-session which runtime to
+talk to from Agent Town. There is no longer a "single active platform" the
+backend needs to negotiate at startup.
+"""
 
 import mimetypes
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,7 +22,7 @@ mimetypes.add_type("image/svg+xml", ".svg", strict=True)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..config import settings
@@ -25,29 +31,6 @@ from ..services.message_sync_service import MessageSyncService
 from .routes import assets, chat, events, guard, map_skins, memory, messages, redteam, risk_test, sessions, skills, stats, system, tool_calls, trace
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
-
-
-# ── Picker mode (§38) ────────────────────────────────────────────────────────
-# When the CLI supervisor detects both OpenClaw and Hermes installed, it spawns
-# this server as a subprocess with ``XSAFECLAW_PICKER_MODE=1``. In that mode:
-#   * lifespan skips heavy init (DB, FileWatcher, onboard preload);
-#   * the HTTP middleware rejects every /api/* route except /health and the two
-#     picker endpoints below, so the frontend can only reach the
-#     SelectFramework page;
-#   * once the user POSTs a choice, the picker endpoint writes the pin file and
-#     schedules ``os._exit(_PICKER_EXIT_CODE)`` so the supervisor can read the
-#     selection and spawn the real server with ``PLATFORM`` fixed.
-PICKER_MODE_ENV = "XSAFECLAW_PICKER_MODE"
-
-_PICKER_API_ALLOWLIST = frozenset({
-    "/api/system/runtime-platform-status",
-    "/api/system/runtime-platform-pick",
-})
-
-
-def _picker_mode_active() -> bool:
-    """Return True when this process was launched in picker mode."""
-    return os.environ.get(PICKER_MODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # Global sync service instance
@@ -62,13 +45,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Handles startup and shutdown events.
     """
     global message_sync_service
-
-    if _picker_mode_active():
-        print("🧭 XSafeClaw Picker Mode — waiting for framework selection...")
-        print(f"   Open http://{settings.api_host}:{settings.api_port}/select-framework")
-        yield
-        print("🧭 Picker Mode shutdown")
-        return
 
     # Startup
     print("🚀 Starting XSafeClaw Application...")
@@ -93,7 +69,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Preload onboard-scan data in background (openclaw models list is slow)
     from .routes.system import trigger_onboard_scan_preload
     trigger_onboard_scan_preload()
-    
+
+    # §48 — Auto-start any installed framework gateway whose /health is silent.
+    # Dispatched as a background task so a slow start (e.g. systemd taking
+    # 5–10s to bind) never delays this lifespan from yielding; the rest of
+    # XSafeClaw — including its own /health — keeps serving immediately.
+    # Each helper is idempotent and best-effort; failures are logged but
+    # never raised.
+    if settings.auto_start_runtimes:
+        import asyncio as _asyncio
+        from ..services.runtime_autostart import autostart_installed_runtimes
+
+        async def _safe_autostart() -> None:
+            try:
+                summary = await autostart_installed_runtimes()
+                noteworthy = {k: v for k, v in summary.items()
+                              if v.get("status") in ("started", "failed")}
+                if noteworthy:
+                    parts = [f"{k}={v['status']}" for k, v in noteworthy.items()]
+                    print(f"🧩 Runtime autostart: {', '.join(parts)}")
+            except Exception as exc:
+                print(f"⚠️  Runtime autostart raised {type(exc).__name__}: {exc}")
+
+        _asyncio.create_task(_safe_autostart())
+
     yield
     
     # Shutdown
@@ -122,37 +121,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.middleware("http")
-async def _picker_mode_guard(request: Request, call_next):
-    """Restrict /api/* to the picker allowlist when running in picker mode.
-
-    Non-API routes (SPA static assets, /select-framework) pass through so the
-    frontend can load and render the picker UI.  Once the user submits a
-    platform choice, the /runtime-platform-pick endpoint schedules process
-    exit and the CLI supervisor takes over.
-    """
-    if not _picker_mode_active():
-        return await call_next(request)
-
-    path = request.url.path
-    if path == "/health" or not path.startswith("/api/"):
-        return await call_next(request)
-
-    if path in _PICKER_API_ALLOWLIST:
-        return await call_next(request)
-
-    return JSONResponse(
-        status_code=503,
-        content={
-            "detail": (
-                "XSafeClaw is in platform picker mode. "
-                "POST /api/system/runtime-platform-pick to proceed."
-            ),
-            "picker_mode": True,
-        },
-    )
 
 
 # Include routers

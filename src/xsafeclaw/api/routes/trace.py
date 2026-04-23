@@ -32,10 +32,37 @@ router = APIRouter()
 RUNNING_CUTOFF = dt.timedelta(hours=1)
 IDLE_CUTOFF = dt.timedelta(hours=24)
 
-if settings.is_hermes:
-    _SESSIONS_JSON = settings.hermes_sessions_dir / "sessions.json"
-else:
-    _SESSIONS_JSON = Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json"
+
+def _candidate_session_index_paths() -> list[Path]:
+    """Collect every ``sessions.json`` we should consult.
+
+    With three runtimes monitored simultaneously, the trace endpoint can no
+    longer assume a single ``_SESSIONS_JSON`` location pinned to the active
+    platform. We probe both the OpenClaw default (``~/.openclaw/agents/main/
+    sessions/sessions.json``) and the Hermes default (``settings.
+    hermes_sessions_dir/sessions.json``); whichever exists contributes
+    metadata to the index. Nanobot has no JSONL session store so it doesn't
+    participate here — its sessions are surfaced through the database tables
+    that this endpoint also reads.
+    """
+    paths: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = str(Path(path).expanduser())
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        paths.append(Path(resolved))
+
+    _add(Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json")
+    try:
+        _add(Path(settings.hermes_sessions_dir) / "sessions.json")
+    except Exception:
+        pass
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -117,32 +144,40 @@ def _truncate(text: str, length: int = 2000) -> str:
 
 
 def _load_session_store_index() -> dict[str, dict[str, Any]]:
-    """Map session_id -> gateway session metadata from sessions.json."""
-    if not _SESSIONS_JSON.exists():
-        return {}
+    """Map session_id -> gateway session metadata aggregated from every runtime.
 
-    try:
-        raw = json.loads(_SESSIONS_JSON.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
+    Walks the candidate ``sessions.json`` paths from every discovered
+    runtime instance so one trace request can surface OpenClaw + Hermes (+
+    any other framework that follows the JSONL store convention) at the
+    same time. First-write wins on ``session_id`` collisions, which is
+    safe because session IDs are platform-namespaced upstream.
+    """
     index: dict[str, dict[str, Any]] = {}
-    for session_key, entry in raw.items():
-        if not isinstance(entry, dict):
+
+    for sessions_json in _candidate_session_index_paths():
+        if not sessions_json.exists():
+            continue
+        try:
+            raw = json.loads(sessions_json.read_text(encoding="utf-8"))
+        except Exception:
             continue
 
-        session_id = entry.get("sessionId")
-        if not session_id:
-            continue
+        for session_key, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
 
-        delivery = entry.get("deliveryContext") or {}
-        origin = entry.get("origin") or {}
-        index[session_id] = {
-            "session_key": session_key,
-            "model_provider": entry.get("modelProvider"),
-            "model": entry.get("model"),
-            "channel": delivery.get("channel") or entry.get("lastChannel") or origin.get("provider"),
-        }
+            session_id = entry.get("sessionId")
+            if not session_id or session_id in index:
+                continue
+
+            delivery = entry.get("deliveryContext") or {}
+            origin = entry.get("origin") or {}
+            index[session_id] = {
+                "session_key": session_key,
+                "model_provider": entry.get("modelProvider"),
+                "model": entry.get("model"),
+                "channel": delivery.get("channel") or entry.get("lastChannel") or origin.get("provider"),
+            }
 
     return index
 

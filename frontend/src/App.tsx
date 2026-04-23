@@ -13,7 +13,6 @@ import Configure from './pages/Configure';
 import ConfigureSelector from './pages/ConfigureSelector';
 import NanobotConfigure from './pages/NanobotConfigure';
 import { systemAPI, type InstallStatusResponse } from './services/api';
-import SelectFramework from './pages/SelectFramework';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,19 +24,38 @@ const queryClient = new QueryClient({
   },
 });
 
-type CheckState = 'pending' | 'picker' | 'setup' | 'openclaw_configure' | 'nanobot_configure' | 'configure_select' | 'ok';
+// §42: the §38 framework picker is gone — XSafeClaw monitors OpenClaw,
+// Hermes and Nanobot simultaneously and the user picks per-session in
+// Agent Town. We only need the install / configure routing now.
+//
+// §51: forced auto-redirect to ``*_configure`` removed. Per the user's
+// updated routing contract (Case 1 / Case 2), the **only** flows that
+// should land the user on a Configure page are:
+//   1. user explicitly clicks【download】on a Setup card → after install
+//      success, ``Setup.tsx`` itself navigates to that platform's
+//      Configure (handled inside Setup.tsx, not here);
+//   2. user explicitly clicks an installed Setup card → ``Setup.tsx``
+//      calls ``navigate('/<platform>_configure')`` directly.
+// Any other entry path (boot to ``/``, deep link to ``/agent-valley``,
+// SET button in town, etc.) **must not** be hijacked by App.tsx based on
+// stale ``requires_configure`` flags. The only auto-redirect kept is
+// ``setup``: when nothing is installed at all, the app must force the
+// user through Setup because the rest of the app cannot function.
+type CheckState = 'pending' | 'setup' | 'ok';
 
-const EXEMPT_PATHS = ['/setup', '/configure', '/openclaw_configure', '/nanobot_configure', '/configure_select', '/select-framework'];
-const PICKER_PATH = '/select-framework';
-
-function configureStateForStatus(status: InstallStatusResponse): CheckState {
-  const needsOpenClaw = Boolean(status.requires_configure);
-  const needsNanobot = Boolean(status.requires_nanobot_configure);
-  if (needsOpenClaw && needsNanobot) return 'configure_select';
-  if (needsNanobot) return 'nanobot_configure';
-  if (needsOpenClaw) return 'openclaw_configure';
-  return 'ok';
-}
+// EXEMPT_PATHS still meaningful: pages the ``setup`` redirect must not
+// kick the user out of (Setup itself + every Configure entry, in case
+// they're mid-config of a freshly installed framework). Kept full on
+// purpose — see §51 audit log for the "trim to only /setup breaks the
+// post-install navigate" trap.
+const EXEMPT_PATHS = [
+  '/setup',
+  '/configure',
+  '/openclaw_configure',
+  '/hermes_configure',
+  '/nanobot_configure',
+  '/configure_select',
+];
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
@@ -48,67 +66,48 @@ function AppRoutes() {
     let cancelled = false;
 
     (async () => {
-      // ── §38 picker-mode probe ────────────────────────────────────────
-      // Runs BEFORE the install-status check: when the CLI supervisor
-      // spawned the picker subprocess, /system/status is blocked by the
-      // backend middleware and would throw, but /runtime-platform-status is
-      // whitelisted. A 200 with picker_mode=true forces every route to
-      // /select-framework until the real server boots.
-      try {
-        const pickerRes = await Promise.race([
-          systemAPI.runtimePlatformStatus(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('timeout')), 2500)
-          ),
-        ]);
-        if (cancelled) return;
-        if (pickerRes.data.picker_mode) {
-          setCheckState('picker');
-          return;
-        }
-      } catch {
-        // Endpoint may not exist on older backends — fall through.
-      }
-
       try {
         const res = await systemAPI.installStatus();
         if (cancelled) return;
-        const d = res.data as any;
+        const d = res.data as InstallStatusResponse & {
+          openclaw_installed?: boolean;
+          hermes_installed?: boolean;
+          nanobot_installed?: boolean;
+        };
 
-        if (d.requires_setup || (!d.openclaw_installed && !d.nanobot_installed && !d.hermes_installed)) {
+        const anyInstalled =
+          d.openclaw_installed || d.nanobot_installed || d.hermes_installed;
+        // §51: only ``requires_setup`` (or "nothing installed at all")
+        // forces a redirect now. ``requires_configure`` and friends are
+        // intentionally ignored — Configure is reachable only via Case 1
+        // (post-install auto-jump from Setup) or Case 2 (clicking a
+        // Setup card or the SET HUD button).
+        if (d.requires_setup || !anyInstalled) {
           setCheckState('setup');
         } else {
-          setCheckState(configureStateForStatus(d));
+          setCheckState('ok');
         }
       } catch {
         if (!cancelled) setCheckState('ok');
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     if (checkState === 'pending') return;
     const currentPath = location.pathname;
-
-    if (checkState === 'picker') {
-      if (currentPath !== PICKER_PATH) {
-        navigate(PICKER_PATH, { replace: true });
-      }
-      return;
-    }
-
     if (EXEMPT_PATHS.includes(currentPath)) return;
 
+    // §51: only the ``setup`` branch survives — see the type comment
+    // above for the rationale. Other branches (openclaw_configure,
+    // hermes_configure, nanobot_configure, configure_select) used to
+    // forcibly hijack the user; they're gone on purpose.
     if (checkState === 'setup') {
       navigate('/setup', { replace: true });
-    } else if (checkState === 'openclaw_configure') {
-      navigate('/openclaw_configure', { replace: true });
-    } else if (checkState === 'nanobot_configure') {
-      navigate('/nanobot_configure', { replace: true });
-    } else if (checkState === 'configure_select') {
-      navigate('/configure_select', { replace: true });
     }
   }, [checkState, location.pathname, navigate]);
 
@@ -116,10 +115,10 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/select-framework" element={<SelectFramework />} />
       <Route path="/setup" element={<Setup />} />
       <Route path="/configure" element={<Configure />} />
       <Route path="/openclaw_configure" element={<Configure />} />
+      <Route path="/hermes_configure" element={<Configure />} />
       <Route path="/nanobot_configure" element={<NanobotConfigure />} />
       <Route path="/configure_select" element={<ConfigureSelector />} />
       <Route path="/agent-town" element={<World />} />

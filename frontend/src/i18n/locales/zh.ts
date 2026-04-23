@@ -207,6 +207,9 @@ export const zh: Translations = {
     stopVoiceInput: '停止语音输入',
     voiceUnsupported: '当前浏览器不支持语音输入',
     pickModel: '请先在设置中选择模型',
+    sessionModelLabel: '模型',
+    hermesSwitchBanner: '已切换到使用模型 {model} 的 Hermes 会话。Hermes 同一时刻只激活一个模型，不同模型会话之间切换会触发本地配置重写（约 10 ms）。频繁交替可能略有延迟。',
+    hermesSwitchBannerDismiss: '收起',
     nanobotGatewayOffline: 'nanobot 的 Chat 页面需要 nanobot gateway 和 websocket channel。请在另一个终端运行：nanobot gateway --port 18790 --verbose；启动后页面会自动刷新状态。',
     connectFailed: '无法连接到 OpenClaw 网关，请检查是否正在运行',
     // Install modal
@@ -527,6 +530,9 @@ export const zh: Translations = {
     nanobotConfigInitFailedHint: 'Nanobot CLI 已安装，但配置仍需在 Nanobot 配置页手动完成。',
     nanobotInstallFailedHint: '如果 uv 未安装，请先安装 uv: pip install uv',
     nanobotContinueConfigure: '继续配置 Nanobot',
+    // §50 — installed-card click target
+    openConfigure: '进入配置',
+    openConfigureAria: '打开配置向导：',
     // Skip
     skipBtn: '跳过，继续使用',
   },
@@ -795,6 +801,7 @@ export const zh: Translations = {
       modelLoading: '正在加载可用提供商…',
       modelNoProviders: '未能获取提供商列表。你可以先跳过，稍后在 CMD UI 中再配置。',
       modelCurrent: '当前默认模型',
+      modelMultipleHint: '提示：每个会话在创建时绑定其模型并保持不变（聊天中不会切换）。Hermes 同一时刻只激活一个模型，不同模型的会话之间切换聊天会触发本地配置重写（约 10 ms）。建议同一时段集中使用同一模型。',
       modelProviderLabel: '提供商',
       modelProviderPlaceholder: '请选择提供商…',
       modelNoAuthedProviders: '当前 ~/.hermes/.env 里还没有任何可用凭据。请先回到上一步配置 API Key，或在终端执行 `hermes auth <provider>`，等至少有一个 key 落盘后再回到此页面。',
@@ -805,6 +812,9 @@ export const zh: Translations = {
       modelApiKeyLabel: '提供商 API 密钥（可选，仅在尚未写入时需要）',
       modelApiKeyPlaceholder: '粘贴提供商侧的 API 密钥（例如 sk-…）',
       modelApiKeyHint: '若 ~/.hermes/.env 中已配置过对应密钥，可留空；留空时仅更新默认模型。',
+      modelBaseUrlLabel: 'Base URL（可选，覆盖默认接入地址）',
+      modelBaseUrlHint: '留空使用上方占位符显示的推荐地址。如果你在中国大陆且无 VPN，请填可达的代理 endpoint（例如转发 api.openai.com / api.anthropic.com / generativelanguage.googleapis.com 的反向代理）。',
+      modelBaseUrlPlaceholderEmpty: '不设置时由 Hermes 自行选择默认 endpoint',
       modelSaveBtn: '保存并应用',
       modelSaveSuccess: '已保存并应用',
       modelSaveFailed: '保存失败',
@@ -904,32 +914,7 @@ export const zh: Translations = {
     },
   },
 
-  selectFramework: {
-    title: '选择 Agent 框架',
-    subtitle: '检测到本机同时安装了 OpenClaw 和 Hermes',
-    description:
-      'XSafeClaw 每次只能监测一个框架。请选择本次要使用的框架——下次重新启动 XSafeClaw 时可以切换到另一个。',
-    bothInstalled: '两个框架均已检测到',
-    tip: '提示：在 xsafeclaw start 后加 --platform openclaw 或 --platform hermes 可跳过此页。',
-    openclawName: 'OpenClaw',
-    openclawDesc: '基于 Node.js 的个人 Agent，提供完整的 14 步引导向导。',
-    openclawBadge: '完整配置流程',
-    hermesName: 'Hermes Agent',
-    hermesDesc: '基于 Python 的开源 Agent，支持动态模型目录与统一网关。',
-    hermesBadge: '精简配置',
-    selectBtn: '使用此框架',
-    selecting: '正在应用选择…',
-    applied: '选择已应用，XSafeClaw 正在重启…',
-    waitingRestart: '等待服务器重启（通常数秒内完成）…',
-    restartFailed: '服务器未能按时重启。',
-    restartFailedHint: '请查看终端输出是否有报错，然后手动刷新本页。',
-    reloadNow: '立即刷新',
-    errorTitle: '选择失败',
-    errorNotPickerMode: '后端未处于 picker 模式，当前无法提交选择。',
-    errorNotInstalled: '所选框架在本机尚未安装。',
-    errorNetwork: '无法连接到 picker 服务器。',
-    notInPickerMode: '当前服务器未处于 picker 模式。',
-    notInPickerModeHint: '你可能是误访问了本页面。点击下方按钮返回主页。',
-    goHome: '返回主页',
-  },
+  // §38 selectFramework block was removed in §42 — XSafeClaw now monitors
+  // OpenClaw, Hermes and Nanobot simultaneously and the user picks
+  // per-session in Agent Town, so the dedicated framework picker is gone.
 };

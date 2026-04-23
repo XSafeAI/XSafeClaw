@@ -1,15 +1,15 @@
-/**
+﻿/**
  * Configure — 14-step onboard wizard, 1:1 clone of OpenClaw's native onboard flow.
  * Steps: Security → Mode → Config → SetupType → Workspace → Provider → Model →
  *        Gateway → Channels → Search → Skills → Hooks → Finalize → Review
  */
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Shield, Zap, Settings2, Key, Server, Plug, Wrench, CheckCircle,
   ChevronRight, ChevronLeft, Eye, EyeOff, Loader2, XCircle,
   RefreshCw, Trash2, Globe, FolderOpen, Search, Rocket,
-  Sparkles, Copy, AlertTriangle,
+  Sparkles, Copy, AlertTriangle, Info,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import type { SystemStatusResponse } from '../services/api';
@@ -1074,6 +1074,19 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   // ``providerEndpoints`` (which is server-owned) so we can let the user
   // mutate the dropdown without round-tripping through the scan cache.
   const [providerEndpointSel, setProviderEndpointSel] = useState<Record<string, string>>({});
+  // §47 fix 2 — XSafeClaw-pinned recommended Base URL per provider, used
+  // as placeholder for the optional override input below the model
+  // dropdown.  Sourced from ``provider_recommended_base_urls`` on the
+  // onboard scan response.  Providers omitted from the map render the
+  // input with a generic placeholder; the input itself is still shown
+  // because the user might be on a network that requires a proxy
+  // endpoint regardless of which provider Hermes defaults to.
+  const [providerRecommendedBaseUrls, setProviderRecommendedBaseUrls] = useState<Record<string, string>>({});
+  // User-entered free-form Base URL override per provider.  Distinct
+  // from ``providerEndpointSel`` (which is dropdown-shaped, designed
+  // for alibaba's three preset endpoints).  Only consumed when the
+  // provider has *no* preset bundle — the dropdown wins for alibaba.
+  const [providerBaseUrlOverride, setProviderBaseUrlOverride] = useState<Record<string, string>>({});
 
   // ── Bot step state ────────────────────────────────────────────────────
   // The Hermes backend owns the platform schema (list of fields per
@@ -1180,7 +1193,12 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   useEffect(() => {
     if (step === STEP_MODEL && modelProviders.length === 0 && !modelLoading) {
       setModelLoading(true);
-      systemAPI.onboardScan()
+      // §52 — this useEffect only runs inside the Hermes wizard branch
+      // (the OpenClaw branch loads model_providers eagerly in the main
+      // useEffect above). Pin to ``hermes`` so a Hermes-on-OpenClaw-default
+      // server still returns the static Hermes catalog instead of the
+      // CLI-scan OpenClaw shape.
+      systemAPI.onboardScan('hermes')
         .then(res => {
           const d = res.data as any;
           const providers: ModelProviderInfo[] = d.model_providers || [];
@@ -1206,6 +1224,10 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
             }
           }
           setProviderEndpointSel(initialSel);
+
+          // §47 fix 2 — pull XSafeClaw-pinned recommended Base URLs.
+          const recommended = (d.provider_recommended_base_urls || {}) as Record<string, string>;
+          setProviderRecommendedBaseUrls(recommended);
 
           if (!modelProviderId && !modelId && def) {
             // Prefill the form with the currently configured default so
@@ -1277,14 +1299,20 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
     setModelSaveError('');
     setModelSaveNote('');
     try {
-      // Only forward base_url when the provider we're saving has a preset
-      // bundle (today that's just ``alibaba`` — §33).  Sending it for a
-      // provider with no preset would be a no-op on the backend but makes
-      // the request payload noisier to reason about in logs.
+      // Resolve the Base URL we forward to ``quick-model-config``.
+      //   • If the provider has a preset bundle (today: alibaba), the
+      //     dropdown selection wins — that's the §33 contract.
+      //   • Otherwise, the §47 free-form override input wins; if the
+      //     user left it blank we send ``undefined`` so the backend
+      //     falls through to ``_HERMES_RECOMMENDED_BASE_URLS`` (the
+      //     XSafeClaw-pinned default for that provider).
       const endpointBundle = providerEndpoints[modelProviderId];
-      const endpointBaseUrl = endpointBundle
-        ? (providerEndpointSel[modelProviderId] || endpointBundle.current || endpointBundle.presets[0]?.base_url || '')
-        : '';
+      let endpointBaseUrl = '';
+      if (endpointBundle) {
+        endpointBaseUrl = providerEndpointSel[modelProviderId] || endpointBundle.current || endpointBundle.presets[0]?.base_url || '';
+      } else {
+        endpointBaseUrl = (providerBaseUrlOverride[modelProviderId] || '').trim();
+      }
 
       const res = await systemAPI.quickModelConfig({
         provider: modelProviderId,
@@ -1368,7 +1396,15 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   async function refreshStatus() {
     setRefreshing(true);
     try {
-      const res = await systemAPI.status();
+      // §53 — ``refreshStatus`` only renders inside the Hermes wizard
+      // (saveModelToHermes / saveBotToHermes / saveHermesApiKey are all
+      // siblings), so always pin the request to ``hermes`` to dodge the
+      // old ``settings.is_hermes`` branch when the server defaults to
+      // OpenClaw. Without this pin, a user on /hermes_configure clicking
+      // "refresh status" against an OpenClaw-default server got an
+      // OpenClaw-shaped response cast to ``HermesStatusSnapshot`` and
+      // silently lost ``hermes_api_key_configured`` / similar fields.
+      const res = await systemAPI.status('hermes');
       setSt(res.data as HermesStatusSnapshot);
     } catch { /* ignore */ }
     finally { setRefreshing(false); }
@@ -1847,6 +1883,23 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                 </div>
               )}
 
+              {/* §45: educational hint shown once a default model already
+                  exists, i.e. the user is about to add (or rotate to) a
+                  *second* Hermes model.  Surfaces the two product
+                  invariants users routinely hit:
+                    1. session model is locked at create time (§43h)
+                    2. cross-model session switches rewrite config.yaml
+                       (§43i, ~10ms per switch)
+                  Hidden on the very first install (modelDefaultId empty)
+                  so we don't scare brand-new users with concurrency talk
+                  before they've even saved their first model. */}
+              {modelDefaultId && (
+                <div className="flex items-start gap-2 bg-surface-0 border border-border rounded-xl px-4 py-3 text-[11px] text-text-muted leading-relaxed">
+                  <Info className="w-3.5 h-3.5 flex-shrink-0 text-text-muted mt-0.5" />
+                  <span>{h.modelMultipleHint}</span>
+                </div>
+              )}
+
               {modelLoading && (
                 <div className="flex items-center gap-2 text-[12px] text-text-muted">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" /> {h.modelLoading}
@@ -1900,6 +1953,47 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                       three DashScope URLs.  Placed above the model dropdown
                       because a wrong base URL bricks chat regardless of
                       which model you pick. */}
+                  {/* §47 fix 2 — optional free-form Base URL override
+                      for providers that don't ship a preset bundle.
+                      Renders for every selectable Hermes provider except
+                      ``alibaba`` (handled by the dropdown above), ``custom``
+                      (Custom Endpoint flow has its own URL field on the
+                      auth step) and ``copilot`` (OAuth — no URL to override).
+                      Without this field the user has no in-app way to
+                      redirect ``api.openai.com`` / ``api.anthropic.com`` /
+                      ``generativelanguage.googleapis.com`` to a proxy that
+                      actually resolves from their network — the §47
+                      regression that surfaced as "[No response]" on
+                      Gemini chats from CN networks. */}
+                  {selectedModelProvider
+                    && !providerEndpoints[selectedModelProvider.id]
+                    && selectedModelProvider.id !== 'custom'
+                    && selectedModelProvider.id !== 'copilot' && (() => {
+                    const recommended = providerRecommendedBaseUrls[selectedModelProvider.id] || '';
+                    const current = providerBaseUrlOverride[selectedModelProvider.id] || '';
+                    return (
+                      <div className="bg-surface-0 border border-border rounded-xl p-3 space-y-2">
+                        <label className="text-[12px] font-semibold text-text-primary block">
+                          {h.modelBaseUrlLabel}
+                        </label>
+                        <input
+                          type="text"
+                          value={current}
+                          onChange={e => {
+                            setProviderBaseUrlOverride(prev => ({
+                              ...prev,
+                              [selectedModelProvider.id]: e.target.value,
+                            }));
+                            setModelSaveResult('idle');
+                          }}
+                          placeholder={recommended || h.modelBaseUrlPlaceholderEmpty}
+                          className="w-full bg-surface-1 border border-border rounded-lg px-3 py-2 text-[13px] text-text-primary font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                        />
+                        <p className="text-[11px] text-text-muted">{h.modelBaseUrlHint}</p>
+                      </div>
+                    );
+                  })()}
+
                   {selectedModelProvider && providerEndpoints[selectedModelProvider.id] && (() => {
                     const bundle = providerEndpoints[selectedModelProvider.id];
                     const currentSel = providerEndpointSel[selectedModelProvider.id] || bundle.presets[0]?.base_url || '';
@@ -2224,7 +2318,25 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
 /* ─── Main ─── */
 export default function Configure() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { t } = useI18n();
+
+  // §52 — derive the requested platform straight from the URL so a user
+  // who clicked the OpenClaw card on /setup (→ /openclaw_configure) gets
+  // the OpenClaw wizard even when ``settings.is_hermes=true`` on the
+  // server. Before §52, this component leaned entirely on
+  // ``status.platform`` which mirrors the server's global default and
+  // therefore ignored the URL the user actually navigated to.
+  //
+  // Returning ``null`` for legacy ``/configure`` keeps the original
+  // status-snapshot autodetect path alive for back-compat.
+  const requestedPlatform: 'openclaw' | 'hermes' | null = (() => {
+    const p = location.pathname;
+    if (p === '/openclaw_configure') return 'openclaw';
+    if (p === '/hermes_configure') return 'hermes';
+    return null;
+  })();
+
   const [agentFlow, setAgentFlow] = useState<'loading' | 'openclaw' | 'hermes'>('loading');
   const [hermesStatusSnapshot, setHermesStatusSnapshot] = useState<HermesStatusSnapshot | null>(null);
   const [step, setStep] = useState(0);
@@ -2248,16 +2360,29 @@ export default function Configure() {
 
     (async () => {
       try {
-        const statusRes = await systemAPI.status();
+        // §53 — when the URL pins a platform we ask /system/status for
+        // *that* platform's shape (matches the §52 onboard-scan policy).
+        // Legacy /configure keeps unpinned so the original autodetect
+        // path still keys off ``st.platform === 'hermes'``.
+        const statusRes = await systemAPI.status(requestedPlatform || undefined);
         if (cancelled) return;
 
         const st = statusRes.data as HermesStatusSnapshot;
         const pref = typeof localStorage !== 'undefined' ? localStorage.getItem(SETUP_PLATFORM_KEY) : null;
 
-        const useHermes =
-          st.platform === 'hermes'
-          || (pref === 'hermes' && st.hermes_installed === true)
-          || (st.hermes_installed === true && st.openclaw_installed !== true);
+        // §52 — URL wins. If the user landed on /openclaw_configure or
+        // /hermes_configure the platform is unambiguous and we skip the
+        // status-snapshot autodetect (which keys off
+        // ``settings.is_hermes`` and would otherwise flip an OpenClaw
+        // navigation into a Hermes wizard on a Hermes-default server).
+        // Legacy /configure keeps the original autodetect.
+        const useHermes = requestedPlatform === 'hermes' || (
+          requestedPlatform === null && (
+            st.platform === 'hermes'
+            || (pref === 'hermes' && st.hermes_installed === true)
+            || (st.hermes_installed === true && st.openclaw_installed !== true)
+          )
+        );
 
         if (useHermes) {
           if (typeof localStorage !== 'undefined') localStorage.removeItem(SETUP_PLATFORM_KEY);
@@ -2270,7 +2395,11 @@ export default function Configure() {
           localStorage.removeItem(SETUP_PLATFORM_KEY);
         }
 
-        const res = await systemAPI.onboardScan();
+        // §52 — pin the scan to OpenClaw so a Hermes-default server still
+        // returns the OpenClaw CLI scan payload (model_providers shape,
+        // gateway defaults, etc.) when the user explicitly asked for
+        // OpenClaw via /openclaw_configure or via the legacy autodetect.
+        const res = await systemAPI.onboardScan('openclaw');
         if (cancelled) return;
 
         const d = res.data as any;
@@ -2303,7 +2432,7 @@ export default function Configure() {
     })();
 
     return () => { cancelled = true; };
-  }, [navigate]);
+  }, [navigate, requestedPlatform]);
 
   const skipped = new Set<number>();
   skipped.add(9);

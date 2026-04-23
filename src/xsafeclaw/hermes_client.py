@@ -74,6 +74,7 @@ class HermesClient:
         thinking: str | None = None,
         timeout_ms: int | None = None,
         attachments: list[dict] | None = None,
+        model: str | None = None,
     ):
         """Async generator that streams chat response via SSE.
 
@@ -82,13 +83,29 @@ class HermesClient:
           {"type": "final",   "text": "<final text>", "stop_reason": ...}
           {"type": "error",   "text": "<error message>"}
           {"type": "timeout", "text": "<partial text>"}
+
+        ``model`` (§43f / §43i) — **cosmetic only**. Verified against
+        ``hermes-agent/gateway/platforms/api_server.py::_handle_chat_completions``
+        L715 (``model_name = body.get("model", self._model_name)``): this
+        value is used solely to fill the ``"model"`` field in the response
+        for OpenAI-client compatibility. It is NEVER passed to ``_run_agent``
+        or ``_create_agent`` and has zero effect on routing.
+        Real per-session routing is implemented in ``chat.py`` (§43i):
+        before each ``stream_chat`` call, ``chat.py`` rewrites
+        ``~/.hermes/config.yaml::model.default + provider`` under the
+        ``_HermesYamlRWLock`` to the session's bound model. Hermes re-reads
+        the yaml on every request via ``_create_agent`` (verified
+        ``api_server.py`` L529-534), so the rewrite takes effect on the
+        next outbound call with no restart and no hot-reload polling wait.
+        We still write ``body["model"]`` so the response echoes the right
+        id back to compliant OpenAI clients.
         """
         client = await self._ensure_client()
 
         messages: list[dict[str, str]] = [{"role": "user", "content": message}]
 
         body: dict[str, Any] = {
-            "model": "hermes-agent",
+            "model": (model or "").strip() or "hermes-agent",
             "messages": messages,
             "stream": True,
         }
@@ -97,6 +114,7 @@ class HermesClient:
         headers["X-Hermes-Session-Id"] = session_key
 
         cumulative_text = ""
+        final_yielded = False
 
         try:
             async with client.stream(
@@ -129,6 +147,7 @@ class HermesClient:
                             "stop_reason": "stop",
                             "usage": None,
                         }
+                        final_yielded = True
                         return
                     if not line.startswith("data: "):
                         continue
@@ -157,12 +176,82 @@ class HermesClient:
                             "stop_reason": finish_reason,
                             "usage": chunk.get("usage"),
                         }
+                        final_yielded = True
                         return
 
         except httpx.TimeoutException:
             yield {"type": "timeout", "text": cumulative_text}
+            return
         except Exception as exc:
             yield {"type": "error", "text": str(exc)}
+            return
+
+        # §49 — Stream closed without [DONE] / finish_reason. This is the
+        # "[No response]" trap: Hermes (and some upstream adapters) silently
+        # drop the SSE body when the upstream API errors AFTER returning 200
+        # OK. The most common trigger is a Google quota-exceeded 429 on
+        # Gemini — ``stream=False`` puts the error message in
+        # ``choices[0].message.content`` (verified end-to-end with curl), but
+        # ``stream=True`` returns *nothing* on the wire. Without this
+        # fallback the user just sees the frontend's "[No response]" placeholder
+        # and has no way to learn that their key is out of quota / the model
+        # name is invalid / billing isn't set up.
+        if not final_yielded:
+            if cumulative_text:
+                # Stream had real content but no terminator — emit a final so
+                # callers see the same shape as a clean run.
+                yield {
+                    "type": "final",
+                    "text": cumulative_text,
+                    "stop_reason": "stop",
+                    "usage": None,
+                }
+                return
+
+            # Empty stream → retry the same request with ``stream=False`` and
+            # hand the recovered ``message.content`` back to the caller. Only
+            # fires for already-failed requests, so the doubled outbound call
+            # never affects the happy path. Any text we recover is treated as
+            # the assistant turn (it's typically an upstream error message,
+            # which is exactly what the user needs to see).
+            try:
+                fallback = await self.send_chat(
+                    session_key=session_key,
+                    message=message,
+                    timeout_ms=timeout_ms,
+                    model=model,
+                )
+            except Exception as exc:
+                yield {
+                    "type": "error",
+                    "text": (
+                        "Hermes streamed an empty response and the non-stream "
+                        f"fallback also failed: {exc}"
+                    ),
+                }
+                return
+
+            recovered = (fallback.get("response_text") or "").strip()
+            if recovered:
+                yield {"type": "delta", "text": recovered}
+                yield {
+                    "type": "final",
+                    "text": recovered,
+                    "stop_reason": fallback.get("stop_reason") or "stop",
+                    "usage": fallback.get("usage"),
+                }
+            else:
+                yield {
+                    "type": "error",
+                    "text": (
+                        "Hermes returned no content in either streaming or "
+                        "non-streaming mode. Common causes: upstream API "
+                        "quota exceeded (check your provider dashboard), an "
+                        "invalid model name, or Hermes failed to start the "
+                        "agent (see ~/.hermes/gateway.log or "
+                        "`journalctl --user -u 'hermes-*'`)."
+                    ),
+                }
 
     async def send_chat(
         self,
@@ -170,13 +259,19 @@ class HermesClient:
         message: str,
         thinking: str | None = None,
         timeout_ms: int | None = None,
+        model: str | None = None,
     ) -> dict:
-        """Send a message and wait for the complete response (non-streaming)."""
+        """Send a message and wait for the complete response (non-streaming).
+
+        ``model`` (§43f / §43i) — see ``stream_chat`` docstring; same contract.
+        Cosmetic only; routing comes from ``chat.py``'s yaml-pin under
+        ``_HermesYamlRWLock``.
+        """
         client = await self._ensure_client()
 
         messages: list[dict[str, str]] = [{"role": "user", "content": message}]
         body: dict[str, Any] = {
-            "model": "hermes-agent",
+            "model": (model or "").strip() or "hermes-agent",
             "messages": messages,
             "stream": False,
         }

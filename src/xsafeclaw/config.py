@@ -47,10 +47,16 @@ class Settings(BaseSettings):
     )
 
     # ── Platform selection ────────────────────────────────────────────────
-    platform: Literal["auto", "openclaw", "hermes"] = Field(
+    # Since §42 this is only a *default-instance hint* for
+    # ``runtime/registry.py::_ensure_default``; XSafeClaw monitors all
+    # three runtimes simultaneously and the user can pick any of them in
+    # Agent Town regardless of this value. ``auto`` falls back to the
+    # registry's fixed priority order (openclaw → hermes → nanobot).
+    platform: Literal["auto", "openclaw", "hermes", "nanobot"] = Field(
         default="auto",
-        description="Agent platform: 'auto' detects installed platform, "
-                    "or force 'openclaw' / 'hermes'",
+        description="Default-instance hint: 'auto' uses the registry's "
+                    "priority order, or pin one of "
+                    "'openclaw' / 'hermes' / 'nanobot'",
     )
 
     # Data directory
@@ -171,6 +177,19 @@ class Settings(BaseSettings):
     )
     watch_interval_seconds: int = Field(
         default=1, description="File watcher polling interval"
+    )
+
+    # §48 Runtime auto-start
+    # When True, XSafeClaw probes ~/.openclaw, ~/.hermes, ~/.nanobot at
+    # startup and best-effort starts each gateway that is installed but not
+    # yet listening on its health port. The same helpers are also called
+    # post-install (see services/runtime_autostart.py) so the user no longer
+    # needs to hop into a terminal after Setup → Install. Set to False to
+    # keep the legacy "you start it yourself" behaviour.
+    auto_start_runtimes: bool = Field(
+        default=True,
+        description="Auto-start installed framework gateways (OpenClaw / Hermes / Nanobot) "
+                    "when XSafeClaw boots and after Setup install/init endpoints succeed.",
     )
 
     # Sync Service

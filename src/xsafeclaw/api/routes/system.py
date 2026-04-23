@@ -315,12 +315,11 @@ def _find_hermes() -> Optional[str]:
     return shutil.which("hermes", path=search_path)
 
 
-def _find_agent_binary() -> Optional[str]:
-    """Locate the active platform's binary (``hermes`` or ``openclaw``)."""
-    if settings.is_hermes:
-        return _find_hermes()
-    return _find_openclaw()
-
+# §53 — removed legacy ``_find_agent_binary()``: a §38-era helper that
+# decided OpenClaw-vs-Hermes binary by global ``settings.is_hermes``.
+# Zero callers remain after the §38/§42 RuntimeRegistry rewrite — the
+# live version with the correct per-instance signature lives in
+# ``api/routes/skills.py::_find_agent_binary(instance: RuntimeInstance)``.
 
 # ── Hermes embedded-Python bridge ─────────────────────────────────────────────
 # Hermes ships its own Python package tree at ``~/.hermes/hermes-agent/`` with
@@ -584,6 +583,45 @@ def _status_flags(
     return False, False
 
 
+def _hermes_runtime_detected() -> bool:
+    """True when Hermes is *available on this host*, regardless of pin.
+
+    Used by the Hermes-only POST endpoints to decide whether to accept a
+    request when the server is running in multi-platform mode (the pre-§42
+    guards used ``settings.is_hermes`` which only succeeded when Hermes was
+    the *active* runtime — that broke OpenClaw + Hermes side-by-side
+    Configure flows).
+    """
+    if Path(settings.hermes_home).expanduser().is_dir():
+        return True
+    return shutil.which("hermes") is not None
+
+
+def _hermes_model_configured() -> bool:
+    """Return True when ``~/.hermes/config.yaml`` already names a usable model.
+
+    Mirrors the spirit of ``_nanobot_config_flags()`` so the install-status
+    response can flag "Hermes is installed but Configure was never run" the
+    same way it does for OpenClaw and Nanobot. We treat the platform as
+    *configured* once ``model.default`` (or a bare ``model:`` string) is
+    populated — this is the value §33/§34 write through
+    ``_quick_model_config_hermes`` after a successful Configure step.
+    """
+    config_path = Path(settings.hermes_config_path).expanduser()
+    if not config_path.exists():
+        return False
+    try:
+        import yaml
+        config = yaml.safe_load(config_path.read_text("utf-8")) or {}
+    except Exception:
+        return False
+    model_cfg = config.get("model", "")
+    if isinstance(model_cfg, dict):
+        default_value = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
+        return bool(default_value)
+    return bool(str(model_cfg).strip())
+
+
 def _decode_first_line(stdout: bytes | None, stderr: bytes | None) -> tuple[str, str | None]:
     raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
     first_line = raw.splitlines()[0] if raw else None
@@ -703,6 +741,7 @@ async def get_install_status():
 
     config_exists = _CONFIG_PATH.exists()
     hermes_ready = bool(hermes_path) or hermes_home.is_dir()
+    hermes_model_configured = _hermes_model_configured() if hermes_ready else False
     nanobot_config_exists, nanobot_model_configured, _, _ = _nanobot_config_flags()
     requires_setup, requires_configure = _status_flags(
         openclaw_installed=openclaw_ready,
@@ -719,6 +758,8 @@ async def get_install_status():
         "hermes_installed": hermes_ready,
         "hermes_path": hermes_path,
         "hermes_version": None,
+        "hermes_config_path": str(settings.hermes_config_path),
+        "hermes_model_configured": hermes_model_configured,
         "nanobot_installed": nanobot_ready,
         "nanobot_version": nanobot_version,
         "nanobot_error": nanobot_error,
@@ -730,17 +771,36 @@ async def get_install_status():
         "requires_configure": requires_configure,
         "requires_nanobot_setup": not nanobot_ready,
         "requires_nanobot_configure": nanobot_ready and not nanobot_model_configured,
+        "requires_hermes_configure": hermes_ready and not hermes_model_configured,
         "node_version": _find_node_version(),
     }
 
 
 @router.get("/status")
-async def get_system_status():
-    """Check whether the agent CLI is installed and whether its daemon is running."""
+async def get_system_status(platform: str | None = None):
+    """Check whether the agent CLI is installed and whether its daemon is running.
+
+    §53 — ``?platform=`` query parameter mirrors the §52 fix on
+    ``/onboard-scan``: the multi-platform UI (Configure.tsx in
+    Hermes-on-OpenClaw-default mode, etc.) needs to ask for a specific
+    platform's status shape regardless of the global ``settings.is_hermes``
+    flag. When omitted, falls back to the legacy ``settings.is_hermes``
+    branch so existing callers (TownConsole's workspace probe,
+    ModelSetupModal's workspace prefill, anything that just reads
+    ``default_workspace`` and doesn't care about platform-specific
+    fields) keep working unchanged.
+    """
     env = _build_env()
     platform_name = settings.resolved_platform
 
-    if settings.is_hermes:
+    requested = (platform or "").strip().lower()
+    use_hermes_status = (
+        requested == "hermes"
+        if requested in {"hermes", "openclaw"}
+        else settings.is_hermes
+    )
+
+    if use_hermes_status:
         return await _hermes_status(env)
 
     # ── OpenClaw status ───────────────────────────────────────────────────
@@ -1893,6 +1953,68 @@ def _persist_hermes_api_key(key_value: str) -> None:
         _ensure_hermes_api_server_env()
 
 
+def _ensure_hermes_api_key_synced() -> tuple[str, str]:
+    """Make XSafeClaw and Hermes share the same Hermes-API bearer token.
+
+    §43b — fixes the "fresh-XSafeClaw-on-existing-Hermes" 401 trap.
+
+    Background: Hermes ships an HTTP server that requires
+    ``Authorization: Bearer <API_SERVER_KEY>`` on every ``/v1/*`` call.
+    XSafeClaw's HermesClient reads its bearer from
+    ``settings.hermes_api_key`` (mirrored from XSafeClaw's own ``.env``
+    as ``HERMES_API_KEY``). Both sides MUST hold the same value or every
+    agent-creation request 401s — exactly what users see when they reinstall
+    XSafeClaw against an already-configured Hermes box.
+
+    Pre-§43b only the *Hermes* side was checked: if Hermes had a key but
+    XSafeClaw did not, no code path mirrored it back, so the picker stayed
+    silently broken until the user knew to hit Configure → API Key → Reveal
+    + paste it into XSafeClaw manually. This helper makes that automatic.
+
+    Decision matrix (chosen to never silently overwrite a user-set value
+    unless Hermes itself disagrees, in which case Hermes always wins because
+    its server enforces the value at request time):
+
+    | Hermes side | XSafeClaw side | Action                                  |
+    |-------------|----------------|-----------------------------------------|
+    | empty       | empty          | generate new key, persist to both       |
+    | set         | empty          | mirror Hermes  → XSafeClaw              |
+    | empty       | set            | mirror XSafeClaw → Hermes               |
+    | set, equal  | set, equal     | no-op                                   |
+    | set, differ | set, differ    | trust Hermes, overwrite XSafeClaw       |
+
+    Returns ``(action, key_value)`` where ``action`` is one of
+    ``"noop"`` / ``"mirrored_from_hermes"`` / ``"mirrored_to_hermes"`` /
+    ``"synced_to_hermes_value"`` / ``"generated"``. Callers may surface this
+    in their response for observability; the helper itself never raises.
+    """
+    hermes_key = (_read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY") or "").strip()
+    xs_key = (settings.hermes_api_key or "").strip()
+
+    if hermes_key and xs_key and hermes_key == xs_key:
+        return ("noop", hermes_key)
+
+    if hermes_key and not xs_key:
+        _persist_hermes_api_key(hermes_key)
+        return ("mirrored_from_hermes", hermes_key)
+
+    if xs_key and not hermes_key:
+        _persist_hermes_api_key(xs_key)
+        return ("mirrored_to_hermes", xs_key)
+
+    if hermes_key and xs_key and hermes_key != xs_key:
+        # Conflict: Hermes wins because its server enforces the bearer at
+        # request time. XSafeClaw's stale value would 401 forever otherwise.
+        _persist_hermes_api_key(hermes_key)
+        return ("synced_to_hermes_value", hermes_key)
+
+    # Both empty — first-time bring-up.
+    import secrets
+    new_key = secrets.token_urlsafe(32)
+    _persist_hermes_api_key(new_key)
+    return ("generated", new_key)
+
+
 @router.get("/hermes-api-key-status")
 async def hermes_api_key_status():
     """Return whether a Hermes API key is currently configured (never exposes the value)."""
@@ -1983,12 +2105,15 @@ async def hermes_enable_api_server():
     Returns whether ``/health`` came back up after the restart.
     """
     touched = _ensure_hermes_api_server_env()
-    # Ensure we have an API_SERVER_KEY too; otherwise /v1/* would 401.
-    existing_key = _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
-    if not existing_key:
-        import secrets
-        _persist_hermes_api_key(secrets.token_urlsafe(32))
-        touched.append("API_SERVER_KEY")
+    # §43b: ensure the Hermes-API bearer token agrees on BOTH sides — not
+    # just the Hermes side. Pre-§43b this only generated a new key when
+    # ~/.hermes/.env was missing API_SERVER_KEY; if Hermes already had a
+    # key but XSafeClaw's .env did not (fresh XSafeClaw on existing
+    # Hermes box), the listener would come up cleanly yet every XSafeClaw
+    # /v1/* call would 401. The unified helper covers all four cases.
+    key_action, _ = _ensure_hermes_api_key_synced()
+    if key_action != "noop":
+        touched.append(f"API_SERVER_KEY({key_action})")
 
     restarted, restart_detail = await _restart_hermes_api_server(timeout_s=25.0)
     api_reachable = await _hermes_api_reachable()
@@ -2023,8 +2148,8 @@ async def hermes_apply(body: HermesApplyRequest | None = None):
     endpoint is useful after manual edits of ``~/.hermes/.env`` or when the
     UI wants to offer an explicit "Apply to Hermes" button.
     """
-    if not settings.is_hermes:
-        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+    if not _hermes_runtime_detected():
+        raise HTTPException(status_code=400, detail="Hermes runtime not detected on this host")
 
     api_was_running = await _hermes_api_reachable()
     restart_ok, output = await _restart_hermes_api_server()
@@ -2138,8 +2263,8 @@ async def hermes_bot_platforms():
     from the Configure wizard.  Also reports which env vars already have
     a value in ``~/.hermes/.env`` so the UI can surface "already set" hints.
     """
-    if not settings.is_hermes:
-        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+    if not _hermes_runtime_detected():
+        raise HTTPException(status_code=400, detail="Hermes runtime not detected on this host")
 
     env_path = _hermes_env_path()
     configured: dict[str, bool] = {}
@@ -2191,8 +2316,8 @@ async def hermes_bot_config(body: HermesBotConfigRequest):
     restarted so the gateway re-reads the updated credentials.  Otherwise
     the configuration is stored but requires a manual restart.
     """
-    if not settings.is_hermes:
-        raise HTTPException(status_code=400, detail="Not running in Hermes mode")
+    if not _hermes_runtime_detected():
+        raise HTTPException(status_code=400, detail="Hermes runtime not detected on this host")
 
     spec = _HERMES_BOT_PLATFORMS.get(body.platform)
     if not spec:
@@ -2543,6 +2668,20 @@ async def init_default_nanobot():
         mode="blocking",
     )
     instances = await runtime_registry.discover()
+
+    # §48 — best-effort auto-start of the nanobot gateway now that the
+    # config file (which the gateway needs to bind its port + channels)
+    # exists. Skipped silently when ``auto_start_runtimes`` is off so the
+    # legacy "user runs the command themselves" workflow still works.
+    autostart: dict[str, str] = {"status": "disabled", "detail": "auto_start_runtimes=false"}
+    if settings.auto_start_runtimes:
+        try:
+            from ..services.runtime_autostart import autostart_nanobot
+            status, detail = await autostart_nanobot()
+            autostart = {"status": status, "detail": detail}
+        except Exception as exc:
+            autostart = {"status": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+
     return {
         "success": True,
         "created": created,
@@ -2554,6 +2693,7 @@ async def init_default_nanobot():
         "install_command": _nanobot_tool_install_command(),
         "model_configured": False,
         "instances": [serialize_instance(instance) for instance in instances],
+        "autostart": autostart,
     }
 
 
@@ -2615,16 +2755,24 @@ async def _hermes_bring_up_api(env: dict):
     else:
         yield f"data: {json.dumps({'type': 'output', 'text': '✓ ~/.hermes/.env already has API_SERVER_ENABLED=true'})}\n\n"
 
-    # Ensure an API_SERVER_KEY exists so the first HTTP call is authorized.
-    # If XSafeClaw already has HERMES_API_KEY we mirror that; otherwise a
-    # random key is generated and mirrored back to XSafeClaw's own .env so
-    # the Configure/API-Key page picks it up.
-    existing_key = _read_dotenv_value(_hermes_env_path(), "API_SERVER_KEY")
-    if not existing_key:
-        from secrets import token_urlsafe
-        new_key = token_urlsafe(32)
-        _persist_hermes_api_key(new_key)
+    # §43b: bring the Hermes-API bearer token into agreement on both sides.
+    # Pre-§43b this branch only generated a new key when Hermes's side was
+    # missing — it never mirrored an existing Hermes key back into
+    # XSafeClaw's .env, nor reconciled a mismatch. ``_ensure_hermes_api_key_synced``
+    # now handles all four cases (see its docstring) so a fresh XSafeClaw
+    # against an existing Hermes install no longer 401s on the first agent
+    # creation.
+    key_action, _ = _ensure_hermes_api_key_synced()
+    if key_action == "generated":
         yield f"data: {json.dumps({'type': 'output', 'text': '▸ Generated API_SERVER_KEY and mirrored to both .env files'})}\n\n"
+    elif key_action == "mirrored_from_hermes":
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Mirrored existing Hermes API_SERVER_KEY into XSafeClaw .env'})}\n\n"
+    elif key_action == "mirrored_to_hermes":
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ Mirrored XSafeClaw HERMES_API_KEY into Hermes .env'})}\n\n"
+    elif key_action == "synced_to_hermes_value":
+        yield f"data: {json.dumps({'type': 'output', 'text': '▸ XSafeClaw HERMES_API_KEY differed from Hermes; overwrote XSafeClaw side to match Hermes'})}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'output', 'text': '✓ Hermes API_SERVER_KEY already in sync with XSafeClaw'})}\n\n"
 
     if await _hermes_api_reachable():
         yield f"data: {json.dumps({'type': 'output', 'text': f'✓ Hermes API already listening on :{port}; no bring-up needed.'})}\n\n"
@@ -3611,12 +3759,205 @@ _OPENCLAW_MIN_CONTEXT_WINDOW = 16000
 _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW = 204800
 _HERMES_DIR = settings.hermes_home
 
-if settings.is_hermes:
-    _CONFIG_PATH = settings.hermes_config_path
-    _EXPLICIT_MODELS_PATH = _HERMES_DIR / "xsafeclaw-explicit-models.json"
-else:
-    _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
-    _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+# OpenClaw is the historical "main" runtime, so the module-level constants
+# default to the OpenClaw paths. Anything that needs Hermes (or a non-default
+# OpenClaw instance) should derive its paths through ``_config_path_for(...)``
+# / ``_explicit_models_path_for(...)`` below — driven by the resolved
+# ``RuntimeInstance``, not by ``settings.is_hermes`` at import time. This is
+# what lets a single XSafeClaw process serve OpenClaw + Hermes + Nanobot
+# simultaneously instead of being pinned to one platform per process.
+_CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
+
+# §43: dedicated Hermes-config alias. ``_CONFIG_PATH`` above is the OpenClaw
+# JSON5 file; treating it as ``~/.hermes/config.yaml`` (yaml.safe_load /
+# yaml.dump) corrupts the OpenClaw runtime — see §43 for the post-mortem.
+# Hermes-only flows below MUST read/write through this constant instead.
+_HERMES_CONFIG_PATH = Path(settings.hermes_config_path).expanduser()
+
+
+# ── §43i: Hermes config.yaml 轻量读 / 写工具 ─────────────────────────────────
+#
+# Hermes API server 的请求体 ``model`` 字段是 cosmetic（见
+# ``hermes-agent/gateway/platforms/api_server.py::_handle_chat_completions``
+# L715），真实路由由 ``~/.hermes/config.yaml::model.default + model.provider``
+# 决定。所幸 ``api_server.py::_create_agent`` (L529-534) 在 **每次**
+# ``/v1/chat/completions`` 都现场调 ``_resolve_gateway_model()`` +
+# ``_load_gateway_config()`` —— rewrite yaml 后下个请求立即生效，无需重启
+# 也无需等 hot-reload 轮询。
+#
+# 这两个 helper 是 ``chat.py`` 在 send-message 之前 yaml-pin 到 session 绑定
+# model 的最小工具集，跟 ``_quick_model_config_hermes`` 的"重型"配置保存不同：
+# 这里 **只** 改 yaml 的 ``model`` 段，不写 dotenv（密钥已存在）、不动 ledger
+# （配置时已记录）、不清缓存、不重启 Hermes。这让单次 pin 的开销降到 ~10ms
+# 文件写。
+def _read_hermes_config_yaml() -> dict:
+    """Return parsed ``~/.hermes/config.yaml`` (empty dict if missing/unreadable).
+
+    Used by ``chat.py::_refresh_hermes_active_yaml_cache_from_disk`` to
+    initialize / repair the in-memory yaml-model cache from disk on startup
+    or after an external edit.
+    """
+    import yaml as _yaml
+
+    if not _HERMES_CONFIG_PATH.exists():
+        return {}
+    try:
+        return _yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _rewrite_hermes_yaml_model_default(full_id: str, slug: str) -> None:
+    """§43i: Pin ``~/.hermes/config.yaml::model`` to (full_id, slug) atomically.
+
+    ``full_id`` is the XSafeClaw-canonical model id (``"<slug>/<bare>"``,
+    e.g. ``"openrouter/moonshotai/kimi-k2"`` or ``"custom:foo/gpt-4"``).
+    ``slug`` is the provider slug as stored in the XSafeClaw configured-models
+    ledger (e.g. ``"openrouter"``, ``"alibaba"``, ``"custom:foo"``).
+
+    For regular providers (``openrouter``, ``alibaba``, …): rewrites the
+    ``model`` block to ``{default, provider}`` (+ preserved
+    ``base_url`` / ``api_key`` / ``api_mode`` iff the *previous* model block
+    was on the same provider — §47).  The strip-on-cross-provider semantics
+    are kept (e.g. switching from a custom session to ``alibaba`` cleanly
+    drops the custom inline credentials), but staying on the same provider
+    no longer wipes a ``model.base_url`` that ``_quick_model_config_hermes``
+    (or the user) wrote — that wipe was the §47 root cause for "[No
+    response]" on Qwen / Gemini.  Per-provider env keys still live in
+    ``~/.hermes/.env`` and aren't touched here.
+
+    For custom providers (``slug.startswith("custom:")``): looks up the
+    matching entry in ``config.yaml::custom_providers`` (by ``name``) and
+    rebuilds the ``model`` block with inline ``base_url`` + ``api_key``
+    (Hermes's contract for custom — see ``hermes_cli/main.py::_model_flow_custom``).
+    Raises ``ValueError`` if the custom provider is no longer registered.
+
+    Atomic write: writes to ``<path>.tmp`` then ``rename()`` to avoid
+    leaving a half-written yaml on disk if the process is killed mid-write.
+    Uses the same ``yaml.dump(default_flow_style=False, allow_unicode=True)``
+    contract as ``_quick_model_config_hermes`` to keep file shape stable
+    across pin and full-config flows.
+
+    NOTE: caller is responsible for serialization (the §43i RWLock in
+    ``chat.py``). This function itself is NOT thread-safe against concurrent
+    writers — two simultaneous calls can race on the tmp-rename step.
+    """
+    import yaml as _yaml
+
+    if not full_id or not slug:
+        raise ValueError("_rewrite_hermes_yaml_model_default requires non-empty full_id and slug")
+
+    config: dict = {}
+    if _HERMES_CONFIG_PATH.exists():
+        try:
+            config = _yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        except Exception:
+            config = {}
+
+    # Strip the slug prefix to get the bare id Hermes expects in
+    # ``model.default`` (Hermes hands this verbatim to the upstream API,
+    # so a double-prefixed string like ``openrouter/moonshotai/kimi-k2``
+    # would be rejected — see §34).
+    if full_id.startswith(f"{slug}/"):
+        bare_id = full_id[len(slug) + 1:]
+    else:
+        bare_id = full_id
+
+    if slug.startswith("custom:"):
+        # Custom provider — must rebuild ``model`` block with inline
+        # base_url + api_key from ``custom_providers[name=...]``.
+        custom_name = slug[len("custom:"):]
+        providers_list = config.get("custom_providers") or []
+        custom_entry: dict | None = None
+        if isinstance(providers_list, list):
+            for p in providers_list:
+                if isinstance(p, dict) and (p.get("name") or "").strip() == custom_name:
+                    custom_entry = p
+                    break
+        if not custom_entry:
+            raise ValueError(
+                f"Cannot pin to custom provider '{custom_name}': not found in "
+                f"~/.hermes/config.yaml::custom_providers. Re-configure this "
+                f"endpoint in the CMD setup panel."
+            )
+        new_model: dict = {
+            "default": bare_id,
+            "provider": "custom",
+        }
+        if custom_entry.get("base_url"):
+            new_model["base_url"] = custom_entry["base_url"]
+        if custom_entry.get("api_key"):
+            new_model["api_key"] = custom_entry["api_key"]
+        if custom_entry.get("api_mode"):
+            new_model["api_mode"] = custom_entry["api_mode"]
+    else:
+        # Regular provider — start with clean ``{default, provider}`` and
+        # then preserve provider-bound fields if (and only if) the previous
+        # ``model`` block was already targeting the same provider.
+        #
+        # §47: the original §43i implementation **always** stripped
+        # ``base_url`` / ``api_key`` / ``api_mode``. That was correct for
+        # the "switching from custom-* to a regular provider" case it was
+        # written for, but wrong for "user just sent another message in
+        # the same alibaba/gemini session" — pinning was wiping the very
+        # ``model.base_url`` the user (or ``_quick_model_config_hermes``
+        # via the §47 fix above) wrote, forcing Hermes to fall back to
+        # adapter defaults that 401 in CN / are blocked from CN /
+        # mismatch the user's key shape. End-user symptom: "[No response]".
+        #
+        # The fix is to keep the §43i strip semantics for the *cross-provider*
+        # transition (so a stale ``custom`` ``base_url`` can't leak into
+        # an ``alibaba`` send) and only preserve when the slug is unchanged.
+        new_model: dict = {
+            "default": bare_id,
+            "provider": slug,
+        }
+        prev_model = config.get("model") if isinstance(config.get("model"), dict) else {}
+        prev_provider = (prev_model.get("provider") or "").strip().lower()
+        if prev_provider == slug.lower():
+            for k in ("base_url", "api_key", "api_mode"):
+                v = prev_model.get(k)
+                if v:
+                    new_model[k] = v
+
+    config["model"] = new_model
+
+    # §43 hard-guard (mirrors ``_quick_model_config_hermes`` L6811): refuse
+    # to yaml-dump into anything under ~/.openclaw, which would corrupt the
+    # OpenClaw JSON5 config (the bug §43 was originally written to fix).
+    assert "openclaw" not in str(_HERMES_CONFIG_PATH).lower(), (
+        f"refusing to yaml-dump into {_HERMES_CONFIG_PATH} — "
+        "this would corrupt OpenClaw's JSON5 config (see §43)"
+    )
+
+    _HERMES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = _HERMES_CONFIG_PATH.with_suffix(_HERMES_CONFIG_PATH.suffix + ".tmp")
+    tmp_path.write_text(
+        _yaml.dump(config, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    tmp_path.replace(_HERMES_CONFIG_PATH)
+
+
+def _config_path_for_platform(platform: str | None) -> Path:
+    """Return the runtime config file path for the given platform name.
+
+    OpenClaw → ``~/.openclaw/openclaw.json``
+    Hermes   → ``settings.hermes_config_path``
+    Anything else falls back to the OpenClaw default so legacy callers keep
+    working unchanged.
+    """
+    if platform == "hermes":
+        return Path(settings.hermes_config_path).expanduser()
+    return _OPENCLAW_DIR / "openclaw.json"
+
+
+def _explicit_models_path_for_platform(platform: str | None) -> Path:
+    """Per-platform path to the XSafeClaw explicit-models ledger (§35)."""
+    if platform == "hermes":
+        return _HERMES_DIR / "xsafeclaw-explicit-models.json"
+    return _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 
 # ── Hermes model / provider catalog ──────────────────────────────────────────
 # Static catalog derived from Hermes's official provider documentation.
@@ -3736,6 +4077,74 @@ _HERMES_DASHSCOPE_ENDPOINTS: list[dict] = [
 # base URL.  Kept as a module-level constant so downstream refactors don't
 # drift from the dotenv key name.
 _HERMES_DASHSCOPE_BASE_URL_ENV = "DASHSCOPE_BASE_URL"
+
+
+# ── Per-provider recommended base URLs (§47) ─────────────────────────────────
+# Authoritative source of "what should ``model.base_url`` be set to in
+# ``~/.hermes/config.yaml`` when the user picks <provider> via the XSafeClaw
+# Configure / quick-model-config flow and **does not** supply an override".
+#
+# Why this exists at all (the §47 root cause):
+# Pre-§47 ``_quick_model_config_hermes`` only wrote ``{default, provider}`` to
+# yaml and relied on Hermes's runtime to fall back through:
+#     yaml.model.base_url > os.getenv(pconfig.base_url_env_var) > pconfig.inference_base_url
+# That fallback chain is *fragile* in practice:
+#   • For ``alibaba`` we already had to wallpaper over it with §33 (pick
+#     intl/cn endpoint, write to ``~/.hermes/.env``) because Hermes's
+#     ``alibaba`` adapter has shipped at least two different ``inference_base_url``
+#     defaults across versions (``coding-intl…`` then ``dashscope-intl…``)
+#     and a wrong default 401s standard DashScope keys → "[No response]".
+#   • For ``gemini`` / ``anthropic`` / ``openai`` / ``xai`` we never wrote
+#     any per-provider env var, so the user had no way to change the
+#     endpoint short of hand-editing ``~/.hermes/.env`` — and Hermes's
+#     defaults for these are blocked in mainland China without a proxy.
+#   • §43i pins yaml on every send, but its "regular provider" branch
+#     deliberately strips ``base_url`` / ``api_key`` / ``api_mode`` from
+#     a previous custom-provider session — meaning even users who *did*
+#     hand-edit yaml saw their override silently wiped on the next message.
+#
+# The §47 fix: pin ``model.base_url`` directly in yaml so the runtime never
+# has to consult env-var fallback or the (drift-prone) Hermes hardcoded
+# default. The values below match Hermes v0.10.0's
+# ``hermes_cli/auth.py::PROVIDER_REGISTRY`` defaults; downstream we let the
+# frontend override these with a per-provider Base URL field (§47 fix 2).
+#
+# Keys MUST match ``_HERMES_MODEL_CATALOG`` provider ids. Providers omitted
+# here (``copilot``, ``custom``, ``copilot-acp``, ``qwen-oauth``) have
+# special routing semantics and intentionally fall through to Hermes's
+# adapter-specific resolution (OAuth subscription, inline custom_providers,
+# external process, etc).
+# Verified against ``hermes-agent`` v0.10.0 PROVIDER_REGISTRY
+# (``hermes_cli/auth.py`` L139-274) on 2026-04-21. Providers omitted
+# below either:
+#   • aren't first-class in PROVIDER_REGISTRY (``openai``, ``mistral``)
+#     and Hermes routes them through OpenRouter / a fallback path —
+#     pinning the wrong url here would lock those flows out;
+#   • have OAuth / external-process / custom-only routing
+#     (``copilot``, ``copilot-acp``, ``qwen-oauth``, ``custom``);
+#   • we couldn't ground-truth verify (``ai-gateway`` ships as
+#     ``ai-gateway.vercel.sh/v1`` but is rarely used — letting it fall
+#     through preserves whatever Hermes already does).
+# When in doubt, omit — caller falls through to existing env-var → Hermes
+# default chain (current behaviour, no regression).
+_HERMES_RECOMMENDED_BASE_URLS: dict[str, str] = {
+    "anthropic":      "https://api.anthropic.com",
+    "openrouter":     "https://openrouter.ai/api/v1",
+    "gemini":         "https://generativelanguage.googleapis.com/v1beta/openai",
+    "deepseek":       "https://api.deepseek.com/v1",
+    "alibaba":        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "zai":            "https://api.z.ai/api/paas/v4",
+    "kimi-coding":    "https://api.moonshot.ai/v1",
+    "kimi-coding-cn": "https://api.moonshot.cn/v1",
+    "arcee":          "https://api.arcee.ai/api/v1",
+    "minimax":        "https://api.minimax.io/anthropic",
+    "minimax-cn":     "https://api.minimaxi.com/anthropic",
+    "xai":            "https://api.x.ai/v1",
+    "opencode-zen":   "https://opencode.ai/zen/v1",
+    "huggingface":    "https://router.huggingface.co/v1",
+    "kilocode":       "https://api.kilo.ai/api/gateway",
+    "xiaomi":         "https://api.xiaomimimo.com/v1",
+}
 
 
 def _current_hermes_dashscope_base_url() -> str:
@@ -4110,16 +4519,11 @@ def _extract_json_obj(raw: str) -> dict | list:
     raise ValueError("No valid JSON found in output")
 
 
-async def _run_agent_json(args: list[str], timeout: int = 30) -> dict | list | None:
-    """Run the active platform's CLI with --json and return parsed output.
-
-    Dispatches to ``_run_openclaw_json`` or ``_run_hermes_json`` depending
-    on the configured platform.
-    """
-    if settings.is_hermes:
-        return await _run_hermes_json(args, timeout=timeout)
-    return await _run_openclaw_json(args, timeout=timeout)
-
+# §53 — removed legacy ``_run_agent_json()``: also a §38-era helper that
+# dispatched to the OpenClaw or Hermes CLI by global ``settings.is_hermes``.
+# Zero callers remain; the live dispatch path goes through
+# ``RuntimeRegistry`` and the per-instance helpers in ``runtime/`` and
+# ``api/routes/skills.py``.
 
 async def _run_hermes_json(args: list[str], timeout: int = 30) -> dict | list | None:
     """Run a hermes CLI command with --json and return parsed output."""
@@ -5071,11 +5475,16 @@ def _build_onboard_scan_data_hermes() -> dict:
     # Without this, Configure would read ``anthropic/claude-opus-4.7`` and
     # try to match provider ``"anthropic"`` against the catalog, which lists
     # the route as ``"openrouter"`` and silently drops the pre-selection.
+    # §43: this is the Hermes onboard-scan path, so the "currently configured
+    # default model" must come from ~/.hermes/config.yaml — NOT _CONFIG_PATH
+    # (= openclaw.json). Pre-§43 the Configure UI was hydrating itself with
+    # whatever model OpenClaw had picked, which masked the real Hermes value
+    # and made post-Configure pre-selection appear stuck on a Hermes-foreign id.
     default_model = ""
     try:
-        if _CONFIG_PATH.exists():
+        if _HERMES_CONFIG_PATH.exists():
             import yaml
-            cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+            cfg = yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
             model_cfg = cfg.get("model", "")
             if isinstance(model_cfg, dict):
                 raw_default = str(model_cfg.get("default", "") or model_cfg.get("model", "")).strip()
@@ -5176,12 +5585,39 @@ def trigger_onboard_scan_preload(force: bool = False) -> None:
 
 
 @router.get("/onboard-scan")
-async def onboard_scan(refresh: bool = False):
-    """Scan the local environment for available providers, channels, skills, hooks."""
+async def onboard_scan(refresh: bool = False, platform: str | None = None):
+    """Scan the local environment for available providers, channels, skills, hooks.
+
+    §52 — ``?platform=`` query parameter lets the caller explicitly pick
+    which platform's scan payload they want, regardless of the global
+    ``settings.is_hermes`` flag. This is required because XSafeClaw now
+    monitors OpenClaw + Hermes + Nanobot **simultaneously** (see §42), so
+    a single ``settings.is_hermes`` value can't decide for routes like
+    ``/openclaw_configure`` vs ``/hermes_configure`` — the route itself
+    must drive the data source.
+
+    Accepted values:
+      - ``platform="hermes"``   → always use ``_build_onboard_scan_data_hermes()``
+      - ``platform="openclaw"`` → always use the OpenClaw CLI-scan path
+      - ``platform=None`` (legacy / no param) → fall back to
+        ``settings.is_hermes`` so existing callers (TownConsole's catalog
+        prefetch, NanobotConfigure's lazy model-list, the §33 endpoint
+        bundles consumer in ModelSetupModal) keep working unchanged.
+    """
     global _onboard_scan_cache, _onboard_scan_version, _onboard_scan_task
 
+    # Normalize the optional override. Anything outside the two known
+    # values silently falls through to the legacy branch — easier to
+    # reason about than a 4xx for an unknown platform string.
+    requested = (platform or "").strip().lower()
+    use_hermes_path = (
+        requested == "hermes"
+        if requested in {"hermes", "openclaw"}
+        else settings.is_hermes
+    )
+
     # ── Hermes fast path — static catalog, no CLI scanning needed ─────────
-    if settings.is_hermes:
+    if use_hermes_path:
         data = _build_onboard_scan_data_hermes()
 
         config_summary: list[str] = []
@@ -5217,6 +5653,18 @@ async def onboard_scan(refresh: bool = False):
                     "presets": _HERMES_DASHSCOPE_ENDPOINTS,
                 },
             },
+            # §47 fix 2 — per-provider recommended Base URLs for the
+            # Configure / quick-model-config flow.  Frontend renders an
+            # *optional* Base URL input for any provider the user picks
+            # (defaulting to the recommended value here as placeholder),
+            # so users in mainland China can redirect ``api.openai.com`` /
+            # ``api.anthropic.com`` / ``generativelanguage.googleapis.com``
+            # to a reachable proxy without having to hand-edit
+            # ``~/.hermes/config.yaml``.  Keys match
+            # ``_HERMES_MODEL_CATALOG`` provider ids; missing entries mean
+            # "no XSafeClaw-pinned default — frontend can still let the
+            # user supply a Base URL, the backend just won't pre-fill it".
+            "provider_recommended_base_urls": _HERMES_RECOMMENDED_BASE_URLS,
             "defaults": {
                 "mode": "local",
                 "gateway_port": settings.hermes_api_port,
@@ -5382,6 +5830,10 @@ class OnboardConfigRequest(BaseModel):
     provider: str = ""
     api_key: str = ""
     model_id: str = ""
+    # Explicit runtime selector — same semantics as ``QuickModelConfigRequest.platform``.
+    # Optional so single-platform clients keep working unchanged; the new
+    # ConfigureSelector multi-card UI sets this explicitly per cardclick.
+    platform: Literal["openclaw", "hermes"] | None = None
     gateway_port: int = Field(default=18789, ge=1, le=65535)
     gateway_bind: str = "loopback"
     gateway_auth_mode: str = "token"
@@ -5980,15 +6432,21 @@ async def _auto_approve_devices() -> None:
         print(f"⚠️  Device auto-approve skipped: {e}")
 
 
-def _install_safeclaw_guard_plugin() -> None:
-    """Install the XSafeClaw guard plugin for the active platform.
+def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> None:
+    """Install the XSafeClaw guard plugin for the requested platform.
 
     - **OpenClaw**: copies TS plugin to ``~/.openclaw/extensions/safeclaw-guard/``
     - **Hermes**: copies Python plugin to ``~/.hermes/plugins/safeclaw-guard/``
+
+    ``platform`` lets callers explicitly target one runtime when several are
+    installed (multi-platform Configure flow). When omitted we fall back to
+    ``settings.is_hermes`` so the legacy single-platform call sites keep
+    working unchanged.
     """
     plugins_root = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugins"
+    target = platform or ("hermes" if settings.is_hermes else "openclaw")
 
-    if settings.is_hermes:
+    if target == "hermes":
         src_dir = plugins_root / "safeclaw-guard-hermes"
         if not src_dir.is_dir():
             return
@@ -6083,13 +6541,28 @@ async def feishu_test(body: FeishuTestRequest):
 
 
 @router.get("/provider-has-key")
-async def provider_has_key(provider: str = ""):
-    """Return whether a provider already has a saved API key (no key content exposed)."""
+async def provider_has_key(provider: str = "", platform: str | None = None):
+    """Return whether a provider already has a saved API key (no key content exposed).
+
+    §53 — ``?platform=`` lets the per-runtime CMD UI ask the right
+    auth store. ModelSetupModal already knows which runtime the user
+    selected (``selectedRuntime.platform``), so on a Hermes-default
+    server it can ask "does OpenClaw have a key for this provider?"
+    instead of getting Hermes's answer by accident. Same legacy
+    fallback to ``settings.is_hermes`` when the parameter is absent.
+    """
     provider = provider.strip()
     if not provider:
         return {"has_key": False}
 
-    if settings.is_hermes:
+    requested = (platform or "").strip().lower()
+    use_hermes_auth = (
+        requested == "hermes"
+        if requested in {"hermes", "openclaw"}
+        else settings.is_hermes
+    )
+
+    if use_hermes_auth:
         return {"has_key": _hermes_provider_has_key(provider)}
 
     _AGENT_STATE_DIR = _OPENCLAW_DIR / "agents" / "main" / "agent"
@@ -6146,124 +6619,58 @@ class QuickModelConfigRequest(BaseModel):
     provider: str
     api_key: str = ""
     model_id: str
-    # Optional Hermes-side endpoint override.  Currently only the ``alibaba``
-    # provider consumes it (see §33 — Hermes's hardcoded ``coding-intl``
-    # default traps standard DashScope keys); other providers ignore it.  The
-    # string is written verbatim into ``~/.hermes/.env`` under the per-provider
-    # env var (``DASHSCOPE_BASE_URL`` for alibaba), so callers must pass a
-    # fully-qualified URL — no path concatenation, no trailing-slash fixups.
+    # Explicit runtime selector — used by the new ConfigureSelector UI to
+    # target a specific framework when the user has more than one installed
+    # (e.g. OpenClaw + Hermes side-by-side after the §42 first-class-Hermes
+    # rollout). When ``None`` the endpoint falls back to ``settings.is_hermes``
+    # for backwards compatibility with single-platform clients.
+    platform: Literal["openclaw", "hermes"] | None = None
+    # Optional Hermes-side endpoint override.  As of §47 every provider
+    # consumes it: the value is written into ``~/.hermes/config.yaml::model.base_url``
+    # (regular providers) and, for ``alibaba``, also mirrored into
+    # ``~/.hermes/.env::DASHSCOPE_BASE_URL`` for backwards compatibility
+    # with §33 (which writes that env var on every save). When omitted,
+    # ``_quick_model_config_hermes`` falls through to
+    # ``_HERMES_RECOMMENDED_BASE_URLS[provider]`` — that's the XSafeClaw-
+    # pinned default that prevents Hermes adapter defaults (``coding-intl``,
+    # ``api.openai.com`` from CN, etc.) from causing "[No response]".
+    # Callers must pass a fully-qualified URL — no path concatenation,
+    # no trailing-slash fixups (we strip a single trailing slash on save).
     base_url: str = ""
     # When True (default), Hermes path auto-restarts the API server after
     # writing ~/.hermes/.env + config.yaml and polls /v1/models to confirm
     # the new model is visible. Set False to batch multiple edits and call
     # POST /system/hermes/apply yourself.
     auto_apply: bool = True
+    # §43d: Custom Endpoint payload — mirror of the matching fields on
+    # ``OnboardConfigRequest``.  ModelSetupModal.jsx (the agent-town wizard)
+    # routes ``authProvider === 'custom'`` through ``/system/onboard-config``
+    # rather than ``/system/quick-model-config`` (see
+    # ``ModelSetupModal.jsx:387-415`` — custom is explicitly excluded from
+    # ``isSimpleSetup``), and ``onboard_config`` then re-packages the body as
+    # a ``QuickModelConfigRequest`` before delegating to
+    # ``_quick_model_config_hermes``.  Without these fields here, the
+    # repackaging silently drops them, ``is_custom`` (§43c) computes False on
+    # the fresh ``QuickModelConfigRequest`` (defaults are empty strings),
+    # the wrong ``model.provider`` slug is written to ~/.hermes/config.yaml,
+    # and the Hermes restart in step 4 raises → FastAPI surfaces it as a
+    # bare 500 on the ModelSetupModal "Save" button.  Defaults are
+    # intentionally identical to ``OnboardConfigRequest`` so the validator
+    # accepts payloads originating from either route.
+    custom_base_url: str = ""
+    custom_model_id: str = ""
+    custom_provider_id: str = ""
+    custom_compatibility: str = "openai"
+    custom_context_window: int = Field(default=_CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW, ge=_OPENCLAW_MIN_CONTEXT_WINDOW)
 
 
-class RemoveConfiguredModelRequest(BaseModel):
-    """Body for ``POST /system/hermes/configured-models/delete``.
-
-    Either ``model_id`` (the prefixed ``slug/bare_id`` form the CMD-UI
-    already carries in its picker state) or the explicit ``slug`` +
-    ``bare_id`` pair can be passed.  ``model_id`` takes precedence when
-    both are supplied; we split it on the first ``/`` to recover the
-    routing slug, which is the same convention §34 / §35 use everywhere
-    else in the Hermes branch.
-    """
-
-    model_id: str = ""
-    slug: str = ""
-    bare_id: str = ""
-
-
-@router.post("/hermes/configured-models/delete")
-async def delete_configured_model(body: RemoveConfiguredModelRequest):
-    """Remove one entry from XSafeClaw's per-user configured-model ledger.
-
-    Hermes-only.  Refuses to delete the model currently active in
-    ``~/.hermes/config.yaml::model.default`` so we never leave Hermes
-    pointing at a model the picker won't show.  Does **not** touch
-    ``~/.hermes/.env`` — the provider's API key stays so any agent that
-    was already created with this ``model_id`` keeps working.
-
-    See §36.
-    """
-    if not settings.is_hermes:
-        raise HTTPException(
-            status_code=400,
-            detail="Configured-model deletion is only available on the Hermes platform.",
-        )
-
-    # 1. Resolve (slug, bare_id) from whichever shape the caller used.
-    slug = (body.slug or "").strip()
-    bare_id = (body.bare_id or "").strip()
-    if body.model_id:
-        full = body.model_id.strip()
-        if "/" in full:
-            split_slug, split_bare = full.split("/", 1)
-            slug = slug or split_slug
-            bare_id = bare_id or split_bare
-        else:
-            # No slash: treat the whole thing as bare_id and require
-            # callers to also pass an explicit slug.  Hermes-side ids
-            # should always be prefixed (post-§35 the ledger normalises
-            # this), so this branch is only hit by hand-rolled requests.
-            bare_id = bare_id or full
-    if not slug or not bare_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing model_id (or slug + bare_id).",
-        )
-
-    # 2. Refuse if the request targets the currently active model.
-    #
-    # Why refuse instead of also clearing config.yaml::model.default:
-    # leaving model.default empty makes Hermes fall back to its own
-    # "auto-detect main provider" path, which is exactly the lottery
-    # that produced the §35 Kimi-zombie surprise.  Forcing the user to
-    # explicitly switch active first keeps the deletion path side-effect-free.
-    active_slug = ""
-    active_bare = ""
-    if _CONFIG_PATH.exists():
-        try:
-            import yaml as _yaml_lib
-            cfg_yaml = _yaml_lib.safe_load(_CONFIG_PATH.read_text("utf-8")) or {}
-            mcfg = cfg_yaml.get("model", "")
-            if isinstance(mcfg, dict):
-                active_bare = str(mcfg.get("default", "") or mcfg.get("model", "")).strip()
-                active_slug = str(mcfg.get("provider", "") or "").strip()
-        except Exception:
-            pass
-
-    if active_slug == slug and active_bare == bare_id:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Cannot delete the model that is currently active in "
-                "~/.hermes/config.yaml. Switch to a different model first, "
-                "then delete this one."
-            ),
-        )
-
-    # 3. Remove from the ledger.
-    removed = _remove_xs_configured_model(slug=slug, bare_id=bare_id)
-
-    # 4. Drop caches so the next /api/chat/available-models read reflects
-    #    the change immediately rather than after the 30 s TTL.  Same
-    #    invalidation pair _quick_model_config_hermes uses.
-    try:
-        from .chat import _available_models_cache
-        _available_models_cache["expires_at"] = 0.0
-    except Exception:
-        pass
-    _invalidate_hermes_configured_cache()
-
-    return {
-        "success": True,
-        "removed": removed,
-        "slug": slug,
-        "bare_id": bare_id,
-    }
+# §46 — Hermes 「删除已配置模型」端点已移除（与 OpenClaw 行为对齐）。
+# 历史实现见 §36；§43 修复过 active-model 误读 openclaw.json 的 bug。
+# 当前策略：configured-model 账本只增不减，删除入口由用户在 cmd 面板内
+# 通过重新配置/覆盖来实现，避免与 §43i「session-bound model」语义打架
+# （删条目导致已绑定 session 在 _ensure_hermes_yaml_pinned_to 阶段 500）。
+# 底层 helper ``_remove_xs_configured_model`` 仍保留为 dormant infrastructure，
+# 不再有调用方；如未来重新引入删除能力可直接复用。
 
 
 @router.post("/quick-model-config")
@@ -6278,7 +6685,9 @@ async def quick_model_config(body: QuickModelConfigRequest):
     if not body.model_id or not body.provider:
         raise HTTPException(status_code=400, detail="provider and model_id are required")
 
-    if settings.is_hermes:
+    target_platform = body.platform or ("hermes" if settings.is_hermes else "openclaw")
+
+    if target_platform == "hermes":
         return await _quick_model_config_hermes(body)
 
     # ── OpenClaw path ─────────────────────────────────────────────────────
@@ -6332,10 +6741,31 @@ async def quick_model_config(body: QuickModelConfigRequest):
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=500, detail="openclaw key setup timed out")
 
+    # §43g: forward Custom Endpoint payload into ``_patch_config_extras``.
+    # ``_patch_config_extras`` (system.py L5921) reads ``body.custom_base_url``
+    # / ``body.custom_model_id`` / ``body.custom_provider_id`` /
+    # ``body.custom_compatibility`` (L6013-6042) to wire up OpenClaw's
+    # ``models.providers.custom`` block — without these forwarded fields, a
+    # third-party caller hitting ``/system/quick-model-config`` with
+    # ``provider="custom-api-key"`` would silently get a no-op patch (custom
+    # branch's gate at L6013 would short-circuit on empty base_url) and
+    # ``body.model_id`` wouldn't be back-filled from
+    # ``custom_provider_id/custom_model_id`` (L6042).  Mirrors §43d but for
+    # the OpenClaw side.  Today's frontend uses ``onboardConfig`` (which
+    # passes ``body`` straight into ``_patch_config_extras`` at
+    # ``onboard_config`` L7013, no re-pack), so this only affects external
+    # callers — but the Pydantic defaults for missing fields are documented
+    # to be empty strings, so existing non-custom callers see zero
+    # behavioural change.
     full_body = OnboardConfigRequest(
         provider=body.provider,
         api_key=body.api_key,
         model_id=body.model_id,
+        custom_base_url=body.custom_base_url or "",
+        custom_model_id=body.custom_model_id or "",
+        custom_provider_id=body.custom_provider_id or "",
+        custom_compatibility=body.custom_compatibility or "openai",
+        custom_context_window=body.custom_context_window or _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW,
     )
     _patch_config_extras(full_body)
 
@@ -6386,6 +6816,14 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
     # Idempotent — only writes when the flag is missing or false.
     _ensure_hermes_api_server_env()
 
+    # §43b: bring the Hermes-API bearer token into agreement on both sides
+    # BEFORE writing model/provider config. Otherwise a fresh XSafeClaw
+    # install on a host that already had Hermes set up would happily save
+    # the model picker, but every subsequent /v1/* call from XSafeClaw's
+    # HermesClient would 401 because settings.hermes_api_key is still empty.
+    # See ``_ensure_hermes_api_key_synced`` for the full decision matrix.
+    key_action, _ = _ensure_hermes_api_key_synced()
+
     # Strip the "-api-key" suffix that the frontend auth method ID carries
     # (e.g. "anthropic-api-key" → "anthropic")
     raw_provider = re.sub(r"-api-key$", "", body.provider)
@@ -6432,42 +6870,203 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         )
 
     # --- 2. Write model + provider to config.yaml ---
+    # §43: target Hermes's own config.yaml, NOT _CONFIG_PATH (which is
+    # ~/.openclaw/openclaw.json, a JSON5 file). Mixing the two corrupted
+    # OpenClaw's config — see §43 for the post-mortem.
     config: dict = {}
-    if _CONFIG_PATH.exists():
+    if _HERMES_CONFIG_PATH.exists():
         try:
-            config = _yaml.safe_load(_CONFIG_PATH.read_text("utf-8")) or {}
+            config = _yaml.safe_load(_HERMES_CONFIG_PATH.read_text("utf-8")) or {}
         except Exception:
             config = {}
 
-    # Split the incoming "<slug>/<bare_id>" id back into the two fields
-    # Hermes's ``config.yaml`` expects — ``model.provider`` for routing and
-    # ``model.default`` for the **bare** id to forward to the upstream API.
-    #
-    # Prior behaviour wrote the full slug-prefixed string into
-    # ``model.default`` (e.g. ``openrouter/anthropic/claude-opus-4.7``).  That
-    # mis-matches Hermes's contract: the ``auxiliary_client`` takes
-    # ``model.default`` verbatim as the outbound model id, so OpenRouter (and
-    # any other provider whose bare ids already contain a ``/``) rejected the
-    # double-prefixed string with ``"... is not a valid model ID"`` and the
-    # agent returned ``[No response]``.  See §34 for the full trace.
-    #
-    # ``split("/", 1)`` cuts only the first ``/``, so aggregator bare ids with
-    # their own ``vendor/model`` form (``anthropic/claude-opus-4.7``,
-    # ``openai/gpt-5.4-mini``) survive intact and get written correctly.
-    model_id = body.model_id
-    if "/" in model_id:
-        hermes_provider, hermes_model = model_id.split("/", 1)
+    # §43c: Custom Endpoint branch.
+    # ``custom-api-key`` is the only provider whose configuration can't be
+    # expressed as "set <ENV_VAR> + write model.default/provider" — Hermes
+    # routes custom calls via an inline ``model.base_url`` + ``model.api_key``
+    # pair plus a matching ``custom_providers`` list entry (see
+    # ``hermes_cli/main.py::_save_custom_provider`` and
+    # ``_model_flow_custom``).  Before this branch existed:
+    #   • API key was silently dropped (no ``envKey`` in the catalog map).
+    #   • ``base_url`` / ``custom_model_id`` / ``custom_compatibility`` were
+    #     never read on the Hermes side (they only feed the OpenClaw
+    #     ``_patch_config_extras`` path, which Hermes never reaches).
+    #   • ``body.model_id`` arrives blank for fresh custom configs, so the
+    #     fall-through wrote ``model.default = ""`` — Hermes then refused to
+    #     apply the new model and kept whatever was previously cached, which
+    #     the user perceived as "the chat still uses my last model".
+    #   • The XSafeClaw ledger recorder early-returns on empty ``model_id``,
+    #     so nothing was persisted; on restart the CMD-UI picker had no
+    #     entry to surface and the just-configured Custom Endpoint vanished.
+    is_custom = (
+        raw_provider == "custom"
+        and (body.custom_base_url or "").strip()
+        and (body.custom_model_id or "").strip()
+    )
+
+    if is_custom:
+        custom_base_url = body.custom_base_url.strip().rstrip("/")
+        custom_model = body.custom_model_id.strip()
+        custom_api_key = (body.api_key or "").strip()
+        # api_mode mirrors Hermes's two supported wire formats. Anything
+        # other than "anthropic" → leave unset so Hermes auto-detects from
+        # the URL (matches ``_model_flow_custom`` line 1652's behaviour).
+        custom_api_mode = "anthropic" if body.custom_compatibility == "anthropic" else ""
+
+        # Display name precedence: explicit ``custom_provider_id`` from the
+        # frontend wins; otherwise derive a friendly slug from the host so
+        # the picker shows something more useful than "custom".  Stays in
+        # sync with ``_auto_provider_name`` in Hermes itself.
+        display_name = (body.custom_provider_id or "").strip()
+        if not display_name:
+            try:
+                from urllib.parse import urlparse
+                host = (urlparse(custom_base_url).hostname or "custom").strip()
+            except Exception:
+                host = "custom"
+            display_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", host).strip("-") or "custom"
+
+        ctx_len = _normalize_context_window(body.custom_context_window)
+
+        # Upsert the custom_providers entry. Match by (name) OR (base_url)
+        # so re-saving an endpoint under the same URL doesn't accumulate
+        # duplicates (mirrors ``_save_custom_provider`` line 1716-1736).
+        providers_list = config.get("custom_providers")
+        if not isinstance(providers_list, list):
+            providers_list = []
+
+        new_entry: dict = {
+            "name": display_name,
+            "base_url": custom_base_url,
+            "model": custom_model,
+            "models": {custom_model: {"context_length": ctx_len}},
+        }
+        if custom_api_key:
+            new_entry["api_key"] = custom_api_key
+        if custom_api_mode:
+            new_entry["api_mode"] = custom_api_mode
+
+        matched_idx: int | None = None
+        for i, existing in enumerate(providers_list):
+            if not isinstance(existing, dict):
+                continue
+            if (existing.get("name") or "").strip() == display_name:
+                matched_idx = i
+                break
+            if (existing.get("base_url") or "").strip().rstrip("/") == custom_base_url:
+                matched_idx = i
+                break
+        if matched_idx is None:
+            providers_list.append(new_entry)
+        else:
+            providers_list[matched_idx] = new_entry
+        config["custom_providers"] = providers_list
+
+        # Hermes's ``model`` block for custom uses literal ``provider:
+        # custom`` plus inline base_url/api_key (see
+        # ``hermes_cli/main.py`` lines 1648-1652).  api_mode left off here
+        # so the runtime auto-detects from the URL (matches Hermes itself).
+        model_block: dict = {
+            "default": custom_model,
+            "provider": "custom",
+            "base_url": custom_base_url,
+        }
+        if custom_api_key:
+            model_block["api_key"] = custom_api_key
+        config["model"] = model_block
+
+        # Slug shape ``custom:<name>`` is the contract used by
+        # ``_fetch_hermes_configured_models`` (see system.py L771 in the
+        # auth-gate probe and chat.py L771 where it's added to
+        # ``authed_slugs``).  Without the prefix the picker hides the
+        # ledger entry on the very next refresh — that's the second half
+        # of "custom model disappears after restart".
+        hermes_provider = f"custom:{display_name}"
+        hermes_model = custom_model
+        # Synthesise a ledger-stable model_id so callers downstream
+        # (``_record_xs_configured_model`` and the picker hydration in
+        # chat.py) all agree on the same identifier.
+        body.model_id = f"{hermes_provider}/{hermes_model}"
     else:
-        hermes_provider = raw_provider
-        hermes_model = model_id
+        # Split the incoming "<slug>/<bare_id>" id back into the two fields
+        # Hermes's ``config.yaml`` expects — ``model.provider`` for routing
+        # and ``model.default`` for the **bare** id to forward to the
+        # upstream API.
+        #
+        # Prior behaviour wrote the full slug-prefixed string into
+        # ``model.default`` (e.g. ``openrouter/anthropic/claude-opus-4.7``).
+        # That mis-matches Hermes's contract: the ``auxiliary_client``
+        # takes ``model.default`` verbatim as the outbound model id, so
+        # OpenRouter (and any other provider whose bare ids already
+        # contain a ``/``) rejected the double-prefixed string with
+        # ``"... is not a valid model ID"`` and the agent returned ``[No
+        # response]``.  See §34 for the full trace.
+        #
+        # ``split("/", 1)`` cuts only the first ``/``, so aggregator bare
+        # ids with their own ``vendor/model`` form
+        # (``anthropic/claude-opus-4.7``, ``openai/gpt-5.4-mini``) survive
+        # intact and get written correctly.
+        model_id = body.model_id
+        if "/" in model_id:
+            hermes_provider, hermes_model = model_id.split("/", 1)
+        else:
+            hermes_provider = raw_provider
+            hermes_model = model_id
 
-    config["model"] = {
-        "default": hermes_model,
-        "provider": hermes_provider,
-    }
+        # §47 fix 1A — write ``model.base_url`` to yaml so Hermes runtime
+        # never has to consult its env-var → adapter-default fallback chain.
+        # The fallback was the source of the "Qwen / Gemini show
+        # [No response]" regression: ``alibaba`` adapters across Hermes
+        # versions ship different ``inference_base_url`` defaults
+        # (``coding-intl…`` rejects standard DashScope keys), and we never
+        # wrote per-provider env-vars for ``gemini`` / ``anthropic`` / etc
+        # so the user had no way to redirect those endpoints. Source-of-
+        # truth precedence (highest first):
+        #   1. ``body.base_url`` — explicit user pick from the new
+        #      Configure "Base URL" field (or §33 alibaba endpoint picker)
+        #   2. previous ``yaml.model.base_url`` if same provider — preserves
+        #      a hand-edited override the user may have made
+        #   3. ``_HERMES_RECOMMENDED_BASE_URLS[provider]`` — XSafeClaw's
+        #      pinned default for this provider
+        #   4. omit — fall through to Hermes adapter default (today's
+        #      behaviour for providers we haven't ground-truth verified)
+        prev_model = config.get("model") if isinstance(config.get("model"), dict) else {}
+        new_model: dict = {
+            "default": hermes_model,
+            "provider": hermes_provider,
+        }
+        effective_base = (body.base_url or "").strip().rstrip("/")
+        if not effective_base and (prev_model.get("provider") or "").strip().lower() == hermes_provider.lower():
+            effective_base = (prev_model.get("base_url") or "").strip().rstrip("/")
+        if not effective_base:
+            effective_base = _HERMES_RECOMMENDED_BASE_URLS.get(hermes_provider, "").strip().rstrip("/")
+        if effective_base:
+            new_model["base_url"] = effective_base
 
-    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CONFIG_PATH.write_text(
+        # Preserve ``api_mode`` only when staying on the same provider —
+        # mirrors Hermes CLI's ``_model_flow_api_key_provider`` behaviour
+        # (sets api_mode for opencode-* family, drops it otherwise). When
+        # the user is *switching* providers, an inherited api_mode could
+        # mis-route the new provider, so we drop it.
+        if (prev_model.get("provider") or "").strip().lower() == hermes_provider.lower():
+            prev_api_mode = (prev_model.get("api_mode") or "").strip()
+            if prev_api_mode:
+                new_model["api_mode"] = prev_api_mode
+
+        config["model"] = new_model
+
+    # §43: hard guard — refuse to yaml-dump into anything under ~/.openclaw.
+    # OpenClaw parses its config with JSON5; YAML output starts with ``agents:``
+    # which JSON5 rejects at column 1. Without this assert the original §39
+    # regression silently overwrote the user's openclaw.json on every Hermes
+    # quick-config save.
+    assert "openclaw" not in str(_HERMES_CONFIG_PATH).lower(), (
+        f"refusing to yaml-dump into {_HERMES_CONFIG_PATH} — "
+        "this would corrupt OpenClaw's JSON5 config (see §43)"
+    )
+
+    _HERMES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _HERMES_CONFIG_PATH.write_text(
         _yaml.dump(config, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
@@ -6496,6 +7095,15 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
     # CMD-UI could keep showing the pre-edit deck for up to 30s after
     # quick-model-config writes to ~/.hermes/.env + config.yaml.
     _invalidate_hermes_configured_cache()
+    # §43i: this path just rewrote ``config.yaml::model.default``; resync
+    # chat.py's in-memory yaml-pin cache so the very next send_message
+    # doesn't redundantly rewrite-to-self (cache miss → no-op disk write,
+    # but we'd waste a write-lock acquire and ~10ms on the file io).
+    try:
+        from .chat import _refresh_hermes_active_yaml_cache_from_disk
+        _refresh_hermes_active_yaml_cache_from_disk()
+    except Exception:
+        pass
 
     # --- 4. Apply: restart Hermes API server + verify readiness ---
     # Mirrors the OpenClaw fast-path, which relies on `openclaw onboard`
@@ -6548,6 +7156,11 @@ async def _quick_model_config_hermes(body: QuickModelConfigRequest) -> dict:
         "applied": bool(body.auto_apply and restart_ok),
         "api_was_running": api_was_running,
         "api_reachable": await _hermes_api_reachable(),
+        # §43b: surface what we did to the Hermes-API bearer token so the
+        # frontend can show a one-line status (e.g. "Mirrored existing
+        # Hermes key into XSafeClaw"). Values come from
+        # ``_ensure_hermes_api_key_synced``.
+        "api_key_action": key_action,
         "output": output,
     }
 
@@ -6559,17 +7172,34 @@ async def onboard_config(body: OnboardConfigRequest):
     - **Hermes**: delegates to the same fast-path as ``quick-model-config``.
     - **OpenClaw**: runs ``openclaw onboard --non-interactive``.
     """
-    if settings.is_hermes:
+    target_platform = body.platform or ("hermes" if settings.is_hermes else "openclaw")
+
+    if target_platform == "hermes":
+        # §43d: forward the Custom Endpoint payload too.  ModelSetupModal.jsx
+        # gates on ``isSimpleSetup`` (L387-389) — custom never qualifies, so
+        # the only way a custom-provider config reaches Hermes is through this
+        # branch.  Skipping these fields used to drop the user's base_url /
+        # api_key / context-window into the void, which (a) made §43c's
+        # ``is_custom`` short-circuit False, (b) wrote ``model.provider:
+        # "custom"`` with no inline credentials, and (c) crashed the
+        # subsequent Hermes restart with a 500 surfaced verbatim to the
+        # frontend ("Request failed with status code 500").
         quick_body = QuickModelConfigRequest(
             provider=body.provider or "",
             api_key=body.api_key or "",
             model_id=body.model_id or "",
+            platform="hermes",
+            custom_base_url=body.custom_base_url or "",
+            custom_model_id=body.custom_model_id or "",
+            custom_provider_id=body.custom_provider_id or "",
+            custom_compatibility=body.custom_compatibility or "openai",
+            custom_context_window=body.custom_context_window or _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW,
         )
         result = await _quick_model_config_hermes(quick_body)
-        _install_safeclaw_guard_plugin()
+        _install_safeclaw_guard_plugin(platform="hermes")
         return {
             "success": True,
-            "config_path": str(_CONFIG_PATH),
+            "config_path": str(_config_path_for_platform("hermes")),
             "workspace": str(_HERMES_DIR / "workspace"),
             "output": result.get("output", ""),
         }
@@ -6665,7 +7295,7 @@ async def onboard_config(body: OnboardConfigRequest):
     _patch_config_extras(body)
 
     # ── Install XSafeClaw Guard plugin into OpenClaw extensions ─────────
-    _install_safeclaw_guard_plugin()
+    _install_safeclaw_guard_plugin(platform="openclaw")
 
     # ── Deploy SAFETY.md & PERMISSION.md into workspace ──────────────
     _deploy_safety_files(body.workspace)
@@ -6697,132 +7327,14 @@ async def onboard_config(body: OnboardConfigRequest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §38  Runtime platform picker
+# §38 framework picker — REMOVED in §42
 #
-# When the CLI supervisor detects both OpenClaw and Hermes installed, it
-# launches the server as a subprocess with ``XSAFECLAW_PICKER_MODE=1``. The
-# middleware in ``api/main.py`` then blocks every /api/* route except the two
-# endpoints below. Once the user makes a choice:
-#   1. we persist the answer to ``~/.xsafeclaw/.runtime-platform-pin``;
-#   2. we schedule ``os._exit(_PICKER_EXIT_CODE)`` via a background thread so
-#      the HTTP response has time to flush;
-#   3. the CLI supervisor sees the magic exit code, reads and deletes the pin
-#      file, then spawns the real server with ``PLATFORM`` fixed.
+# The two endpoints that used to live here (``/runtime-platform-status`` and
+# ``/runtime-platform-pick``) implemented a one-shot subprocess that pinned
+# XSafeClaw to either OpenClaw or Hermes for the rest of the session. With
+# the multi-runtime registry in place, there is no longer any "active
+# platform" to negotiate — the user picks per-session in Agent Town.
+# Discovery of installed frameworks is now done by the registry itself; the
+# install-status endpoint above exposes the per-runtime configuration flags
+# the frontend needs to decide which Configure card to show first.
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Non-zero, unique-looking return code used to signal "user picked a platform"
-# from the picker subprocess back to the CLI supervisor. Any other exit code
-# means the picker died / was cancelled, and the supervisor falls back to
-# platform auto-detection instead of blocking forever.
-_PICKER_EXIT_CODE = 42
-
-# Env var name kept in sync with ``api/main.py``; duplicated here so this
-# module doesn't have to import from the app package it lives inside of.
-_PICKER_MODE_ENV = "XSAFECLAW_PICKER_MODE"
-
-
-def _picker_mode_active() -> bool:
-    return os.environ.get(_PICKER_MODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _runtime_platform_pin_path() -> Path:
-    """CLI-supervisor <-> picker handoff file.
-
-    The pin lives under the XSafeClaw data directory (not under Hermes or
-    OpenClaw homes) so the choice is scoped to XSafeClaw and never leaks into
-    the agent frameworks themselves.
-    """
-    return Path.home() / ".xsafeclaw" / ".runtime-platform-pin"
-
-
-def _detect_installed_frameworks() -> dict:
-    """Report which agent frameworks are installed on this machine.
-
-    Consumed by the picker UI (to render two cards) and — indirectly via the
-    CLI — by the supervisor loop (to decide whether a picker is needed at
-    all). A framework counts as installed when either its binary is on PATH
-    *or* its home directory exists, matching the heuristics used by
-    ``config._detect_platform()``.
-    """
-    hermes_bin = _find_hermes()
-    openclaw_bin = _find_openclaw()
-    hermes_home = (Path.home() / ".hermes").is_dir()
-    openclaw_home = (Path.home() / ".openclaw").is_dir()
-    return {
-        "openclaw_installed": bool(openclaw_bin) or openclaw_home,
-        "hermes_installed": bool(hermes_bin) or hermes_home,
-        "openclaw_path": openclaw_bin,
-        "hermes_path": hermes_bin,
-    }
-
-
-@router.get("/runtime-platform-status")
-async def runtime_platform_status():
-    """Return picker-mode flag plus framework detection.
-
-    The frontend router guard polls this on every navigation: when
-    ``picker_mode === true``, every route except ``/select-framework`` is
-    redirected to the picker. The SelectFramework page itself uses the
-    ``*_installed`` fields to decide which cards to render (a card for a
-    missing framework is disabled / hidden rather than submittable).
-    """
-    info = _detect_installed_frameworks()
-    return {
-        "picker_mode": _picker_mode_active(),
-        **info,
-    }
-
-
-class _RuntimePlatformPickRequest(BaseModel):
-    """Body for POST /api/system/runtime-platform-pick."""
-
-    platform: str = Field(..., pattern=r"^(openclaw|hermes)$")
-
-
-@router.post("/runtime-platform-pick")
-async def runtime_platform_pick(body: _RuntimePlatformPickRequest):
-    """Accept the user's framework choice and signal the CLI supervisor.
-
-    Refuses (409) when the server is NOT in picker mode — this prevents an
-    accidental call during normal operation from triggering a hard exit.
-    On success, writes the choice atomically and schedules process exit with
-    ``_PICKER_EXIT_CODE`` after a short delay so the HTTP response can flush.
-    """
-    if not _picker_mode_active():
-        raise HTTPException(
-            status_code=409,
-            detail="XSafeClaw is not in picker mode; platform pinning is disabled.",
-        )
-
-    # Also reject choices for a framework that isn't actually installed — the
-    # supervisor would just fail to spawn the real server otherwise.
-    info = _detect_installed_frameworks()
-    if body.platform == "hermes" and not info["hermes_installed"]:
-        raise HTTPException(status_code=400, detail="Hermes is not installed on this machine.")
-    if body.platform == "openclaw" and not info["openclaw_installed"]:
-        raise HTTPException(status_code=400, detail="OpenClaw is not installed on this machine.")
-
-    pin_path = _runtime_platform_pin_path()
-    try:
-        pin_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = pin_path.with_suffix(".tmp")
-        tmp.write_text(body.platform, encoding="utf-8")
-        os.replace(tmp, pin_path)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to persist picker choice: {exc}") from exc
-
-    def _exit_after_delay() -> None:
-        # Give the response a moment to leave the socket before killing the
-        # process. ``os._exit`` bypasses uvicorn's graceful shutdown on
-        # purpose — the CLI supervisor is the one in charge of lifecycle.
-        import time as _time
-        _time.sleep(0.6)
-        os._exit(_PICKER_EXIT_CODE)
-
-    threading.Thread(target=_exit_after_delay, daemon=True).start()
-
-    return {
-        "success": True,
-        "platform": body.platform,
-        "pin_path": str(pin_path),
-    }
