@@ -1130,20 +1130,40 @@ async def check_runtime_tool_call(
     return {"action": "block", "reason": _GUARD_BLOCK_REASON}
 
 
+_PROFILE_BY_PLATFORM = {
+    "openclaw": "OpenClaw AI Agent",
+    "hermes": "Hermes AI Agent",
+    "nanobot": "nanobot AI Agent",
+}
+
+
 async def check_tool_call(
     tool_name: str,
     params: dict[str, Any],
     session_key: str,
+    *,
+    platform: str = "openclaw",
+    instance_id: str = "openclaw-default",
+    messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Check a tool call against the guard model using the full session trajectory.
 
-    Fetches the complete conversation history from OpenClaw Gateway,
-    appends the current tool call, and sends the full trajectory to
-    the guard model for evaluation.
+    Trajectory source is decided by the caller:
 
-    Returns immediately if safe.  If unsafe, creates a pending-approval
-    record and **blocks** (awaits) until a human resolves it or the
-    timeout expires.
+    - ``messages`` provided (Hermes plugin): build trajectory directly from
+      the supplied conversation. The Hermes ``pre_tool_call`` hook only
+      receives ``session_id`` so the plugin pre-fetches messages via
+      ``hermes_state.SessionDB.get_messages`` and ships them in the body.
+    - ``messages`` empty + ``platform == "openclaw"``: legacy path —
+      fetch the trajectory from OpenClaw Gateway via ``GatewayClient``.
+    - ``messages`` empty + other platform: skip trajectory fetch (no safe
+      cross-runtime way to obtain history); the guard model receives
+      only the current tool action.
+
+    Unsafe verdicts create a ``PendingApproval`` keyed by the caller's
+    ``platform`` / ``instance_id``, then long-poll for human review until
+    timeout (5 min). Frontend ``Approvals`` page lists every pending
+    item regardless of platform, so Hermes calls show up automatically.
 
     Returns dict with:
       action: "allow" | "block"
@@ -1160,20 +1180,30 @@ async def check_tool_call(
     if not _guard_enabled:
         return {"action": "allow"}
 
-    session_trajectory = await _fetch_session_trajectory(session_key)
+    profile = _PROFILE_BY_PLATFORM.get(platform, "OpenClaw AI Agent")
+
+    if messages:
+        session_trajectory = _build_runtime_trajectory_text(messages, profile=profile)
+    elif platform == "openclaw":
+        session_trajectory = await _fetch_session_trajectory(session_key)
+    else:
+        session_trajectory = ""
 
     current_call = (
         f"\n[AGENT]:\n"
         f"[ACTION]: {json.dumps({'name': tool_name, 'arguments': params}, ensure_ascii=False)}\n"
     )
     trajectory_text = session_trajectory + current_call if session_trajectory else (
-        f"=== Agent Profile ===\nOpenClaw AI Agent\n\n"
+        f"=== Agent Profile ===\n{profile}\n\n"
         f"=== Conversation History ===\n"
         f"\n[AGENT]:\n"
         f"[ACTION]: {json.dumps({'name': tool_name, 'arguments': params}, ensure_ascii=False)}\n"
     )
 
-    print(f"[guard] tool-check: calling guard model for {tool_name} (session={session_key})")
+    print(
+        f"[guard] tool-check: calling guard model for {tool_name} "
+        f"(platform={platform} session={session_key})"
+    )
     try:
         raw = await _call_guard_model(trajectory_text)
         parsed = _parse_guard_output(raw)
@@ -1196,8 +1226,8 @@ async def check_tool_call(
     pending_id = str(uuid.uuid4())
     p = PendingApproval(
         id=pending_id,
-        platform="openclaw",
-        instance_id="openclaw-default",
+        platform=platform,
+        instance_id=instance_id,
         guard_mode="blocking",
         session_key=session_key,
         tool_name=tool_name,
