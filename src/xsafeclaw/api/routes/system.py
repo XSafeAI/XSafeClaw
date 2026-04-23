@@ -6487,6 +6487,141 @@ def _deploy_safety_files(workspace: str) -> None:
             shutil.copy2(src, dst)
 
 
+# §56 — sentinels delimit the XSafeClaw-managed safety block inside
+# ``~/.hermes/config.yaml::agent.system_prompt``. We always rewrite the
+# block on every onboard so SAFETY/PERMISSION updates propagate, but we
+# preserve any user-authored prompt content sitting outside the sentinels.
+_HERMES_SAFETY_BLOCK_BEGIN = "<!-- xsafeclaw:safety-block:begin v1 -->"
+_HERMES_SAFETY_BLOCK_END = "<!-- xsafeclaw:safety-block:end -->"
+
+
+def _build_hermes_safety_block(workspace: str) -> str:
+    """Assemble the SAFETY+PERMISSION text that goes into the ephemeral
+    system prompt. Reads from the deployed workspace first (so user edits
+    win), falls back to the bundled templates when the workspace copy is
+    missing — this matches how the Hermes plugin resolves these files.
+    """
+    templates_dir = Path(__file__).resolve().parent.parent.parent / "data" / "templates"
+    ws = Path(workspace).expanduser()
+
+    sections: list[str] = []
+    titles = {"SAFETY.md": "Safety Policies", "PERMISSION.md": "Permission Boundaries"}
+    for fname in ("SAFETY.md", "PERMISSION.md"):
+        candidates = [ws / fname, templates_dir / fname]
+        body = ""
+        for cand in candidates:
+            if cand.exists():
+                try:
+                    body = cand.read_text(encoding="utf-8").strip()
+                except Exception:
+                    body = ""
+                if body:
+                    break
+        if body:
+            sections.append(f"# {titles[fname]}\n\n{body}")
+
+    if not sections:
+        return ""
+
+    inner = "\n\n".join(sections)
+    return (
+        f"{_HERMES_SAFETY_BLOCK_BEGIN}\n"
+        f"{inner}\n"
+        f"{_HERMES_SAFETY_BLOCK_END}"
+    )
+
+
+def _splice_hermes_safety_block(existing: str, new_block: str) -> str:
+    """Replace the XSafeClaw-managed block inside ``existing`` with
+    ``new_block``, or prepend ``new_block`` if no block exists yet.
+
+    Preserves any user-authored content that lives outside the sentinels
+    so this function is safe to call repeatedly across onboard cycles.
+    """
+    existing = (existing or "").strip()
+    new_block = (new_block or "").strip()
+    if not new_block:
+        return existing
+
+    begin = existing.find(_HERMES_SAFETY_BLOCK_BEGIN)
+    end = existing.find(_HERMES_SAFETY_BLOCK_END)
+    if begin != -1 and end != -1 and end > begin:
+        end_full = end + len(_HERMES_SAFETY_BLOCK_END)
+        merged = (existing[:begin].rstrip() + "\n" + new_block + "\n" + existing[end_full:].lstrip()).strip()
+        return merged
+
+    if existing:
+        return f"{new_block}\n\n{existing}"
+    return new_block
+
+
+def _deploy_hermes_system_prompt(workspace: str) -> None:
+    """§56 — Inject SAFETY+PERMISSION into Hermes's ephemeral system prompt.
+
+    Hermes plugins are forbidden from modifying the system prompt by
+    design (``run_agent.py:8038-8042``: "system prompt is Hermes's
+    territory; plugins contribute context alongside the user's input").
+    The only sanctioned strong-injection point is
+    ``Agent.__init__::ephemeral_system_prompt``, which Gateway loads from
+    ``~/.hermes/config.yaml::agent.system_prompt`` at startup
+    (``gateway/run.py::_load_ephemeral_system_prompt``).
+
+    This function writes (or splices) the safety block into that field
+    using a sentinel-delimited section so user-authored prompt content
+    survives across onboard re-runs. The write is atomic (tmp + rename)
+    to mirror the contract of ``_rewrite_hermes_yaml_model_default``.
+
+    No-op when no safety files are available. Called immediately after
+    ``_deploy_safety_files`` and before ``_quick_model_config_hermes``,
+    so the ensuing ``_restart_hermes_api_server`` picks up the new
+    ``agent.system_prompt`` on first turn.
+    """
+    import yaml as _yaml
+
+    new_block = _build_hermes_safety_block(workspace)
+    if not new_block:
+        return
+
+    cfg: dict = {}
+    if _HERMES_CONFIG_PATH.exists():
+        try:
+            raw = _HERMES_CONFIG_PATH.read_text(encoding="utf-8")
+            cfg = _yaml.safe_load(raw) or {}
+        except Exception:
+            cfg = {}
+
+    if not isinstance(cfg, dict):
+        cfg = {}
+    agent_block = cfg.get("agent")
+    if not isinstance(agent_block, dict):
+        agent_block = {}
+
+    existing_prompt = str(agent_block.get("system_prompt") or "")
+    merged_prompt = _splice_hermes_safety_block(existing_prompt, new_block)
+
+    if merged_prompt == existing_prompt:
+        return
+
+    agent_block["system_prompt"] = merged_prompt
+    cfg["agent"] = agent_block
+
+    tmp_path = _HERMES_CONFIG_PATH.with_suffix(_HERMES_CONFIG_PATH.suffix + ".tmp")
+    try:
+        _HERMES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(
+            _yaml.dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, _HERMES_CONFIG_PATH)
+    except Exception as exc:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise RuntimeError(f"_deploy_hermes_system_prompt: write failed: {exc}") from exc
+
+
 class FeishuTestRequest(BaseModel):
     app_id: str
     app_secret: str
@@ -7205,6 +7340,19 @@ async def onboard_config(body: OnboardConfigRequest):
         # 才能让插件首轮就能从 ~/.hermes/workspace 读到内容。
         _install_safeclaw_guard_plugin(platform="hermes")
         _deploy_safety_files(str(_HERMES_DIR / "workspace"))
+        # §56: 把 SAFETY+PERMISSION 拼进 agent.system_prompt（ephemeral
+        # system prompt 路径），让 Gateway 重启后的 Agent 把策略放到
+        # system role 而不是 user message —— 强约束，对齐 OpenClaw。
+        # 必须在 _quick_model_config_hermes 之前完成，那个调用末尾会
+        # _restart_hermes_api_server，重启后 Gateway 才会重新 load
+        # ephemeral_system_prompt（_load_ephemeral_system_prompt 是
+        # startup-time 一次性读取）。
+        try:
+            _deploy_hermes_system_prompt(str(_HERMES_DIR / "workspace"))
+        except Exception as exc:
+            # 注入失败不应该阻断 onboard —— 工具调用守护链路（§55）仍能用，
+            # 只是少一层 system-prompt 强约束。
+            print(f"[xsafeclaw] hermes system_prompt deploy failed: {exc}", file=sys.stderr)
 
         result = await _quick_model_config_hermes(quick_body)
         return {

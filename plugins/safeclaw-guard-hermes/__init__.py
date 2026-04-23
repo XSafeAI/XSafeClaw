@@ -1,93 +1,46 @@
 """
 XSafeClaw Guard Plugin for Hermes Agent.
 
-1. ``pre_tool_call`` — sends every tool call to XSafeClaw for safety
-   evaluation; unsafe calls are blocked with a reason message.
-2. ``pre_llm_call`` — injects SAFETY.md and PERMISSION.md from the
-   workspace into every conversation turn as user-message context.
+This plugin registers a single hook:
+
+* ``pre_tool_call`` — sends every tool call to XSafeClaw for safety
+  evaluation; unsafe calls are blocked with a reason message and may be
+  long-polled for human approval (see XSafeClaw §55).
 
 This is the Hermes-native counterpart of the OpenClaw TypeScript plugin
 (plugins/safeclaw-guard/index.ts).
+
+History:
+
+* §54 introduced a ``pre_llm_call`` hook that injected SAFETY.md /
+  PERMISSION.md into the **user message** for every turn.
+* §56 removed that hook because Hermes documents the user-message
+  injection path as a weak constraint ("system prompt is Hermes's
+  territory; plugins contribute context alongside the user's input" —
+  ``run_agent.py:8038-8042``). XSafeClaw now writes the same SAFETY +
+  PERMISSION text into ``~/.hermes/config.yaml::agent.system_prompt``
+  during onboard, so Hermes Gateway loads it as ``ephemeral_system_prompt``
+  at startup and prepends it to the **system role** on every API call —
+  the strongest constraint a Hermes plugin can route policies through
+  without forking the agent core. The user-message path also broke
+  prompt cache reuse (one fresh ~10KB block per turn).
 
 Install:
     Copy this directory to ``~/.hermes/plugins/safeclaw-guard/``
 
 Environment variables:
     SAFECLAW_URL       — XSafeClaw backend URL (default: http://localhost:6874)
-    SAFECLAW_WORKSPACE — Path to workspace containing SAFETY.md / PERMISSION.md
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 310
-SAFETY_FILES = ("SAFETY.md", "PERMISSION.md")
-
-# mtime-based file cache: {path_str: (content, mtime)}
-_file_cache: Dict[str, tuple] = {}
-
-
-def _resolve_workspace_dir() -> Optional[Path]:
-    """Resolve the workspace directory holding SAFETY.md / PERMISSION.md.
-
-    Priority:
-      1. ``SAFECLAW_WORKSPACE`` env var (operator override).
-      2. ``$HERMES_HOME/workspace`` (defaults to ``~/.hermes/workspace``) —
-         this matches XSafeClaw onboard's reported workspace path and the
-         Hermes docker entrypoint convention. It only counts as a hit when
-         the directory actually contains ``SAFETY.md`` so we don't return
-         an empty workspace and inject an empty context block.
-      3. Current working directory — kept as a last-resort fallback for
-         users who launch ``hermes`` themselves from inside a project that
-         already ships a ``SAFETY.md``.
-
-    Note: Hermes does not have a top-level ``workspace`` key in
-    ``config.yaml`` (verified against the Config schema in
-    ``hermes_cli/config.py``), so reading it would have always missed.
-    """
-    env_ws = os.environ.get("SAFECLAW_WORKSPACE", "").strip()
-    if env_ws:
-        p = Path(env_ws).expanduser()
-        if p.is_dir():
-            return p
-
-    hermes_home = Path(
-        os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")
-    )
-    standard_ws = hermes_home / "workspace"
-    if standard_ws.is_dir() and (standard_ws / "SAFETY.md").exists():
-        return standard_ws
-
-    cwd = Path.cwd()
-    if (cwd / "SAFETY.md").exists():
-        return cwd
-
-    return None
-
-
-def _read_cached_file(file_path: Path) -> Optional[str]:
-    """Read a file with mtime-based caching."""
-    try:
-        if not file_path.exists():
-            return None
-        mtime = file_path.stat().st_mtime
-        key = str(file_path)
-        cached = _file_cache.get(key)
-        if cached and cached[1] == mtime:
-            return cached[0]
-        content = file_path.read_text(encoding="utf-8").strip()
-        if not content:
-            return None
-        _file_cache[key] = (content, mtime)
-        return content
-    except Exception:
-        return None
 
 
 def _get_base_url() -> str:
@@ -204,36 +157,17 @@ def _pre_tool_call_handler(
     return None
 
 
-def _pre_llm_call_handler(
-    session_id: str = "",
-    user_message: str = "",
-    **kwargs: Any,
-) -> Optional[Dict[str, str]]:
-    """Inject SAFETY.md and PERMISSION.md content into the user message.
-
-    Returns ``{"context": "..."}`` when policy files are found, or
-    ``None`` when no files are available.
-    """
-    ws_dir = _resolve_workspace_dir()
-    if not ws_dir:
-        return None
-
-    sections: list[str] = []
-    for filename in SAFETY_FILES:
-        content = _read_cached_file(ws_dir / filename)
-        if content:
-            sections.append(f"## {filename}\n{content}")
-
-    if not sections:
-        return None
-
-    return {"context": "\n\n".join(sections)}
-
-
 def register(ctx: Any) -> None:
-    """Hermes plugin entry point — register guard hooks."""
+    """Hermes plugin entry point — register guard hooks.
+
+    §56: only ``pre_tool_call`` is registered. SAFETY/PERMISSION
+    injection is now done by XSafeClaw onboard writing
+    ``~/.hermes/config.yaml::agent.system_prompt``, which Gateway loads
+    as ``ephemeral_system_prompt`` at startup and prepends to the
+    **system role** of every API call. See module docstring for the full
+    rationale.
+    """
     ctx.register_hook("pre_tool_call", _pre_tool_call_handler)
-    ctx.register_hook("pre_llm_call", _pre_llm_call_handler)
     logger.info(
         "safeclaw-guard: registered (backend=%s)", _get_base_url(),
     )
