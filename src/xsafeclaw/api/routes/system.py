@@ -6555,6 +6555,39 @@ def _splice_hermes_safety_block(existing: str, new_block: str) -> str:
     return new_block
 
 
+def _ensure_hermes_safety_assets() -> None:
+    """§56b — One-call helper that prepares ALL Hermes-side safety assets:
+
+    1. ``~/.hermes/plugins/safeclaw-guard/`` (XSafeClaw guard plugin, §54)
+    2. ``~/.hermes/workspace/SAFETY.md`` + ``PERMISSION.md`` (§54)
+    3. ``~/.hermes/config.yaml::agent.system_prompt`` (§56 ephemeral prompt)
+
+    Every Hermes onboard / fast-path entry point MUST call this — otherwise
+    the entry point would silently bypass safety injection. This is what
+    bit us in §56b: ``/onboard-config`` was wired up but ``/quick-model-config``
+    wasn't, and the cmd UI's "configure model" button uses the latter.
+
+    All three steps are idempotent and safe to call repeatedly:
+      - plugin copy is overwrite (mtime check inside ``shutil.copy2``)
+      - ``_deploy_safety_files`` skips files that already exist
+      - ``_deploy_hermes_system_prompt`` splices via sentinel so re-runs
+        replace just the safety block
+
+    Failures in step 3 are caught and logged to stderr so they don't
+    abort the onboard flow — the §55 tool-call guard remains effective
+    even if the system-prompt injection misses.
+    """
+    _install_safeclaw_guard_plugin(platform="hermes")
+    _deploy_safety_files(str(_HERMES_DIR / "workspace"))
+    try:
+        _deploy_hermes_system_prompt(str(_HERMES_DIR / "workspace"))
+    except Exception as exc:
+        print(
+            f"[xsafeclaw] hermes system_prompt deploy failed: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _deploy_hermes_system_prompt(workspace: str) -> None:
     """§56 — Inject SAFETY+PERMISSION into Hermes's ephemeral system prompt.
 
@@ -6823,6 +6856,14 @@ async def quick_model_config(body: QuickModelConfigRequest):
     target_platform = body.platform or ("hermes" if settings.is_hermes else "openclaw")
 
     if target_platform == "hermes":
+        # §56b: cmd UI 的 "Configure Model" / 简易 onboard 走这条 fast-path,
+        # 不走 /onboard-config。如果只在 /onboard-config 里挂安全资产部署,
+        # 用户重装/换模型后 ~/.hermes/config.yaml::agent.system_prompt 仍然
+        # 为空,SAFETY/PERMISSION 进不到 system role —— 这正是 §56b 之前的
+        # 漏洞。helper 三步幂等，重复调用零副作用。必须在
+        # _quick_model_config_hermes 之前调用，因为后者末尾会
+        # _restart_hermes_api_server 触发 ephemeral_system_prompt 重载。
+        _ensure_hermes_safety_assets()
         return await _quick_model_config_hermes(body)
 
     # ── OpenClaw path ─────────────────────────────────────────────────────
@@ -7338,21 +7379,12 @@ async def onboard_config(body: OnboardConfigRequest):
         # 第一轮（也常常是唯一一轮）对话失效，必须等到下一次重启才补上。
         # 同理，SAFETY.md / PERMISSION.md 也必须在重启之前写入 workspace，
         # 才能让插件首轮就能从 ~/.hermes/workspace 读到内容。
-        _install_safeclaw_guard_plugin(platform="hermes")
-        _deploy_safety_files(str(_HERMES_DIR / "workspace"))
-        # §56: 把 SAFETY+PERMISSION 拼进 agent.system_prompt（ephemeral
-        # system prompt 路径），让 Gateway 重启后的 Agent 把策略放到
-        # system role 而不是 user message —— 强约束，对齐 OpenClaw。
-        # 必须在 _quick_model_config_hermes 之前完成，那个调用末尾会
-        # _restart_hermes_api_server，重启后 Gateway 才会重新 load
-        # ephemeral_system_prompt（_load_ephemeral_system_prompt 是
-        # startup-time 一次性读取）。
-        try:
-            _deploy_hermes_system_prompt(str(_HERMES_DIR / "workspace"))
-        except Exception as exc:
-            # 注入失败不应该阻断 onboard —— 工具调用守护链路（§55）仍能用，
-            # 只是少一层 system-prompt 强约束。
-            print(f"[xsafeclaw] hermes system_prompt deploy failed: {exc}", file=sys.stderr)
+        # §56b: 三步合一 — plugin / SAFETY+PERMISSION / system_prompt 注入。
+        # 抽成 helper 后 /quick-model-config 也能复用，不再有"两个入口走两套
+        # 注入逻辑"的漂移风险。必须在 _quick_model_config_hermes 之前完成,
+        # 那个调用末尾会 _restart_hermes_api_server，重启后 Gateway 才会
+        # 重新 load ephemeral_system_prompt（startup-time 一次性读取）。
+        _ensure_hermes_safety_assets()
 
         result = await _quick_model_config_hermes(quick_body)
         return {
