@@ -764,6 +764,17 @@ export const systemAPI = {
      * and invoke `hermesApply` explicitly.
      */
     auto_apply?: boolean;
+    /**
+     * Target runtime to write the model config into. The backend resolves
+     * ``target_platform = body.platform or (settings.is_hermes ? 'hermes'
+     * : 'openclaw')`` (see ``api/routes/system.py::quick_model_config``),
+     * so omitting this on a Hermes-default server silently misroutes
+     * OpenClaw configures into ``~/.hermes/config.yaml`` and leaves
+     * ``~/.openclaw/openclaw.json`` stale — caller MUST pin this whenever
+     * the target runtime is unambiguous (URL-pinned wizard, runtime-pinned
+     * modal, etc.).
+     */
+    platform?: 'openclaw' | 'hermes';
   }) =>
     api.post<{
       success: boolean;

@@ -432,11 +432,22 @@ export default function ModelSetupModal({
 
       let modelReady = false;
       if (isSimpleSetup) {
+        // §54 — pin platform to the active runtime so ``quick-model-config``
+        // doesn't get misrouted by the backend's
+        // ``settings.is_hermes ? 'hermes' : 'openclaw'`` fallback. Same
+        // ``runtimePlatform`` guard already used by ``providerHasKey``
+        // above (line 582): forward only the canonical pair, leave any
+        // other value (e.g. ``'nanobot'`` or ``''``) as ``undefined`` so
+        // legacy single-runtime installs still autodetect.
+        const platformParam = runtimePlatform === 'openclaw' || runtimePlatform === 'hermes'
+          ? runtimePlatform
+          : undefined;
         const res = await systemAPI.quickModelConfig({
           provider: effectiveProvider,
           api_key: realApiKey,
           model_id: configuredModelId,
           base_url: endpointBaseUrl || undefined,
+          platform: platformParam,
         });
         modelReady = Boolean(res.data?.model_ready);
       } else {

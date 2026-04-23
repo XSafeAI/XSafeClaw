@@ -1314,11 +1314,26 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
         endpointBaseUrl = (providerBaseUrlOverride[modelProviderId] || '').trim();
       }
 
+      // §54 — pin platform from the wizard's resolved ``agentFlow`` so
+      // ``/system/quick-model-config`` writes to the correct runtime
+      // config file. Without this, the backend falls back to
+      // ``settings.is_hermes ? 'hermes' : 'openclaw'`` (see
+      // ``api/routes/system.py::quick_model_config``) and an OpenClaw
+      // configure on a Hermes-default server silently lands in
+      // ``~/.hermes/config.yaml``, leaving ``openclaw.json`` stale and
+      // gateway-readiness checks failing with "模型仍在由 gateway
+      // 准备中". ``agentFlow`` is resolved by the URL-pinned (§52) /
+      // status-snapshot autodetect before this step is reachable, so it
+      // is never ``'loading'`` here; we still default to ``'openclaw'``
+      // defensively rather than letting it slip through as ``undefined``.
+      const platformParam: 'openclaw' | 'hermes' =
+        agentFlow === 'hermes' ? 'hermes' : 'openclaw';
       const res = await systemAPI.quickModelConfig({
         provider: modelProviderId,
         model_id: modelId,
         api_key: modelApiKey.trim() || undefined,
         base_url: endpointBaseUrl || undefined,
+        platform: platformParam,
       });
       setModelSaveResult('ok');
       setModelDefaultId(modelId);
