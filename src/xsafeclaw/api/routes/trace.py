@@ -91,26 +91,69 @@ def _classify_sessions(
     return active, today
 
 
+def _normalize_session_key(key: str | None) -> str:
+    """Reduce a session_key to its rightmost local segment for cross-namespace matching.
+
+    Different layers tag the same chat with different prefixes:
+
+    - OpenClaw plugin reports ``agent:<agentId>:<chatKey>`` (e.g.
+      ``agent:main:chat-d18f79d5879f``) into ``PendingApproval.session_key``.
+    - Multi-runtime encoder produces ``<platform>::<instance>::<chatKey>``
+      for keys that round-trip through ``encode_chat_session_key``.
+    - The DB ``Session.session_key`` and OpenClaw ``sessions.json`` typically
+      store the bare local segment (``chat-d18f79d5879f``).
+
+    Strict equality therefore misses every cross-layer pairing. We normalize
+    on both sides by taking the rightmost ``::``-or-``:``-separated segment;
+    callers compare on both raw and normalized values to avoid spurious
+    cross-namespace collisions while still healing the prefix mismatch.
+    """
+    if not key:
+        return ""
+    if "::" in key:
+        key = key.rsplit("::", 1)[-1]
+    if ":" in key:
+        key = key.rsplit(":", 1)[-1]
+    return key
+
+
 def _session_ids_with_unresolved_guard_approval(
     session_map: dict[str, Session],
     session_store_index: dict[str, dict[str, Any]],
 ) -> set[str]:
-    """Session IDs that have at least one unresolved in-memory guard approval (session_key match)."""
-    pending_keys = {
-        p.session_key
-        for p in guard_service.get_all_pending()
+    """Session IDs that have at least one unresolved in-memory guard approval.
+
+    Matches on raw ``session_key`` first, then falls back to the normalized
+    rightmost segment so plugin-emitted ``agent:main:chat-xxx`` keys still
+    resolve to DB / sessions.json rows storing the bare ``chat-xxx`` form.
+    Without this fallback the Agent Town pending badge silently no-ops for
+    every OpenClaw-originated unsafe verdict.
+    """
+    pending_items = [
+        p for p in guard_service.get_all_pending()
         if not p.resolved and p.session_key
-    }
-    if not pending_keys:
+    ]
+    if not pending_items:
         return set()
+
+    pending_raw = {p.session_key for p in pending_items}
+    pending_norm = {_normalize_session_key(p.session_key) for p in pending_items}
+    pending_norm.discard("")
+
+    def _match(sk: str | None) -> bool:
+        if not sk:
+            return False
+        if sk in pending_raw:
+            return True
+        norm = _normalize_session_key(sk)
+        return bool(norm) and norm in pending_norm
+
     out: set[str] = set()
     for sid, sess in session_map.items():
-        sk = sess.session_key
-        if sk and sk in pending_keys:
+        if _match(sess.session_key):
             out.add(sid)
     for sid, meta in session_store_index.items():
-        sk = meta.get("session_key")
-        if sk and sk in pending_keys:
+        if _match(meta.get("session_key")):
             out.add(sid)
     return out
 

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical } from 'lucide-react';
+import { Shield, ShieldAlert, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { guardAPI } from '../services/api';
 
 function useTheme() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -21,11 +22,38 @@ export default function Layout() {
   const location = useLocation();
   const { theme, toggle } = useTheme();
   const { locale, setLocale, t } = useI18n();
+  const [pendingCount, setPendingCount] = useState(0);
 
-  const navigation = [
+  // Poll the global PendingApproval list so the sidebar badge reflects unsafe
+  // tool calls awaiting a human reviewer regardless of which runtime / session
+  // produced them. Failures stay silent so a transient backend hiccup never
+  // empties the badge in a way that hides real pending work.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { data } = await guardAPI.pending(false);
+        if (!cancelled) setPendingCount(Array.isArray(data) ? data.length : 0);
+      } catch {
+        // ignore
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
+  const navigation: Array<{
+    name: string;
+    href: string;
+    icon: typeof Shield;
+    desc: string;
+    badge?: number;
+  }> = [
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,       desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
+    { name: 'Approvals',              href: '/approvals',        icon: ShieldAlert,    desc: 'Review unsafe tool calls', badge: pendingCount },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
     { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },
   ];
@@ -67,7 +95,11 @@ export default function Layout() {
               >
                 <Icon className={`w-[18px] h-[18px] ${isActive ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}`} />
                 <span>{item.name}</span>
-                {isActive && (
+                {item.badge && item.badge > 0 ? (
+                  <span className="ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[10px] font-bold animate-pulse">
+                    {item.badge}
+                  </span>
+                ) : isActive && (
                   <ChevronRight className="w-3.5 h-3.5 ml-auto text-accent/50" />
                 )}
               </NavLink>
