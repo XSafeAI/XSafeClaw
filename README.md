@@ -43,15 +43,16 @@
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
-|  🧩   | 2026-04-23 | **Hermes and runtime autostart** — XSafeClaw now discovers OpenClaw, Hermes, and nanobot side by side, and best-effort starts installed gateways when the server boots. |
-|  🐈   | 2026-04-18 | **nanobot local runtime support** — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show mixed-runtime sessions together in Agent Valley. |
-|  🚀   | 2026-04-13 | **v 1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
+| 🎉 | 2026-04-25 | **v1.0.3 发布** — XSafeClaw 公开支持 OpenClaw、nanobot、Hermes 同时并列运行，并修复了若干已知问题。 |
+|  🧩   | 2026-04-23 | **Hermes and runtime autostart** — XSafeClaw now discovers OpenClaw, Hermes, 和 nanobot side by side, 和 best-effort starts installed gateways when the server boots. |
+|  🐈   | 2026-04-18 | **nanobot local runtime support** — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, 和 show mixed-runtime sessions together in Agent Valley. |
+|  🚀   | 2026-04-13 | **v 1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, 和 Onboard Setup. |
 
 ---
 
 ## 🔍 What is XSafeClaw?
 
-XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command. The current runtime registry discovers local OpenClaw, Hermes Agent, and nanobot installations side by side, then lets you choose the runtime per session in Agent Town.
+XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, 和 trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, 和 automated red-team testing — all accessible through a single `xsafeclaw start` command. The current runtime registry discovers local OpenClaw, Hermes Agent, and nanobot installations side by side, then lets you choose the runtime per session in Agent Town.
 
 | Module               | Description                                                  |
 | :------------------- | :----------------------------------------------------------- |
