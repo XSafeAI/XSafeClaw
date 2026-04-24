@@ -25,6 +25,7 @@ from ...config import settings
 from ...database import get_db
 from ...models import Message, Session, ToolCall
 from ...models.event import Event
+from ...runtime.ids import namespace_session_id
 from ...services import guard_service
 
 router = APIRouter()
@@ -33,33 +34,38 @@ RUNNING_CUTOFF = dt.timedelta(hours=1)
 IDLE_CUTOFF = dt.timedelta(hours=24)
 
 
-def _candidate_session_index_paths() -> list[Path]:
-    """Collect every ``sessions.json`` we should consult.
+def _candidate_session_index_paths() -> list[tuple[Path, str, str]]:
+    """Collect every ``sessions.json`` we should consult, tagged with runtime.
 
-    With three runtimes monitored simultaneously, the trace endpoint can no
-    longer assume a single ``_SESSIONS_JSON`` location pinned to the active
-    platform. We probe both the OpenClaw default (``~/.openclaw/agents/main/
-    sessions/sessions.json``) and the Hermes default (``settings.
-    hermes_sessions_dir/sessions.json``); whichever exists contributes
-    metadata to the index. Nanobot has no JSONL session store so it doesn't
-    participate here — its sessions are surfaced through the database tables
-    that this endpoint also reads.
+    Each entry is ``(path, platform, instance_id)`` so downstream code can
+    convert raw ``sessionId`` values into the namespaced form actually used
+    by the DB (``namespace_session_id(platform, instance_id, sid)``). Without
+    this tag the trace endpoint cannot bridge plugin-emitted chat keys to
+    DB session IDs.
     """
-    paths: list[Path] = []
+    paths: list[tuple[Path, str, str]] = []
     seen: set[str] = set()
 
-    def _add(path: Path | None) -> None:
+    def _add(path: Path | None, platform: str, instance_id: str) -> None:
         if path is None:
             return
         resolved = str(Path(path).expanduser())
         if resolved in seen:
             return
         seen.add(resolved)
-        paths.append(Path(resolved))
+        paths.append((Path(resolved), platform, instance_id))
 
-    _add(Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json")
+    _add(
+        Path.home() / ".openclaw" / "agents" / "main" / "sessions" / "sessions.json",
+        "openclaw",
+        "openclaw-default",
+    )
     try:
-        _add(Path(settings.hermes_sessions_dir) / "sessions.json")
+        _add(
+            Path(settings.hermes_sessions_dir) / "sessions.json",
+            "hermes",
+            "hermes-default",
+        )
     except Exception:
         pass
     return paths
@@ -121,13 +127,16 @@ def _session_ids_with_unresolved_guard_approval(
     session_map: dict[str, Session],
     session_store_index: dict[str, dict[str, Any]],
 ) -> set[str]:
-    """Session IDs that have at least one unresolved in-memory guard approval.
+    """Namespaced DB-style session IDs that have at least one unresolved approval.
 
-    Matches on raw ``session_key`` first, then falls back to the normalized
-    rightmost segment so plugin-emitted ``agent:main:chat-xxx`` keys still
-    resolve to DB / sessions.json rows storing the bare ``chat-xxx`` form.
-    Without this fallback the Agent Town pending badge silently no-ops for
-    every OpenClaw-originated unsafe verdict.
+    Pending entries store whatever ``session_key`` the originating hook
+    happened to send: OpenClaw uses ``agent:<agentId>:<chatKey>``, Hermes
+    uses the bare local key, and DB-side rows use the encoded
+    ``platform::instance::chatKey`` form. The only reliable bridge between
+    a chat key and a DB session ID is ``sessions.json`` (key=chatKey,
+    value.sessionId=UUID), so we resolve through there first and fall back
+    to ``Session.session_key`` matching with rightmost-segment normalization
+    for legacy / pre-encoder rows.
     """
     pending_items = [
         p for p in guard_service.get_all_pending()
@@ -140,6 +149,19 @@ def _session_ids_with_unresolved_guard_approval(
     pending_norm = {_normalize_session_key(p.session_key) for p in pending_items}
     pending_norm.discard("")
 
+    chatkey_to_sid: dict[str, str] = {}
+    for sid, meta in session_store_index.items():
+        sk = meta.get("session_key")
+        if sk:
+            chatkey_to_sid.setdefault(sk, sid)
+
+    out: set[str] = set()
+
+    for pkey in pending_raw:
+        sid = chatkey_to_sid.get(pkey)
+        if sid:
+            out.add(sid)
+
     def _match(sk: str | None) -> bool:
         if not sk:
             return False
@@ -148,13 +170,10 @@ def _session_ids_with_unresolved_guard_approval(
         norm = _normalize_session_key(sk)
         return bool(norm) and norm in pending_norm
 
-    out: set[str] = set()
     for sid, sess in session_map.items():
         if _match(sess.session_key):
             out.add(sid)
-    for sid, meta in session_store_index.items():
-        if _match(meta.get("session_key")):
-            out.add(sid)
+
     return out
 
 
@@ -187,17 +206,17 @@ def _truncate(text: str, length: int = 2000) -> str:
 
 
 def _load_session_store_index() -> dict[str, dict[str, Any]]:
-    """Map session_id -> gateway session metadata aggregated from every runtime.
+    """Map *namespaced* session_id -> gateway session metadata.
 
-    Walks the candidate ``sessions.json`` paths from every discovered
-    runtime instance so one trace request can surface OpenClaw + Hermes (+
-    any other framework that follows the JSONL store convention) at the
-    same time. First-write wins on ``session_id`` collisions, which is
-    safe because session IDs are platform-namespaced upstream.
+    Walks every discovered ``sessions.json`` and re-keys each entry by the
+    namespaced form (``namespace_session_id(platform, instance_id, sid)``)
+    that the DB stores in ``Session.session_id``. This unification lets the
+    rest of the endpoint cross-reference DB sessions, ghost (not-yet-ingested)
+    sessions, and pending guard approvals through one consistent ID space.
     """
     index: dict[str, dict[str, Any]] = {}
 
-    for sessions_json in _candidate_session_index_paths():
+    for sessions_json, platform, instance_id in _candidate_session_index_paths():
         if not sessions_json.exists():
             continue
         try:
@@ -209,17 +228,24 @@ def _load_session_store_index() -> dict[str, dict[str, Any]]:
             if not isinstance(entry, dict):
                 continue
 
-            session_id = entry.get("sessionId")
-            if not session_id or session_id in index:
+            source_session_id = entry.get("sessionId")
+            if not source_session_id:
+                continue
+
+            namespaced_sid = namespace_session_id(platform, instance_id, source_session_id)
+            if namespaced_sid in index:
                 continue
 
             delivery = entry.get("deliveryContext") or {}
             origin = entry.get("origin") or {}
-            index[session_id] = {
+            index[namespaced_sid] = {
                 "session_key": session_key,
                 "model_provider": entry.get("modelProvider"),
                 "model": entry.get("model"),
                 "channel": delivery.get("channel") or entry.get("lastChannel") or origin.get("provider"),
+                "platform": platform,
+                "instance_id": instance_id,
+                "source_session_id": source_session_id,
             }
 
     return index
@@ -440,7 +466,51 @@ async def get_trace(
             "working_heat_label": heat_label,
         })
 
-    if not session_ids:
+    # ── 3.5 Ghost agents: pending exists but DB ingest hasn't caught up ──
+    # Guard hooks fire the moment a tool call is emitted, often before the
+    # JSONL writer has flushed and the runtime ingester has parsed the new
+    # session into the DB. Without this branch the chat shows up nowhere
+    # in Agent Town until ingest finishes (which can be several seconds —
+    # or never, if the session never produces another event). We bridge by
+    # synthesizing a minimal pending-card from sessions.json metadata,
+    # keyed by the same namespaced sid the real ingest will eventually
+    # produce, so the ghost dedups cleanly once ingest catches up.
+    chatkey_to_sid: dict[str, str] = {}
+    for store_sid, meta in session_store_index.items():
+        sk = meta.get("session_key")
+        if sk:
+            chatkey_to_sid.setdefault(sk, store_sid)
+
+    known_sids: set[str] = {a["id"] for a in agents}
+    for pending_item in all_pending_items:
+        if pending_item.resolved or not pending_item.session_key:
+            continue
+        pkey = pending_item.session_key
+        ghost_sid = chatkey_to_sid.get(pkey)
+        if not ghost_sid or ghost_sid in known_sids:
+            continue
+        known_sids.add(ghost_sid)
+        ghost_meta = session_store_index.get(ghost_sid, {})
+        agents.append({
+            "id": ghost_sid,
+            "name": f"Agent-{_short_id(ghost_sid)}",
+            "pid": _short_id(ghost_sid),
+            "provider": ghost_meta.get("model_provider") or "unknown",
+            "model": ghost_meta.get("model") or "",
+            "status": "pending",
+            "first_seen_at": "",
+            "session_key": pkey,
+            "platform": ghost_meta.get("platform"),
+            "instance_id": ghost_meta.get("instance_id"),
+            "channel": ghost_meta.get("channel"),
+            "dialog_turns_total": 0,
+            "human_interventions_total": intervention_counts_by_session_key.get(pkey, 0),
+            "activity_heat_24h": [0] * 24,
+            "working_heat_score": 0,
+            "working_heat_label": "dormant",
+        })
+
+    if not agents:
         return {"agents": [], "events": []}
 
     # ── 4. Messages for all monitor-visible sessions ────────────────
