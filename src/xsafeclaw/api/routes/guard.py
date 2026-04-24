@@ -217,6 +217,18 @@ class ToolCheckRequest(BaseModel):
     tool_name: str
     params: dict = {}
     session_key: str = ""
+    # §55: which runtime is calling. Defaults preserve the legacy OpenClaw
+    # behaviour so the previously deployed TS plugin (which only sent
+    # tool_name / params / session_key) still routes through the OpenClaw
+    # branch byte-for-byte.
+    platform: str = "openclaw"
+    instance_id: str = "openclaw-default"
+    # §55: optional pre-fetched trajectory. Hermes's pre_tool_call hook
+    # has no access to the conversation history, so its plugin pulls
+    # messages from hermes_state.SessionDB and ships them with the
+    # request. OpenClaw plugin keeps sending [] and the server falls back
+    # to GatewayClient — same as before.
+    messages: list[dict[str, Any]] = []
 
 
 class ToolCheckResponse(BaseModel):
@@ -231,6 +243,9 @@ async def tool_check(body: ToolCheckRequest):
         tool_name=body.tool_name,
         params=body.params,
         session_key=body.session_key,
+        platform=body.platform,
+        instance_id=body.instance_id,
+        messages=body.messages,
     )
     return ToolCheckResponse(**result)
 

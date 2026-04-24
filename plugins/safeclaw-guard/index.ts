@@ -83,10 +83,18 @@ export default function register(api: OpenClawPluginApi) {
       const resp = await fetch(toolCheckUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // §55: explicit platform/instance_id so the backend can route
+        // PendingApproval correctly when multiple runtimes share the
+        // /tool-check endpoint (Hermes also calls this same URL now).
+        // The values match the backend defaults, so older XSafeClaw
+        // builds that don't read these fields still see identical
+        // behaviour.
         body: JSON.stringify({
           tool_name: event.toolName,
           params: event.params,
           session_key: ctx.sessionKey || "",
+          platform: "openclaw",
+          instance_id: "openclaw-default",
         }),
         signal: controller.signal,
       });
