@@ -23,7 +23,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..runtime_helpers import get_instance, list_instances, runtime_registry, serialize_instance
+from ..runtime_helpers import (
+    get_instance,
+    list_instances,
+    prime_instances_cache,
+    runtime_registry,
+    serialize_instance,
+)
 from ...runtime.nanobot import (
     DEFAULT_NANOBOT_GATEWAY_HOST,
     DEFAULT_NANOBOT_GATEWAY_PORT,
@@ -123,7 +129,7 @@ _NANOBOT_PROVIDER_OPTIONS = [
     {"id": "anthropic", "name": "Anthropic", "default_model": "anthropic/claude-opus-4-5"},
     {"id": "openai", "name": "OpenAI", "default_model": "openai/gpt-4.1"},
     {"id": "openrouter", "name": "OpenRouter", "default_model": "openrouter/anthropic/claude-sonnet-4"},
-    {"id": "deepseek", "name": "DeepSeek", "default_model": "deepseek/deepseek-chat"},
+    {"id": "deepseek", "name": "DeepSeek", "default_model": "deepseek/deepseek-v4-flash"},
     {"id": "gemini", "name": "Gemini", "default_model": "gemini/gemini-2.5-pro"},
     {"id": "moonshot", "name": "Moonshot", "default_model": "moonshot/kimi-k2"},
     {"id": "dashscope", "name": "DashScope", "default_model": "dashscope/qwen-plus"},
@@ -136,6 +142,24 @@ _NANOBOT_PROVIDER_OPTIONS = [
     {"id": "githubCopilot", "name": "GitHub Copilot", "default_model": "githubCopilot/gpt-4.1"},
 ]
 _NANOBOT_PROVIDER_IDS = {item["id"] for item in _NANOBOT_PROVIDER_OPTIONS}
+_NANOBOT_PROVIDER_CATALOG_ALIASES: dict[str, tuple[str, ...]] = {
+    "gemini": ("gemini", "google"),
+    "dashscope": ("dashscope", "alibaba", "qwen-portal", "modelstudio"),
+    "zhipu": ("zhipu", "zai"),
+    "moonshot": ("moonshot", "kimi-coding", "kimi-coding-cn"),
+    "minimax": ("minimax", "minimax-cn"),
+    "openaiCodex": ("openaiCodex", "openai"),
+    "githubCopilot": ("githubCopilot", "copilot"),
+    "vllm": ("vllm", "custom"),
+}
+_NANOBOT_PROVIDER_EXTRA_FALLBACK_MODELS: dict[str, list[dict[str, Any]]] = {
+    "deepseek": [
+        {"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": False},
+        {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": False},
+        {"id": "deepseek/deepseek-chat", "name": "deepseek-chat", "reasoning": False},
+        {"id": "deepseek/deepseek-reasoner", "name": "deepseek-reasoner", "reasoning": True},
+    ],
+}
 _HERMES_EXECUTABLES = (
     ("hermes.cmd", "hermes.exe", "hermes.bat", "hermes.ps1", "hermes")
     if os.name == "nt"
@@ -1078,6 +1102,127 @@ def _redacted_nanobot_provider_configs(providers: dict[str, Any]) -> dict[str, d
     return redacted
 
 
+def _nanobot_provider_catalog_aliases(provider_id: str) -> tuple[str, ...]:
+    aliases = _NANOBOT_PROVIDER_CATALOG_ALIASES.get(provider_id)
+    if aliases:
+        return aliases
+    return (provider_id,)
+
+
+def _normalize_nanobot_catalog_model_id(provider_id: str, model_id: str) -> str:
+    raw = str(model_id or "").strip()
+    if not raw:
+        return ""
+    for alias in _nanobot_provider_catalog_aliases(provider_id):
+        prefix = f"{alias}/"
+        if raw.lower().startswith(prefix.lower()):
+            return f"{provider_id}/{raw[len(prefix):]}"
+    if "/" not in raw:
+        return f"{provider_id}/{raw}"
+    return raw
+
+
+def _nanobot_fallback_models_for_provider(provider_id: str) -> list[dict[str, Any]]:
+    defaults = next((item for item in _NANOBOT_PROVIDER_OPTIONS if item["id"] == provider_id), None)
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_entry(model_id: str, *, name: str | None = None, reasoning: bool = False) -> None:
+        normalized_id = _normalize_nanobot_catalog_model_id(provider_id, model_id)
+        if not normalized_id:
+            return
+        key = normalized_id.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        models.append(
+            {
+                "id": normalized_id,
+                "name": name or normalized_id.split("/", 1)[1],
+                "contextWindow": 0,
+                "reasoning": reasoning,
+                "available": True,
+                "input": "text",
+            }
+        )
+
+    if defaults:
+        add_entry(str(defaults["default_model"]))
+    for extra in _NANOBOT_PROVIDER_EXTRA_FALLBACK_MODELS.get(provider_id, []):
+        add_entry(
+            str(extra.get("id") or ""),
+            name=str(extra.get("name") or "") or None,
+            reasoning=bool(extra.get("reasoning")),
+        )
+    return models
+
+
+async def _build_nanobot_model_catalog(refresh: bool = False) -> dict[str, Any]:
+    providers: dict[str, dict[str, Any]] = {
+        option["id"]: {
+            "id": option["id"],
+            "name": option["name"],
+            "models": [],
+        }
+        for option in _NANOBOT_PROVIDER_OPTIONS
+    }
+    seen: dict[str, set[str]] = {provider_id: set() for provider_id in providers}
+
+    def add_model(provider_id: str, model: dict[str, Any]) -> None:
+        raw_id = str(model.get("id") or "").strip()
+        normalized_id = _normalize_nanobot_catalog_model_id(provider_id, raw_id)
+        if not normalized_id:
+            return
+        key = normalized_id.lower()
+        if key in seen[provider_id]:
+            return
+        seen[provider_id].add(key)
+        providers[provider_id]["models"].append(
+            {
+                "id": normalized_id,
+                "name": str(model.get("name") or normalized_id.split("/", 1)[1]).strip(),
+                "contextWindow": int(model.get("contextWindow") or 0),
+                "reasoning": bool(model.get("reasoning")),
+                "available": bool(model.get("available", True)),
+                "input": str(model.get("input") or "text"),
+            }
+        )
+
+    try:
+        scan_data = await _get_openclaw_onboard_scan_data(refresh=refresh)
+    except Exception:
+        scan_data = {}
+
+    for provider_info in scan_data.get("model_providers", []) or []:
+        scan_provider_id = str(provider_info.get("id") or "").strip().lower()
+        models = provider_info.get("models", []) or []
+        for provider_id in providers:
+            aliases = _nanobot_provider_catalog_aliases(provider_id)
+            alias_keys = {alias.lower() for alias in aliases}
+            provider_matches = scan_provider_id in alias_keys
+            for model in models:
+                model_id = str(model.get("id") or "").strip().lower()
+                id_matches = any(model_id.startswith(f"{alias.lower()}/") for alias in aliases)
+                if provider_matches or id_matches:
+                    add_model(provider_id, model)
+
+    for provider_id in providers:
+        for model in _nanobot_fallback_models_for_provider(provider_id):
+            add_model(provider_id, model)
+        providers[provider_id]["models"].sort(key=lambda item: str(item.get("name") or item.get("id") or "").lower())
+
+    config_exists, model_configured, provider, model = _nanobot_config_flags()
+    default_model = ""
+    if config_exists and model_configured and provider and model:
+        default_model = _normalize_nanobot_catalog_model_id(provider, model)
+
+    return {
+        "provider_options": _NANOBOT_PROVIDER_OPTIONS,
+        "model_providers": list(providers.values()),
+        "default_model": default_model,
+    }
+
+
 def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
     path = Path(config_path or NANOBOT_DEFAULT_CONFIG).expanduser()
     config_exists = path.exists()
@@ -1241,6 +1386,12 @@ async def get_nanobot_config():
     return _nanobot_config_response()
 
 
+@router.get("/nanobot/model-catalog")
+async def get_nanobot_model_catalog(refresh: bool = False):
+    """Return the normalized model catalog used by Nanobot Configure."""
+    return await _build_nanobot_model_catalog(refresh=refresh)
+
+
 @router.post("/nanobot/config")
 async def set_nanobot_config(body: NanobotConfigRequest):
     """Write the default nanobot configuration used by the setup wizard."""
@@ -1264,7 +1415,7 @@ async def set_nanobot_config(body: NanobotConfigRequest):
     )
     response = _nanobot_config_response(path)
     try:
-        instances = await runtime_registry.discover()
+        instances = prime_instances_cache(await runtime_registry.discover())
     except Exception:
         instances = []
     return {
@@ -1368,8 +1519,11 @@ async def set_nanobot_guard_config(instance_id: str, body: NanobotGuardConfigReq
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    refreshed_instance = await get_instance(instance_id)
-    instances = await list_instances()
+    instances = prime_instances_cache(await runtime_registry.discover())
+    refreshed_instance = next(
+        (item for item in instances if item.instance_id == instance_id),
+        instance,
+    )
     return {
         "instance_id": refreshed_instance.instance_id,
         "platform": refreshed_instance.platform,
@@ -2680,7 +2834,7 @@ async def init_default_nanobot():
         mode="blocking",
         plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
     )
-    instances = await runtime_registry.discover()
+    instances = prime_instances_cache(await runtime_registry.discover())
 
     # §48 — best-effort auto-start of the nanobot gateway now that the
     # config file (which the gateway needs to bind its port + channels)
@@ -3705,8 +3859,10 @@ PROVIDERS: list[dict] = [
         "api": "openai-completions",
         "keyUrl": "https://platform.deepseek.com/api_keys",
         "models": [
-            {"id": "deepseek-chat", "name": "DeepSeek V3", "reasoning": False},
-            {"id": "deepseek-reasoner", "name": "DeepSeek R1", "reasoning": True},
+            {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": False},
+            {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": False},
+            {"id": "deepseek-chat", "name": "deepseek-chat", "reasoning": False},
+            {"id": "deepseek-reasoner", "name": "deepseek-reasoner", "reasoning": True},
         ],
     },
     {
@@ -5523,6 +5679,51 @@ def _build_onboard_scan_data_hermes() -> dict:
 
 def _count_scan_models(data: dict) -> int:
     return sum(len(p.get("models", [])) for p in data.get("model_providers", []))
+
+
+async def _get_openclaw_onboard_scan_data(refresh: bool = False) -> dict[str, Any]:
+    """Return the OpenClaw catalog payload, reusing the existing scan cache."""
+    global _onboard_scan_cache, _onboard_scan_version, _onboard_scan_task
+
+    if refresh:
+        _onboard_scan_cache.clear()
+        _onboard_scan_version = ""
+
+    version = _get_openclaw_version_sync()
+    cache_matches = bool(
+        _onboard_scan_cache
+        and (
+            (version and _onboard_scan_version == version)
+            or (not version and _onboard_scan_cache.get("model_providers"))
+        )
+    )
+    if cache_matches:
+        return _onboard_scan_cache
+
+    if _onboard_scan_task and not _onboard_scan_task.done():
+        print("⏳ Waiting for background onboard-scan preload...")
+        try:
+            await asyncio.wait_for(asyncio.shield(_onboard_scan_task), timeout=150)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    cache_matches = bool(
+        _onboard_scan_cache
+        and (
+            (version and _onboard_scan_version == version)
+            or (not version and _onboard_scan_cache.get("model_providers"))
+        )
+    )
+    if cache_matches:
+        return _onboard_scan_cache
+
+    data = await _build_onboard_scan_data()
+    if data.get("model_providers"):
+        _onboard_scan_cache = data
+        if version:
+            _onboard_scan_version = version
+            _save_scan_to_disk(data, version)
+    return data
 
 
 async def _preload_onboard_scan() -> None:

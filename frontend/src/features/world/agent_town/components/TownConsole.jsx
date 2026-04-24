@@ -8,6 +8,7 @@ import {
   normalizeTownData,
 } from '../data/mockData';
 import { systemAPI } from '../../../../services/api';
+import { useRuntimeInstances } from '../../../../hooks/useAPI';
 import { useI18n } from '../../../../i18n';
 import ControlTab from './ControlTab';
 import CrewTab from './CrewTab';
@@ -1303,7 +1304,6 @@ export default function TownConsole({
   const [traceData, setTraceData] = useState(buildConsoleData(null));
   const [dashboardEvents, setDashboardEvents] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState([]);
-  const [runtimeInstances, setRuntimeInstances] = useState([]);
   const [selectedRuntimeId, setSelectedRuntimeId] = useState('');
   const [availableModels, setAvailableModels] = useState([]);
   const [defaultModel, setDefaultModel] = useState('');
@@ -1360,6 +1360,7 @@ export default function TownConsole({
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
   const [pendingImagesMap, setPendingImagesMap] = useState({});
   const [nanobotInstalled, setNanobotInstalled] = useState(null);
+  const runtimeInstancesQuery = useRuntimeInstances(!USE_AGENT_TOWN_MOCK);
   const streamControllerRef = useRef(null);
   const stopRequestedRef = useRef(false);
   const mockReplyTimeoutRef = useRef(null);
@@ -1376,6 +1377,29 @@ export default function TownConsole({
 
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024;
+
+  const runtimeInstances = useMemo(() => {
+    if (USE_AGENT_TOWN_MOCK) {
+      return [
+        {
+          instance_id: 'openclaw-default',
+          platform: 'openclaw',
+          display_name: 'OpenClaw',
+          enabled: true,
+          is_default: true,
+          capabilities: { chat: true, model_list: true },
+          health_status: 'healthy',
+        },
+      ];
+    }
+
+    const instances = Array.isArray(runtimeInstancesQuery.data?.instances)
+      ? runtimeInstancesQuery.data.instances
+      : [];
+    return instances.filter((instance) => (
+      instance?.enabled !== false && instance?.capabilities?.chat
+    ));
+  }, [runtimeInstancesQuery.data]);
 
   const selectedRuntime = useMemo(() => (
     runtimeInstances.find((instance) => instance.instance_id === selectedRuntimeId)
@@ -1432,43 +1456,29 @@ export default function TownConsole({
     modelValidationJobsRef.current.clear();
   }, []);
 
-  const loadRuntimeInstances = useCallback(async () => {
-    if (USE_AGENT_TOWN_MOCK) {
-      const mockRuntime = {
-        instance_id: 'openclaw-default',
-        platform: 'openclaw',
-        display_name: 'OpenClaw',
-        enabled: true,
-        is_default: true,
-        capabilities: { chat: true, model_list: true },
-        health_status: 'healthy',
-      };
-      setRuntimeInstances([mockRuntime]);
-      setSelectedRuntimeId((prev) => prev || mockRuntime.instance_id);
+  useEffect(() => {
+    if (USE_AGENT_TOWN_MOCK) return;
+    if (!runtimeInstancesQuery.isError) return;
+    console.warn('[TownConsole] runtime instances fetch error:', runtimeInstancesQuery.error);
+  }, [runtimeInstancesQuery.error, runtimeInstancesQuery.isError]);
+
+  useEffect(() => {
+    if (runtimeInstances.length === 0) {
+      setSelectedRuntimeId('');
       return;
     }
 
-    try {
-      const response = await systemAPI.instances();
-      const instances = Array.isArray(response?.data?.instances) ? response.data.instances : [];
-      const chatInstances = instances.filter((instance) => (
-        instance?.enabled !== false && instance?.capabilities?.chat
-      ));
-      setRuntimeInstances(chatInstances);
-      setSelectedRuntimeId((prev) => {
-        if (prev && chatInstances.some((instance) => instance.instance_id === prev)) {
-          return prev;
-        }
-        return (
-          chatInstances.find((instance) => instance.platform === 'openclaw')?.instance_id
-          || chatInstances[0]?.instance_id
-          || ''
-        );
-      });
-    } catch (err) {
-      console.warn('[TownConsole] runtime instances fetch error:', err);
-    }
-  }, []);
+    setSelectedRuntimeId((prev) => {
+      if (prev && runtimeInstances.some((instance) => instance.instance_id === prev)) {
+        return prev;
+      }
+      return (
+        runtimeInstances.find((instance) => instance.platform === 'openclaw')?.instance_id
+        || runtimeInstances[0]?.instance_id
+        || ''
+      );
+    });
+  }, [runtimeInstances]);
 
   const loadAvailableModels = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
@@ -1702,7 +1712,6 @@ export default function TownConsole({
     let disposed = false;
     const load = async () => {
       if (disposed) return;
-      await loadRuntimeInstances();
       await loadConsoleData();
     };
 
@@ -1713,7 +1722,7 @@ export default function TownConsole({
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [loadAvailableModels, loadConsoleData, loadRuntimeInstances]);
+  }, [loadAvailableModels, loadConsoleData]);
 
   useEffect(() => {
     if (!modelPickerOpen) return;

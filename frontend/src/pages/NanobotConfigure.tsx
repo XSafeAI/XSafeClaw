@@ -22,24 +22,15 @@ import {
   type NanobotConfigPayload,
   type NanobotConfigResponse,
   type NanobotGuardMode,
+  type NanobotModelCatalogModel,
+  type NanobotModelCatalogProvider,
+  type NanobotModelCatalogResponse,
   type NanobotProviderOption,
 } from '../services/api';
 import { useI18n } from '../i18n';
 
-interface ModelInfo {
-  id: string;
-  name: string;
-  contextWindow?: number;
-  reasoning?: boolean;
-  available?: boolean;
-  input?: string;
-}
-
-interface ModelProviderInfo {
-  id: string;
-  name: string;
-  models: ModelInfo[];
-}
+type ModelInfo = NanobotModelCatalogModel;
+type ModelProviderInfo = NanobotModelCatalogProvider;
 
 interface ModelChoice {
   id: string;
@@ -71,7 +62,7 @@ const copy = {
     subtitle: '按步骤写入 ~/.nanobot/config.json。快速开始只配置模型与密钥，其余使用默认值。',
     loading: '正在读取 Nanobot 配置...',
     loadFailed: '读取 Nanobot 配置失败',
-    catalogFailed: 'OpenClaw 模型目录暂不可用，已回退到当前 provider 的默认模型。',
+    catalogFailed: 'Nanobot 模型目录暂不可用，已回退到当前 provider 的默认模型。',
     backSetup: '返回安装向导',
     enterValley: '进入 Agent Valley',
     editAgain: '继续编辑',
@@ -118,14 +109,14 @@ const copy = {
     },
     model: {
       title: '模型与密钥',
-      subtitle: '先选择 provider，再从 OpenClaw 模型目录选择模型 ID；也可以手动输入。',
+      subtitle: '先选择 provider，再选择模型 ID；也可以手动输入。',
       provider: 'Provider',
       providerPlaceholder: '选择 provider...',
       providerHint: '首次打开不会预填 provider。选择 provider 后才能填写对应 API Key。',
       modelId: '模型 ID',
       chooseModel: '选择模型...',
       searchModels: '搜索模型...',
-      catalogLoading: '正在读取 OpenClaw 模型目录...',
+      catalogLoading: '正在读取 Nanobot 模型目录...',
       defaultFallback: '默认推荐',
       reasoningTag: ' · 推理',
       enterManual: '手动输入模型 ID',
@@ -215,7 +206,7 @@ const copy = {
     subtitle: 'Write ~/.nanobot/config.json step by step. QuickStart only configures model and secret; everything else uses defaults.',
     loading: 'Reading Nanobot config...',
     loadFailed: 'Failed to read Nanobot config',
-    catalogFailed: 'OpenClaw model catalog is unavailable, falling back to the selected provider default.',
+    catalogFailed: 'Nanobot model catalog is unavailable, falling back to the selected provider default.',
     backSetup: 'Back to Setup',
     enterValley: 'Enter Agent Valley',
     editAgain: 'Edit Again',
@@ -262,14 +253,14 @@ const copy = {
     },
     model: {
       title: 'Model and Secret',
-      subtitle: 'Choose a provider first, then pick a model ID from the OpenClaw catalog or enter one manually.',
+      subtitle: 'Choose a provider first, then pick a model ID or enter one manually.',
       provider: 'Provider',
       providerPlaceholder: 'Choose a provider...',
       providerHint: 'No provider is preselected on first load. Choose one before editing provider-specific secrets.',
       modelId: 'Model ID',
       chooseModel: 'Choose a model...',
       searchModels: 'Search models...',
-      catalogLoading: 'Reading OpenClaw model catalog...',
+      catalogLoading: 'Reading Nanobot model catalog...',
       defaultFallback: 'Provider default',
       reasoningTag: ' · reasoning',
       enterManual: 'Enter model ID manually',
@@ -1047,6 +1038,7 @@ export default function NanobotConfigure() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [showWsToken, setShowWsToken] = useState(false);
   const [manualModel, setManualModel] = useState(false);
+  const [catalogProviderOptions, setCatalogProviderOptions] = useState<NanobotProviderOption[]>([]);
   const [modelProviders, setModelProviders] = useState<ModelProviderInfo[]>([]);
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -1076,9 +1068,10 @@ export default function NanobotConfigure() {
       setModelCatalogLoading(true);
       setModelCatalogError('');
       try {
-        const res = await systemAPI.onboardScan();
+        const res = await systemAPI.getNanobotModelCatalog();
         if (cancelled) return;
-        const data = res.data as { model_providers?: ModelProviderInfo[] };
+        const data = res.data as NanobotModelCatalogResponse;
+        setCatalogProviderOptions(Array.isArray(data.provider_options) ? data.provider_options : []);
         setModelProviders(Array.isArray(data.model_providers) ? data.model_providers : []);
       } catch {
         if (!cancelled) setModelCatalogError(labels.catalogFailed);
@@ -1089,7 +1082,9 @@ export default function NanobotConfigure() {
     return () => { cancelled = true; };
   }, [labels.catalogFailed]);
 
-  const providerOptions = config?.provider_options || [];
+  const providerOptions = catalogProviderOptions.length > 0
+    ? catalogProviderOptions
+    : (config?.provider_options || []);
   const providerSelected = Boolean(form.provider.trim());
   const providerState = providerSelected ? config?.provider_configs?.[form.provider] : undefined;
   const providerHasKey = Boolean(providerState?.has_api_key);

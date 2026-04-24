@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { chatAPI, guardAPI, systemAPI, voiceAPI } from '../services/api';
 import type { RuntimeInstance } from '../services/api';
+import { useRuntimeInstances } from '../hooks/useAPI';
 import { useI18n } from '../i18n';
 
 declare global {
@@ -314,7 +315,6 @@ export default function Chat() {
   const [availableModels, setAvailableModels] = useState<{ id: string; name: string; provider: string; reasoning: boolean }[]>([]);
   const [defaultModel, setDefaultModel] = useState('');
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [availableInstances, setAvailableInstances] = useState<RuntimeInstance[]>([]);
   const [selectedInstanceId, setSelectedInstanceId] = useState('');
   const [activeRuntime, setActiveRuntime] = useState<RuntimeInstance | null>(null);
   const [supportsSessionPatch, setSupportsSessionPatch] = useState(true);
@@ -368,6 +368,7 @@ export default function Chat() {
   const lastCompositionEndAtRef = useRef(0);
 
   const { t, locale } = useI18n();
+  const runtimeInstancesQuery = useRuntimeInstances();
 
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024; // 5 MB per image
@@ -384,6 +385,7 @@ export default function Chat() {
 
   const activeSession = activeKey ? (sessions.find(item => item.key === activeKey) ?? null) : null;
   const activeMessages: ChatMessage[] = activeKey ? (messageMap[activeKey] ?? []) : [];
+  const availableInstances = (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled);
   const selectedInstance = availableInstances.find(instance => instance.instance_id === selectedInstanceId) ?? null;
   const activeInstance = activeSession?.instanceId
     ? availableInstances.find(instance => instance.instance_id === activeSession.instanceId) ?? null
@@ -415,31 +417,21 @@ export default function Chat() {
   }, [activeKey]);
 
   useEffect(() => {
-    let cancelled = false;
-    const loadInstances = async () => {
-      try {
-        const res = await systemAPI.instances();
-        if (cancelled) return;
-        const instances = (res.data.instances ?? []).filter(instance => instance.enabled);
-        setAvailableInstances(instances);
-        const defaultInstance = instances.find(i => i.platform === 'openclaw' && i.is_default)
-          ?? instances.find(i => i.platform === 'openclaw')
-          ?? instances[0];
-        if (defaultInstance) {
-          setSelectedInstanceId(prev => (
-            prev && instances.some(instance => instance.instance_id === prev)
-              ? prev
-              : defaultInstance.instance_id
-          ));
-        }
-      } catch {
-        if (!cancelled) setAvailableInstances([]);
-      }
-    };
-    loadInstances();
-    const timer = window.setInterval(loadInstances, 5000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, []);
+    if (availableInstances.length === 0) {
+      setSelectedInstanceId(prev => (prev && prev === activeSession?.instanceId ? prev : ''));
+      return;
+    }
+    const defaultInstance = availableInstances.find(i => i.platform === 'openclaw' && i.is_default)
+      ?? availableInstances.find(i => i.platform === 'openclaw')
+      ?? availableInstances[0];
+    if (defaultInstance) {
+      setSelectedInstanceId(prev => (
+        prev && availableInstances.some(instance => instance.instance_id === prev)
+          ? prev
+          : defaultInstance.instance_id
+      ));
+    }
+  }, [activeSession?.instanceId, availableInstances]);
 
   useEffect(() => {
     if (activeSession?.instanceId) {
@@ -1222,22 +1214,25 @@ export default function Chat() {
           )}
         </div>
         <div className="flex items-center gap-3">
-          {availableInstances.length > 0 && (
-            <select
+          <select
               value={selectedInstanceId}
               onChange={e => setSelectedInstanceId(e.target.value)}
-              className="px-3 py-2.5 rounded-lg border border-border bg-surface-1 text-[12px] text-text-primary focus:outline-none focus:border-accent/50"
+              disabled={availableInstances.length === 0}
+              className="px-3 py-2.5 rounded-lg border border-border bg-surface-1 text-[12px] text-text-primary focus:outline-none focus:border-accent/50 disabled:opacity-60"
             >
-              {availableInstances.map(instance => (
-                <option key={instance.instance_id} value={instance.instance_id}>
-                  {instance.display_name}
-                  {instance.platform === 'nanobot' && instance.health_status !== 'healthy'
-                    ? ' · gateway offline'
-                    : ''}
-                </option>
-              ))}
+              {availableInstances.length === 0 ? (
+                <option value="">{runtimeInstancesQuery.isError ? 'Runtime unavailable' : t.chat.connecting}</option>
+              ) : (
+                availableInstances.map(instance => (
+                  <option key={instance.instance_id} value={instance.instance_id}>
+                    {instance.display_name}
+                    {instance.platform === 'nanobot' && instance.health_status !== 'healthy'
+                      ? ' · gateway offline'
+                      : ''}
+                  </option>
+                ))
+              )}
             </select>
-          )}
           <button onClick={toggleGuard}
             className="flex items-center gap-2 group"
             title={guardOn ? t.chat.guardOn : t.chat.guardOff}

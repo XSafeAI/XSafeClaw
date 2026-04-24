@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from fastapi import HTTPException
@@ -10,6 +12,61 @@ from sqlalchemy import Select
 from ..runtime import RuntimeInstance, RuntimeRegistry, decode_chat_session_key
 
 runtime_registry = RuntimeRegistry()
+_INSTANCES_CACHE_FRESH_TTL_S = 5.0
+_INSTANCES_CACHE_STALE_TTL_S = 60.0
+_instances_cache: list[RuntimeInstance] | None = None
+_instances_cache_fresh_until = 0.0
+_instances_cache_stale_until = 0.0
+_instances_cache_refresh_task: asyncio.Task[None] | None = None
+_instances_cache_lock = asyncio.Lock()
+
+
+def _store_instances_cache(instances: list[RuntimeInstance]) -> list[RuntimeInstance]:
+    global _instances_cache, _instances_cache_fresh_until, _instances_cache_stale_until
+    now = time.monotonic()
+    _instances_cache = instances
+    _instances_cache_fresh_until = now + _INSTANCES_CACHE_FRESH_TTL_S
+    _instances_cache_stale_until = now + _INSTANCES_CACHE_STALE_TTL_S
+    return instances
+
+
+async def _refresh_instances_cache() -> list[RuntimeInstance]:
+    async with _instances_cache_lock:
+        now = time.monotonic()
+        if _instances_cache is not None and now < _instances_cache_fresh_until:
+            return _instances_cache
+        return _store_instances_cache(await runtime_registry.get_instances())
+
+
+def _maybe_spawn_instances_refresh() -> None:
+    global _instances_cache_refresh_task
+    task = _instances_cache_refresh_task
+    if task is not None and not task.done():
+        return
+
+    async def runner() -> None:
+        try:
+            await _refresh_instances_cache()
+        except Exception:
+            # Keep serving the stale snapshot until it expires.
+            return
+
+    _instances_cache_refresh_task = asyncio.create_task(runner())
+
+
+def invalidate_instances_cache() -> None:
+    global _instances_cache, _instances_cache_fresh_until, _instances_cache_stale_until, _instances_cache_refresh_task
+    _instances_cache = None
+    _instances_cache_fresh_until = 0.0
+    _instances_cache_stale_until = 0.0
+    task = _instances_cache_refresh_task
+    _instances_cache_refresh_task = None
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def prime_instances_cache(instances: list[RuntimeInstance]) -> list[RuntimeInstance]:
+    return _store_instances_cache(instances)
 
 
 def serialize_instance(instance: RuntimeInstance) -> dict[str, Any]:
@@ -33,14 +90,28 @@ def serialize_instance(instance: RuntimeInstance) -> dict[str, Any]:
     }
 
 
-async def list_instances() -> list[RuntimeInstance]:
-    """Return all known runtime instances."""
-    return await runtime_registry.get_instances()
+async def list_instances(*, force_refresh: bool = False) -> list[RuntimeInstance]:
+    """Return all known runtime instances with a short SWR cache."""
+    if force_refresh:
+        return await _refresh_instances_cache()
+
+    now = time.monotonic()
+    if _instances_cache is not None:
+        if now < _instances_cache_fresh_until:
+            return _instances_cache
+        if now < _instances_cache_stale_until:
+            _maybe_spawn_instances_refresh()
+            return _instances_cache
+
+    return await _refresh_instances_cache()
 
 
 async def get_instance(instance_id: str) -> RuntimeInstance:
     """Resolve one runtime instance or raise 404."""
-    instance = await runtime_registry.get_instance(instance_id)
+    instance = next(
+        (item for item in await list_instances() if item.instance_id == instance_id),
+        None,
+    )
     if instance is None:
         raise HTTPException(status_code=404, detail=f"Runtime instance not found: {instance_id}")
     return instance
@@ -48,7 +119,10 @@ async def get_instance(instance_id: str) -> RuntimeInstance:
 
 async def get_default_instance(*, require_enabled: bool = True) -> RuntimeInstance:
     """Resolve the default instance or raise 503."""
-    instance = await runtime_registry.get_default_instance()
+    instance = next(
+        (item for item in await list_instances() if item.is_default),
+        None,
+    )
     if instance is None:
         raise HTTPException(status_code=503, detail="No runtime instance is configured")
     if require_enabled and not instance.enabled:

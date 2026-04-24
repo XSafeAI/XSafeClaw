@@ -167,6 +167,27 @@ export interface NanobotProviderConfigState {
   api_base: string | null;
 }
 
+export interface NanobotModelCatalogModel {
+  id: string;
+  name: string;
+  contextWindow?: number;
+  reasoning?: boolean;
+  available?: boolean;
+  input?: string;
+}
+
+export interface NanobotModelCatalogProvider {
+  id: string;
+  name: string;
+  models: NanobotModelCatalogModel[];
+}
+
+export interface NanobotModelCatalogResponse {
+  provider_options: NanobotProviderOption[];
+  model_providers: NanobotModelCatalogProvider[];
+  default_model: string;
+}
+
 export interface NanobotConfigResponse {
   success?: boolean;
   config_exists: boolean;
@@ -654,6 +675,10 @@ export const systemAPI = {
   /** Read default nanobot config with secrets redacted. */
   getNanobotConfig: () =>
     api.get<NanobotConfigResponse>('/system/nanobot/config'),
+
+  /** Read the normalized Nanobot model catalog used by the configure wizard. */
+  getNanobotModelCatalog: (refresh?: boolean) =>
+    api.get<NanobotModelCatalogResponse>('/system/nanobot/model-catalog', refresh ? { params: { refresh } } : undefined),
 
   /** Create/update the default nanobot config used by XSafeClaw. */
   setNanobotConfig: (payload: NanobotConfigPayload) =>

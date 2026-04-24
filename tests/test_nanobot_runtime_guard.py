@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from xsafeclaw.api.main import app
+import xsafeclaw.api.runtime_helpers as runtime_helpers
 from xsafeclaw.api.routes import chat as chat_routes
 from xsafeclaw.api.routes import system as system_routes
 from xsafeclaw.integrations import nanobot_hook_loader
@@ -25,6 +27,13 @@ from xsafeclaw.runtime.nanobot import (
     update_nanobot_guard_state,
 )
 from xsafeclaw.services import guard_service
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_instances_cache():
+    runtime_helpers.invalidate_instances_cache()
+    yield
+    runtime_helpers.invalidate_instances_cache()
 
 
 def _write_nanobot_config(config_path: Path, workspace: Path) -> None:
@@ -593,6 +602,90 @@ def test_install_status_requires_nanobot_configure_for_base_config_only(monkeypa
     assert data["nanobot_config_exists"] is True
     assert data["nanobot_model_configured"] is False
     assert data["requires_nanobot_configure"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_instances_uses_fresh_cache(monkeypatch):
+    calls = 0
+
+    async def fake_get_instances():
+        nonlocal calls
+        calls += 1
+        return ["instance-a"]
+
+    monkeypatch.setattr(runtime_helpers.runtime_registry, "get_instances", fake_get_instances)
+
+    first = await runtime_helpers.list_instances()
+    second = await runtime_helpers.list_instances()
+
+    assert first == ["instance-a"]
+    assert second == ["instance-a"]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_list_instances_returns_stale_cache_while_refreshing(monkeypatch):
+    calls = 0
+
+    async def fake_get_instances():
+        nonlocal calls
+        calls += 1
+        return [f"instance-{calls}"]
+
+    monkeypatch.setattr(runtime_helpers.runtime_registry, "get_instances", fake_get_instances)
+
+    first = await runtime_helpers.list_instances()
+    runtime_helpers._instances_cache_fresh_until = runtime_helpers.time.monotonic() - 1
+    runtime_helpers._instances_cache_stale_until = runtime_helpers.time.monotonic() + 60
+
+    second = await runtime_helpers.list_instances()
+
+    assert first == ["instance-1"]
+    assert second == ["instance-1"]
+    assert calls == 1
+    assert runtime_helpers._instances_cache_refresh_task is not None
+
+    await asyncio.wait_for(asyncio.shield(runtime_helpers._instances_cache_refresh_task), timeout=1)
+
+    third = await runtime_helpers.list_instances()
+    assert third == ["instance-2"]
+    assert calls == 2
+
+
+def test_nanobot_model_catalog_endpoint_surfaces_latest_deepseek_models(monkeypatch):
+    async def fake_scan(*, refresh=False):
+        assert refresh is False
+        return {
+            "model_providers": [
+                {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "models": [
+                        {"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash"},
+                        {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(system_routes, "_get_openclaw_onboard_scan_data", fake_scan)
+
+    client = TestClient(app)
+    response = client.get("/api/system/nanobot/model-catalog")
+
+    assert response.status_code == 200
+    data = response.json()
+    deepseek_option = next(item for item in data["provider_options"] if item["id"] == "deepseek")
+    deepseek_provider = next(item for item in data["model_providers"] if item["id"] == "deepseek")
+    model_ids = {item["id"] for item in deepseek_provider["models"]}
+
+    assert deepseek_option["default_model"] == "deepseek/deepseek-v4-flash"
+    assert model_ids == {
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+    }
 
 
 def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_path):

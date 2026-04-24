@@ -90,14 +90,16 @@ _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 
 _cached_model_info: dict[str, str] | None = None
+_ANTHROPIC_VERSION = "2023-06-01"
 
 
 def _get_openclaw_model_info() -> dict[str, str]:
-    """Read OpenClaw's configured model/provider/baseUrl/apiKey.
+    """Read OpenClaw's configured model/provider/baseUrl/apiKey/api type.
 
     Config layout (openclaw.json):
       agents.defaults.model.primary = "openai/gpt-5-mini"
       models.providers.<provider>.baseUrl = "https://..."
+      models.providers.<provider>.api = "openai-completions" | "anthropic-messages"
 
     Auth profiles (~/.openclaw/agents/main/agent/auth-profiles.json):
       profiles.<provider:default>.key = "sk-..."
@@ -114,31 +116,42 @@ def _get_openclaw_model_info() -> dict[str, str]:
         "moonshot": "https://api.moonshot.cn/v1",
         "deepseek": "https://api.deepseek.com/v1",
     }
+    _DEFAULT_PROVIDER_API_TYPES = {
+        "anthropic": "anthropic-messages",
+    }
 
-    def _resolve_provider(prov: str, config: dict, auth_profiles: dict) -> tuple[str, str, str]:
-        """Return (model_id, base_url, api_key) for a given provider."""
+    def _resolve_provider(
+        prov: str,
+        config: dict,
+        auth_profiles: dict,
+    ) -> tuple[str, str, str, str]:
+        """Return (model_id, base_url, api_key, api_type) for a provider."""
         providers_cfg = config.get("models", {}).get("providers", {})
+        provider_cfg = providers_cfg.get(prov, {}) if isinstance(providers_cfg.get(prov), dict) else {}
         burl = ""
+        api_type = str(provider_cfg.get("api") or "").strip()
         if prov in providers_cfg:
-            burl = providers_cfg[prov].get("baseUrl", "")
-            models_list = providers_cfg[prov].get("models", [])
+            burl = str(provider_cfg.get("baseUrl") or "").strip()
+            models_list = provider_cfg.get("models", [])
         else:
             models_list = []
         if not burl:
             burl = _DEFAULT_PROVIDER_URLS.get(prov, "")
+        if not api_type:
+            api_type = _DEFAULT_PROVIDER_API_TYPES.get(prov, "openai-completions")
 
         first_model = models_list[0]["id"] if models_list else ""
 
-        akey = ""
+        akey = str(provider_cfg.get("apiKey") or "").strip()
         pk = f"{prov}:default"
-        if pk in auth_profiles:
+        if not akey and pk in auth_profiles:
             akey = auth_profiles[pk].get("key", "")
         if not akey:
             for _k, v in auth_profiles.items():
                 if v.get("provider") == prov:
                     akey = v.get("key", "")
                     break
-        return first_model, burl, akey
+        return first_model, burl, akey, api_type
 
     try:
         config = json.loads(_CONFIG_PATH.read_text("utf-8"))
@@ -157,7 +170,7 @@ def _get_openclaw_model_info() -> dict[str, str]:
         if auth_path.exists():
             auth_profiles = json.loads(auth_path.read_text("utf-8")).get("profiles", {})
 
-        _, base_url, api_key = _resolve_provider(provider, config, auth_profiles)
+        _, base_url, api_key, api_type = _resolve_provider(provider, config, auth_profiles)
 
         providers_cfg = config.get("models", {}).get("providers", {})
         primary_has_provider_cfg = provider in providers_cfg
@@ -165,35 +178,43 @@ def _get_openclaw_model_info() -> dict[str, str]:
             for alt_prov in providers_cfg:
                 if alt_prov == provider:
                     continue
-                alt_model, alt_url, alt_key = _resolve_provider(alt_prov, config, auth_profiles)
+                alt_model, alt_url, alt_key, alt_api_type = _resolve_provider(
+                    alt_prov,
+                    config,
+                    auth_profiles,
+                )
                 if alt_url and alt_key and alt_model:
                     print(f"[guard] Using provider {alt_prov} (primary {provider} not fully configured)")
                     provider = alt_prov
                     base_url = alt_url
                     api_key = alt_key
                     model_id = alt_model
+                    api_type = alt_api_type
                     break
 
         if not base_url:
-            base_url = settings.guard_base_url.rstrip("/v1")
+            base_url = settings.guard_base_url
         if not api_key:
             api_key = settings.guard_api_key
         if not model_id:
             model_id = settings.guard_base_model
-
-        if base_url and not base_url.endswith("/v1"):
-            base_url = base_url.rstrip("/") + "/v1"
+        if not api_type:
+            api_type = "openai-completions"
 
         _cached_model_info = {
             "model": model_id,
             "base_url": base_url,
             "api_key": api_key,
+            "api_type": api_type,
+            "provider": provider or "settings",
         }
     except Exception:
         _cached_model_info = {
             "model": settings.guard_base_model,
             "base_url": settings.guard_base_url,
             "api_key": settings.guard_api_key,
+            "api_type": "openai-completions",
+            "provider": "settings",
         }
 
     return _cached_model_info
@@ -203,6 +224,88 @@ def invalidate_model_cache() -> None:
     """Force re-read of openclaw.json on next guard call."""
     global _cached_model_info
     _cached_model_info = None
+
+
+def _normalize_model_api_base(base_url: str, api_type: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/")
+    if not normalized:
+        return normalized
+    if api_type in {"openai-completions", "anthropic-messages"}:
+        if re.search(r"/v\d+(?:beta\d+)?$", normalized, re.IGNORECASE):
+            return normalized
+        return normalized + "/v1"
+    return normalized
+
+
+def _extract_text_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        return str(content.get("text") or "").strip()
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            stripped = item.strip()
+            if stripped:
+                parts.append(stripped)
+            continue
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                parts.append(text)
+            continue
+        nested = item.get("content")
+        if isinstance(nested, str) and nested.strip():
+            parts.append(nested.strip())
+    return "\n".join(parts).strip()
+
+
+def _extract_openai_guard_response(data: dict[str, Any]) -> str:
+    choice = data.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    result = _extract_text_content(message.get("content"))
+
+    if result:
+        return result
+
+    reasoning = str(message.get("reasoning_content") or "").strip()
+    if not reasoning:
+        return ""
+
+    print(f"[guard] content empty, extracting from reasoning_content ({len(reasoning)} chars)")
+    print(f"[guard] reasoning_content: {reasoning[:800]}")
+    lower_reasoning = reasoning.lower()
+    if "unsafe" in lower_reasoning:
+        lines = ["unsafe"]
+        for ln in reasoning.split("\n"):
+            stripped = ln.strip()
+            cleaned = re.sub(r"^[-*•]\s*", "", stripped)
+            cl = cleaned.lower()
+            if cl.startswith("risk source:"):
+                lines.append("Risk Source:" + cleaned.split(":", 1)[1])
+            elif cl.startswith("failure mode:"):
+                lines.append("Failure Mode:" + cleaned.split(":", 1)[1])
+            elif cl.startswith("real world harm:") or cl.startswith("real-world harm:"):
+                lines.append("Real World Harm:" + cleaned.split(":", 1)[1])
+        if len(lines) == 1:
+            rs = re.search(r"risk\s*source[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
+            fm = re.search(r"failure\s*mode[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
+            rh = re.search(r"real[\s-]*world\s*harm[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
+            if rs:
+                lines.append("Risk Source: " + rs.group(1).strip())
+            if fm:
+                lines.append("Failure Mode: " + fm.group(1).strip())
+            if rh:
+                lines.append("Real World Harm: " + rh.group(1).strip())
+        return "\n".join(lines)
+    if "safe" in lower_reasoning:
+        return "safe"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -515,66 +618,56 @@ async def _call_guard_model(trajectory_text: str) -> str:
     The model/baseUrl/apiKey are read from OpenClaw's config.
     """
     model_info = _get_openclaw_model_info()
-    print(f"[guard] model={model_info['model']} base_url={model_info['base_url']}")
+    api_type = model_info.get("api_type", "openai-completions")
+    base_url = _normalize_model_api_base(model_info.get("base_url", ""), api_type)
+    print(
+        f"[guard] provider={model_info.get('provider', 'unknown')} "
+        f"api_type={api_type} model={model_info['model']} base_url={base_url}"
+    )
     prompt_template = _get_fg_prompt()
     prompt = prompt_template.format(
         trajectory=trajectory_text,
         taxonomy=_get_fg_taxonomy(),
     )
 
-    payload = {
-        "model": model_info["model"],
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-    }
+    headers = {"Content-Type": "application/json"}
+    if api_type == "openai-completions":
+        payload = {
+            "model": model_info["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+        }
+        url = f"{base_url}/chat/completions"
+        headers["Authorization"] = f"Bearer {model_info['api_key']}"
+    elif api_type == "anthropic-messages":
+        payload = {
+            "model": model_info["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+        }
+        url = f"{base_url}/messages"
+        headers["x-api-key"] = model_info["api_key"]
+        headers["Authorization"] = f"Bearer {model_info['api_key']}"
+        headers["anthropic-version"] = _ANTHROPIC_VERSION
+    else:
+        raise RuntimeError(
+            f"Unsupported guard model api type: {api_type} "
+            f"(provider={model_info.get('provider', 'unknown')})"
+        )
 
     async with httpx.AsyncClient(timeout=60) as client:
-        url = f"{model_info['base_url']}/chat/completions"
         resp = await client.post(
             url,
             json=payload,
-            headers={
-                "Authorization": f"Bearer {model_info['api_key']}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
         resp.raise_for_status()
         data = resp.json()
 
-    choice = data.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    content = message.get("content") or ""
-    result = content.strip()
-
-    if not result:
-        reasoning = message.get("reasoning_content", "")
-        if reasoning:
-            print(f"[guard] content empty, extracting from reasoning_content ({len(reasoning)} chars)")
-            print(f"[guard] reasoning_content: {reasoning[:800]}")
-            lower_reasoning = reasoning.lower()
-            if "unsafe" in lower_reasoning:
-                lines = ["unsafe"]
-                for ln in reasoning.split("\n"):
-                    stripped = ln.strip()
-                    cleaned = re.sub(r"^[-*•]\s*", "", stripped)
-                    cl = cleaned.lower()
-                    if cl.startswith("risk source:"):
-                        lines.append("Risk Source:" + cleaned.split(":", 1)[1])
-                    elif cl.startswith("failure mode:"):
-                        lines.append("Failure Mode:" + cleaned.split(":", 1)[1])
-                    elif cl.startswith("real world harm:") or cl.startswith("real-world harm:"):
-                        lines.append("Real World Harm:" + cleaned.split(":", 1)[1])
-                # Regex fallback if structured lines not found
-                if len(lines) == 1:
-                    rs = re.search(r"risk\s*source[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
-                    fm = re.search(r"failure\s*mode[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
-                    rh = re.search(r"real[\s-]*world\s*harm[:\s]+(.+?)(?:\n|$)", reasoning, re.IGNORECASE)
-                    if rs: lines.append("Risk Source: " + rs.group(1).strip())
-                    if fm: lines.append("Failure Mode: " + fm.group(1).strip())
-                    if rh: lines.append("Real World Harm: " + rh.group(1).strip())
-                result = "\n".join(lines)
-            elif "safe" in lower_reasoning:
-                result = "safe"
+    if api_type == "openai-completions":
+        result = _extract_openai_guard_response(data)
+    else:
+        result = _extract_text_content(data.get("content"))
 
     if not result:
         print(f"[guard] empty response, full data: {json.dumps(data, ensure_ascii=False)[:500]}")

@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { sessionsAPI, messagesAPI, toolCallsAPI, eventsAPI, assetsAPI, statsAPI } from '../services/api';
+import { sessionsAPI, messagesAPI, toolCallsAPI, eventsAPI, assetsAPI, statsAPI, systemAPI } from '../services/api';
 
 // Sessions hooks
 export const useSessions = (params?: { page?: number; page_size?: number }) => {
@@ -101,6 +101,17 @@ export const useHardwareInfo = () => {
   return useQuery({
     queryKey: ['hardware-info'],
     queryFn: () => assetsAPI.hardware().then(res => res.data),
+  });
+};
+
+export const useRuntimeInstances = (enabled = true) => {
+  return useQuery({
+    queryKey: ['runtime-instances'],
+    queryFn: () => systemAPI.instances().then(res => res.data),
+    enabled,
+    staleTime: 5000,
+    refetchInterval: enabled ? 5000 : false,
+    placeholderData: previousData => previousData,
   });
 };
 
