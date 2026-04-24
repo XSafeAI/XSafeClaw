@@ -43,23 +43,24 @@
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
-|  🐈   | 2026-04-18 | **nanobot local runtime support** — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show OpenClaw / nanobot sessions together in Agent Valley. |
+|  🧩   | 2026-04-23 | **Hermes and runtime autostart** — XSafeClaw now discovers OpenClaw, Hermes, and nanobot side by side, and best-effort starts installed gateways when the server boots. |
+|  🐈   | 2026-04-18 | **nanobot local runtime support** — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show mixed-runtime sessions together in Agent Valley. |
 |  🚀   | 2026-04-13 | **v 1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
 
 ---
 
 ## 🔍 What is XSafeClaw?
 
-XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command. The current runtime integration targets one local OpenClaw instance and one local nanobot instance on the host machine.
+XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command. The current runtime registry discovers local OpenClaw, Hermes Agent, and nanobot installations side by side, then lets you choose the runtime per session in Agent Town.
 
 | Module               | Description                                                  |
 | :------------------- | :----------------------------------------------------------- |
-| **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning across OpenClaw and nanobot sessions |
-| **Safe Chat**        | Secure gateway to chat with your OpenClaw or nanobot agent with built-in guard protection |
+| **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning across OpenClaw, Hermes, and nanobot sessions |
+| **Safe Chat**        | Secure chat with OpenClaw, Hermes, or nanobot through each runtime's gateway/API |
 | **Asset Shield**     | File system scanning with risk classification (L0–L3), software audit, hardware inventory |
 | **Guard (AgentDoG)** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval |
 | **Agent Office**     | PixiJS-powered 2D visualization of all agents' status and activities |
-| **Onboard Setup**    | Interactive wizard to install and configure OpenClaw CLI and initialize the local nanobot config / hook |
+| **Onboard Setup**    | Interactive setup for OpenClaw, Hermes, and nanobot, including model configuration and runtime guard integration |
 
 ---
 
@@ -70,7 +71,7 @@ pip install xsafeclaw
 xsafeclaw start
 ```
 
-Browser opens automatically at `http://127.0.0.1:6874`. If OpenClaw is not yet installed, the web UI will guide you through setup.
+Browser opens automatically at `http://127.0.0.1:6874`. If no supported runtime is installed, the web UI guides you through OpenClaw, Hermes, or nanobot setup.
 
 Common options:
 
@@ -121,27 +122,28 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
 ## 🏗️ Architecture
 
 ```
-                     Browser (:6874)
-                       │
-           ┌───────────┴───────────┐
-           │     FastAPI Server    │
-           ├───────────────────────┤
-           │   Guard Service       │◄── AgentDoG model
-           │   File Watcher        │◄── ~/.openclaw/ JSONL sessions
-           │   Asset Scanner       │◄── File/software/hardware scanning
-           └───────────┬───────────┘
-                       │
-              ┌────────┴────────┐
-              │                 │
-         SQLite DB        OpenClaw Sessions
-       ~/.xsafeclaw/       ~/.openclaw/
-
-           OpenClaw Agent                         nanobot Agent
-               │ before_tool_call hook                │ configured hook
-               ▼                                      ▼
-       safeclaw-guard plugin ──► POST /api/guard/tool-check ◄── XSafeClaw nanobot hook
-                                                      │
-                                             nanobot gateway websocket
+                         Browser (:6874)
+                              │
+                  ┌───────────┴───────────┐
+                  │     FastAPI Server     │
+                  ├───────────────────────┤
+                  │   Runtime Registry     │◄── OpenClaw / Hermes / nanobot discovery
+                  │   Runtime Autostart    │◄── best-effort gateway startup
+                  │   Guard Service        │◄── AgentDoG model
+                  │   File Watcher         │◄── runtime JSONL sessions
+                  │   Asset Scanner        │◄── file/software/hardware scanning
+                  └───────────┬───────────┘
+                              │
+                    SQLite DB │ ~/.xsafeclaw/
+                              │
+          ┌───────────────────┼───────────────────┐
+          │                   │                   │
+    OpenClaw Agent      Hermes Agent          nanobot Agent
+    safeclaw plugin     Hermes plugin         XSafeClaw hook
+    ws://:18789         http://:8642          gateway + websocket
+          └───────────────────┴───────────────────┘
+                              │
+                   POST /api/guard/tool-check
 ```
 
 | Layer       | Technology                                        |
@@ -150,7 +152,7 @@ When rejected (or timed out after 5 min), the agent is instructed to **stop all 
 | Frontend    | React 19, TypeScript, Vite, Tailwind CSS 4        |
 | Database    | SQLite (via aiosqlite)                            |
 | Guard Model | AgentDoG (configurable base URL & model)          |
-| Runtimes    | Local OpenClaw plus local nanobot via `nanobot gateway` |
+| Runtimes    | Local OpenClaw, Hermes Agent, and nanobot with per-session selection |
 
 Full API docs available at `http://localhost:6874/docs` when running.
 
@@ -161,7 +163,7 @@ Full API docs available at `http://localhost:6874/docs` when running.
 For detailed installation procedures, see the **[installation guide](docs/installation.md)**.
 
 > [!TIP]
-> Requires Python 3.11+. The frontend is pre-built and bundled — no Node.js needed for production.
+> Requires Python 3.11+. Published packages include the frontend bundle. Source checkouts should run `cd frontend && npm run build` for the embedded backend UI, or use the Vite dev server.
 
 ```bash
 # From PyPI (recommended)
@@ -181,7 +183,9 @@ cd XSafeClaw && pip install -e ".[dev]"
 
 ### 🔌 Install the Guard Plugin
 
-To enable real-time tool-call interception in OpenClaw, install the OpenClaw plugin:
+The Setup and Configure flows install the matching Guard integration automatically. If you are wiring runtimes manually, use the runtime-specific path below.
+
+For OpenClaw, copy the TypeScript plugin:
 
 ```bash
 cp -r plugins/safeclaw-guard ~/.openclaw/extensions/safeclaw-guard
@@ -201,33 +205,48 @@ Then add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-For nanobot, do **not** copy `plugins/safeclaw-guard`. nanobot is integrated through a Python hook written into `~/.nanobot/config.json`. In development, install nanobot as a uv tool with this repository editable so the hook module is importable from the nanobot tool environment:
+For Hermes, copy the Python plugin to Hermes' plugin directory:
 
 ```bash
+mkdir -p ~/.hermes/plugins/safeclaw-guard
+cp -r plugins/safeclaw-guard-hermes/* ~/.hermes/plugins/safeclaw-guard/
+```
+
+For nanobot, copy the Python plugin and keep the XSafeClaw package available in nanobot's uv tool environment:
+
+```bash
+mkdir -p ~/.nanobot/plugins/safeclaw-guard
+cp -r plugins/safeclaw-guard-nanobot/* ~/.nanobot/plugins/safeclaw-guard/
 uv tool install nanobot-ai --with-editable . --force
 ```
 
-When XSafeClaw is running from a source checkout, the `/setup` page now uses the same editable-install command automatically so the nanobot tool environment can import the local XSafeClaw hook modules.
+The Nanobot config page does this automatically when you save: it copies the plugin, writes the hook entry to `~/.nanobot/config.json`, and deploys `SAFETY.md` / `PERMISSION.md` into the nanobot workspace. The plugin injects those safety templates into every nanobot agent turn and checks tool calls through XSafeClaw Guard.
 
-`pyproject.toml` also exposes an optional `nanobot` extra for users who intentionally want `nanobot-ai` installed inside the active project environment. For this repository's developer workflow, the uv-tool command above is preferred because it matches how the `nanobot` CLI is usually run.
+Provider, model, and API key are intentionally blank until you configure them.
 
-Then start XSafeClaw. The `/setup` page only installs the Nanobot CLI and then redirects to `/nanobot_configure`. The Nanobot config file is created only when you click Save on the Nanobot configuration page. Provider, model, and API key are intentionally blank on first load.
-
-For compatibility, the setup endpoint still exists and creates only a skeleton config without provider/model defaults:
+For compatibility, the legacy setup endpoint still exists and creates only a skeleton config without provider/model defaults:
 
 ```bash
 curl -X POST http://127.0.0.1:6874/api/system/nanobot/init-default
 ```
 
-For manual testing, run nanobot gateway in a separate terminal:
+### Runtime Gateways
+
+XSafeClaw best-effort auto-starts installed runtimes at server boot and after setup:
+
+- OpenClaw: `openclaw gateway start --json`, default `ws://127.0.0.1:18789`.
+- Hermes: enables the HTTP API and starts/restarts `hermes gateway`, default `http://127.0.0.1:8642`.
+- nanobot: detached `nanobot gateway --port <configured-port>`, default health port `18790` and WebSocket channel `ws://127.0.0.1:8765/`.
+
+Manual commands are still useful for troubleshooting:
 
 ```bash
+openclaw gateway start
+hermes gateway
 nanobot gateway --port 18790 --verbose
 ```
 
-XSafeClaw uses `nanobot gateway` for Chat and Agent Valley. `nanobot serve` is not required for the current integration.
-
-The Web UI also provides a nanobot configuration page for the default local runtime. It writes `~/.nanobot/config.json`, including workspace, provider/model, API key, gateway, WebSocket channel, optional WebSocket token, and XSafeClaw Guard hook settings. On first run, the page pre-fills only infrastructure defaults such as workspace, ports, WebSocket, and Guard; it does not auto-select a model provider or API key. Saving only the base config is allowed, but Nanobot will still remain in a needs-config state until provider and model are set. Restart `nanobot gateway` after changing gateway, WebSocket, provider, or token settings so the running gateway loads the latest config.
+If you edit runtime config files by hand, restart the affected gateway so it reloads the new settings. `nanobot serve` is not required for the current integration.
 
 ---
 
@@ -235,16 +254,21 @@ The Web UI also provides a nanobot configuration page for the default local runt
 
 XSafeClaw works out of the box with sensible defaults. Copy `.env.example` to `.env` to customize:
 
-| Variable                | Default                            | Description                |
-| :---------------------- | :--------------------------------- | :------------------------- |
-| `API_PORT`              | `6874`                             | Server port                |
-| `API_HOST`              | `0.0.0.0`                          | Bind address               |
+| Variable | Default | Description |
+| :------- | :------ | :---------- |
+| `API_PORT` | `6874` | XSafeClaw API port |
+| `API_HOST` | `0.0.0.0` | Bind address |
+| `DATA_DIR` | `~/.xsafeclaw` | SQLite database and local state directory |
+| `PLATFORM` | `auto` | Default-instance hint: `auto`, `openclaw`, `hermes`, or `nanobot`; all discovered runtimes remain selectable |
+| `AUTO_START_RUNTIMES` | `true` | Best-effort gateway autostart for installed OpenClaw, Hermes, and nanobot runtimes |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw session directory |
-| `~/.nanobot/config.json` | *(created when saved in Nanobot Configure)* | nanobot config, gateway, workspace, and XSafeClaw hook settings |
-| `GUARD_BASE_URL`        | *(auto-detected)*                  | Guard model API base URL   |
-| `GUARD_BASE_MODEL`      | *(auto-detected)*                  | Guard model ID             |
+| `HERMES_HOME` | `~/.hermes` | Hermes home directory |
+| `HERMES_API_PORT` | `8642` | Hermes HTTP API port |
+| `HERMES_API_KEY` | *(empty)* | Must match `API_SERVER_KEY` in `~/.hermes/.env` |
+| `~/.nanobot/config.json` | *(created when saved in Nanobot Configure)* | nanobot config, gateway, workspace, WebSocket, and XSafeClaw hook settings |
+| `GUARD_BASE_URL` / `GUARD_BASE_MODEL` | AgentDoG defaults | Guard model endpoint and model ID |
 
-If guard variables are not set, XSafeClaw reads model configuration from `~/.openclaw/openclaw.json` automatically. nanobot runtime configuration is stored in `~/.nanobot/config.json`, not in `.env`. See `.env.example` for the full list.
+OpenClaw configuration lives in `~/.openclaw/openclaw.json`, Hermes in `~/.hermes/.env` and `~/.hermes/config.yaml`, and nanobot in `~/.nanobot/config.json`. See `.env.example` for the full list.
 
 ---
 
@@ -264,16 +288,20 @@ git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw
 uv venv && uv pip install -e ".[dev]"
 python run.py                    # http://localhost:6874, auto-reload
 
-# Optional nanobot CLI for local runtime testing
+# Optional runtime CLIs for local testing
 uv tool install nanobot-ai --with-editable . --force
+openclaw gateway start
+hermes gateway
 nanobot gateway --port 18790 --verbose
 
 # Frontend (separate terminal)
 cd frontend && npm install && npm run dev   # http://localhost:3003, HMR
 
 # Build frontend for production
-cd frontend && npm run build     # outputs to src/xsafeclaw/static/
+cd frontend && npm run build     # outputs ignored Vite artifacts to src/xsafeclaw/static/
 ```
+
+For the repository dev loop on Linux/macOS, `bash setup.sh` installs backend and frontend dependencies once, and `bash start.sh` runs Vite on `:6874` with the FastAPI backend proxied on `:3022`.
 
 ---
 
@@ -301,6 +329,8 @@ cd frontend && npm run build     # outputs to src/xsafeclaw/static/
 ## 🙏 Acknowledgements
 
 - [**OpenClaw**](https://github.com/openclaw/openclaw) — The personal AI assistant platform that XSafeClaw is designed to protect. OpenClaw's open plugin architecture makes our guard integration possible.
+- [**Hermes Agent**](https://github.com/NousResearch/hermes-agent) — The local Python agent runtime and multi-platform gateway now supported as a first-class XSafeClaw runtime.
+- **nanobot** — The lightweight local agent runtime integrated through XSafeClaw's gateway, WebSocket, and Python hook support.
 - [**AgentDoG**](https://github.com/AI45Lab/AgentDoG) — The diagnostic guardrail framework for AI agent safety. XSafeClaw's guard module is powered by AgentDoG's trajectory-level risk assessment and fine-grained safety taxonomy.
 - [**ISC-Bench**](https://github.com/wuyoscar/ISC-Bench) — Research on Internal Safety Collapse in frontier LLMs. ISC-Bench's insights into task-completion-driven safety failures have informed our red team testing design.
 - [**AgentHazard**](https://github.com/Yunhao-Feng/AgentHazard) — A benchmark for evaluating harmful behavior in computer-use agents. AgentHazard's attack taxonomy and execution-level risk categories have shaped our threat modeling.

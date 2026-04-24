@@ -22,8 +22,10 @@ from .parsing import (
 NANOBOT_DEFAULT_CONFIG = Path.home() / ".nanobot" / "config.json"
 _UNSAFE_ID_CHARS = re.compile(r"[^a-z0-9]+")
 XSAFECLAW_HOOK_NAME = "xsafeclaw"
-XSAFECLAW_HOOK_CLASS_PATH = "xsafeclaw.integrations.nanobot_guard_hook:XSafeClawHook"
+XSAFECLAW_HOOK_CLASS_PATH = "safeclaw_guard_nanobot:XSafeClawNanobotHook"
+XSAFECLAW_LEGACY_HOOK_CLASS_PATH = "xsafeclaw.integrations.nanobot_guard_hook:XSafeClawHook"
 XSAFECLAW_CHANNEL_EXTENSION_NAME = "xsafeclaw"
+XSAFECLAW_NANOBOT_PLUGIN_PATH = Path.home() / ".nanobot" / "plugins" / "safeclaw-guard"
 DEFAULT_XSAFECLAW_GUARD_BASE_URL = "http://127.0.0.1:6874"
 DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S = 305.0
 DEFAULT_NANOBOT_GATEWAY_HOST = "127.0.0.1"
@@ -132,9 +134,15 @@ def parse_nanobot_guard_state(config: dict[str, Any]) -> dict[str, Any]:
     entry = _read_mapping(entries.get(XSAFECLAW_HOOK_NAME))
     hook_config = _read_mapping(entry.get("config"))
     class_path = str(entry.get("class_path") or entry.get("classPath") or "").strip()
+    plugin_path = str(
+        entry.get("plugin_path")
+        or entry.get("pluginPath")
+        or entry.get("path")
+        or XSAFECLAW_NANOBOT_PLUGIN_PATH
+    ).strip()
     hook_present = bool(entry)
     enabled = bool(entry.get("enabled", False))
-    hook_valid = class_path == XSAFECLAW_HOOK_CLASS_PATH
+    hook_valid = class_path in {XSAFECLAW_HOOK_CLASS_PATH, XSAFECLAW_LEGACY_HOOK_CLASS_PATH}
     raw_mode = str(hook_config.get("mode") or "disabled").strip().lower()
     if raw_mode not in {"observe", "blocking"}:
         raw_mode = "disabled"
@@ -160,6 +168,7 @@ def parse_nanobot_guard_state(config: dict[str, Any]) -> dict[str, Any]:
         "enabled": enabled,
         "hook_valid": hook_valid,
         "class_path": class_path or None,
+        "plugin_path": plugin_path,
         "mode": mode,
         "base_url": base_url,
         "configured_instance_id": configured_instance_id,
@@ -184,6 +193,7 @@ def update_nanobot_guard_state(
     mode: str,
     base_url: str | None = None,
     timeout_s: float | None = None,
+    plugin_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write XSafeClaw guard-hook config into a nanobot config file."""
     path = Path(config_path).expanduser()
@@ -205,6 +215,7 @@ def update_nanobot_guard_state(
     else:
         entries[XSAFECLAW_HOOK_NAME] = {
             "enabled": True,
+            "plugin_path": str(plugin_path or XSAFECLAW_NANOBOT_PLUGIN_PATH),
             "class_path": XSAFECLAW_HOOK_CLASS_PATH,
             "config": {
                 "mode": normalized_mode,
@@ -416,6 +427,7 @@ def build_nanobot_instance_payload(
             "guard_hook_present": guard_state["hook_present"],
             "guard_hook_valid": guard_state["hook_valid"],
             "guard_hook_class_path": guard_state["class_path"],
+            "guard_hook_plugin_path": guard_state["plugin_path"],
             "guard_timeout_s": guard_state["timeout_s"],
         },
     }

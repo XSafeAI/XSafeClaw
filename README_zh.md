@@ -12,6 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **构建、监控并保护你的智能体**
+
 </div>
 
 > AI 智能体不只是新软件，它们是可以被「说服」去做危险事情的软件。随着智能体从聊天机器人演变为能够浏览网页、执行代码、接入真实工作流的主动系统，我们在还没想好如何「上锁」之前，就已经把基础设施的钥匙交给了语言模型。
@@ -21,7 +22,7 @@
 > **XSafeClaw** 正是为此而生。它是一个开源智能体防御平台，将智能体安全视为实时控制问题，而非事后复盘。在智能体时代，没有防御的能力不是进步，而是未受管理的暴露风险。
 
 🚀 <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
-📖 <a href="docs/installation.pdf">安装文档</a> &nbsp;·&nbsp;
+📖 <a href="docs/installation.md">安装文档</a> &nbsp;·&nbsp;
 🌐 <a href="https://xsafeclaw.ai">项目官网</a> &nbsp;·&nbsp;
 ▶️ <a href="https://youtu.be/HIqwFVeuiKs">演示视频</a>
 
@@ -41,25 +42,26 @@
 
 <sub>版本发布与项目里程碑。</sub>
 
-| | 日期 | 更新 |
-|:-:|:-----|:-------|
-| 🐈 | 2026-04-18 | **支持本机 nanobot 运行时** — XSafeClaw 现在可以发现本机 nanobot 实例，通过 `nanobot gateway` 创建受 Guard 保护的聊天会话，并在 Agent Valley 中同时展示 OpenClaw / nanobot 会话。 |
-| 🚀 | 2026-04-13 | **v1.0.0 发布** — XSafeClaw 首个公开版本，包含安全监控、安全对话、资产防护、Guard 守卫、智能体办公室与引导安装全部模块。 |
+|    | 日期       | 更新                                                                                                                                                                                       |
+| :-: | :--------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🧩 | 2026-04-23 | **支持 Hermes 与运行时自动启动** — XSafeClaw 现在可以并列发现 OpenClaw、Hermes 与 nanobot，并在服务启动时 best-effort 自动拉起已安装运行时的 gateway。 |
+| 🐈 | 2026-04-18 | **支持本机 nanobot 运行时** — XSafeClaw 现在可以发现本机 nanobot 实例，通过 `nanobot gateway` 创建受 Guard 保护的聊天会话，并在 Agent Valley 中同时展示混合运行时会话。 |
+| 🚀 | 2026-04-13 | **v1.0.0 发布** — XSafeClaw 首个公开版本，包含安全监控、安全对话、资产防护、Guard 守卫、智能体办公室与引导安装全部模块。                                                            |
 
 ---
 
 ## 🔍 XSafeClaw 是什么？
 
-XSafeClaw 是 AI 智能体的安全监控与防护平台。它能够实时监控智能体活动、在不安全的工具调用执行前拦截、扫描系统资产评估风险、并提供自动化红队测试——只需一条 `xsafeclaw start` 命令即可启动全部功能。当前运行时适配面向宿主机上的一个 OpenClaw 实例和一个 nanobot 实例。
+XSafeClaw 是 AI 智能体的安全监控与防护平台。它能够实时监控智能体活动、在不安全的工具调用执行前拦截、扫描系统资产评估风险、并提供自动化红队测试——只需一条 `xsafeclaw start` 命令即可启动全部功能。当前运行时注册表会并列发现宿主机上的 OpenClaw、Hermes Agent 与 nanobot，并允许在 Agent Town 中为每个会话选择运行时。
 
-| 模块 | 说明 |
-|:--|:--|
-| **安全监控 (Claw Monitor)** | 实时会话时间线，包含 OpenClaw / nanobot 会话的事件追踪、Token 用量、工具调用检查、技能与记忆扫描 |
-| **安全对话 (Safe Chat)** | 与 OpenClaw 或 nanobot 智能体安全对话的网关，内置 Guard 防护 |
-| **资产防护 (Asset Shield)** | 文件系统扫描与风险分级（L0–L3）、软件审计、硬件清单 |
-| **安全守卫 (Guard / AgentDoG)** | 轨迹级与工具调用级安全评估，支持人工审批工作流 |
-| **智能体办公室 (Agent Office)** | 基于 PixiJS 的 2D 可视化界面，集中查看所有智能体状态与活动 |
-| **引导安装 (Onboard Setup)** | 交互式向导，引导安装和配置 OpenClaw CLI，并初始化本机 nanobot 配置与 hook |
+| 模块                                  | 说明                                                                                             |
+| :------------------------------------ | :----------------------------------------------------------------------------------------------- |
+| **安全监控 (Claw Monitor)**     | 实时会话时间线，覆盖 OpenClaw、Hermes 与 nanobot 会话的事件追踪、Token 用量、工具调用检查、技能与记忆扫描 |
+| **安全对话 (Safe Chat)**        | 通过各运行时 gateway/API 与 OpenClaw、Hermes 或 nanobot 智能体安全对话                           |
+| **资产防护 (Asset Shield)**     | 文件系统扫描与风险分级（L0–L3）、软件审计、硬件清单                                             |
+| **安全守卫 (Guard / AgentDoG)** | 轨迹级与工具调用级安全评估，支持人工审批工作流                                                   |
+| **智能体办公室 (Agent Office)** | 基于 PixiJS 的 2D 可视化界面，集中查看所有智能体状态与活动                                       |
+| **引导安装 (Onboard Setup)**    | 交互式安装与配置 OpenClaw、Hermes、nanobot，并写入对应的模型、gateway 与 Guard 集成               |
 
 ---
 
@@ -70,7 +72,7 @@ pip install xsafeclaw
 xsafeclaw start
 ```
 
-浏览器会自动打开 `http://127.0.0.1:6874`。如果尚未安装 OpenClaw，Web 界面会引导你完成安装。
+浏览器会自动打开 `http://127.0.0.1:6874`。如果尚未安装任何支持的运行时，Web 界面会引导你安装 OpenClaw、Hermes 或 nanobot。
 
 常用选项：
 
@@ -87,7 +89,6 @@ xsafeclaw start --no-browser --reload    # 无头开发模式
 XSafeClaw 的安全守卫通过双层防御保护用户：
 
 1. **轨迹级评估** — 将完整对话历史发送至守卫模型（AgentDoG），评估整个交互序列中可能跨多轮涌现的风险。
-
 2. **工具调用拦截** — 每次工具调用都经过 `before_tool_call` 钩子。如果守卫模型判定为不安全，该调用会被挂起，等待人工审批。
 
 ```
@@ -117,36 +118,37 @@ XSafeClaw 的安全守卫通过双层防御保护用户：
 ## 🏗️ 架构
 
 ```
-                   浏览器 (:6874)
-                       │
-           ┌───────────┴───────────┐
-           │     FastAPI 服务器     │
-           ├───────────────────────┤
-           │   Guard 服务          │◄── AgentDoG 模型
-           │   文件监听器           │◄── ~/.openclaw/ JSONL 会话
-           │   资产扫描器           │◄── 文件/软件/硬件扫描
-           └───────────┬───────────┘
-                       │
-              ┌────────┴────────┐
-              │                 │
-         SQLite 数据库     OpenClaw 会话文件
-       ~/.xsafeclaw/       ~/.openclaw/
-
-           OpenClaw 智能体                         nanobot 智能体
-               │ before_tool_call 钩子                 │ 配置式 hook
-               ▼                                       ▼
-       safeclaw-guard 插件 ──► POST /api/guard/tool-check ◄── XSafeClaw nanobot hook
-                                                       │
-                                             nanobot gateway websocket
+                         浏览器 (:6874)
+                              │
+                  ┌───────────┴───────────┐
+                  │     FastAPI 服务器     │
+                  ├───────────────────────┤
+                  │   运行时注册表         │◄── OpenClaw / Hermes / nanobot 发现
+                  │   运行时自动启动       │◄── best-effort gateway 启动
+                  │   Guard 服务          │◄── AgentDoG 模型
+                  │   文件监听器           │◄── 各运行时 JSONL 会话
+                  │   资产扫描器           │◄── 文件/软件/硬件扫描
+                  └───────────┬───────────┘
+                              │
+                    SQLite DB │ ~/.xsafeclaw/
+                              │
+          ┌───────────────────┼───────────────────┐
+          │                   │                   │
+    OpenClaw 智能体      Hermes 智能体        nanobot 智能体
+    safeclaw 插件        Hermes 插件          XSafeClaw hook
+    ws://:18789          http://:8642         gateway + websocket
+          └───────────────────┴───────────────────┘
+                              │
+                   POST /api/guard/tool-check
 ```
 
-| 层级 | 技术 |
-|:--|:--|
-| 后端 | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn |
-| 前端 | React 19, TypeScript, Vite, Tailwind CSS 4 |
-| 数据库 | SQLite (aiosqlite) |
-| 守卫模型 | AgentDoG（可配置 Base URL 和模型） |
-| 运行时 | 本机 OpenClaw 与本机 nanobot（通过 `nanobot gateway`） |
+| 层级     | 技术                                                     |
+| :------- | :------------------------------------------------------- |
+| 后端     | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn        |
+| 前端     | React 19, TypeScript, Vite, Tailwind CSS 4               |
+| 数据库   | SQLite (aiosqlite)                                       |
+| 守卫模型 | AgentDoG（可配置 Base URL 和模型）                       |
+| 运行时   | 本机 OpenClaw、Hermes Agent 与 nanobot，支持按会话选择 |
 
 运行时可访问 `http://localhost:6874/docs` 查看完整 API 文档。
 
@@ -154,10 +156,10 @@ XSafeClaw 的安全守卫通过双层防御保护用户：
 
 ## 📦 安装
 
-详细安装流程请参阅 **[安装指南](docs/installation.pdf)**。
+详细安装流程请参阅 **[安装指南](docs/installation.md)**。
 
 > [!TIP]
-> 需要 Python 3.11+。前端已预构建并打包，生产环境无需安装 Node.js。
+> 需要 Python 3.11+。已发布的包会包含前端 bundle；源码仓库需要运行 `cd frontend && npm run build` 才能让后端直接提供嵌入式 UI，也可以使用 Vite 开发服务器。
 
 ```bash
 # 从 PyPI 安装（推荐）
@@ -177,7 +179,9 @@ cd XSafeClaw && pip install -e ".[dev]"
 
 ### 🔌 安装 Guard 插件
 
-如需为 OpenClaw 启用实时工具调用拦截，请安装 OpenClaw 插件：
+Setup 和 Configure 流程会自动安装对应运行时的 Guard 集成。手动接入时，按运行时使用下面的方式。
+
+OpenClaw 使用 TypeScript 插件：
 
 ```bash
 cp -r plugins/safeclaw-guard ~/.openclaw/extensions/safeclaw-guard
@@ -197,17 +201,24 @@ cp -r plugins/safeclaw-guard ~/.openclaw/extensions/safeclaw-guard
 }
 ```
 
-对于 nanobot，**不要**复制 `plugins/safeclaw-guard`。nanobot 通过写入 `~/.nanobot/config.json` 的 Python hook 接入 XSafeClaw。在开发模式下，应使用 uv tool 安装 nanobot，并把当前仓库作为 editable 包注入到 nanobot 工具环境中，这样 nanobot 才能导入 XSafeClaw 的 hook 模块：
+Hermes 使用 Python 插件：
 
 ```bash
+mkdir -p ~/.hermes/plugins/safeclaw-guard
+cp -r plugins/safeclaw-guard-hermes/* ~/.hermes/plugins/safeclaw-guard/
+```
+
+nanobot 使用单独的 Python 插件目录，并需要让 nanobot 的 uv tool 环境能导入 XSafeClaw：
+
+```bash
+mkdir -p ~/.nanobot/plugins/safeclaw-guard
+cp -r plugins/safeclaw-guard-nanobot/* ~/.nanobot/plugins/safeclaw-guard/
 uv tool install nanobot-ai --with-editable . --force
 ```
 
-当 XSafeClaw 以源码仓库方式运行时，`/setup` 页面现在也会自动使用同一条 editable 安装命令，确保 nanobot 的工具环境可以导入当前仓库里的 XSafeClaw hook 模块。
+Nanobot 配置页会在点击保存后自动完成这些操作：复制插件、把 hook 写入 `~/.nanobot/config.json`，并把 `SAFETY.md` / `PERMISSION.md` 部署到 nanobot workspace。该插件会在每轮 nanobot agent 对话中注入这些安全模板，并通过 XSafeClaw Guard 检查工具调用。
 
-`pyproject.toml` 也提供了可选的 `nanobot` extra，供确实希望把 `nanobot-ai` 安装进当前项目虚拟环境的用户使用。对于本仓库的开发流程，仍优先推荐上面的 uv-tool 命令，因为这更符合平时直接运行 `nanobot` CLI 的方式。
-
-然后启动 XSafeClaw。`/setup` 页面现在只负责安装 Nanobot CLI，安装完成后会直接跳转到 `/nanobot_configure`。只有在 Nanobot 配置页点击“保存”后，才会真正创建 `~/.nanobot/config.json`。首次进入配置页时，provider、model 和 API Key 都不会预填。
+首次进入时不会预填 provider、model 或 API Key。
 
 兼容旧流程时，初始化接口仍然保留，但它只会创建不含 provider/model 默认值的 skeleton 配置：
 
@@ -215,15 +226,23 @@ uv tool install nanobot-ai --with-editable . --force
 curl -X POST http://127.0.0.1:6874/api/system/nanobot/init-default
 ```
 
-手动测试时，需要在另一个终端启动 nanobot gateway：
+### 运行时 Gateway
+
+XSafeClaw 会在服务启动时和安装/初始化后 best-effort 自动启动已安装运行时：
+
+- OpenClaw：`openclaw gateway start --json`，默认 `ws://127.0.0.1:18789`。
+- Hermes：启用 HTTP API 后启动/重启 `hermes gateway`，默认 `http://127.0.0.1:8642`。
+- nanobot：后台启动 `nanobot gateway --port <配置端口>`，默认 health 端口 `18790`，WebSocket channel 为 `ws://127.0.0.1:8765/`。
+
+手动命令主要用于排障：
 
 ```bash
+openclaw gateway start
+hermes gateway
 nanobot gateway --port 18790 --verbose
 ```
 
-当前 Chat 和 Agent Valley 使用 `nanobot gateway` 通道，不需要启动 `nanobot serve`。
-
-Web UI 也提供了默认本机 nanobot 运行时的配置页，会写入 `~/.nanobot/config.json`，包括 workspace、provider/model、API Key、gateway、WebSocket channel、可选 WebSocket token，以及 XSafeClaw Guard hook 设置。首次打开时，只会预填 workspace、端口、WebSocket 和 Guard 这类基础设施默认值，不会自动选择 provider 或模型。你也可以先只保存基础配置，但在补齐 provider 和 model 之前，Nanobot 仍会保持“待配置”状态。修改 gateway、WebSocket、provider 或 token 后，需要重启 `nanobot gateway`，让正在运行的 gateway 加载最新配置。
+如果手动修改运行时配置文件，需要重启对应 gateway 才能加载新设置。当前 nanobot 集成不需要启动 `nanobot serve`。
 
 ---
 
@@ -232,15 +251,20 @@ Web UI 也提供了默认本机 nanobot 运行时的配置页，会写入 `~/.na
 XSafeClaw 默认配置开箱即用。如需自定义，将 `.env.example` 复制为 `.env` 进行修改：
 
 | 变量 | 默认值 | 说明 |
-|:--|:--|:--|
-| `API_PORT` | `6874` | 服务器端口 |
+| :--- | :----- | :--- |
+| `API_PORT` | `6874` | XSafeClaw API 端口 |
 | `API_HOST` | `0.0.0.0` | 绑定地址 |
+| `DATA_DIR` | `~/.xsafeclaw` | SQLite 数据库与本地状态目录 |
+| `PLATFORM` | `auto` | 默认实例提示：`auto`、`openclaw`、`hermes` 或 `nanobot`；所有已发现运行时仍可选择 |
+| `AUTO_START_RUNTIMES` | `true` | 自动尝试启动已安装的 OpenClaw、Hermes 与 nanobot gateway |
 | `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw 会话目录 |
-| `~/.nanobot/config.json` | *在 Nanobot 配置页保存时生成* | nanobot 配置、gateway、workspace 与 XSafeClaw hook 设置 |
-| `GUARD_BASE_URL` | *（自动检测）* | 守卫模型 API 基础 URL |
-| `GUARD_BASE_MODEL` | *（自动检测）* | 守卫模型 ID |
+| `HERMES_HOME` | `~/.hermes` | Hermes 主目录 |
+| `HERMES_API_PORT` | `8642` | Hermes HTTP API 端口 |
+| `HERMES_API_KEY` | *空* | 需与 `~/.hermes/.env` 中的 `API_SERVER_KEY` 一致 |
+| `~/.nanobot/config.json` | *在 Nanobot 配置页保存时生成* | nanobot 配置、gateway、workspace、WebSocket 与 XSafeClaw hook 设置 |
+| `GUARD_BASE_URL` / `GUARD_BASE_MODEL` | AgentDoG 默认值 | 守卫模型 endpoint 与模型 ID |
 
-如未配置守卫相关变量，XSafeClaw 会自动从 `~/.openclaw/openclaw.json` 读取。nanobot 运行时配置存放在 `~/.nanobot/config.json`，不是 `.env`。完整变量列表请参见 `.env.example`。
+OpenClaw 配置存放在 `~/.openclaw/openclaw.json`，Hermes 配置存放在 `~/.hermes/.env` 与 `~/.hermes/config.yaml`，nanobot 配置存放在 `~/.nanobot/config.json`。完整变量列表请参见 `.env.example`。
 
 ---
 
@@ -261,16 +285,20 @@ git clone https://github.com/XSafeAI/XSafeClaw.git && cd XSafeClaw
 uv venv && uv pip install -e ".[dev]"
 python run.py                    # http://localhost:6874，支持热重载
 
-# 可选：本机 nanobot 运行时测试
+# 可选：本机运行时测试
 uv tool install nanobot-ai --with-editable . --force
+openclaw gateway start
+hermes gateway
 nanobot gateway --port 18790 --verbose
 
 # 前端（另开终端）
 cd frontend && npm install && npm run dev   # http://localhost:3003，支持 HMR
 
 # 构建前端用于生产
-cd frontend && npm run build     # 输出到 src/xsafeclaw/static/
+cd frontend && npm run build     # 输出被 git 忽略的 Vite 产物到 src/xsafeclaw/static/
 ```
+
+在 Linux/macOS 的仓库开发流程中，可以先运行 `bash setup.sh` 安装依赖，再运行 `bash start.sh`。该脚本会把 Vite 前端运行在 `:6874`，FastAPI 后端运行在 `:3022` 并由 Vite 代理 `/api`。
 
 ---
 
@@ -298,6 +326,8 @@ cd frontend && npm run build     # 输出到 src/xsafeclaw/static/
 ## 🙏 致谢
 
 - [**OpenClaw**](https://github.com/openclaw/openclaw) — XSafeClaw 所守护的个人 AI 助手平台。OpenClaw 开放的插件架构使我们的安全守卫集成成为可能。
+- [**Hermes Agent**](https://github.com/NousResearch/hermes-agent) — XSafeClaw 现在作为一等运行时支持的本机 Python 智能体与多平台 gateway。
+- **nanobot** — 通过 gateway、WebSocket 与 Python hook 接入 XSafeClaw 的轻量级本机智能体运行时。
 - [**AgentDoG**](https://github.com/AI45Lab/AgentDoG) — AI 智能体安全诊断守卫框架。XSafeClaw 的 Guard 模块基于 AgentDoG 的轨迹级风险评估和细粒度安全分类体系构建。
 - [**ISC-Bench**](https://github.com/wuyoscar/ISC-Bench) — 前沿大语言模型内部安全崩溃研究。ISC-Bench 对任务完成驱动型安全失败的深入洞察，为我们的红队测试设计提供了重要参考。
 - [**AgentHazard**](https://github.com/Yunhao-Feng/AgentHazard) — 计算机使用智能体有害行为评估基准。AgentHazard 的攻击分类体系和执行级风险类别为我们的威胁建模提供了借鉴。

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { guardAPI } from '../../../../services/api';
-import { CHAR_BASE, USE_AGENT_TOWN_MOCK } from '../config/constants';
+import { CHAR_BASE, USE_AGENT_TOWN_MOCK, formatAgentDisplayName } from '../config/constants';
 import { buildMockAssistantReply, buildMockHistory } from '../data/mockData';
 
 function pickActiveShowcaseMode(seed) {
@@ -1160,7 +1160,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
                 <div className="agent-card-identity">
                   <div className="agent-card-name">
                     <span className={`dot ${stateDot}`} />
-                    <span>{String(agent.name || `Agent-${shortId(agent.id)}`)}</span>
+                    <span>{formatAgentDisplayName(agent || { id: shortId(agent?.id) })}</span>
                   </div>
                   <div className="agent-card-subline">
                     {String(agent.provider || 'unknown')} · {String(agent.model || 'model pending')}

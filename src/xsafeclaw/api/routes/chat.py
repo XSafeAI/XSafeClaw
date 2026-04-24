@@ -188,6 +188,57 @@ def _find_nanobot_session_file(
     return None
 
 
+def _nanobot_session_file_path(
+    instance: RuntimeInstance,
+    local_session_key: str,
+) -> Path | None:
+    if not instance.sessions_path:
+        return None
+    sessions_dir = Path(instance.sessions_path).expanduser()
+    candidate_key = f"websocket:{local_session_key}"
+    file_name = f"{_safe_nanobot_filename(candidate_key.replace(':', '_'))}.jsonl"
+    return sessions_dir / file_name
+
+
+def _clone_nanobot_session_history(
+    instance: RuntimeInstance,
+    *,
+    old_local_session_key: str,
+    new_local_session_key: str,
+) -> bool:
+    if not old_local_session_key or not new_local_session_key:
+        return False
+    if old_local_session_key == new_local_session_key:
+        return False
+
+    source = _find_nanobot_session_file(instance, old_local_session_key)
+    target = _nanobot_session_file_path(instance, new_local_session_key)
+    if source is None or target is None or not source.exists():
+        return False
+    if target.exists():
+        return False
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = source.read_text(encoding="utf-8").splitlines()
+        if lines:
+            try:
+                first = json.loads(lines[0])
+                if first.get("_type") == "metadata":
+                    first["key"] = f"websocket:{new_local_session_key}"
+                    lines[0] = json.dumps(first, ensure_ascii=False)
+            except json.JSONDecodeError:
+                pass
+        target.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        return True
+    except Exception as exc:
+        print(
+            "[nanobot-relink] failed to clone history "
+            f"{old_local_session_key} -> {new_local_session_key}: {exc}"
+        )
+        return False
+
+
 def _nanobot_result_text(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -1293,20 +1344,38 @@ async def _connect_nanobot_gateway(instance: RuntimeInstance) -> NanobotGatewayC
 
 async def _get_nanobot_gateway_session(
     public_session_key: str,
+    local_session_key: str,
     instance: RuntimeInstance,
-) -> NanobotGatewayClient:
+) -> tuple[NanobotGatewayClient, str, str, bool]:
     client = _nanobot_gateway_sessions.get(public_session_key)
     if client is not None and client.is_open:
-        return client
+        return client, local_session_key, public_session_key, False
     if client is not None:
         await client.disconnect()
         _nanobot_gateway_sessions.pop(public_session_key, None)
-    raise HTTPException(
-        status_code=503,
-        detail=(
-            "nanobot gateway websocket session is not connected. "
-            "Create a new nanobot session from the Chat page."
-        ),
+
+    relinked_client = await _connect_nanobot_gateway(instance)
+    relinked_local_session_key = relinked_client.chat_id or local_session_key
+    relinked_public_session_key = encode_chat_session_key(
+        instance,
+        relinked_local_session_key,
+    )
+    _nanobot_gateway_sessions[relinked_public_session_key] = relinked_client
+    migrated = _clone_nanobot_session_history(
+        instance,
+        old_local_session_key=local_session_key,
+        new_local_session_key=relinked_local_session_key,
+    )
+    print(
+        "[nanobot-relink] restored websocket session "
+        f"{public_session_key} -> {relinked_public_session_key} "
+        f"(history_migrated={migrated})"
+    )
+    return (
+        relinked_client,
+        relinked_local_session_key,
+        relinked_public_session_key,
+        True,
     )
 
 
@@ -1901,7 +1970,11 @@ async def send_message(request: SendMessageRequest):
                     status_code=400,
                     detail="nanobot gateway websocket channel currently supports text messages only",
                 )
-            client = await _get_nanobot_gateway_session(public_session_key, instance)
+            client, local_session_key, public_session_key, _ = await _get_nanobot_gateway_session(
+                public_session_key,
+                local_session_key,
+                instance,
+            )
             result = await client.send_chat(request.message, timeout_s=120.0)
         else:
             client = await _get_or_create_client(instance, public_session_key)
@@ -2027,14 +2100,34 @@ async def send_message_stream(request: SendMessageRequest):
     async def event_generator():
         final_text = ""
         client: GatewayClient | HermesClient | NanobotGatewayClient | None = None
+        stream_local_session_key = local_session_key
+        stream_public_session_key = public_session_key
         try:
             if instance.platform == "nanobot":
                 if request.images:
                     raise HTTPException(
                         status_code=400,
                         detail="nanobot gateway websocket channel currently supports text messages only",
+                    )
+                client, stream_local_session_key, stream_public_session_key, relinked = (
+                    await _get_nanobot_gateway_session(
+                        public_session_key,
+                        local_session_key,
+                        instance,
+                    )
                 )
-                client = await _get_nanobot_gateway_session(public_session_key, instance)
+                if relinked:
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "session_relinked",
+                                "session_key": stream_public_session_key,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
                 async for chunk in client.stream_chat(request.message, timeout_s=120.0):
                     if isinstance(chunk, dict) and chunk.get("text"):
                         final_text = str(chunk["text"])
@@ -2096,7 +2189,7 @@ async def send_message_stream(request: SendMessageRequest):
         # After the final response, read tool calls from the JSONL file.
         try:
             tool_events = (
-                _read_nanobot_tool_calls_from_jsonl(instance, local_session_key)
+                _read_nanobot_tool_calls_from_jsonl(instance, stream_local_session_key)
                 if instance.platform == "nanobot"
                 else _read_tool_calls_from_jsonl(instance, local_session_key)
             )

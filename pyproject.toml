@@ -1,6 +1,6 @@
 [project]
 name = "xsafeclaw"
-version = "1.0.2"
+version = "1.0.3"
 description = "XSafeClaw - Keeping Your Claw Safe. Real-time monitoring and security for OpenClaw, Hermes, and nanobot AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,7 +8,10 @@ keywords = [
     "agent-security",
     "ai-safety",
     "openclaw",
+    "hermes",
+    "hermes-agent",
     "nanobot",
+    "multi-runtime",
     "guardrails",
     "fastapi",
 ]
@@ -49,7 +52,7 @@ xsafeclaw = "xsafeclaw.cli:app"
 [project.urls]
 Homepage = "https://xsafeclaw.ai"
 Repository = "https://github.com/XSafeAI/XSafeClaw"
-Documentation = "https://github.com/XSafeAI/XSafeClaw/blob/main/docs/installation.pdf"
+Documentation = "https://github.com/XSafeAI/XSafeClaw/blob/main/docs/installation.md"
 Issues = "https://github.com/XSafeAI/XSafeClaw/issues"
 
 [project.optional-dependencies]
@@ -71,6 +74,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xsafeclaw"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"plugins" = "plugins"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["frontend"]

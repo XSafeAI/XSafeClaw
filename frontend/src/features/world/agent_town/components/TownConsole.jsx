@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK, buildStableCharNameMap, hashAgentCharIndex, DEMO_MODE, DEMO_CHAR_NAME, markDemoSession, isDemoSession } from '../config/constants';
+import { CHAR_BASE, CHAR_NAMES, USE_AGENT_TOWN_MOCK, buildStableCharNameMap, hashAgentCharIndex, formatAgentDisplayName, DEMO_MODE, DEMO_CHAR_NAME, markDemoSession, isDemoSession } from '../config/constants';
 import {
   buildMockAssistantReply,
   buildMockHistory,
@@ -296,12 +296,19 @@ function buildDraftAgent(sessionKey, modelOption, runtimeInstance = null) {
   const platform = runtimeInstance?.platform || 'openclaw';
   const instanceId = runtimeInstance?.instance_id || 'openclaw-default';
   const suffix = shortId(normalizeSessionIdentity(sessionKey)).toUpperCase();
-  return {
-    id: `draft:${sessionKey}`,
+  const identity = {
     session_key: sessionKey,
     platform,
     instance_id: instanceId,
-    name: `Agent-${suffix}`,
+    id: `draft:${sessionKey}`,
+    pid: suffix,
+  };
+  return {
+    id: identity.id,
+    session_key: sessionKey,
+    platform,
+    instance_id: instanceId,
+    name: formatAgentDisplayName(identity),
     pid: suffix,
     provider,
     model: modelName,

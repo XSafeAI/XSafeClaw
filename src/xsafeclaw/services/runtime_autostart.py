@@ -42,7 +42,7 @@ Design rules:
   OpenClaw uses the upstream ``openclaw gateway start --json`` service
   command. Nanobot uses the same ``start_new_session=True`` detached spawn
   pattern that ``_hermes_bring_up_api`` step (3) uses.
-* **Opt-out.** Disabled by setting ``XSAFECLAW_AUTO_START_RUNTIMES=false``
+* **Opt-out.** Disabled by setting ``AUTO_START_RUNTIMES=false``
   in the env / ``.env``. We do not provide a per-framework knob because the
   helpers already no-op when a framework isn't installed — there's nothing
   to disable in that case.
@@ -366,7 +366,7 @@ async def autostart_installed_runtimes() -> dict[str, dict[str, Any]]:
     from ..config import settings as _settings  # local import → no circular dep
     enabled = getattr(_settings, "auto_start_runtimes", True)
     if not enabled:
-        logger.info("[autostart] disabled via XSAFECLAW_AUTO_START_RUNTIMES=false")
+        logger.info("[autostart] disabled via AUTO_START_RUNTIMES=false")
         return {
             "openclaw": {"status": "disabled", "detail": "auto_start_runtimes=false"},
             "hermes":   {"status": "disabled", "detail": "auto_start_runtimes=false"},
