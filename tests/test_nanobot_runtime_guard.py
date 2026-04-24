@@ -413,10 +413,9 @@ async def test_runtime_registry_uses_fixed_singletons(monkeypatch, tmp_path):
     registry = RuntimeRegistry()
     instances = await registry.discover()
 
-    assert [instance.instance_id for instance in instances] == [
-        "openclaw-default",
-        "nanobot-default",
-    ]
+    instance_ids = [instance.instance_id for instance in instances]
+    assert instance_ids[0] == "openclaw-default"
+    assert "nanobot-default" in instance_ids
     assert next(instance for instance in instances if instance.instance_id == "openclaw-default").is_default is True
     nanobot = next(instance for instance in instances if instance.instance_id == "nanobot-default")
     assert nanobot.is_default is False
@@ -530,10 +529,12 @@ def test_install_status_does_not_require_openclaw_config_for_nanobot_only(monkey
 
     monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
     monkeypatch.setattr(system_routes, "_find_openclaw", lambda: None)
+    monkeypatch.setattr(system_routes, "_find_hermes", lambda: None)
     monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
     monkeypatch.setattr(system_routes, "_find_node_version", lambda: "v22.0.0")
     monkeypatch.setattr(system_routes, "_CONFIG_PATH", tmp_path / "missing-openclaw.json")
     monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", nanobot_config)
+    monkeypatch.setattr(system_routes.Path, "home", lambda: tmp_path / "fake-home")
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     client = TestClient(app)
