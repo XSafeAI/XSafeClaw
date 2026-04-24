@@ -6483,9 +6483,36 @@ def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> Path | Non
             src_file = src_dir / fname
             if src_file.exists():
                 shutil.copy2(src_file, dst_dir / fname)
+
+        # §57 — user-installed Hermes plugins are opt-in. Per
+        # ``hermes_cli/plugins.py`` (line ~620, "Everything else (...) is
+        # opt-in via plugins.enabled"): if the plugin name is not in
+        # ``config.yaml::plugins.enabled`` the PluginManager loads it as
+        # ``enabled=False`` and pre_llm_call / pre_tool_call never fire.
+        # Symptom in the wild: Configure flow returns success, files land
+        # under ~/.hermes/plugins/safeclaw-guard/ correctly, plugin.yaml
+        # parses correctly, ``hermes plugins list`` shows it as "not
+        # enabled" — and SAFETY/PERMISSION never reach the model.
+        #
+        # Three-layer enable, ordered by safety:
+        #   1) ``hermes plugins enable safeclaw-guard`` (Hermes's own
+        #      first-class API; future-proof against schema changes)
+        #   2) Direct yaml upsert into ``plugins.enabled`` (used when the
+        #      hermes binary isn't reachable from this process)
+        #   3) Silent log on total failure — the §55 system-prompt
+        #      injection still buys us partial coverage even if the hook
+        #      never registers.
+        try:
+            _enable_hermes_plugin("safeclaw-guard")
+        except Exception as exc:
+            print(
+                f"[xsafeclaw] hermes plugin enable failed: {exc}",
+                file=sys.stderr,
+            )
         return dst_dir
     if target == "nanobot":
         src_dir = plugins_root / "safeclaw-guard-nanobot"
+
         if not src_dir.is_dir():
             return None
         dst_dir = XSAFECLAW_NANOBOT_PLUGIN_PATH
@@ -6505,6 +6532,83 @@ def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> Path | Non
         if src_file.exists():
             shutil.copy2(src_file, dst_dir / fname)
     return dst_dir
+
+
+def _enable_hermes_plugin(plugin_name: str) -> None:
+    """§57 — Mark a user-installed Hermes plugin as enabled.
+
+    Hermes loads ``~/.hermes/plugins/<name>/`` only when ``<name>`` appears
+    in ``~/.hermes/config.yaml::plugins.enabled``. We try the official
+    ``hermes plugins enable <name>`` CLI first (it knows the schema and
+    handles edge cases like the ``disabled`` denylist), and fall back to a
+    direct yaml rewrite when the binary isn't reachable.
+
+    Idempotent: a second call with the same ``plugin_name`` is a no-op.
+    """
+    hermes_bin = _find_hermes()
+    if hermes_bin:
+        try:
+            result = subprocess.run(
+                [hermes_bin, "plugins", "enable", plugin_name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=_build_env(),
+            )
+            if result.returncode == 0:
+                return
+            stderr = (result.stderr or "").strip()
+            if "already enabled" in stderr.lower():
+                return
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    import yaml as _yaml
+
+    cfg: dict = {}
+    if _HERMES_CONFIG_PATH.exists():
+        try:
+            cfg = _yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        except Exception:
+            cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    plugins_block = cfg.get("plugins")
+    if not isinstance(plugins_block, dict):
+        plugins_block = {}
+
+    enabled = plugins_block.get("enabled") or []
+    if not isinstance(enabled, list):
+        enabled = []
+    if plugin_name in enabled:
+        return
+    enabled.append(plugin_name)
+    plugins_block["enabled"] = enabled
+
+    disabled = plugins_block.get("disabled") or []
+    if isinstance(disabled, list) and plugin_name in disabled:
+        plugins_block["disabled"] = [d for d in disabled if d != plugin_name]
+    elif "disabled" not in plugins_block:
+        plugins_block["disabled"] = []
+
+    cfg["plugins"] = plugins_block
+
+    tmp_path = _HERMES_CONFIG_PATH.with_suffix(_HERMES_CONFIG_PATH.suffix + ".tmp")
+    try:
+        _HERMES_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(
+            _yaml.dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, _HERMES_CONFIG_PATH)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
 
 
 def _deploy_safety_files(workspace: str) -> None:

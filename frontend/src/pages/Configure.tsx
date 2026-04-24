@@ -1314,11 +1314,21 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
         endpointBaseUrl = (providerBaseUrlOverride[modelProviderId] || '').trim();
       }
 
+      // §54 — explicitly pin ``platform: 'hermes'``. This handler lives
+      // inside ``HermesConfigureFlow`` (function literally named
+      // ``saveModelToHermes``) and is unreachable from the OpenClaw
+      // wizard, so the platform is statically known. We still send the
+      // field on the wire because the backend's
+      // ``target_platform = body.platform or ('hermes' if
+      // settings.is_hermes else 'openclaw')`` fallback is silent and
+      // would have happened to do the right thing here, but only by
+      // accident on Hermes-default servers — explicit > implicit.
       const res = await systemAPI.quickModelConfig({
         provider: modelProviderId,
         model_id: modelId,
         api_key: modelApiKey.trim() || undefined,
         base_url: endpointBaseUrl || undefined,
+        platform: 'hermes',
       });
       setModelSaveResult('ok');
       setModelDefaultId(modelId);

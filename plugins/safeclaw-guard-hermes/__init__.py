@@ -1,11 +1,14 @@
 """
 XSafeClaw Guard Plugin for Hermes Agent.
 
-This plugin registers a single hook:
+This plugin registers two hooks:
 
 * ``pre_tool_call`` — sends every tool call to XSafeClaw for safety
   evaluation; unsafe calls are blocked with a reason message and may be
   long-polled for human approval (see XSafeClaw §55).
+* ``pre_llm_call`` — injects SAFETY.md + PERMISSION.md into the current
+  turn's user message as a hard fallback for Hermes's API-server path
+  (see §56b history note below).
 
 This is the Hermes-native counterpart of the OpenClaw TypeScript plugin
 (plugins/safeclaw-guard/index.ts).
@@ -14,16 +17,28 @@ History:
 
 * §54 introduced a ``pre_llm_call`` hook that injected SAFETY.md /
   PERMISSION.md into the **user message** for every turn.
-* §56 removed that hook because Hermes documents the user-message
-  injection path as a weak constraint ("system prompt is Hermes's
-  territory; plugins contribute context alongside the user's input" —
-  ``run_agent.py:8038-8042``). XSafeClaw now writes the same SAFETY +
-  PERMISSION text into ``~/.hermes/config.yaml::agent.system_prompt``
-  during onboard, so Hermes Gateway loads it as ``ephemeral_system_prompt``
-  at startup and prepends it to the **system role** on every API call —
-  the strongest constraint a Hermes plugin can route policies through
-  without forking the agent core. The user-message path also broke
-  prompt cache reuse (one fresh ~10KB block per turn).
+* §56 removed that hook in favour of writing the same text into
+  ``~/.hermes/config.yaml::agent.system_prompt``. The §56 author assumed
+  Hermes Gateway always loads that field as ``ephemeral_system_prompt``
+  and prepends it to the **system role** on every API call — the
+  strongest constraint a plugin can route policies through.
+* §56b — the §56 assumption is wrong for the API-server path that
+  XSafeClaw's chat UI actually uses. ``gateway/platforms/api_server.py
+  ::_handle_chat_completions`` builds ``ephemeral_system_prompt``
+  exclusively from ``system``-role messages in the inbound HTTP request
+  body and **never reads** ``config.yaml::agent.system_prompt``. Only the
+  CLI / interactive path in ``gateway/run.py`` reads that field. As a
+  result the SAFETY block written by ``_deploy_hermes_system_prompt``
+  reaches Hermes CLI users but is silently dropped for every chat
+  completion that flows through XSafeClaw's UI → Hermes API → upstream
+  LLM. The most reliable proof: ask any Hermes-fronted Claude session
+  to grep its own context for the literal sentinel
+  ``xsafeclaw:safety-block:begin`` and it returns ``NOT FOUND``.
+  This commit re-introduces the §54 ``pre_llm_call`` hook as a hard
+  fallback so the SAFETY/PERMISSION text reaches the model regardless
+  of which Hermes entry point is used. Prompt-cache reuse is sacrificed
+  in exchange for not silently shipping an agent without policy
+  context — the correct trade-off for a safety plugin.
 
 Install:
     Copy this directory to ``~/.hermes/plugins/safeclaw-guard/``
@@ -36,16 +51,58 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 310
 
+_HERMES_WORKSPACE = Path(
+    os.environ.get("SAFECLAW_WORKSPACE")
+    or (Path.home() / ".hermes" / "workspace")
+).expanduser()
+
+_SAFETY_BLOCK_BEGIN = "<!-- xsafeclaw:safety-block:begin v1 -->"
+_SAFETY_BLOCK_END = "<!-- xsafeclaw:safety-block:end -->"
+
 
 def _get_base_url() -> str:
     """Return the XSafeClaw backend URL."""
     return os.environ.get("SAFECLAW_URL", "http://localhost:6874").rstrip("/")
+
+
+def _read_workspace_file(name: str) -> str:
+    """Return UTF-8 contents of ``<workspace>/<name>`` or empty string."""
+    path = _HERMES_WORKSPACE / name
+    try:
+        if path.is_file():
+            return path.read_text("utf-8")
+    except Exception as exc:
+        logger.debug("safeclaw-guard: cannot read %s: %s", path, exc)
+    return ""
+
+
+def _build_safety_block() -> str:
+    """Compose the sentinel-wrapped SAFETY+PERMISSION block.
+
+    Returns an empty string when both source files are missing so the
+    hook becomes a no-op rather than injecting bare sentinels with no
+    policy text — that would still report ``found`` to a sentinel grep
+    but would actually deliver zero guidance to the model.
+    """
+    safety = _read_workspace_file("SAFETY.md")
+    permission = _read_workspace_file("PERMISSION.md")
+    if not (safety or permission):
+        return ""
+
+    sections = []
+    if safety:
+        sections.append(safety.rstrip())
+    if permission:
+        sections.append(permission.rstrip())
+    body = "\n\n".join(sections)
+    return f"{_SAFETY_BLOCK_BEGIN}\n# Safety Policies\n\n{body}\n{_SAFETY_BLOCK_END}"
 
 
 def _fetch_session_messages(session_id: str) -> list:
@@ -157,17 +214,47 @@ def _pre_tool_call_handler(
     return None
 
 
+def _pre_llm_call_handler(**kwargs: Any) -> Optional[Dict[str, str]]:
+    """§56b: inject SAFETY/PERMISSION as user-message context.
+
+    Hermes's hook contract (see ``run_agent.py`` ~L8033 and
+    ``website/docs/user-guide/features/hooks.md::pre_llm_call``):
+    a callback that returns ``{"context": "..."}`` (or a plain string)
+    has its return value appended to the **current turn's user message**
+    just before the LLM request is built. This is the only sanctioned
+    plugin path that reaches the model on every Hermes entry point —
+    CLI, gateway, and ``/v1/chat/completions``.
+
+    We accept ``**kwargs`` only — Hermes passes ``session_id``,
+    ``user_message``, ``conversation_history``, ``is_first_turn``,
+    ``model``, ``platform``, but we don't need any of them (the SAFETY
+    payload is identical every turn). Accepting kwargs keeps us
+    forward-compatible if Hermes adds new params.
+
+    Returning ``None`` (when the workspace files are missing) makes this
+    hook a silent no-op rather than a half-baked injection.
+    """
+    block = _build_safety_block()
+    if not block:
+        return None
+    return {"context": block}
+
+
 def register(ctx: Any) -> None:
     """Hermes plugin entry point — register guard hooks.
 
-    §56: only ``pre_tool_call`` is registered. SAFETY/PERMISSION
-    injection is now done by XSafeClaw onboard writing
-    ``~/.hermes/config.yaml::agent.system_prompt``, which Gateway loads
-    as ``ephemeral_system_prompt`` at startup and prepends to the
-    **system role** of every API call. See module docstring for the full
-    rationale.
+    §56b: registers BOTH ``pre_tool_call`` (Asset Shield + Guard Model
+    runtime check) and ``pre_llm_call`` (SAFETY/PERMISSION fallback
+    injection). The original §56 design tried to push policy through
+    ``config.yaml::agent.system_prompt`` alone but that path is silently
+    bypassed by ``api_server.py`` — see module docstring for the
+    post-mortem.
     """
     ctx.register_hook("pre_tool_call", _pre_tool_call_handler)
+    ctx.register_hook("pre_llm_call", _pre_llm_call_handler)
     logger.info(
-        "safeclaw-guard: registered (backend=%s)", _get_base_url(),
+        "safeclaw-guard: registered hooks=[pre_tool_call,pre_llm_call] "
+        "backend=%s workspace=%s",
+        _get_base_url(),
+        _HERMES_WORKSPACE,
     )
