@@ -1,0 +1,6 @@
+{
+  "name": "safeclaw-guard-nanobot",
+  "runtime": "nanobot",
+  "entrypoint": "safeclaw_guard_nanobot:XSafeClawNanobotHook",
+  "description": "XSafeClaw safety guard for nanobot prompt context injection and tool-call checks."
+}

@@ -33,6 +33,7 @@ from ...runtime.nanobot import (
     DEFAULT_XSAFECLAW_GUARD_BASE_URL,
     DEFAULT_XSAFECLAW_GUARD_TIMEOUT_S,
     NANOBOT_DEFAULT_CONFIG,
+    XSAFECLAW_NANOBOT_PLUGIN_PATH,
     default_nanobot_gateway_heartbeat_config,
     ensure_nanobot_gateway_heartbeat_config,
     parse_nanobot_gateway_state,
@@ -1095,6 +1096,7 @@ def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
         "enabled": False,
         "hook_valid": False,
         "class_path": None,
+        "plugin_path": str(XSAFECLAW_NANOBOT_PLUGIN_PATH),
         "mode": "blocking",
         "base_url": DEFAULT_XSAFECLAW_GUARD_BASE_URL,
         "configured_instance_id": None,
@@ -1133,6 +1135,7 @@ def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
             "enabled": guard["enabled"],
             "hook_present": guard["hook_present"],
             "hook_valid": guard["hook_valid"],
+            "plugin_path": guard["plugin_path"],
             "base_url": guard["base_url"],
             "timeout_s": guard["timeout_s"],
             "configured_instance_id": guard["configured_instance_id"],
@@ -1249,12 +1252,15 @@ async def set_nanobot_config(body: NanobotConfigRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _write_json_mapping(path, data)
+    plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
+    _deploy_safety_files(str(Path(body.workspace or _nanobot_default_workspace()).expanduser()))
     guard = update_nanobot_guard_state(
         path,
         instance_id="nanobot-default",
         mode=body.guard_mode,
         base_url=body.guard_base_url,
         timeout_s=body.guard_timeout_s,
+        plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
     )
     response = _nanobot_config_response(path)
     try:
@@ -1331,6 +1337,7 @@ async def get_nanobot_guard_config(instance_id: str):
         "hook_present": guard["hook_present"],
         "hook_valid": guard["hook_valid"],
         "class_path": guard["class_path"],
+        "plugin_path": guard["plugin_path"],
         "base_url": guard["base_url"],
         "timeout_s": guard["timeout_s"],
         "configured_instance_id": guard["configured_instance_id"],
@@ -1349,12 +1356,14 @@ async def set_nanobot_guard_config(instance_id: str, body: NanobotGuardConfigReq
     if not instance.config_path:
         raise HTTPException(status_code=400, detail="Runtime instance does not have a config_path")
     try:
+        plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
         guard = update_nanobot_guard_state(
             instance.config_path,
             instance_id=instance.instance_id,
             mode=body.mode,
             base_url=body.base_url,
             timeout_s=body.timeout_s,
+            plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1369,6 +1378,7 @@ async def set_nanobot_guard_config(instance_id: str, body: NanobotGuardConfigReq
         "hook_present": guard["hook_present"],
         "hook_valid": guard["hook_valid"],
         "class_path": guard["class_path"],
+        "plugin_path": guard["plugin_path"],
         "base_url": guard["base_url"],
         "timeout_s": guard["timeout_s"],
         "configured_instance_id": guard["configured_instance_id"],
@@ -2661,11 +2671,14 @@ async def init_default_nanobot():
     defaults["workspace"] = str(workspace)
     _write_json_mapping(config_path, data)
 
+    plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
+    _deploy_safety_files(str(workspace))
     gateway = update_nanobot_gateway_state(config_path)
     guard = update_nanobot_guard_state(
         config_path,
         instance_id="nanobot-default",
         mode="blocking",
+        plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
     )
     instances = await runtime_registry.discover()
 
@@ -6432,24 +6445,38 @@ async def _auto_approve_devices() -> None:
         print(f"⚠️  Device auto-approve skipped: {e}")
 
 
-def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> None:
+def _plugins_root() -> Path:
+    """Find bundled Guard plugin sources in source checkouts and installed wheels."""
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[4] / "plugins",  # source checkout: repo/plugins
+        here.parents[3] / "plugins",  # installed wheel: site-packages/plugins
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
+
+
+def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> Path | None:
     """Install the XSafeClaw guard plugin for the requested platform.
 
     - **OpenClaw**: copies TS plugin to ``~/.openclaw/extensions/safeclaw-guard/``
     - **Hermes**: copies Python plugin to ``~/.hermes/plugins/safeclaw-guard/``
+    - **nanobot**: copies Python plugin to ``~/.nanobot/plugins/safeclaw-guard/``
 
     ``platform`` lets callers explicitly target one runtime when several are
     installed (multi-platform Configure flow). When omitted we fall back to
     ``settings.is_hermes`` so the legacy single-platform call sites keep
     working unchanged.
     """
-    plugins_root = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugins"
+    plugins_root = _plugins_root()
     target = platform or ("hermes" if settings.is_hermes else "openclaw")
 
     if target == "hermes":
         src_dir = plugins_root / "safeclaw-guard-hermes"
         if not src_dir.is_dir():
-            return
+            return None
         dst_dir = _HERMES_DIR / "plugins" / "safeclaw-guard"
         dst_dir.mkdir(parents=True, exist_ok=True)
         for fname in ("__init__.py", "plugin.yaml"):
@@ -6482,16 +6509,29 @@ def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> None:
                 f"[xsafeclaw] hermes plugin enable failed: {exc}",
                 file=sys.stderr,
             )
-    else:
-        src_dir = plugins_root / "safeclaw-guard"
+        return dst_dir
+    if target == "nanobot":
+        src_dir = plugins_root / "safeclaw-guard-nanobot"
+
         if not src_dir.is_dir():
-            return
-        dst_dir = _OPENCLAW_DIR / "extensions" / "safeclaw-guard"
+            return None
+        dst_dir = XSAFECLAW_NANOBOT_PLUGIN_PATH
         dst_dir.mkdir(parents=True, exist_ok=True)
-        for fname in ("index.ts", "openclaw.plugin.json", "package.json"):
+        for fname in ("safeclaw_guard_nanobot.py", "plugin.json"):
             src_file = src_dir / fname
             if src_file.exists():
                 shutil.copy2(src_file, dst_dir / fname)
+        return dst_dir
+    src_dir = plugins_root / "safeclaw-guard"
+    if not src_dir.is_dir():
+        return None
+    dst_dir = _OPENCLAW_DIR / "extensions" / "safeclaw-guard"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for fname in ("index.ts", "openclaw.plugin.json", "package.json"):
+        src_file = src_dir / fname
+        if src_file.exists():
+            shutil.copy2(src_file, dst_dir / fname)
+    return dst_dir
 
 
 def _enable_hermes_plugin(plugin_name: str) -> None:

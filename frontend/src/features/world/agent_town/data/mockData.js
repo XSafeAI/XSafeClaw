@@ -1,4 +1,4 @@
-import { CHAR_NAMES, USE_AGENT_TOWN_MOCK } from '../config/constants';
+import { CHAR_NAMES, USE_AGENT_TOWN_MOCK, formatAgentDisplayName } from '../config/constants';
 
 const STATUS_PLAN = [
   'running', 'running', 'running', 'running', 'running',
@@ -268,7 +268,7 @@ function buildAgent(index) {
 
   return {
     id: identity.id,
-    name: `Agent-${identity.pid}`,
+    name: formatAgentDisplayName({ id: identity.id, session_key: identity.sessionKey, pid: identity.pid }),
     pid: identity.pid,
     provider: profile.provider,
     model: profile.model,
@@ -422,7 +422,7 @@ export function generateJourneyEvents(agent) {
   return Array.from({ length: count }, (_, index) => ({
     event_id: `journey-${agent?.id || 'agent'}-${index}`,
     agent_id: agent?.id || 'agent',
-    agent_name: agent?.name || 'Agent-Mock',
+    agent_name: agent?.name || formatAgentDisplayName({ id: 'mock' }),
     event_type: buildEventType(profile, index),
     status: index % 5 === 4 ? 'error' : index % 4 === 3 ? 'warning' : 'completed',
     start_time: isoFromNow(420 + (count - index) * 16),

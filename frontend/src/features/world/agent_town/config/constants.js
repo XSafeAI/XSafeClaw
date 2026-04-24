@@ -234,6 +234,40 @@ export const CHAR_NAMES = [
   'Bouncer','Doctor_1','Nurse_1','Old_man_Josh','Old_woman_Jenny',
 ];
 
+export const AGENT_PERSON_NAMES = [
+  'Tom','Jerry','Kirco','Mira','Nora','Iris','Leo','Ada',
+  'Theo','Mina','Rex','Lina','Owen','Juno','Kai','Vera',
+  'Noah','Zara','Milo','Eli',
+];
+
+function hashStableIndex(key, total) {
+  if (!total) return 0;
+  let h = 0;
+  const s = String(key || '');
+  for (let i = 0; i < s.length; i += 1) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return ((h % total) + total) % total;
+}
+
+export function inferAgentRuntime(agent = {}) {
+  const platform = String(agent?.platform || '').trim().toLowerCase();
+  const instanceId = String(agent?.instance_id || '').trim().toLowerCase();
+  const sessionKey = String(agent?.session_key || '').trim().toLowerCase();
+
+  if (platform === 'nanobot' || instanceId.startsWith('nanobot') || sessionKey.startsWith('nanobot::')) return 'nanobot';
+  if (platform === 'hermes' || instanceId.startsWith('hermes') || sessionKey.startsWith('hermes::')) return 'hermes';
+  if (platform === 'openclaw' || instanceId.startsWith('openclaw') || sessionKey.startsWith('openclaw::')) return 'openclaw';
+  return platform || 'openclaw';
+}
+
+export function pickAgentPersonName(agent = {}) {
+  const key = agent?.session_key || agent?.id || agent?.pid || agent?.name || '';
+  return AGENT_PERSON_NAMES[hashStableIndex(key, AGENT_PERSON_NAMES.length)];
+}
+
+export function formatAgentDisplayName(agent = {}) {
+  return `${inferAgentRuntime(agent)}「${pickAgentPersonName(agent)}」`;
+}
+
 /** Deterministic agent->character index from key hash (stable across list reordering). */
 export function hashAgentCharIndex(key) {
   let h = 0;

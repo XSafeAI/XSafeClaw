@@ -19,6 +19,7 @@ import json
 import urllib.error
 import urllib.request
 import webbrowser
+from importlib import metadata as importlib_metadata
 
 import typer
 from rich.console import Console
@@ -31,6 +32,13 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+
+def _package_version() -> str:
+    try:
+        return importlib_metadata.version("xsafeclaw")
+    except importlib_metadata.PackageNotFoundError:
+        return "1.0.3"
 
 
 def _open_browser_landing(host: str, port: int) -> None:
@@ -120,7 +128,7 @@ def start(
 @app.command()
 def version() -> None:
     """Show XSafeClaw version."""
-    console.print("[bold]XSafeClaw[/bold] v0.1.0")
+    console.print(f"[bold]XSafeClaw[/bold] v{_package_version()}")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ backend needs to negotiate at startup.
 import mimetypes
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 
 # Windows often maps .js → text/plain via the registry; ES module scripts require
@@ -31,6 +32,13 @@ from ..services.message_sync_service import MessageSyncService
 from .routes import assets, chat, events, guard, map_skins, memory, messages, redteam, risk_test, sessions, skills, stats, system, tool_calls, trace
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
+
+
+def _package_version() -> str:
+    try:
+        return importlib_metadata.version("xsafeclaw")
+    except importlib_metadata.PackageNotFoundError:
+        return "1.0.3"
 
 
 # Global sync service instance
@@ -181,7 +189,7 @@ else:
     async def root():
         return {
             "name": "XSafeClaw",
-            "version": "1.0.0",
+            "version": _package_version(),
             "status": "running",
             "message_sync_service_running": message_sync_service.is_running() if message_sync_service else False,
             "hint": "Frontend not built. Run: cd frontend && npm run build",
