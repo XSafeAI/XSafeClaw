@@ -1,8 +1,9 @@
-"""Nanobot lifecycle hook that delegates tool-call checks to XSafeClaw."""
+"""Nanobot lifecycle hook that delegates prompt and tool checks to XSafeClaw."""
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,9 +20,12 @@ except Exception:  # pragma: no cover - lets XSafeClaw import without nanobot in
 
 logger = logging.getLogger(__name__)
 
+SAFETY_FILES = ("SAFETY.md", "PERMISSION.md")
+PROMPT_CONTEXT_MARKER = "<!-- XSafeClaw nanobot safety context -->"
+
 
 class XSafeClawHook(AgentHook):
-    """Guard nanobot tool calls through XSafeClaw before execution."""
+    """Guard nanobot prompts and tool calls through XSafeClaw."""
 
     def __init__(
         self,
@@ -43,6 +47,7 @@ class XSafeClawHook(AgentHook):
         self.channel = str(options.get("channel") or "")
         self.chat_id = str(options.get("chat_id") or "")
         self.message_id = str(options.get("message_id") or "")
+        self.inject_prompts = bool(options.get("inject_prompts", True))
 
     def set_runtime_context(
         self,
@@ -58,6 +63,43 @@ class XSafeClawHook(AgentHook):
         self.channel = channel
         self.chat_id = chat_id
         self.message_id = message_id or ""
+
+    def prepare_initial_messages(
+        self,
+        initial_messages: list[dict[str, Any]],
+        *,
+        workspace: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """Inject SAFETY.md and PERMISSION.md into nanobot's system prompt."""
+        if not self.inject_prompts:
+            return initial_messages
+
+        sections = self._policy_sections(workspace)
+        if not sections:
+            return initial_messages
+
+        marker = PROMPT_CONTEXT_MARKER
+        for message in initial_messages:
+            if message.get("role") != "system":
+                continue
+            if marker in self._content_text(message.get("content")):
+                return initial_messages
+
+        context = f"{marker}\n# XSafeClaw Safety Context\n\n" + "\n\n".join(sections)
+        messages = [dict(message) for message in initial_messages]
+        for message in messages:
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = f"{content.rstrip()}\n\n---\n\n{context}" if content else context
+            elif isinstance(content, list):
+                message["content"] = [*content, {"type": "text", "text": context}]
+            else:
+                message["content"] = context
+            return messages
+
+        return [{"role": "system", "content": context}, *messages]
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         tool_calls = list(getattr(context, "tool_calls", []) or [])
@@ -140,3 +182,37 @@ class XSafeClawHook(AgentHook):
                 "content": f"Error: XSafeClaw blocked this tool call. {reason}",
             }
         )
+
+    def _policy_sections(self, workspace: str | Path | None) -> list[str]:
+        sections = self._read_policy_sections(Path(workspace).expanduser()) if workspace else []
+        if sections:
+            return sections
+        return self._read_policy_sections(Path(__file__).resolve().parent.parent / "data" / "templates")
+
+    @staticmethod
+    def _read_policy_sections(directory: Path) -> list[str]:
+        sections: list[str] = []
+        if not directory.is_dir():
+            return sections
+        for filename in SAFETY_FILES:
+            path = directory / filename
+            try:
+                content = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if content:
+                sections.append(f"## {filename}\n{content}")
+        return sections
+
+    @staticmethod
+    def _content_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                str(item.get("text") or item.get("content") or item)
+                if isinstance(item, dict)
+                else str(item)
+                for item in content
+            )
+        return str(content or "")

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CHAR_BASE, CHAR_NAMES } from '../config/constants';
+import { CHAR_BASE, CHAR_NAMES, formatAgentDisplayName } from '../config/constants';
 import { getAgentTownText } from '../i18n';
 
 const FILTER_META = [
@@ -1064,7 +1064,7 @@ export default function CrewTab({
                 <div className="tc-stage-info-head">
                   <div>
                     <div className="tc-stage-agent-name-row">
-                      <div className="tc-stage-agent-name">{currentAgent.name}</div>
+                      <div className="tc-stage-agent-name">{formatAgentDisplayName(currentAgent)}</div>
                       <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
                         {(currentAgent.status || 'offline').toUpperCase()}
                       </div>
@@ -1156,7 +1156,7 @@ export default function CrewTab({
                           className={`tc-ledger-item tc-ledger-item-button tc-ledger-item-${event.status || 'running'} ${selectedLedgerTask?.task?.id === event.id ? 'tc-ledger-item-selected' : ''}`}
                           onClick={() => setSelectedLedgerTask({
                             task: event,
-                            agentName: currentAgent.name,
+                            agentName: formatAgentDisplayName(currentAgent),
                           })}
                         >
                           <div className="tc-ledger-row">

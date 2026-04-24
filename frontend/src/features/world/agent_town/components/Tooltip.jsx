@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatAgentDisplayName } from '../config/constants';
 
 function safeStr(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -31,7 +32,7 @@ export default function Tooltip({ data }) {
     >
       <div className="ttName">
         <span className={`dot dot-${state}`} />
-        {safeStr(agent.name)}
+        {safeStr(formatAgentDisplayName(agent))}
       </div>
       <div className="ttMeta">
         {safeStr(agent.provider)} · {safeStr(agent.model || '')} · {state}

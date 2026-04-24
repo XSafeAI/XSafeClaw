@@ -12,7 +12,7 @@ export default function PendingPopup({ onClose }) {
         </div>
         <div className="popup-body">
           <div className="kv">
-            <div>Agent</div><span>Agent-Edward</span>
+            <div>Agent</div><span>openclaw「Edward」</span>
             <div>Action</div><span>execute_shell_command</span>
             <div>Target</div><span>/usr/bin/sudo apt install python3-dev</span>
             <div>Risk Level</div><span className="badge-error">HIGH</span>

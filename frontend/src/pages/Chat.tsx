@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
-  Settings2, Brain, Cpu, Shield, Check, AlertTriangle, Mic, MicOff, Zap,
+  Settings2, Brain, Cpu, Shield, Check, AlertTriangle, Mic, MicOff, Zap, Pencil,
 } from 'lucide-react';
 import { chatAPI, guardAPI, systemAPI, voiceAPI } from '../services/api';
 import type { RuntimeInstance } from '../services/api';
@@ -55,6 +55,8 @@ interface StoredSession {
   // which model each session is locked to and understand why switching
   // between different-model sessions takes ~10ms longer.
   model?: string;
+  autoTitlePending?: boolean;
+  titleEdited?: boolean;
 }
 
 /* ==================== localStorage helpers ==================== */
@@ -103,6 +105,15 @@ function fmtDate(iso: string, todayLabel = 'Today', yesterdayLabel = 'Yesterday'
   if (diffDays === 0) return todayLabel;
   if (diffDays === 1) return yesterdayLabel;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function titleFromUserMessage(input: string): string {
+  const cleaned = input
+    .replace(/\s+/g, ' ')
+    .replace(/^\/model\s+\S+\s*/i, '')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned.length > 56 ? `${cleaned.slice(0, 56).trimEnd()}...` : cleaned;
 }
 
 /* ==================== Extract text from OpenClaw message ==================== */
@@ -312,6 +323,8 @@ export default function Chat() {
   const [patchingSession, setPatchingSession] = useState(false);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
+  const [editingSessionKey, setEditingSessionKey] = useState<string | null>(null);
+  const [editingSessionLabel, setEditingSessionLabel] = useState('');
 
   const [guardOn, setGuardOn] = useState(true);
 
@@ -549,6 +562,39 @@ export default function Chat() {
     try { await guardAPI.setEnabled(next); } catch { setGuardOn(!next); }
   };
 
+  const applyAutoSessionTitle = useCallback((key: string, text: string) => {
+    const title = titleFromUserMessage(text);
+    if (!title) return;
+    setSessions(prev => prev.map(session => (
+      session.key === key && session.autoTitlePending && !session.titleEdited
+        ? { ...session, label: title, autoTitlePending: false }
+        : session
+    )));
+  }, []);
+
+  const startRenameSession = (session: StoredSession, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingSessionKey(session.key);
+    setEditingSessionLabel(session.label);
+  };
+
+  const cancelRenameSession = () => {
+    setEditingSessionKey(null);
+    setEditingSessionLabel('');
+  };
+
+  const commitRenameSession = (key: string) => {
+    const label = editingSessionLabel.replace(/\s+/g, ' ').trim();
+    if (label) {
+      setSessions(prev => prev.map(session => (
+        session.key === key
+          ? { ...session, label, autoTitlePending: false, titleEdited: true }
+          : session
+      )));
+    }
+    cancelRenameSession();
+  };
+
   // Load available models once
   useEffect(() => {
     let cancelled = false;
@@ -737,12 +783,13 @@ export default function Chat() {
         || undefined;
       const newSession: StoredSession = {
         key,
-        label: `Chat ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`,
+        label: t.chat.newChatLabel,
         createdAt: new Date().toISOString(),
         instanceId: res.data.instance_id,
         platform: res.data.platform,
         displayName: res.data.instance?.display_name,
         model: boundModel,
+        autoTitlePending: true,
       };
       setSessions(prev => [newSession, ...prev]);
       setMessageMap(prev => ({ ...prev, [key]: [] }));
@@ -757,6 +804,7 @@ export default function Chat() {
   /* --- Switch session --- */
   const handleSelectSession = (key: string) => {
     const session = sessions.find(item => item.key === key);
+    cancelRenameSession();
     setActiveKey(key);
     if (session?.instanceId) setSelectedInstanceId(session.instanceId);
     setSelectedModel('');
@@ -776,6 +824,7 @@ export default function Chat() {
   const handleDeleteSession = async (key: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try { await chatAPI.closeSession(key); } catch { /* ignore */ }
+    if (editingSessionKey === key) cancelRenameSession();
     setSessions(prev => prev.filter(s => s.key !== key));
     setMessageMap(prev => { const next = { ...prev }; delete next[key]; return next; });
     if (activeKey === key) {
@@ -808,7 +857,7 @@ export default function Chat() {
     const modelCommand = parsePromptModelSwitch(text);
     const textToSend = modelCommand ?? text;
 
-    const key = activeKey;
+    let key = activeKey;
     inFlightRef.current = true;
 
     const imagesToSend = [...pendingImages];
@@ -825,6 +874,7 @@ export default function Chat() {
     const pendingMsg: ChatMessage = { id: pendingId, role: 'assistant', content: '', timestamp: new Date(), pending: true };
 
     setMessageMap(prev => ({ ...prev, [key]: [...(prev[key] ?? []), userMsg, pendingMsg] }));
+    applyAutoSessionTitle(key, text);
 
     const body: any = { session_key: key, message: textToSend || '(see attached image)' };
     if (imagesToSend.length > 0) {
@@ -869,10 +919,27 @@ export default function Chat() {
           try {
             const chunk = JSON.parse(raw) as {
               type: string; text?: string;
+              session_key?: string;
               tool_id?: string; tool_name?: string; args?: any; result?: any; is_error?: boolean;
             };
 
-            if (chunk.type === 'delta' && chunk.text) {
+            if (chunk.type === 'session_relinked' && chunk.session_key) {
+              const previousKey = key;
+              const nextKey = chunk.session_key;
+              if (nextKey && nextKey !== previousKey) {
+                key = nextKey;
+                setSessions(prev => prev.map(session => (
+                  session.key === previousKey ? { ...session, key: nextKey } : session
+                )));
+                setMessageMap(prev => {
+                  const next = { ...prev };
+                  next[nextKey] = next[previousKey] ?? next[nextKey] ?? [];
+                  delete next[previousKey];
+                  return next;
+                });
+                setActiveKey(current => (current === previousKey ? nextKey : current));
+              }
+            } else if (chunk.type === 'delta' && chunk.text) {
               if (!streamStarted) streamStarted = true;
               setMessageMap(prev => ({
                 ...prev,
@@ -1265,7 +1332,24 @@ export default function Chat() {
                       : <MessageSquare className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-accent' : 'text-text-muted'}`} />
                     }
                     <div className="flex-1 min-w-0">
-                      <p className="text-[12px] font-medium truncate">{s.label}</p>
+                      {editingSessionKey === s.key ? (
+                        <input
+                          value={editingSessionLabel}
+                          onChange={e => setEditingSessionLabel(e.target.value)}
+                          onClick={e => e.stopPropagation()}
+                          onBlur={() => commitRenameSession(s.key)}
+                          onKeyDown={e => {
+                            e.stopPropagation();
+                            if (e.key === 'Enter') commitRenameSession(s.key);
+                            if (e.key === 'Escape') cancelRenameSession();
+                          }}
+                          autoFocus
+                          className="w-full rounded-md border border-border bg-surface-0 px-2 py-1 text-[12px] font-medium text-text-primary outline-none focus:border-accent"
+                          placeholder={t.chat.renameSessionPlaceholder}
+                        />
+                      ) : (
+                        <p className="text-[12px] font-medium truncate">{s.label}</p>
+                      )}
                       <div className="flex items-center gap-1 mt-0.5">
                         <Clock className="w-2.5 h-2.5 text-text-muted flex-shrink-0" />
                         <p className="text-[10px] text-text-muted truncate">
@@ -1298,6 +1382,13 @@ export default function Chat() {
                         </p>
                       )}
                     </div>
+                    <button
+                      onClick={e => startRenameSession(s, e)}
+                      className="opacity-0 group-hover:opacity-100 p-0.5 text-text-muted hover:text-text-primary transition-all flex-shrink-0"
+                      title={t.chat.renameSession}
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
                     <button
                       onClick={e => handleDeleteSession(s.key, e)}
                       className="opacity-0 group-hover:opacity-100 p-0.5 text-text-muted hover:text-red-400 transition-all flex-shrink-0"

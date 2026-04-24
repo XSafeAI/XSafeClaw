@@ -6,6 +6,7 @@ import inspect
 import importlib
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -40,12 +41,21 @@ def _read_mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _import_hook_class(class_path: str) -> type[Any]:
+def _import_hook_class(class_path: str, plugin_path: str | Path | None = None) -> type[Any]:
     module_name, sep, attr_path = class_path.partition(":")
     if not sep:
         module_name, _, attr_path = class_path.rpartition(".")
     if not module_name or not attr_path:
         raise ValueError(f"Invalid nanobot hook class_path: {class_path}")
+
+    if plugin_path:
+        path = Path(plugin_path).expanduser()
+        import_dir = path.parent if path.is_file() else path
+        if import_dir.is_dir():
+            import_dir_str = str(import_dir)
+            if import_dir_str not in sys.path:
+                sys.path.insert(0, import_dir_str)
+            importlib.invalidate_caches()
 
     module = importlib.import_module(module_name)
     target: Any = module
@@ -89,9 +99,14 @@ def load_configured_nanobot_hooks(config_path: str | Path | None = None) -> list
             logger.warning("Skipping nanobot hook %s because class_path is missing", name)
             continue
 
+        plugin_path = (
+            entry.get("plugin_path")
+            or entry.get("pluginPath")
+            or entry.get("path")
+        )
         hook_config = _read_mapping(entry.get("config"))
         try:
-            hook_class = _import_hook_class(class_path)
+            hook_class = _import_hook_class(class_path, plugin_path)
             hooks.append(hook_class(hook_config))
         except Exception:
             logger.exception("Failed to load nanobot hook %s from %s", name, class_path)
@@ -195,6 +210,26 @@ def _set_hook_runtime_context(
             logger.exception("Failed to update runtime context for nanobot hook %r", hook)
 
 
+def _prepare_initial_messages(
+    hooks: list[Any] | None,
+    initial_messages: list[dict[str, Any]],
+    *,
+    workspace: str | Path | None,
+) -> list[dict[str, Any]]:
+    messages = initial_messages
+    for hook in hooks or []:
+        prepare = getattr(hook, "prepare_initial_messages", None)
+        if not callable(prepare):
+            continue
+        try:
+            prepared = prepare(messages, workspace=workspace)
+            if isinstance(prepared, list):
+                messages = prepared
+        except Exception:
+            logger.exception("Failed to prepare initial messages for nanobot hook %r", hook)
+    return messages
+
+
 def install_nanobot_hook_autoload() -> bool:
     """Patch nanobot AgentLoop so original nanobot commands load configured hooks."""
     install_nanobot_config_compat()
@@ -244,6 +279,11 @@ def install_nanobot_hook_autoload() -> bool:
             channel=str(kwargs.get("channel") or "cli"),
             chat_id=str(kwargs.get("chat_id") or "direct"),
             message_id=kwargs.get("message_id"),
+        )
+        initial_messages = _prepare_initial_messages(
+            getattr(self, "_extra_hooks", None),
+            initial_messages,
+            workspace=getattr(getattr(self, "context", None), "workspace", None),
         )
         return await original_run_agent_loop(self, initial_messages, *args, **kwargs)
 

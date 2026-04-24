@@ -10,6 +10,7 @@ import {
   FIELD_NPC_DIALOGUE_URL,
   buildStableCharNameMap,
   hashAgentCharIndex,
+  formatAgentDisplayName,
   DEMO_MODE, DEMO_CHAR_NAME, isDemoSession,
 } from '../config/constants';
 
@@ -1168,7 +1169,7 @@ export default class GameEngine {
 
         return {
           id: agentId,
-          name: latest.name || agent?.name || `Agent ${index + 1}`,
+          name: formatAgentDisplayName({ ...agent, ...latest, id: agentId }),
           idLabel: this._shortDashboardAgentId(latest?.session_key || latest?.id || agentId, 18),
           charName: charNameMap[agentId] || CHAR_NAMES[index % Math.max(1, CHAR_NAMES.length)],
           statusMeta,
@@ -3637,7 +3638,7 @@ export default class GameEngine {
 
     // Name tag
     const nameTagColor = 0x7fb9ff;
-    const nameTag  = new PIXI.Text(agent.name.replace(/^Agent-/, '').substring(0, 10), {
+    const nameTag  = new PIXI.Text(formatAgentDisplayName(agent).substring(0, 18), {
       fontFamily: 'Press Start 2P', fontSize: 20, fill: nameTagColor, align: 'center', stroke: 0x120d1c, strokeThickness: 2,
     });
     nameTag.anchor.set(0.5, 1);
@@ -4204,8 +4205,8 @@ export default class GameEngine {
     }
     a.sprite.play(); b.sprite.play();
 
-    this._createBubble(a, this._getSnippet(a.agent) || a.agent.name + ' working...');
-    this._createBubble(b, this._getSnippet(b.agent) || b.agent.name + ' working...');
+    this._createBubble(a, this._getSnippet(a.agent) || formatAgentDisplayName(a.agent) + ' working...');
+    this._createBubble(b, this._getSnippet(b.agent) || formatAgentDisplayName(b.agent) + ' working...');
 
     const baseY = MEETING_BUBBLE_ANCHOR_Y;
     const sx = MEETING_BUBBLE_SPREAD_X;
