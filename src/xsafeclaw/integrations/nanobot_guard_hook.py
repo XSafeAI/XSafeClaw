@@ -111,9 +111,17 @@ class XSafeClawHook(AgentHook):
         for tool_call in tool_calls:
             try:
                 verdict = await self._check_tool_call(context, tool_call)
-            except Exception:
-                logger.exception("XSafeClaw nanobot guard check failed; allowing tool call")
-                remaining.append(tool_call)
+            except Exception as exc:
+                logger.exception("XSafeClaw nanobot guard check failed; blocking tool call")
+                blocked_ids.add(str(getattr(tool_call, "id", "")))
+                self._append_blocked_tool_result(
+                    context,
+                    tool_call,
+                    (
+                        "XSafeClaw guard is unavailable, so this tool call was "
+                        f"blocked to preserve path protection. ({type(exc).__name__})"
+                    ),
+                )
                 continue
 
             if verdict.get("action") == "block":

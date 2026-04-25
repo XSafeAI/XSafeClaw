@@ -211,6 +211,13 @@ export default function Assets() {
     modify: t.assets.safety.guardModify,
     delete: t.assets.safety.guardDelete,
   };
+  const safetyOperationLabels: Record<(typeof OPERATIONS)[number], string> = {
+    read: t.assets.safety.operations.read,
+    write: t.assets.safety.operations.write,
+    delete: t.assets.safety.operations.delete,
+    modify: t.assets.safety.operations.modify,
+    create: t.assets.safety.operations.create,
+  };
 
   const [activeTab, setActiveTab] = useState<TabId>('scan');
 
@@ -978,8 +985,8 @@ export default function Assets() {
                     <div className="grid grid-cols-5 gap-1.5">
                       {OPERATIONS.map(op => (
                         <button key={op} onClick={() => setSafetyOp(op)}
-                          className={`py-2 rounded-lg text-[12px] font-medium capitalize transition-all border ${safetyOp === op ? 'bg-accent/15 text-accent border-accent/40' : 'bg-surface-0 text-text-muted border-border hover:border-border-active hover:text-text-secondary'}`}>
-                          {op}
+                          className={`asset-permission-option py-2 rounded-lg text-[12px] font-medium capitalize transition-all border ${safetyOp === op ? 'bg-accent/15 text-accent border-accent/40' : 'bg-surface-0 text-text-muted border-border hover:border-border-active hover:text-text-secondary'}`}>
+                          {safetyOperationLabels[op]}
                         </button>
                       ))}
                     </div>
@@ -1034,7 +1041,7 @@ export default function Assets() {
                           <button
                             key={operation}
                             onClick={() => toggleDenyOp(operation)}
-                            className={`px-3 py-2 rounded-lg text-[12px] font-medium transition-all border ${
+                            className={`asset-permission-option px-3 py-2 rounded-lg text-[12px] font-medium transition-all border ${
                               selected
                                 ? 'bg-accent/15 text-accent border-accent/40'
                                 : 'bg-surface-0 text-text-muted border-border hover:border-border-active hover:text-text-secondary'

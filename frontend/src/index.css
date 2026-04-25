@@ -79,6 +79,11 @@ body {
   transition: background-color 0.2s ease, color 0.2s ease;
 }
 
+:root:not([data-theme="light"]) .asset-permission-option,
+[data-theme="dark"] .asset-permission-option {
+  color: #ffffff;
+}
+
 /* ── Scrollbar ─────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }

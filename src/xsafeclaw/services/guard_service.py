@@ -36,7 +36,7 @@ import httpx
 from ..config import settings
 from ..path_protection import (
     build_block_reason,
-    extract_exec_operations,
+    extract_tool_operations,
     load_rules,
     match_protected_scope,
 )
@@ -286,18 +286,12 @@ def clear_results() -> None:
 
 
 def _denylist_precheck(tool_name: str, params: dict[str, Any]) -> str | None:
-    """Block exec calls that hit a user-protected path for the matched operation."""
-    if tool_name != "exec":
-        return None
-    cmd = params.get("command") or params.get("cmd") or ""
-    if not isinstance(cmd, str) or not cmd.strip():
-        return None
-
+    """Block tool calls that hit a user-protected path for the matched operation."""
     denylist = _load_denylist()
     if not denylist:
         return None
 
-    for operation, target in extract_exec_operations(cmd):
+    for operation, target in extract_tool_operations(tool_name, params):
         protected_root = match_protected_scope(target, operation, denylist)
         if protected_root:
             return build_block_reason(target, operation, protected_root)
