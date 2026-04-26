@@ -56,7 +56,7 @@
 |  🔥  | 2026-04-25 | v1.0.4 released — XSafeClaw now publicly supports OpenClaw, nanobot, and Hermes side by side, while fixing several known bugs. |
 |  🔥  | 2026-04-23 | Hermes and runtime autostart — XSafeClaw now discovers OpenClaw, Hermes, and nanobot side by side, and best-effort starts installed gateways when the server boots. |
 |  🔥  | 2026-04-18 | nanobot local runtime support — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show mixed-runtime sessions together in Agent Valley. |
-|  🚀  | 2026-04-13 | v 1.0.0 released — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
+|  🔥  | 2026-04-13 | v 1.0.0 released — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup. |
 
 ---
 
