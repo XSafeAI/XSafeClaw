@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from importlib import metadata as importlib_metadata
 import json
+import locale
 import os
 import re
+import secrets
 import select as _select
 import shlex
 import shutil
@@ -67,6 +69,8 @@ _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 _DEFAULT_OPENCLAW_WORKSPACE_STR = str(_OPENCLAW_DIR / "workspace")
+_XSAFECLAW_STATE_DIR = Path.home() / ".xsafeclaw"
+_UV_CACHE_DIR = _XSAFECLAW_STATE_DIR / "uv-cache"
 
 # ---------------------------------------------------------------------------
 # PTY-based process registry for interactive (onboard) steps
@@ -293,6 +297,44 @@ def _build_uv_command(uv_path: str, args: list[str]) -> list[str]:
     return _build_tool_command(uv_path, args)
 
 
+def _decode_subprocess_output(data: bytes) -> str:
+    """Decode subprocess output with platform-aware fallbacks."""
+    if not data:
+        return ""
+
+    encodings: list[str] = ["utf-8", "utf-8-sig"]
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        encodings.append(preferred)
+    if os.name == "nt":
+        for candidate in ("mbcs", "cp936", "gbk", "cp1252"):
+            encodings.append(candidate)
+
+    seen: set[str] = set()
+    for encoding in encodings:
+        if not encoding:
+            continue
+        normalized = encoding.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return data.decode("utf-8", errors="replace")
+
+
+def _find_available_launcher(names: tuple[str, ...], fallback: str | None = None) -> str | None:
+    """Return the first executable available on PATH."""
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+    return fallback
+
+
 def _uv_tool_bin_dir(
     uv_executable: str,
     *,
@@ -366,6 +408,12 @@ def _build_env() -> dict:
     """Build an env dict that includes nvm Node 22 bin directory if available (cross-platform)."""
     env = {**os.environ, "CI": "true", "NO_COLOR": "1"}
     path_sep = _PATH_SEP
+    if not env.get("UV_CACHE_DIR"):
+        try:
+            _UV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            env["UV_CACHE_DIR"] = str(_UV_CACHE_DIR)
+        except Exception:
+            pass
 
     # nvm-sh (Linux/macOS/WSL): ~/.nvm/versions/node/v22.x.x/bin
     nvm_node22 = Path.home() / ".nvm" / "versions" / "node"
@@ -451,14 +499,18 @@ def _nanobot_official_install_args(
     *,
     env: dict | None = None,
     uv_executable: str | None = None,
+    force: bool = False,
 ) -> list[str]:
     """Build the official uv-tool install command for nanobot."""
-    return [
+    args = [
         uv_executable or _find_uv_executable(env=env) or "uv",
         "tool",
         "install",
         "nanobot-ai",
     ]
+    if force:
+        args.append("--force")
+    return args
 
 
 def _nanobot_overlay_install_args(
@@ -481,16 +533,25 @@ def _nanobot_overlay_install_args(
 
 def _format_command(args: list[str]) -> str:
     """Render a subprocess argument list as a shell command for logs/UI."""
-    if os.name == "nt":
+    if _host_is_windows():
         return subprocess.list2cmdline(args)
     return shlex.join(args)
 
 
+def _host_is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _host_platform() -> str:
+    return sys.platform
+
+
 def _uv_official_install_args() -> list[str]:
     """Return the official uv installer command for the current host OS."""
-    if os.name == "nt":
+    if _host_is_windows():
+        shell = _find_available_launcher(("pwsh", "powershell"), fallback="powershell") or "powershell"
         return [
-            "powershell",
+            shell,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -509,16 +570,83 @@ def _uv_official_install_command() -> str:
     return _format_command(_uv_official_install_args())
 
 
-def _nanobot_official_install_command() -> str:
+def _uv_install_attempts() -> list[tuple[str, list[str], str]]:
+    """Return uv installation attempts in preferred order for the host OS."""
+    attempts: list[tuple[str, list[str], str]] = []
+
+    if _host_is_windows():
+        official_args = _uv_official_install_args()
+        attempts.append(("official-installer", official_args, _format_command(official_args)))
+
+        winget = shutil.which("winget")
+        if winget:
+            winget_args = [
+                winget,
+                "install",
+                "--id",
+                "astral-sh.uv",
+                "-e",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ]
+            attempts.append(("winget", winget_args, "winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements"))
+
+        scoop = shutil.which("scoop")
+        if scoop:
+            scoop_args = [scoop, "install", "main/uv"]
+            attempts.append(("scoop", scoop_args, "scoop install main/uv"))
+
+        python_launcher = _find_available_launcher(("py", "python"), fallback=sys.executable)
+        if python_launcher:
+            pip_args = [python_launcher, "-m", "pip", "install", "--user", "uv"]
+            launcher_name = Path(python_launcher).name.lower()
+            display = "py -m pip install --user uv" if launcher_name in {"py", "py.exe"} else "python -m pip install --user uv"
+            attempts.append(("pip-user", pip_args, display))
+        return attempts
+
+    curl = shutil.which("curl")
+    if curl:
+        curl_args = ["/bin/sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]
+        attempts.append(("official-installer-curl", curl_args, _format_command(curl_args)))
+
+    wget = shutil.which("wget")
+    if wget:
+        wget_args = ["/bin/sh", "-c", "wget -qO- https://astral.sh/uv/install.sh | sh"]
+        attempts.append(("official-installer-wget", wget_args, _format_command(wget_args)))
+
+    if _host_platform() == "darwin":
+        brew = shutil.which("brew")
+        if brew:
+            brew_args = [brew, "install", "uv"]
+            attempts.append(("homebrew", brew_args, "brew install uv"))
+
+    python_launcher = _find_available_launcher(("python3", "python"), fallback=sys.executable)
+    if python_launcher:
+        pip_args = [python_launcher, "-m", "pip", "install", "--user", "uv"]
+        launcher_name = Path(python_launcher).name.lower()
+        display = "python3 -m pip install --user uv" if launcher_name.startswith("python3") else "python -m pip install --user uv"
+        attempts.append(("pip-user", pip_args, display))
+    return attempts
+
+
+def _classify_uv_install_failure(outputs: list[str]) -> str:
+    """Return a user-facing hint for common uv installation failures."""
+    haystack = "\n".join(outputs).lower()
+    if any(token in haystack for token in ("authentication failed", "certificate", "tls", "ssl", "schannel", "sec_e_no_credentials", "基础连接已经关闭")):
+        return "The host could not establish a trusted HTTPS connection while downloading uv. Check system certificates, proxy settings, or corporate network interception."
+    if "timed out" in haystack or "timeout" in haystack:
+        return "Downloading uv timed out. Check outbound network access and retry."
+    if "access is denied" in haystack or "permission denied" in haystack:
+        return "Installing uv was blocked by local permissions. Retry with a user-level package manager or fix write permissions for the user install directory."
+    return "All uv installation attempts failed."
+
+
+def _nanobot_official_install_command(*, force: bool = False) -> str:
     """Return the official nanobot installation command for logs/UI."""
-    return _format_command(
-        [
-            "uv",
-            "tool",
-            "install",
-            "nanobot-ai",
-        ]
-    )
+    args = ["uv", "tool", "install", "nanobot-ai"]
+    if force:
+        args.append("--force")
+    return _format_command(args)
 
 
 def _nanobot_overlay_install_command() -> str:
@@ -755,7 +883,7 @@ async def _probe_nanobot_cli_async(
     except Exception as exc:
         return False, None, str(exc)
 
-    raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
+    raw = _decode_subprocess_output(stdout or stderr or b"").strip()
     first_line = raw.splitlines()[0] if raw else None
     if (
         proc.returncode == 0
@@ -1286,6 +1414,33 @@ def _nanobot_default_config_payload() -> dict[str, Any]:
     }
 
 
+def _ensure_nanobot_websocket_token(data: dict[str, Any]) -> str | None:
+    """Generate and persist a websocket token when Nanobot requires one."""
+    channels = data.setdefault("channels", {})
+    if not isinstance(channels, dict):
+        channels = {}
+        data["channels"] = channels
+
+    websocket = channels.setdefault("websocket", {})
+    if not isinstance(websocket, dict):
+        websocket = {}
+        channels["websocket"] = websocket
+
+    websocket.setdefault("allowFrom", ["xsafeclaw"])
+    websocket.setdefault("streaming", True)
+
+    if not bool(websocket.get("websocketRequiresToken")):
+        return None
+
+    token = str(websocket.get("token") or "").strip()
+    if token:
+        return None
+
+    token = secrets.token_urlsafe(32)
+    websocket["token"] = token
+    return token
+
+
 def _nanobot_selected_provider(defaults: dict[str, Any]) -> str:
     model = str(defaults.get("model") or "").strip()
     provider = str(defaults.get("provider") or "").strip()
@@ -1310,6 +1465,22 @@ def _nanobot_config_flags(config_path: Path | None = None) -> tuple[bool, bool, 
     provider = _nanobot_selected_provider(defaults)
     model = str(defaults.get("model") or "").strip()
     return True, _nanobot_model_configured(provider, model), provider, model
+
+
+def _nanobot_active_provider_has_api_key(config_path: Path | None = None) -> bool:
+    path = Path(config_path or NANOBOT_DEFAULT_CONFIG).expanduser()
+    if not path.exists():
+        return False
+
+    data = _read_json_mapping(path)
+    defaults = _json_mapping(_json_mapping(data.get("agents")).get("defaults"))
+    provider = _nanobot_selected_provider(defaults)
+    if not provider:
+        return False
+
+    providers = _json_mapping(data.get("providers"))
+    active_provider_config = _json_mapping(providers.get(provider))
+    return bool(str(active_provider_config.get("apiKey") or "").strip())
 
 
 def _redacted_nanobot_provider_configs(providers: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1625,6 +1796,7 @@ async def set_nanobot_config(body: NanobotConfigRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    generated_websocket_token = _ensure_nanobot_websocket_token(data)
     _write_json_mapping(path, data)
     plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
     _deploy_safety_files(str(Path(body.workspace or _nanobot_default_workspace()).expanduser()))
@@ -1653,6 +1825,7 @@ async def set_nanobot_config(body: NanobotConfigRequest):
             "status": overlay_status,
             "detail": overlay_detail,
         },
+        "websocket_token_generated": bool(generated_websocket_token),
         "instances": [serialize_instance(instance) for instance in instances],
     }
 
@@ -1895,7 +2068,7 @@ async def _run_cmd(
         except Exception:
             pass
         return 124, "timeout"
-    return proc.returncode or 0, stdout_bytes.decode("utf-8", errors="replace").strip()
+    return proc.returncode or 0, _decode_subprocess_output(stdout_bytes).strip()
 
 
 def _nanobot_onboard_args(
@@ -3027,38 +3200,61 @@ async def install_nanobot():
         try:
             uv_executable = _find_uv_executable(env=local_env)
             if not uv_executable:
-                uv_install_cmd = _uv_official_install_command()
                 yield f"data: {json.dumps({'type': 'output', 'text': 'uv not found; installing uv via the official installer...'})}\n\n"
-                yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {uv_install_cmd}'})}\n\n"
-                rc, out = await _run_cmd(
-                    _uv_official_install_args(),
-                    env=local_env,
-                    timeout_s=240.0,
-                )
-                for segment in (out or "").splitlines():
-                    if segment.strip():
-                        yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
-                if rc != 0:
-                    yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': rc})}\n\n"
-                    return
-                local_env = _build_env()
-                uv_executable = _find_uv_executable(env=local_env)
+                attempts = _uv_install_attempts()
+                attempt_outputs: list[str] = []
+                for index, (attempt_name, attempt_args, attempt_display) in enumerate(attempts, start=1):
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Trying uv installer {index}/{len(attempts)}: {attempt_name}'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {attempt_display}'})}\n\n"
+                    timeout_s = 420.0 if attempt_name in {'winget', 'scoop'} else 240.0
+                    rc, out = await _run_cmd(
+                        attempt_args,
+                        env=local_env,
+                        timeout_s=timeout_s,
+                    )
+                    if out:
+                        attempt_outputs.append(out)
+                    for segment in (out or "").splitlines():
+                        if segment.strip():
+                            yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
+                    local_env = _build_env()
+                    uv_executable = _find_uv_executable(env=local_env)
+                    if rc == 0 and uv_executable:
+                        yield f"data: {json.dumps({'type': 'output', 'text': f'uv installed successfully via {attempt_name}.'})}\n\n"
+                        break
+                    if rc == 0 and not uv_executable:
+                        yield f"data: {json.dumps({'type': 'output', 'text': 'Installer finished, but uv is still not detectable from the current user environment.'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'output', 'text': f'uv installer {attempt_name} exited with code {rc}.'})}\n\n"
                 if not uv_executable:
                     raise RuntimeError(
-                        "The official uv installer finished, but uv is still not detectable. "
+                        f"{_classify_uv_install_failure(attempt_outputs)} "
                         "Check the manual commands below and verify your user bin directory is on PATH."
                     )
             else:
                 yield f"data: {json.dumps({'type': 'output', 'text': f'Using uv: {uv_executable}'})}\n\n"
 
             nanobot_path = _find_nanobot(env=local_env)
+            nanobot_ready = False
+            nanobot_error: str | None = None
+            if nanobot_path:
+                nanobot_ready, _, nanobot_error = await _probe_nanobot_cli_async(
+                    nanobot_path,
+                    env=local_env,
+                    timeout_s=15.0,
+                )
             yield f"data: {json.dumps({'type': 'nanobot_install_start'})}\n\n"
-            if not nanobot_path:
+            if not nanobot_path or not nanobot_ready:
+                repairing_nanobot = bool(nanobot_path and not nanobot_ready)
+                if repairing_nanobot:
+                    repair_reason = nanobot_error or "unknown error"
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Existing Nanobot CLI at {nanobot_path} is not usable ({repair_reason}); reinstalling it.'})}\n\n"
                 install_args = _nanobot_official_install_args(
                     env=local_env,
                     uv_executable=uv_executable,
+                    force=repairing_nanobot,
                 )
-                yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_nanobot_official_install_command()}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_nanobot_official_install_command(force=repairing_nanobot)}'})}\n\n"
                 proc = await asyncio.create_subprocess_exec(
                     *_build_uv_command(install_args[0], install_args[1:]),
                     stdout=asyncio.subprocess.PIPE,
@@ -3070,7 +3266,7 @@ async def install_nanobot():
                     line = await proc.stdout.readline()
                     if not line:
                         break
-                    text = line.decode("utf-8", errors="replace").rstrip()
+                    text = _decode_subprocess_output(line).rstrip()
                     if text:
                         yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
                 await proc.wait()
@@ -3081,9 +3277,15 @@ async def install_nanobot():
                 local_env = _build_env()
                 uv_executable = _find_uv_executable(env=local_env) or uv_executable
                 nanobot_path = _find_nanobot(env=local_env)
-                if not nanobot_path:
+                nanobot_ready, _, nanobot_error = await _probe_nanobot_cli_async(
+                    nanobot_path,
+                    env=local_env,
+                    timeout_s=15.0,
+                )
+                if not nanobot_path or not nanobot_ready:
                     raise RuntimeError(
-                        "The official nanobot install completed, but the nanobot CLI is still not detectable."
+                        "The official nanobot install completed, but the nanobot CLI is still not usable. "
+                        f"{nanobot_error or 'The executable could not be detected.'}"
                     )
             else:
                 yield f"data: {json.dumps({'type': 'output', 'text': f'Nanobot CLI already detected at {nanobot_path}; skipping reinstall.'})}\n\n"
@@ -3110,6 +3312,12 @@ async def install_nanobot():
                     return
             else:
                 yield f"data: {json.dumps({'type': 'output', 'text': f'Existing Nanobot config found at {config_path}; skipping onboard to preserve user settings.'})}\n\n"
+
+            config_data = _read_json_mapping(config_path)
+            generated_websocket_token = _ensure_nanobot_websocket_token(config_data)
+            if generated_websocket_token:
+                _write_json_mapping(config_path, config_data)
+                yield f"data: {json.dumps({'type': 'output', 'text': 'Nanobot websocket required a token but none was configured; generated one automatically.'})}\n\n"
 
             overlay_args = _nanobot_overlay_install_args(
                 env=local_env,
@@ -3140,19 +3348,39 @@ async def install_nanobot():
                 mode="blocking",
                 plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
             )
-            instances = prime_instances_cache(await runtime_registry.discover())
             gateway_health_url = gateway["gateway_health_url"]
             guard_mode = guard["mode"]
             yield f"data: {json.dumps({'type': 'output', 'text': f'Configured Nanobot gateway at {gateway_health_url} and enabled XSafeClaw Guard ({guard_mode}).'})}\n\n"
 
-            if settings.auto_start_runtimes:
-                try:
-                    from ...services.runtime_autostart import autostart_nanobot
-                    status, detail = await autostart_nanobot()
-                    yield f"data: {json.dumps({'type': 'output', 'text': f'Autostart {status}: {detail}'})}\n\n"
-                except Exception as exc:
-                    yield f"data: {json.dumps({'type': 'output', 'text': f'Autostart failed: {type(exc).__name__}: {exc}'})}\n\n"
+            _, model_configured, _, _ = _nanobot_config_flags(config_path)
+            gateway_credentials_configured = model_configured and _nanobot_active_provider_has_api_key(config_path)
+            if not gateway_credentials_configured:
+                detail = (
+                    "Nanobot is installed and XSafeClaw Guard is configured. "
+                    "Gateway autostart is waiting for provider/model/API key setup in Nanobot Configure."
+                )
+                yield f"data: {json.dumps({'type': 'output', 'text': detail})}\n\n"
+                instances = prime_instances_cache(await runtime_registry.discover())
+                trigger_onboard_scan_preload()
+                yield f"data: {json.dumps({'type': 'done', 'success': True, 'instances': len(instances), 'configure_required': True, 'autostart': 'skipped', 'detail': detail})}\n\n"
+                return
 
+            try:
+                from ...services.runtime_autostart import autostart_nanobot
+
+                status, detail = await autostart_nanobot()
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Autostart failed: {detail}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'detail': detail})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'type': 'output', 'text': f'Autostart {status}: {detail}'})}\n\n"
+            if status not in {"started", "already_running"}:
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'detail': detail})}\n\n"
+                return
+
+            instances = prime_instances_cache(await runtime_registry.discover())
             trigger_onboard_scan_preload()
             yield f"data: {json.dumps({'type': 'done', 'success': True, 'instances': len(instances)})}\n\n"
         except Exception as exc:
@@ -3186,7 +3414,7 @@ async def init_default_nanobot():
             },
         )
 
-    workspace = Path.home() / ".nanobot" / "workspace"
+    workspace = Path(_nanobot_default_workspace()).expanduser()
     workspace.mkdir(parents=True, exist_ok=True)
     config_path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
     created = not config_path.exists()
@@ -3200,6 +3428,7 @@ async def init_default_nanobot():
         defaults = {}
         agents["defaults"] = defaults
     defaults["workspace"] = str(workspace)
+    generated_websocket_token = _ensure_nanobot_websocket_token(data)
     _write_json_mapping(config_path, data)
 
     plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
@@ -3244,6 +3473,7 @@ async def init_default_nanobot():
             "status": overlay_status,
             "detail": overlay_detail,
         },
+        "websocket_token_generated": bool(generated_websocket_token),
         "model_configured": False,
         "instances": [serialize_instance(instance) for instance in instances],
         "autostart": autostart,
