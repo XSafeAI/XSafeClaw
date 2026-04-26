@@ -53,6 +53,7 @@
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
+|  🛠️  | 2026-04-26 | v1.0.5 released — Nanobot onboarding now follows the official install flow across platforms, setup no longer fails before API-key configuration, and Agent Valley's standalone page is wired up with the required React Query provider. |
 |  🔥  | 2026-04-25 | v1.0.4 released — XSafeClaw now publicly supports OpenClaw, nanobot, and Hermes side by side, while fixing several known bugs. |
 |  🔥  | 2026-04-23 | Hermes and runtime autostart — XSafeClaw now discovers OpenClaw, Hermes, and nanobot side by side, and best-effort starts installed gateways when the server boots. |
 |  🔥  | 2026-04-18 | nanobot local runtime support — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show mixed-runtime sessions together in Agent Valley. |
