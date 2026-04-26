@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 const TIMEOUT_MS = 310_000;
 
 const SAFETY_FILES = ["SAFETY.md", "PERMISSION.md"] as const;
+const GUARD_UNAVAILABLE_REASON = "XSafeClaw guard is unavailable, so this tool call was blocked to preserve path protection.";
 
 function resolveWorkspaceDir(ctxWorkspaceDir?: string): string | null {
   if (ctxWorkspaceDir) return ctxWorkspaceDir;
@@ -47,7 +48,11 @@ function readCachedFile(filePath: string): string | null {
 }
 
 export default function register(api: OpenClawPluginApi) {
-  const cfg = (api.pluginConfig ?? {}) as { safeclawUrl?: string };
+  const cfg = (api.pluginConfig ?? {}) as {
+    safeclawUrl?: string;
+    failOpenOnGuardError?: boolean;
+  };
+  const failOpenOnGuardError = cfg.failOpenOnGuardError === true;
   const baseUrl = (
     cfg.safeclawUrl ??
     process.env.SAFECLAW_URL ??
@@ -103,9 +108,13 @@ export default function register(api: OpenClawPluginApi) {
 
       if (!resp.ok) {
         api.logger.warn?.(
-          `safeclaw-guard: tool-check returned ${resp.status}, allowing tool call`,
+          `safeclaw-guard: tool-check returned ${resp.status}`,
         );
-        return;
+        if (failOpenOnGuardError) return;
+        return {
+          block: true,
+          blockReason: `${GUARD_UNAVAILABLE_REASON} (HTTP ${resp.status})`,
+        };
       }
 
       const result = (await resp.json()) as {
@@ -127,8 +136,13 @@ export default function register(api: OpenClawPluginApi) {
         };
       }
       api.logger.warn?.(
-        `safeclaw-guard: hook error: ${err?.message || err}, allowing tool call`,
+        `safeclaw-guard: hook error: ${err?.message || err}`,
       );
+      if (failOpenOnGuardError) return;
+      return {
+        block: true,
+        blockReason: GUARD_UNAVAILABLE_REASON,
+      };
     }
   });
 }

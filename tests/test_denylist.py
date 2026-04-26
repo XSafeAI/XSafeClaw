@@ -36,6 +36,126 @@ async def test_path_protection_only_blocks_selected_operations(tmp_path, monkeyp
     assert guard_service._denylist_precheck("exec", {"command": f"touch {protected_file}"}) is None
 
 
+def test_guard_service_blocks_openclaw_file_tools_for_protected_paths(tmp_path, monkeypatch):
+    """Direct OpenClaw file tools should not bypass path protection."""
+    denylist_file = tmp_path / "denylist.json"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+
+    protected_dir = tmp_path / "protected"
+    protected_dir.mkdir()
+    protected_file = protected_dir / "demo.txt"
+    protected_file.write_text("demo", encoding="utf-8")
+
+    denylist_file.write_text(
+        json.dumps(
+            [
+                {
+                    "path": str(protected_dir),
+                    "operations": ["read", "modify", "delete"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert guard_service._denylist_precheck("read", {"path": str(protected_file)})
+    assert guard_service._denylist_precheck("write", {"path": str(protected_file), "content": "x"})
+    assert guard_service._denylist_precheck("edit", {"filePath": str(protected_file), "old": "a", "new": "b"})
+    assert guard_service._denylist_precheck("delete_file", {"file_path": str(protected_file)})
+
+
+def test_guard_service_respects_selected_operation_for_direct_tools(tmp_path, monkeypatch):
+    """Direct tool operations should still honor the selected operation set."""
+    denylist_file = tmp_path / "denylist.json"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+
+    protected_dir = tmp_path / "protected"
+    protected_dir.mkdir()
+    protected_file = protected_dir / "demo.txt"
+    protected_file.write_text("demo", encoding="utf-8")
+
+    denylist_file.write_text(
+        json.dumps(
+            [
+                {
+                    "path": str(protected_dir),
+                    "operations": ["read"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert guard_service._denylist_precheck("read_file", {"path": str(protected_file)})
+    assert guard_service._denylist_precheck("write", {"path": str(protected_file)}) is None
+
+
+def test_exec_relative_paths_use_cd_and_cwd(tmp_path, monkeypatch):
+    """Relative shell targets should be resolved against cd/cwd/workdir."""
+    denylist_file = tmp_path / "denylist.json"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+
+    protected_dir = tmp_path / "protected"
+    protected_dir.mkdir()
+
+    denylist_file.write_text(
+        json.dumps(
+            [
+                {
+                    "path": str(protected_dir),
+                    "operations": ["modify"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert guard_service._denylist_precheck(
+        "exec",
+        {"command": f'cd "{protected_dir}" && touch demo.txt'},
+    )
+    assert guard_service._denylist_precheck(
+        "exec",
+        {"command": "touch demo.txt", "cwd": str(protected_dir)},
+    )
+    assert guard_service._denylist_precheck(
+        "exec",
+        {"command": "mkdir nested", "workdir": str(protected_dir)},
+    )
+
+
+def test_archive_and_script_args_are_checked_for_protected_paths(tmp_path, monkeypatch):
+    """Common archive/scripting commands should not bypass protected paths."""
+    denylist_file = tmp_path / "denylist.json"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+
+    protected_dir = tmp_path / "protected"
+    protected_dir.mkdir()
+    protected_file = protected_dir / "demo.txt"
+    protected_file.write_text("demo", encoding="utf-8")
+
+    denylist_file.write_text(
+        json.dumps(
+            [
+                {
+                    "path": str(protected_dir),
+                    "operations": ["read", "modify", "delete"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert guard_service._denylist_precheck(
+        "exec",
+        {"command": f"tar -czf /tmp/demo.tgz {protected_dir}"},
+    )
+    assert guard_service._denylist_precheck(
+        "exec",
+        {"command": f"python tools/cleanup.py {protected_file}"},
+    )
+
+
 @pytest.mark.asyncio
 async def test_denylist_remove_restores_access(tmp_path, monkeypatch):
     """Removing a protected path should stop blocking later tool calls."""

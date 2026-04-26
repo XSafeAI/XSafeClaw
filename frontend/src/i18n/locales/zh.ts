@@ -418,6 +418,13 @@ export const zh: Translations = {
       pathPlaceholder: '输入文件或目录路径，例如 /Users/you/file 或 C:\\Users\\you\\file',
       targetPath: '目标路径',
       operation: '操作',
+      operations: {
+        read: '读取',
+        write: '写入',
+        delete: '删除',
+        modify: '修改',
+        create: '创建',
+      },
       checkSafety: '安全检查',
       checking: '检查中...',
       allowed: '允许',

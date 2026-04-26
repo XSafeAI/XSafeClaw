@@ -1,4 +1,3 @@
-
 [English](README.md) · [中文文档](README_zh.md)
 
 # XSafeClaw
@@ -22,10 +21,10 @@
 >
 > **XSafeClaw** 正是为此而生。它是一个开源智能体防御平台，将智能体安全视为实时控制问题，而非事后复盘。在智能体时代，没有防御的能力不是进步，而是未受管理的暴露风险。
 
-🚀 `<a href="#-快速开始">`快速开始`</a>` &nbsp;·&nbsp;
-📖 `<a href="docs/installation.md">`安装文档`</a>` &nbsp;·&nbsp;
-🌐 `<a href="https://xsafeclaw.ai">`项目官网`</a>` &nbsp;·&nbsp;
-▶️ `<a href="https://youtu.be/HIqwFVeuiKs">`演示视频`</a>`
+🚀 <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
+📖 <a href="docs/installation.md">安装文档</a> &nbsp;·&nbsp;
+🌐 <a href="https://xsafeclaw.ai">项目官网</a> &nbsp;·&nbsp;
+▶️ <a href="https://youtu.be/HIqwFVeuiKs">演示视频</a>
 
 ---
 
@@ -41,14 +40,14 @@
 
 ## 📰 最新动态
 
-`<sub>`版本发布与项目里程碑。`</sub>`
+<sub>版本发布与项目里程碑。</sub>
 
-|    | 日期       | 更新                                                                                                                                                                             |
-| :-: | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🎉 | 2026-04-25 | **v1.0.4 发布** — XSafeClaw 公开支持 OpenClaw、nanobot、Hermes 同时并列运行，并修复了若干已知问题。                                                                       |
-| 🧩 | 2026-04-23 | **支持 Hermes 与运行时自动启动** — XSafeClaw 现在可以并列发现 OpenClaw、Hermes 与 nanobot，并在服务启动时 best-effort 自动拉起已安装运行时的 gateway。                    |
+|    | 日期       | 更新                                                                                                                                                                                       |
+| :-: | :--------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🎉 | 2026-04-25 | **v1.0.4 发布** — XSafeClaw 公开支持 OpenClaw、nanobot、Hermes 同时并列运行，并修复了若干已知问题。 |
+| 🧩 | 2026-04-23 | **支持 Hermes 与运行时自动启动** — XSafeClaw 现在可以并列发现 OpenClaw、Hermes 与 nanobot，并在服务启动时 best-effort 自动拉起已安装运行时的 gateway。 |
 | 🐈 | 2026-04-18 | **支持本机 nanobot 运行时** — XSafeClaw 现在可以发现本机 nanobot 实例，通过 `nanobot gateway` 创建受 Guard 保护的聊天会话，并在 Agent Valley 中同时展示混合运行时会话。 |
-| 🚀 | 2026-04-13 | **v1.0.0 发布** — XSafeClaw 首个公开版本，包含安全监控、安全对话、资产防护、Guard 守卫、智能体办公室与引导安装全部模块。                                                  |
+| 🚀 | 2026-04-13 | **v1.0.0 发布** — XSafeClaw 首个公开版本，包含安全监控、安全对话、资产防护、Guard 守卫、智能体办公室与引导安装全部模块。                                                            |
 
 ---
 
@@ -56,14 +55,14 @@
 
 XSafeClaw 是 AI 智能体的安全监控与防护平台。它能够实时监控智能体活动、在不安全的工具调用执行前拦截、扫描系统资产评估风险、并提供自动化红队测试——只需一条 `xsafeclaw start` 命令即可启动全部功能。当前运行时注册表会并列发现宿主机上的 OpenClaw、Hermes Agent 与 nanobot，并允许在 Agent Town 中为每个会话选择运行时。
 
-| 模块                                  | 说明                                                                                                      |
-| :------------------------------------ | :-------------------------------------------------------------------------------------------------------- |
+| 模块                                  | 说明                                                                                             |
+| :------------------------------------ | :----------------------------------------------------------------------------------------------- |
 | **安全监控 (Claw Monitor)**     | 实时会话时间线，覆盖 OpenClaw、Hermes 与 nanobot 会话的事件追踪、Token 用量、工具调用检查、技能与记忆扫描 |
-| **安全对话 (Safe Chat)**        | 通过各运行时 gateway/API 与 OpenClaw、Hermes 或 nanobot 智能体安全对话                                    |
-| **资产防护 (Asset Shield)**     | 文件系统扫描与风险分级（L0–L3）、软件审计、硬件清单                                                      |
-| **安全守卫 (Guard / AgentDoG)** | 轨迹级与工具调用级安全评估，支持人工审批工作流                                                            |
-| **智能体办公室 (Agent Office)** | 基于 PixiJS 的 2D 可视化界面，集中查看所有智能体状态与活动                                                |
-| **引导安装 (Onboard Setup)**    | 交互式安装与配置 OpenClaw、Hermes、nanobot，并写入对应的模型、gateway 与 Guard 集成                       |
+| **安全对话 (Safe Chat)**        | 通过各运行时 gateway/API 与 OpenClaw、Hermes 或 nanobot 智能体安全对话                           |
+| **资产防护 (Asset Shield)**     | 文件系统扫描与风险分级（L0–L3）、软件审计、硬件清单                                             |
+| **安全守卫 (Guard / AgentDoG)** | 轨迹级与工具调用级安全评估，支持人工审批工作流                                                   |
+| **智能体办公室 (Agent Office)** | 基于 PixiJS 的 2D 可视化界面，集中查看所有智能体状态与活动                                       |
+| **引导安装 (Onboard Setup)**    | 交互式安装与配置 OpenClaw、Hermes、nanobot，并写入对应的模型、gateway 与 Guard 集成               |
 
 ---
 
@@ -144,12 +143,12 @@ XSafeClaw 的安全守卫通过双层防御保护用户：
                    POST /api/guard/tool-check
 ```
 
-| 层级     | 技术                                                   |
-| :------- | :----------------------------------------------------- |
-| 后端     | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn      |
-| 前端     | React 19, TypeScript, Vite, Tailwind CSS 4             |
-| 数据库   | SQLite (aiosqlite)                                     |
-| 守卫模型 | AgentDoG（可配置 Base URL 和模型）                     |
+| 层级     | 技术                                                     |
+| :------- | :------------------------------------------------------- |
+| 后端     | Python 3.11, FastAPI, SQLAlchemy (async), uvicorn        |
+| 前端     | React 19, TypeScript, Vite, Tailwind CSS 4               |
+| 数据库   | SQLite (aiosqlite)                                       |
+| 守卫模型 | AgentDoG（可配置 Base URL 和模型）                       |
 | 运行时   | 本机 OpenClaw、Hermes Agent 与 nanobot，支持按会话选择 |
 
 运行时可访问 `http://localhost:6874/docs` 查看完整 API 文档。
@@ -210,17 +209,15 @@ mkdir -p ~/.hermes/plugins/safeclaw-guard
 cp -r plugins/safeclaw-guard-hermes/* ~/.hermes/plugins/safeclaw-guard/
 ```
 
-nanobot 请先走官方安装，再叠加 XSafeClaw 插件与 overlay：
+nanobot 使用单独的 Python 插件目录，并需要让 nanobot 的 uv tool 环境能导入 XSafeClaw：
 
 ```bash
-uv tool install nanobot-ai
-nanobot onboard
 mkdir -p ~/.nanobot/plugins/safeclaw-guard
 cp -r plugins/safeclaw-guard-nanobot/* ~/.nanobot/plugins/safeclaw-guard/
 uv tool install nanobot-ai --with-editable . --force
 ```
 
-Nanobot 配置页现在会在点击保存后自动完成这些操作：刷新 nanobot uv tool 环境里的 XSafeClaw overlay、复制插件、把 hook 写入 `~/.nanobot/config.json`，并把 `SAFETY.md` / `PERMISSION.md` 部署到 nanobot workspace。该插件会在每轮 nanobot agent 对话中注入这些安全模板，并通过 XSafeClaw Guard 检查工具调用。
+Nanobot 配置页会在点击保存后自动完成这些操作：复制插件、把 hook 写入 `~/.nanobot/config.json`，并把 `SAFETY.md` / `PERMISSION.md` 部署到 nanobot workspace。该插件会在每轮 nanobot agent 对话中注入这些安全模板，并通过 XSafeClaw Guard 检查工具调用。
 
 首次进入时不会预填 provider、model 或 API Key。
 
@@ -254,19 +251,19 @@ nanobot gateway --port 18790 --verbose
 
 XSafeClaw 默认配置开箱即用。如需自定义，将 `.env.example` 复制为 `.env` 进行修改：
 
-| 变量                                      | 默认值                               | 说明                                                                                      |
-| :---------------------------------------- | :----------------------------------- | :---------------------------------------------------------------------------------------- |
-| `API_PORT`                              | `6874`                             | XSafeClaw API 端口                                                                        |
-| `API_HOST`                              | `0.0.0.0`                          | 绑定地址                                                                                  |
-| `DATA_DIR`                              | `~/.xsafeclaw`                     | SQLite 数据库与本地状态目录                                                               |
-| `PLATFORM`                              | `auto`                             | 默认实例提示：`auto`、`openclaw`、`hermes` 或 `nanobot`；所有已发现运行时仍可选择 |
-| `AUTO_START_RUNTIMES`                   | `true`                             | 自动尝试启动已安装的 OpenClaw、Hermes 与 nanobot gateway                                  |
-| `OPENCLAW_SESSIONS_DIR`                 | `~/.openclaw/agents/main/sessions` | OpenClaw 会话目录                                                                         |
-| `HERMES_HOME`                           | `~/.hermes`                        | Hermes 主目录                                                                             |
-| `HERMES_API_PORT`                       | `8642`                             | Hermes HTTP API 端口                                                                      |
-| `HERMES_API_KEY`                        | *空*                               | 需与 `~/.hermes/.env` 中的 `API_SERVER_KEY` 一致                                      |
-| `~/.nanobot/config.json`                | *在 Nanobot 配置页保存时生成*      | nanobot 配置、gateway、workspace、WebSocket 与 XSafeClaw hook 设置                        |
-| `GUARD_BASE_URL` / `GUARD_BASE_MODEL` | AgentDoG 默认值                      | 守卫模型 endpoint 与模型 ID                                                               |
+| 变量 | 默认值 | 说明 |
+| :--- | :----- | :--- |
+| `API_PORT` | `6874` | XSafeClaw API 端口 |
+| `API_HOST` | `0.0.0.0` | 绑定地址 |
+| `DATA_DIR` | `~/.xsafeclaw` | SQLite 数据库与本地状态目录 |
+| `PLATFORM` | `auto` | 默认实例提示：`auto`、`openclaw`、`hermes` 或 `nanobot`；所有已发现运行时仍可选择 |
+| `AUTO_START_RUNTIMES` | `true` | 自动尝试启动已安装的 OpenClaw、Hermes 与 nanobot gateway |
+| `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | OpenClaw 会话目录 |
+| `HERMES_HOME` | `~/.hermes` | Hermes 主目录 |
+| `HERMES_API_PORT` | `8642` | Hermes HTTP API 端口 |
+| `HERMES_API_KEY` | *空* | 需与 `~/.hermes/.env` 中的 `API_SERVER_KEY` 一致 |
+| `~/.nanobot/config.json` | *在 Nanobot 配置页保存时生成* | nanobot 配置、gateway、workspace、WebSocket 与 XSafeClaw hook 设置 |
+| `GUARD_BASE_URL` / `GUARD_BASE_MODEL` | AgentDoG 默认值 | 守卫模型 endpoint 与模型 ID |
 
 OpenClaw 配置存放在 `~/.openclaw/openclaw.json`，Hermes 配置存放在 `~/.hermes/.env` 与 `~/.hermes/config.yaml`，nanobot 配置存放在 `~/.nanobot/config.json`。完整变量列表请参见 `.env.example`。
 
@@ -290,8 +287,6 @@ uv venv && uv pip install -e ".[dev]"
 python run.py                    # http://localhost:6874，支持热重载
 
 # 可选：本机运行时测试
-uv tool install nanobot-ai
-nanobot onboard
 uv tool install nanobot-ai --with-editable . --force
 openclaw gateway start
 hermes gateway

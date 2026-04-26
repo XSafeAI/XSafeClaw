@@ -9,6 +9,10 @@
       "safeclawUrl": {
         "type": "string",
         "default": "http://localhost:6874"
+      },
+      "failOpenOnGuardError": {
+        "type": "boolean",
+        "default": false
       }
     }
   }

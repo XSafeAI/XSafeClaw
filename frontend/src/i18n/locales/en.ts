@@ -424,6 +424,13 @@ export const en = {
       pathPlaceholder: 'Enter a file or directory path, e.g. /Users/you/file or C:\\Users\\you\\file',
       targetPath: 'Target Path',
       operation: 'Operation',
+      operations: {
+        read: 'Read',
+        write: 'Write',
+        delete: 'Delete',
+        modify: 'Modify',
+        create: 'Create',
+      },
       checkSafety: 'Check Safety',
       checking: 'Checking...',
       allowed: 'Allowed',

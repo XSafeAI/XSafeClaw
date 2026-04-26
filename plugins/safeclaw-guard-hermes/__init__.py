@@ -191,10 +191,16 @@ def _pre_tool_call_handler(
 
         if not resp.ok:
             logger.warning(
-                "safeclaw-guard: tool-check returned %d, allowing tool call",
+                "safeclaw-guard: tool-check returned %d",
                 resp.status_code,
             )
-            return None
+            return {
+                "action": "block",
+                "message": (
+                    "XSafeClaw guard is unavailable, so this tool call was "
+                    f"blocked to preserve path protection. (HTTP {resp.status_code})"
+                ),
+            }
 
         result = resp.json()
         if result.get("action") == "block":
@@ -208,8 +214,15 @@ def _pre_tool_call_handler(
         return {"action": "block", "message": "XSafeClaw guard approval timed out"}
     except Exception as exc:
         logger.warning(
-            "safeclaw-guard: hook error: %s, allowing tool call", exc,
+            "safeclaw-guard: hook error: %s", exc,
         )
+        return {
+            "action": "block",
+            "message": (
+                "XSafeClaw guard is unavailable, so this tool call was "
+                "blocked to preserve path protection."
+            ),
+        }
 
     return None
 
