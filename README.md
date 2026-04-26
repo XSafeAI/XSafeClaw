@@ -69,8 +69,8 @@ XSafeClaw is an open-source safety platform for AI agents, built to make agent b
 | **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning across OpenClaw, Hermes, and nanobot sessions |
 | **Safe Chat**        | Secure chat with OpenClaw, Hermes, or nanobot through each runtime's gateway/API |
 | **Asset Shield**     | File system scanning with risk classification (L0–L3), software audit, hardware inventory |
-| **Guard (AgentDoG)** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval |
-| **Agent Office**     | PixiJS-powered 2D visualization of all agents' status and activities |
+| **Agent Guard** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval |
+| **Pixel Office**     | PixiJS-powered 2D visualization of all agents' status and activities |
 | **Onboard Setup**    | Interactive setup for OpenClaw, Hermes, and nanobot, including model configuration and runtime guard integration |
 
 ---
