@@ -204,28 +204,73 @@ def test_nanobot_hook_loader_deduplicates_existing_hook(monkeypatch):
     assert hooks == [existing_hook]
 
 
-def test_nanobot_tool_install_command_prefers_editable_checkout(monkeypatch, tmp_path):
+def test_nanobot_official_install_command_uses_plain_uv_tool_install():
+    command = system_routes._nanobot_tool_install_command()
+
+    assert command == "uv tool install nanobot-ai"
+
+
+def test_nanobot_overlay_install_command_prefers_editable_checkout(monkeypatch, tmp_path):
     monkeypatch.setattr(system_routes, "_find_source_checkout_root", lambda: tmp_path)
 
-    command = system_routes._nanobot_tool_install_command()
+    command = system_routes._nanobot_overlay_install_command()
 
     assert "--with-editable" in command
     assert str(tmp_path) in command
     assert "nanobot-ai" in command
 
 
-def test_nanobot_tool_install_command_falls_back_to_installed_package(monkeypatch):
+def test_nanobot_overlay_install_command_falls_back_to_installed_package(monkeypatch):
     monkeypatch.setattr(system_routes, "_find_source_checkout_root", lambda: None)
     monkeypatch.setattr(system_routes.importlib_metadata, "version", lambda _name: "1.2.3")
 
-    command = system_routes._nanobot_tool_install_command()
+    command = system_routes._nanobot_overlay_install_command()
 
     assert "--with" in command
     assert "xsafeclaw==1.2.3" in command
 
 
-def test_nanobot_install_endpoint_uses_resolved_install_command(monkeypatch, tmp_path):
-    captured: dict[str, object] = {}
+def test_find_uv_executable_checks_user_bins(monkeypatch, tmp_path):
+    uv_dir = tmp_path / ".local" / "bin"
+    uv_dir.mkdir(parents=True)
+    uv_path = uv_dir / "uv.exe"
+    uv_path.write_text("uv\n", encoding="utf-8")
+
+    monkeypatch.setattr(system_routes, "_active_python_script_dirs", lambda: [])
+    monkeypatch.setattr(system_routes, "_python_user_script_dirs", lambda: [])
+    monkeypatch.setattr(system_routes, "_common_user_bin_dirs", lambda _env=None: [uv_dir])
+
+    resolved = system_routes._find_uv_executable(env={"PATH": ""})
+
+    assert resolved == str(uv_path)
+
+
+def test_find_nanobot_uses_uv_tool_bin_dir_when_path_is_missing(monkeypatch, tmp_path):
+    uv_dir = tmp_path / "uv-bin"
+    tool_dir = tmp_path / "tool-bin"
+    uv_dir.mkdir()
+    tool_dir.mkdir()
+    uv_path = uv_dir / "uv.exe"
+    nanobot_path = tool_dir / "nanobot.exe"
+    uv_path.write_text("uv\n", encoding="utf-8")
+    nanobot_path.write_text("nanobot\n", encoding="utf-8")
+
+    monkeypatch.setattr(system_routes, "_active_python_script_dirs", lambda: [])
+    monkeypatch.setattr(system_routes, "_python_user_script_dirs", lambda: [])
+    monkeypatch.setattr(system_routes, "_common_user_bin_dirs", lambda _env=None: [uv_dir])
+    monkeypatch.setattr(system_routes, "_uv_tool_bin_dir", lambda *_args, **_kwargs: tool_dir)
+
+    resolved = system_routes._find_nanobot(env={"PATH": ""})
+
+    assert resolved == str(nanobot_path)
+
+
+def test_nanobot_install_endpoint_runs_official_install_onboard_and_overlay(monkeypatch, tmp_path):
+    captured_installs: list[tuple[object, ...]] = []
+    captured_run_cmds: list[list[str]] = []
+    nanobot_calls = {"count": 0}
+    config_path = tmp_path / ".nanobot" / "config.json"
+    plugin_dir = tmp_path / "plugins" / "safeclaw-guard"
 
     class FakeStdout:
         def __init__(self) -> None:
@@ -243,28 +288,70 @@ def test_nanobot_install_endpoint_uses_resolved_install_command(monkeypatch, tmp
             return None
 
     async def fake_create_subprocess_exec(*args, **_kwargs):
-        captured["args"] = args
+        captured_installs.append(args)
         return FakeProcess()
 
+    async def fake_run_cmd(cmd, *, env, timeout_s=10.0):
+        captured_run_cmds.append(cmd)
+        if "onboard" in cmd:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps({"agents": {"defaults": {"workspace": str(tmp_path / "workspace")}}}),
+                encoding="utf-8",
+            )
+            return 0, "Created config"
+        if "--with-editable" in cmd or "--with" in cmd:
+            return 0, "Overlay installed"
+        return 0, "ok"
+
+    def fake_find_nanobot(**_kwargs):
+        nanobot_calls["count"] += 1
+        if nanobot_calls["count"] == 1:
+            return None
+        return str(tmp_path / "nanobot.exe")
+
+    async def fake_discover():
+        return []
+
     monkeypatch.setattr(system_routes, "_find_uv_executable", lambda **_: r"C:\Tools\uv.exe")
+    monkeypatch.setattr(system_routes, "_find_nanobot", fake_find_nanobot)
     monkeypatch.setattr(system_routes, "_find_source_checkout_root", lambda: tmp_path)
+    monkeypatch.setattr(system_routes, "_nanobot_default_workspace", lambda: str(tmp_path / "workspace"))
+    monkeypatch.setattr(system_routes, "NANOBOT_DEFAULT_CONFIG", config_path)
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(system_routes, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(system_routes, "_install_safeclaw_guard_plugin", lambda **_kwargs: plugin_dir)
+    monkeypatch.setattr(system_routes, "_deploy_safety_files", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        system_routes,
+        "update_nanobot_gateway_state",
+        lambda _path: {"gateway_health_url": "http://127.0.0.1:18790/health"},
+    )
+    monkeypatch.setattr(
+        system_routes,
+        "update_nanobot_guard_state",
+        lambda *_args, **_kwargs: {"mode": "blocking"},
+    )
+    monkeypatch.setattr(system_routes.runtime_registry, "discover", fake_discover)
+    monkeypatch.setattr(system_routes, "prime_instances_cache", lambda instances: instances)
+    monkeypatch.setattr(system_routes, "trigger_onboard_scan_preload", lambda *args, **kwargs: None)
+    monkeypatch.setattr(system_routes.settings, "auto_start_runtimes", False)
 
     client = TestClient(app)
     response = client.post("/api/system/nanobot/install")
 
     assert response.status_code == 200
+    assert "uv tool install nanobot-ai" in response.text
+    assert "nanobot onboard" in response.text
     assert "--with-editable" in response.text
-    assert str(tmp_path).replace("\\", "\\\\") in response.text
-    assert captured["args"] == (
+    assert captured_installs[0] == (
         r"C:\Tools\uv.exe",
         "tool",
         "install",
         "nanobot-ai",
-        "--with-editable",
-        str(tmp_path),
-        "--force",
     )
+    assert any("onboard" in cmd for cmd in captured_run_cmds)
+    assert any("--with-editable" in cmd for cmd in captured_run_cmds)
 
 
 def test_nanobot_config_extension_stripper_preserves_nanobot_config():
@@ -313,6 +400,11 @@ def test_nanobot_guard_config_roundtrip_and_runtime_capabilities(monkeypatch, tm
         system_routes,
         "_install_safeclaw_guard_plugin",
         lambda **_kwargs: plugin_dir,
+    )
+    monkeypatch.setattr(
+        system_routes,
+        "_ensure_nanobot_xsafeclaw_overlay",
+        lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
     )
 
     initial = read_nanobot_guard_state(config_path)
@@ -702,6 +794,11 @@ def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_
         "_install_safeclaw_guard_plugin",
         lambda **_kwargs: plugin_dir,
     )
+    monkeypatch.setattr(
+        system_routes,
+        "_ensure_nanobot_xsafeclaw_overlay",
+        lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
+    )
 
     client = TestClient(app)
     initial = client.get("/api/system/nanobot/config")
@@ -782,6 +879,11 @@ def test_nanobot_config_api_allows_base_config_without_provider_model(monkeypatc
         "_install_safeclaw_guard_plugin",
         lambda **_kwargs: plugin_dir,
     )
+    monkeypatch.setattr(
+        system_routes,
+        "_ensure_nanobot_xsafeclaw_overlay",
+        lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
+    )
 
     client = TestClient(app)
     response = client.post(
@@ -840,6 +942,11 @@ def test_nanobot_init_default_creates_skeleton_config_without_provider_defaults(
         system_routes,
         "_install_safeclaw_guard_plugin",
         lambda **_kwargs: plugin_dir,
+    )
+    monkeypatch.setattr(
+        system_routes,
+        "_ensure_nanobot_xsafeclaw_overlay",
+        lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
     )
     monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: str(tmp_path / "nanobot.exe"))
     monkeypatch.setattr(
@@ -903,6 +1010,11 @@ def test_nanobot_config_save_repairs_legacy_integer_heartbeat(monkeypatch, tmp_p
         system_routes,
         "_install_safeclaw_guard_plugin",
         lambda **_kwargs: plugin_dir,
+    )
+    monkeypatch.setattr(
+        system_routes,
+        "_ensure_nanobot_xsafeclaw_overlay",
+        lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
     )
 
     client = TestClient(app)

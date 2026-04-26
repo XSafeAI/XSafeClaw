@@ -267,7 +267,9 @@ def _nanobot_installed() -> tuple[bool, str | None]:
     serve, so spawning ``nanobot gateway`` would just exit with a config
     error. Caller must run ``/nanobot/init-default`` first.
     """
-    cli = shutil.which("nanobot")
+    from ..api.routes.system import _build_env, _find_nanobot  # type: ignore
+
+    cli = _find_nanobot(env=_build_env())
     if not cli:
         return False, None
     if not _NANOBOT_DEFAULT_CONFIG.exists():
@@ -324,13 +326,17 @@ async def autostart_nanobot(*, timeout_s: float = 12.0) -> StartResult:
         return "failed", f"could not open {log_path} for nanobot gateway logs: {exc}"
 
     try:
+        from ..api.routes.system import _build_env, _build_nanobot_command  # type: ignore
+
+        env = _build_env()
         await asyncio.create_subprocess_exec(
-            cli, "gateway", "--port", str(port),
+            *_build_nanobot_command(cli, ["gateway", "--port", str(port)]),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=log_fh,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
             close_fds=os.name != "nt",
+            env=env,
         )
         # log_fh is now owned by the child; we deliberately do NOT close it
         # here — closing on the parent side would only close our copy of the

@@ -1,16 +1,21 @@
+
 [English](README.md) · [中文文档](README_zh.md)
 
-# XSafeClaw
+<h2 align="center"> XSafeClaw: Monitor and Secure Your (Many) Claws in One Place 🚀 </h2>
+
+<div align="center">
+<img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
+
+<div align="center">
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![React 19](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<div align="center">
-<img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
+</div>
 
-**Build, Monitor, and Secure Your Agents**
+<h2 align="center">🔥🔥 Now supporting OpenClaw, Hermes, and Nanobot! 🔥🔥</h2>
 
 </div>
 
@@ -20,10 +25,12 @@
 >
 > **XSafeClaw** is built for that reality. It is an open-source defense platform that treats agent security as a live control problem, not a postmortem exercise. In the agent era, capability without defense is not progress. It is unmanaged exposure.
 
-🚀 `<a href="#-quick-start">`Get Started`</a>` &nbsp;·&nbsp;
-📖 `<a href="docs/installation.md">`Documentation`</a>` &nbsp;·&nbsp;
-🌐 `<a href="https://xsafeclaw.ai">`Project Website`</a>` &nbsp;·&nbsp;
-▶️ `<a href="https://youtu.be/HIqwFVeuiKs">`YouTube Demo`</a>`
+<h3 align="center">
+  🚀 <a href="#-quick-start">Get Started</a>  · 
+  📖 <a href="docs/installation.md">Documentation</a>  · 
+  🌐 <a href="https://xsafeclaw.ai">Project Website</a>  · 
+  ▶️ <a href="https://youtu.be/HIqwFVeuiKs">YouTube Demo</a>
+</h3>
 
 ---
 
@@ -41,13 +48,12 @@
 
 `<sub>`Release notes and project milestones.`</sub>`
 
-|    | Date       | Update                                                                                                                                                                                                             |
-| :-: | :--------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🛠️ | 2026-04-25 | **v1.0.4 released** — PyPI packaging now explicitly includes the embedded frontend bundle, fixing the `Frontend not built` regression from `1.0.3`. |
-| 🎉 | 2026-04-25 | **v1.0.3 released** — XSafeClaw now publicly supports OpenClaw, nanobot, 和 Hermes side by side, 和 fixes several known bugs. |
-|  🧩   | 2026-04-23 | **Hermes and runtime autostart** — XSafeClaw now discovers OpenClaw, Hermes, 和 nanobot side by side, 和 best-effort starts installed gateways when the server boots. |
-|  🐈   | 2026-04-18 | **nanobot local runtime support** — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, 和 show mixed-runtime sessions together in Agent Valley. |
-|  🚀   | 2026-04-13 | **v 1.0.0 released** — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, 和 Onboard Setup. |
+|    | Date       | Update                                                                                                                                                                                                   |
+| :-: | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🔥 | 2026-04-25 | v1.0.4 released — XSafeClaw now publicly supports OpenClaw, nanobot, and Hermes side by side, while fixing several known bugs.                                                                          |
+| 🔥 | 2026-04-23 | Hermes and runtime autostart — XSafeClaw now discovers OpenClaw, Hermes, and nanobot side by side, and best-effort starts installed gateways when the server boots.                                     |
+| 🔥 | 2026-04-18 | nanobot local runtime support — XSafeClaw can now discover a local nanobot instance, start guarded chat sessions through `nanobot gateway`, and show mixed-runtime sessions together in Agent Valley. |
+| 🔥 | 2026-04-13 | v 1.0.0 released — First public release of XSafeClaw with Claw Monitor, Safe Chat, Asset Shield, Guard, Agent Office, and Onboard Setup.                                                                |
 
 ---
 
@@ -55,14 +61,14 @@
 
 XSafeClaw is an open-source safety platform for AI agents, built to make agent behavior visible, controllable, and trustworthy. It turns complex agent execution into an intuitive visual “Safe Agent Valley,” providing real-time monitoring, risk interception, human-in-the-loop governance, and automated red-team testing — all accessible through a single `xsafeclaw start` command. The current runtime registry discovers local OpenClaw, Hermes Agent, and nanobot installations side by side, then lets you choose the runtime per session in Agent Town.
 
-| Module                     | Description                                                                                                                                               |
-| :------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Claw Monitor**     | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning across OpenClaw, Hermes, and nanobot sessions |
-| **Safe Chat**        | Secure chat with OpenClaw, Hermes, or nanobot through each runtime's gateway/API                                                                          |
-| **Asset Shield**     | File system scanning with risk classification (L0–L3), software audit, hardware inventory                                                                |
-| **Guard (AgentDoG)** | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval                                                                      |
-| **Agent Office**     | PixiJS-powered 2D visualization of all agents' status and activities                                                                                      |
-| **Onboard Setup**    | Interactive setup for OpenClaw, Hermes, and nanobot, including model configuration and runtime guard integration                                          |
+| Module                  | Description                                                                                                                                               |
+| :---------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claw Monitor**  | Real-time session timeline with event tracking, token usage, tool call inspection, skills & memory scanning across OpenClaw, Hermes, and nanobot sessions |
+| **Safe Chat**     | Secure chat with OpenClaw, Hermes, or nanobot through each runtime's gateway/API                                                                          |
+| **Asset Shield**  | File system scanning with risk classification (L0–L3), software audit, hardware inventory                                                                |
+| **Agent Guard**   | Trajectory-level & tool-call-level safety evaluation with human-in-the-loop approval                                                                      |
+| **Pixel Office**  | PixiJS-powered 2D visualization of all agents' status and activities                                                                                      |
+| **Onboard Setup** | Interactive setup for OpenClaw, Hermes, and nanobot, including model configuration and runtime guard integration                                          |
 
 ---
 
@@ -211,15 +217,17 @@ mkdir -p ~/.hermes/plugins/safeclaw-guard
 cp -r plugins/safeclaw-guard-hermes/* ~/.hermes/plugins/safeclaw-guard/
 ```
 
-For nanobot, copy the Python plugin and keep the XSafeClaw package available in nanobot's uv tool environment:
+For nanobot, follow the official install first, then layer the XSafeClaw plugin and overlay:
 
 ```bash
+uv tool install nanobot-ai
+nanobot onboard
 mkdir -p ~/.nanobot/plugins/safeclaw-guard
 cp -r plugins/safeclaw-guard-nanobot/* ~/.nanobot/plugins/safeclaw-guard/
 uv tool install nanobot-ai --with-editable . --force
 ```
 
-The Nanobot config page does this automatically when you save: it copies the plugin, writes the hook entry to `~/.nanobot/config.json`, and deploys `SAFETY.md` / `PERMISSION.md` into the nanobot workspace. The plugin injects those safety templates into every nanobot agent turn and checks tool calls through XSafeClaw Guard.
+The Nanobot config page now does this automatically when you save: it refreshes the XSafeClaw overlay inside nanobot's uv tool environment, copies the plugin, writes the hook entry to `~/.nanobot/config.json`, and deploys `SAFETY.md` / `PERMISSION.md` into the nanobot workspace. The plugin injects those safety templates into every nanobot agent turn and checks tool calls through XSafeClaw Guard.
 
 Provider, model, and API key are intentionally blank until you configure them.
 
@@ -288,6 +296,8 @@ uv venv && uv pip install -e ".[dev]"
 python run.py                    # http://localhost:6874, auto-reload
 
 # Optional runtime CLIs for local testing
+uv tool install nanobot-ai
+nanobot onboard
 uv tool install nanobot-ai --with-editable . --force
 openclaw gateway start
 hermes gateway

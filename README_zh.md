@@ -1,3 +1,4 @@
+
 [English](README.md) · [中文文档](README_zh.md)
 
 # XSafeClaw
@@ -44,11 +45,11 @@
 
 |    | 日期       | 更新                                                                                                                                                                             |
 | :-: | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🛠️ | 2026-04-25 | **v1.0.4 发布** — PyPI 打包现在会显式包含嵌入式前端 bundle，修复了 `1.0.3` 安装后返回 `Frontend not built` 的问题。 |
-| 🎉 | 2026-04-25 | **v1.0.3 发布** — XSafeClaw 公开支持 OpenClaw、nanobot、Hermes 同时并列运行，并修复了若干已知问题。 |
-| 🧩 | 2026-04-23 | **支持 Hermes 与运行时自动启动** — XSafeClaw 现在可以并列发现 OpenClaw、Hermes 与 nanobot，并在服务启动时 best-effort 自动拉起已安装运行时的 gateway。 |
+| 🎉 | 2026-04-25 | **v1.0.4 发布** — XSafeClaw 公开支持 OpenClaw、nanobot、Hermes 同时并列运行，并修复了若干已知问题。                                                                       |
+| 🧩 | 2026-04-23 | **支持 Hermes 与运行时自动启动** — XSafeClaw 现在可以并列发现 OpenClaw、Hermes 与 nanobot，并在服务启动时 best-effort 自动拉起已安装运行时的 gateway。                    |
 | 🐈 | 2026-04-18 | **支持本机 nanobot 运行时** — XSafeClaw 现在可以发现本机 nanobot 实例，通过 `nanobot gateway` 创建受 Guard 保护的聊天会话，并在 Agent Valley 中同时展示混合运行时会话。 |
-| 🚀 | 2026-04-13 | **v1.0.0 发布** — XSafeClaw 首个公开版本，包含安全监控、安全对话、资产防护、Guard 守卫、智能体办公室与引导安装全部模块。  
+| 🚀 | 2026-04-13 | **v1.0.0 发布** — XSafeClaw 首个公开版本，包含安全监控、安全对话、资产防护、Guard 守卫、智能体办公室与引导安装全部模块。                                                  |
+
 ---
 
 ## 🔍 XSafeClaw 是什么？
@@ -209,15 +210,17 @@ mkdir -p ~/.hermes/plugins/safeclaw-guard
 cp -r plugins/safeclaw-guard-hermes/* ~/.hermes/plugins/safeclaw-guard/
 ```
 
-nanobot 使用单独的 Python 插件目录，并需要让 nanobot 的 uv tool 环境能导入 XSafeClaw：
+nanobot 请先走官方安装，再叠加 XSafeClaw 插件与 overlay：
 
 ```bash
+uv tool install nanobot-ai
+nanobot onboard
 mkdir -p ~/.nanobot/plugins/safeclaw-guard
 cp -r plugins/safeclaw-guard-nanobot/* ~/.nanobot/plugins/safeclaw-guard/
 uv tool install nanobot-ai --with-editable . --force
 ```
 
-Nanobot 配置页会在点击保存后自动完成这些操作：复制插件、把 hook 写入 `~/.nanobot/config.json`，并把 `SAFETY.md` / `PERMISSION.md` 部署到 nanobot workspace。该插件会在每轮 nanobot agent 对话中注入这些安全模板，并通过 XSafeClaw Guard 检查工具调用。
+Nanobot 配置页现在会在点击保存后自动完成这些操作：刷新 nanobot uv tool 环境里的 XSafeClaw overlay、复制插件、把 hook 写入 `~/.nanobot/config.json`，并把 `SAFETY.md` / `PERMISSION.md` 部署到 nanobot workspace。该插件会在每轮 nanobot agent 对话中注入这些安全模板，并通过 XSafeClaw Guard 检查工具调用。
 
 首次进入时不会预填 provider、model 或 API Key。
 
@@ -287,6 +290,8 @@ uv venv && uv pip install -e ".[dev]"
 python run.py                    # http://localhost:6874，支持热重载
 
 # 可选：本机运行时测试
+uv tool install nanobot-ai
+nanobot onboard
 uv tool install nanobot-ai --with-editable . --force
 openclaw gateway start
 hermes gateway

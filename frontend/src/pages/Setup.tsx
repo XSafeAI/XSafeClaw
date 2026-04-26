@@ -14,6 +14,7 @@ import { useI18n } from '../i18n';
 
 type Stage = 'checking' | 'selecting' | 'downloading_node' | 'installing_openclaw' | 'installing_nanobot' | 'installing_hermes' | 'install_failed' | 'install_hermes_failed';
 type Platform = 'openclaw' | 'nanobot' | 'hermes';
+type HostOs = 'windows' | 'macos' | 'linux';
 
 interface PlatformInfo {
   installed: boolean | null;
@@ -23,6 +24,29 @@ interface PlatformInfo {
 
 interface LogLine { id: number; text: string; kind: 'output' | 'info' | 'success' | 'error'; }
 let _lid = 0;
+
+function detectClientOs(): HostOs {
+  if (typeof navigator === 'undefined') return 'linux';
+  const fingerprint = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  if (fingerprint.includes('win')) return 'windows';
+  if (fingerprint.includes('mac')) return 'macos';
+  return 'linux';
+}
+
+function uvInstallCommand(hostOs: HostOs): string {
+  if (hostOs === 'windows') {
+    return 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"';
+  }
+  return 'curl -LsSf https://astral.sh/uv/install.sh | sh';
+}
+
+function nanobotManualSteps(hostOs: HostOs) {
+  return {
+    uv: uvInstallCommand(hostOs),
+    install: 'uv tool install nanobot-ai',
+    onboard: 'nanobot onboard',
+  };
+}
 
 function StepBar({ active, steps }: { active: number; steps: { id: number; label: string }[] }) {
   return (
@@ -218,6 +242,8 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
 export default function Setup() {
   const navigate = useNavigate();
   const { t } = useI18n();
+  const hostOs = detectClientOs();
+  const manualNanobot = nanobotManualSteps(hostOs);
   const [stage, setStage] = useState<Stage>('checking');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
@@ -584,7 +610,10 @@ export default function Setup() {
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
                     <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNanobot}</span></p>
-                    <p className="text-emerald-400 select-all">uv tool install nanobot-ai --with-editable &lt;repo-root&gt; --force</p>
+                    <p className="text-emerald-400 select-all break-all">{manualNanobot.uv}</p>
+                    <p className="text-emerald-400 select-all">{manualNanobot.install}</p>
+                    <p className="text-emerald-400 select-all">{manualNanobot.onboard}</p>
+                    <p className="text-text-secondary mt-1 leading-5 not-italic font-sans">{t.setup.nanobotOfficialFlowHint}</p>
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
                     <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
                   </div>
