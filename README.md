@@ -1,6 +1,10 @@
 [English](README.md) · [中文文档](README_zh.md)
 
-# XSafeClaw
+<h2 align="center"> XSafeClaw: Monitor and Secure Your Claws 🚀 </h2>
+
+<div align="center">
+<img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
+
 
 <div align="center">
 
@@ -11,12 +15,11 @@
 
 </div>
 
-<div align="center">
-<img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
+<h2 align="center">🔥🔥 Now supporting OpenClaw, Hermes, and Nanobot! 🔥🔥</h2>
 
 
-**Build, Monitor, and Secure Your Agents**
 </div>
+
 
 > AI agents are not just new software. They are software that can be talked into doing dangerous things. As agents move from chatbots to active systems that browse the web, execute code, and operate inside real workflows, we have handed language models the keys to our infrastructure before figuring out how to keep them on the rails.
 >
@@ -24,10 +27,12 @@
 >
 > **XSafeClaw** is built for that reality. It is an open-source defense platform that treats agent security as a live control problem, not a postmortem exercise. In the agent era, capability without defense is not progress. It is unmanaged exposure.
 
-🚀 <a href="#-quick-start">Get Started</a> &nbsp;·&nbsp;
-📖 <a href="docs/installation.md">Documentation</a> &nbsp;·&nbsp;
-🌐 <a href="https://xsafeclaw.ai">Project Website</a> &nbsp;·&nbsp;
-▶️ <a href="https://youtu.be/HIqwFVeuiKs">YouTube Demo</a>
+<h3 align="center">
+  🚀 <a href="#-quick-start">Get Started</a> &nbsp;·&nbsp;
+  📖 <a href="docs/installation.md">Documentation</a> &nbsp;·&nbsp;
+  🌐 <a href="https://xsafeclaw.ai">Project Website</a> &nbsp;·&nbsp;
+  ▶️ <a href="https://youtu.be/HIqwFVeuiKs">YouTube Demo</a>
+</h3>
 
 ---
 
