@@ -58,6 +58,12 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_NANOBOT_GATEWAY_LOG = Path.home() / ".nanobot" / "gateway.log"
+_NANOBOT_AUTOSTART_LOCK: asyncio.Lock | None = None
+_NANOBOT_BROKEN_TOOL_MARKERS = (
+    "modulenotfounderror: no module named 'nanobot'",
+    "failed to canonicalize script path",
+)
 
 # Result tuple meaning, used uniformly across helpers:
 #   status:
@@ -267,7 +273,9 @@ def _nanobot_installed() -> tuple[bool, str | None]:
     serve, so spawning ``nanobot gateway`` would just exit with a config
     error. Caller must run ``/nanobot/init-default`` first.
     """
-    cli = shutil.which("nanobot")
+    from ..api.routes.system import _build_env, _find_nanobot  # type: ignore
+
+    cli = _find_nanobot(env=_build_env())
     if not cli:
         return False, None
     if not _NANOBOT_DEFAULT_CONFIG.exists():
@@ -292,6 +300,144 @@ def _nanobot_gateway_port() -> int:
     return _NANOBOT_DEFAULT_GATEWAY_PORT
 
 
+def _get_nanobot_autostart_lock() -> asyncio.Lock:
+    global _NANOBOT_AUTOSTART_LOCK
+    if _NANOBOT_AUTOSTART_LOCK is None:
+        _NANOBOT_AUTOSTART_LOCK = asyncio.Lock()
+    return _NANOBOT_AUTOSTART_LOCK
+
+
+def _last_non_empty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line:
+            return line[:240]
+    return ""
+
+
+def _nanobot_gateway_log_tail(*, max_lines: int = 16, max_chars: int = 1200) -> str:
+    try:
+        lines = _NANOBOT_GATEWAY_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    tail = lines[-max_lines:]
+    joined = " | ".join(line.strip() for line in tail if line.strip())
+    return joined[:max_chars]
+
+
+def _nanobot_log_indicates_broken_tool_env(text: str) -> bool:
+    haystack = text.lower()
+    return any(marker in haystack for marker in _NANOBOT_BROKEN_TOOL_MARKERS)
+
+
+def _nanobot_failure_detail(base: str, *, log_tail: str | None = None) -> str:
+    tail = (log_tail or "").strip()
+    if tail:
+        return f"{base}. gateway.log tail: {tail}"
+    return base
+
+
+async def _repair_nanobot_tool_env(reason: str) -> tuple[bool, str, str | None]:
+    from ..api.routes.system import (  # type: ignore
+        _build_env,
+        _build_uv_command,
+        _find_nanobot,
+        _find_uv_executable,
+        _nanobot_official_install_args,
+        _nanobot_overlay_install_args,
+        _probe_nanobot_cli_async,
+    )
+
+    env = _build_env()
+    uv_executable = _find_uv_executable(env=env)
+    if not uv_executable:
+        return False, f"nanobot repair needed ({reason}) but uv is not available", None
+
+    install_args = _nanobot_official_install_args(
+        env=env,
+        uv_executable=uv_executable,
+        force=True,
+    )
+    rc, out = await _run_cmd(
+        _build_uv_command(install_args[0], install_args[1:]),
+        env=env,
+        timeout_s=240.0,
+    )
+    if rc != 0:
+        return (
+            False,
+            f"nanobot repair failed during `uv tool install nanobot-ai --force`: "
+            f"{_last_non_empty_line(out) or f'rc={rc}'}",
+            None,
+        )
+
+    overlay_args = _nanobot_overlay_install_args(
+        env=env,
+        uv_executable=uv_executable,
+    )
+    rc, out = await _run_cmd(
+        _build_uv_command(overlay_args[0], overlay_args[1:]),
+        env=env,
+        timeout_s=240.0,
+    )
+    if rc != 0:
+        return (
+            False,
+            f"nanobot repair applied the CLI but failed to refresh the XSafeClaw overlay: "
+            f"{_last_non_empty_line(out) or f'rc={rc}'}",
+            None,
+        )
+
+    env = _build_env()
+    cli = _find_nanobot(env=env)
+    ready, _, error = await _probe_nanobot_cli_async(
+        cli,
+        env=env,
+        timeout_s=15.0,
+    )
+    if not ready:
+        return (
+            False,
+            f"nanobot CLI is still unusable after repair: {error or 'executable not detected'}",
+            cli,
+        )
+    return True, f"nanobot CLI repaired after {reason}", cli
+
+
+async def _spawn_nanobot_gateway(
+    cli: str,
+    *,
+    port: int,
+    env: dict[str, str],
+) -> tuple[bool, str]:
+    try:
+        _NANOBOT_GATEWAY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(_NANOBOT_GATEWAY_LOG, "ab", buffering=0)
+    except Exception as exc:
+        return False, f"could not open {_NANOBOT_GATEWAY_LOG} for nanobot gateway logs: {exc}"
+
+    try:
+        from ..api.routes.system import _build_nanobot_command  # type: ignore
+
+        await asyncio.create_subprocess_exec(
+            *_build_nanobot_command(cli, ["gateway", "--port", str(port)]),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=os.name != "nt",
+            env=env,
+        )
+        return True, ""
+    except Exception as exc:
+        return False, f"detached nanobot gateway spawn failed: {exc}"
+    finally:
+        try:
+            log_fh.close()
+        except Exception:
+            pass
+
+
 async def autostart_nanobot(*, timeout_s: float = 12.0) -> StartResult:
     """Best-effort start of the local Nanobot gateway.
 
@@ -305,6 +451,34 @@ async def autostart_nanobot(*, timeout_s: float = 12.0) -> StartResult:
         user's manual ``nanobot gateway --port 18790 --verbose`` does).
       * ``stdin=DEVNULL`` so it doesn't try to read from our terminal.
     """
+    return await _autostart_nanobot_health_checked(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_impl(*, timeout_s: float) -> StartResult:
+    return await _autostart_nanobot_locked(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_locked(*, timeout_s: float) -> StartResult:
+    return await _autostart_nanobot_final(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_final(*, timeout_s: float) -> StartResult:
+    return await _autostart_nanobot_v3(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_v3(*, timeout_s: float) -> StartResult:
+    return await _autostart_nanobot_chat_ready(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_chat_ready(*, timeout_s: float) -> StartResult:
+    return await _autostart_nanobot_real(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_real(*, timeout_s: float) -> StartResult:
+    return await _autostart_nanobot_serialized(timeout_s=timeout_s)
+
+
+async def _autostart_nanobot_serialized(*, timeout_s: float) -> StartResult:
     installed, cli = _nanobot_installed()
     if not installed:
         if cli is None:
@@ -324,13 +498,17 @@ async def autostart_nanobot(*, timeout_s: float = 12.0) -> StartResult:
         return "failed", f"could not open {log_path} for nanobot gateway logs: {exc}"
 
     try:
+        from ..api.routes.system import _build_env, _build_nanobot_command  # type: ignore
+
+        env = _build_env()
         await asyncio.create_subprocess_exec(
-            cli, "gateway", "--port", str(port),
+            *_build_nanobot_command(cli, ["gateway", "--port", str(port)]),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=log_fh,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
             close_fds=os.name != "nt",
+            env=env,
         )
         # log_fh is now owned by the child; we deliberately do NOT close it
         # here — closing on the parent side would only close our copy of the
@@ -393,3 +571,93 @@ async def autostart_installed_runtimes() -> dict[str, dict[str, Any]]:
         else:
             logger.debug("[autostart] %s → %s: %s", name, status, detail)
     return summary
+
+
+async def _autostart_nanobot_health_checked(*, timeout_s: float) -> StartResult:
+    installed, cli = _nanobot_installed()
+    if not installed:
+        if cli is None:
+            return "skipped", "nanobot CLI missing on PATH"
+        return "skipped", "nanobot CLI present but ~/.nanobot/config.json missing"
+
+    port = _nanobot_gateway_port()
+    health_url = f"http://127.0.0.1:{port}/health"
+    if await _probe_http_health(health_url):
+        return "already_running", f"nanobot /health already 200 on :{port}"
+
+    async with _get_nanobot_autostart_lock():
+        if await _probe_http_health(health_url):
+            return "already_running", f"nanobot /health already 200 on :{port}"
+
+        from ..api.routes.system import _build_env, _find_nanobot, _probe_nanobot_cli_async  # type: ignore
+
+        env = _build_env()
+        cli_path = cli or _find_nanobot(env=env)
+        ready, _, cli_error = await _probe_nanobot_cli_async(
+            cli_path,
+            env=env,
+            timeout_s=15.0,
+        )
+
+        repaired = False
+        if not ready:
+            repair_ok, repair_detail, repaired_cli = await _repair_nanobot_tool_env(
+                cli_error or "nanobot --version failed",
+            )
+            if not repair_ok:
+                return "failed", repair_detail
+            repaired = True
+            env = _build_env()
+            cli_path = repaired_cli or _find_nanobot(env=env)
+
+        if not cli_path:
+            return "failed", "nanobot CLI is missing after repair; cannot start the gateway"
+
+        spawned, detail = await _spawn_nanobot_gateway(
+            cli_path,
+            port=port,
+            env=env,
+        )
+        if not spawned:
+            return "failed", detail
+
+        if await _wait_http_health(health_url, timeout_s=timeout_s):
+            if repaired:
+                return "started", f"nanobot gateway is now serving /health on :{port} after repairing the nanobot CLI"
+            return "started", f"nanobot gateway is now serving /health on :{port}"
+
+        log_tail = _nanobot_gateway_log_tail()
+        if not repaired and _nanobot_log_indicates_broken_tool_env(log_tail):
+            repair_ok, repair_detail, repaired_cli = await _repair_nanobot_tool_env(
+                "gateway startup exposed a broken nanobot tool environment",
+            )
+            if not repair_ok:
+                return "failed", _nanobot_failure_detail(repair_detail, log_tail=log_tail)
+
+            env = _build_env()
+            cli_path = repaired_cli or _find_nanobot(env=env)
+            if not cli_path:
+                return "failed", _nanobot_failure_detail(
+                    "nanobot repair completed but the CLI is still missing",
+                    log_tail=log_tail,
+                )
+
+            spawned, detail = await _spawn_nanobot_gateway(
+                cli_path,
+                port=port,
+                env=env,
+            )
+            if not spawned:
+                return "failed", detail
+
+            if await _wait_http_health(health_url, timeout_s=timeout_s):
+                return "started", f"nanobot gateway recovered on :{port} after repairing the nanobot tool environment"
+            log_tail = _nanobot_gateway_log_tail()
+
+        return (
+            "failed",
+            _nanobot_failure_detail(
+                f"nanobot gateway spawned but /health stayed silent on :{port} after {timeout_s:.0f}s",
+                log_tail=log_tail,
+            ),
+        )

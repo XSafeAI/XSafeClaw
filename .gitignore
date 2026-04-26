@@ -74,6 +74,7 @@ debug/
 
 # Local dev helpers
 start.sh
+release_work/
 
 # Optional downloaded map skins (fetched at runtime, not shipped in repo)
 src/xsafeclaw/static/Map-opensorce/Map[2-9].png

@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 from importlib import metadata as importlib_metadata
 import json
+import locale
 import os
 import re
+import secrets
 import select as _select
 import shlex
 import shutil
+import site
 import struct
 import subprocess
 import sys
+import sysconfig
 import threading
 import uuid
 from pathlib import Path
@@ -23,7 +27,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...config import settings
-from ..runtime_helpers import get_instance, list_instances, runtime_registry, serialize_instance
+from ..runtime_helpers import (
+    get_instance,
+    list_instances,
+    prime_instances_cache,
+    runtime_registry,
+    serialize_instance,
+)
 from ...runtime.nanobot import (
     DEFAULT_NANOBOT_GATEWAY_HOST,
     DEFAULT_NANOBOT_GATEWAY_PORT,
@@ -59,6 +69,8 @@ _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
 _EXPLICIT_MODELS_PATH = _OPENCLAW_DIR / "xsafeclaw-explicit-models.json"
 _DEFAULT_OPENCLAW_WORKSPACE_STR = str(_OPENCLAW_DIR / "workspace")
+_XSAFECLAW_STATE_DIR = Path.home() / ".xsafeclaw"
+_UV_CACHE_DIR = _XSAFECLAW_STATE_DIR / "uv-cache"
 
 # ---------------------------------------------------------------------------
 # PTY-based process registry for interactive (onboard) steps
@@ -118,12 +130,17 @@ _NANOBOT_EXECUTABLES = (
     if os.name == "nt"
     else ("nanobot",)
 )
+_UV_EXECUTABLES = (
+    ("uv.cmd", "uv.exe", "uv.bat", "uv.ps1", "uv")
+    if os.name == "nt"
+    else ("uv",)
+)
 _NANOBOT_PROVIDER_OPTIONS = [
     {"id": "minimax", "name": "MiniMax", "default_model": "MiniMax-M2.7"},
     {"id": "anthropic", "name": "Anthropic", "default_model": "anthropic/claude-opus-4-5"},
     {"id": "openai", "name": "OpenAI", "default_model": "openai/gpt-4.1"},
     {"id": "openrouter", "name": "OpenRouter", "default_model": "openrouter/anthropic/claude-sonnet-4"},
-    {"id": "deepseek", "name": "DeepSeek", "default_model": "deepseek/deepseek-chat"},
+    {"id": "deepseek", "name": "DeepSeek", "default_model": "deepseek/deepseek-v4-flash"},
     {"id": "gemini", "name": "Gemini", "default_model": "gemini/gemini-2.5-pro"},
     {"id": "moonshot", "name": "Moonshot", "default_model": "moonshot/kimi-k2"},
     {"id": "dashscope", "name": "DashScope", "default_model": "dashscope/qwen-plus"},
@@ -136,11 +153,30 @@ _NANOBOT_PROVIDER_OPTIONS = [
     {"id": "githubCopilot", "name": "GitHub Copilot", "default_model": "githubCopilot/gpt-4.1"},
 ]
 _NANOBOT_PROVIDER_IDS = {item["id"] for item in _NANOBOT_PROVIDER_OPTIONS}
+_NANOBOT_PROVIDER_CATALOG_ALIASES: dict[str, tuple[str, ...]] = {
+    "gemini": ("gemini", "google"),
+    "dashscope": ("dashscope", "alibaba", "qwen-portal", "modelstudio"),
+    "zhipu": ("zhipu", "zai"),
+    "moonshot": ("moonshot", "kimi-coding", "kimi-coding-cn"),
+    "minimax": ("minimax", "minimax-cn"),
+    "openaiCodex": ("openaiCodex", "openai"),
+    "githubCopilot": ("githubCopilot", "copilot"),
+    "vllm": ("vllm", "custom"),
+}
+_NANOBOT_PROVIDER_EXTRA_FALLBACK_MODELS: dict[str, list[dict[str, Any]]] = {
+    "deepseek": [
+        {"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": False},
+        {"id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": False},
+        {"id": "deepseek/deepseek-chat", "name": "deepseek-chat", "reasoning": False},
+        {"id": "deepseek/deepseek-reasoner", "name": "deepseek-reasoner", "reasoning": True},
+    ],
+}
 _HERMES_EXECUTABLES = (
     ("hermes.cmd", "hermes.exe", "hermes.bat", "hermes.ps1", "hermes")
     if os.name == "nt"
     else ("hermes",)
 )
+_uv_tool_bin_cache: dict[str, str | None] = {}
 
 
 def _is_runnable_file(path: Path) -> bool:
@@ -166,10 +202,218 @@ def _set_pty_size(fd: int, rows: int, cols: int) -> None:
         return
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
+
+def _append_unique_path(paths: list[Path], seen: set[str], candidate: str | Path | None) -> None:
+    """Append one path only once, preserving original order."""
+    if not candidate:
+        return
+    path = Path(candidate).expanduser()
+    key = os.path.normcase(str(path))
+    if key in seen:
+        return
+    paths.append(path)
+    seen.add(key)
+
+
+def _python_user_script_dirs() -> list[Path]:
+    """Return per-user Python script directories for pip/uv-style installs."""
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    try:
+        user_base = Path(site.USER_BASE)
+    except Exception:
+        user_base = None
+    if user_base is not None:
+        if os.name == "nt":
+            _append_unique_path(dirs, seen, user_base / "Scripts")
+            _append_unique_path(dirs, seen, user_base)
+        else:
+            _append_unique_path(dirs, seen, user_base / "bin")
+            _append_unique_path(dirs, seen, user_base)
+
+    for scheme in ("nt_user", "posix_user"):
+        try:
+            scripts = sysconfig.get_path("scripts", scheme=scheme)
+        except Exception:
+            scripts = None
+        _append_unique_path(dirs, seen, scripts)
+
+    return dirs
+
+
+def _common_user_bin_dirs(env: dict | None = None) -> list[Path]:
+    """Return common user-level executable directories across platforms."""
+    search_env = env or os.environ
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    home_str = search_env.get("HOME") or search_env.get("USERPROFILE") or str(Path.home())
+    home = Path(home_str).expanduser()
+    xdg_bin_home = search_env.get("XDG_BIN_HOME")
+    xdg_data_home = search_env.get("XDG_DATA_HOME")
+    uv_install_dir = search_env.get("UV_INSTALL_DIR")
+    uv_tool_bin_dir = search_env.get("UV_TOOL_BIN_DIR")
+
+    _append_unique_path(dirs, seen, uv_tool_bin_dir)
+    _append_unique_path(dirs, seen, uv_install_dir)
+    _append_unique_path(dirs, seen, xdg_bin_home)
+    if xdg_data_home:
+        _append_unique_path(dirs, seen, Path(xdg_data_home).expanduser().parent / "bin")
+    _append_unique_path(dirs, seen, home / ".local" / "bin")
+    _append_unique_path(dirs, seen, home / ".cargo" / "bin")
+
+    if os.name == "nt":
+        local_appdata = search_env.get("LOCALAPPDATA")
+        if local_appdata:
+            _append_unique_path(dirs, seen, Path(local_appdata) / "Programs" / "uv" / "bin")
+
+    return dirs
+
+
+def _path_env_dirs(env: dict | None = None) -> list[Path]:
+    """Split PATH into Path objects, preserving order."""
+    search_env = env or os.environ
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for value in search_env.get("PATH", "").split(_PATH_SEP):
+        if value:
+            _append_unique_path(dirs, seen, value)
+    return dirs
+
+
+def _find_executable_in_dirs(executables: tuple[str, ...], dirs: list[Path]) -> Optional[str]:
+    """Find the first runnable executable in the given directories."""
+    for directory in dirs:
+        for executable in executables:
+            candidate = directory / executable
+            if _is_runnable_file(candidate):
+                return str(candidate)
+    return None
+
+
+def _build_uv_command(uv_path: str, args: list[str]) -> list[str]:
+    """Build a subprocess command that can launch uv across platforms."""
+    return _build_tool_command(uv_path, args)
+
+
+def _decode_subprocess_output(data: bytes) -> str:
+    """Decode subprocess output with platform-aware fallbacks."""
+    if not data:
+        return ""
+
+    encodings: list[str] = ["utf-8", "utf-8-sig"]
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        encodings.append(preferred)
+    if os.name == "nt":
+        for candidate in ("mbcs", "cp936", "gbk", "cp1252"):
+            encodings.append(candidate)
+
+    seen: set[str] = set()
+    for encoding in encodings:
+        if not encoding:
+            continue
+        normalized = encoding.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return data.decode("utf-8", errors="replace")
+
+
+def _find_available_launcher(names: tuple[str, ...], fallback: str | None = None) -> str | None:
+    """Return the first executable available on PATH."""
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+    return fallback
+
+
+def _uv_tool_bin_dir(
+    uv_executable: str,
+    *,
+    env: dict | None = None,
+    refresh: bool = False,
+) -> Path | None:
+    """Resolve ``uv tool dir --bin`` for the current user."""
+    key = os.path.normcase(str(Path(uv_executable).expanduser()))
+    if not refresh and key in _uv_tool_bin_cache:
+        cached = _uv_tool_bin_cache[key]
+        return Path(cached) if cached else None
+
+    try:
+        result = subprocess.run(
+            _build_uv_command(uv_executable, ["tool", "dir", "--bin"]),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env or _build_env(),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        _uv_tool_bin_cache[key] = None
+        return None
+
+    raw = (result.stdout or result.stderr or "").strip()
+    first_line = raw.splitlines()[0].strip() if raw else ""
+    if result.returncode == 0 and first_line:
+        resolved = str(Path(first_line).expanduser())
+        _uv_tool_bin_cache[key] = resolved
+        return Path(resolved)
+
+    _uv_tool_bin_cache[key] = None
+    return None
+
+
+def _candidate_search_dirs(
+    env: dict | None = None,
+    *,
+    include_uv_tool_bin: bool = False,
+) -> list[Path]:
+    """Return executable search directories for CLI detection."""
+    search_env = env or os.environ
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    for directory in _active_python_script_dirs():
+        _append_unique_path(dirs, seen, directory)
+    for directory in _python_user_script_dirs():
+        _append_unique_path(dirs, seen, directory)
+    for directory in _common_user_bin_dirs(search_env):
+        _append_unique_path(dirs, seen, directory)
+    for directory in _path_env_dirs(search_env):
+        _append_unique_path(dirs, seen, directory)
+
+    if include_uv_tool_bin:
+        uv_path = _find_executable_in_dirs(_UV_EXECUTABLES, dirs)
+        if not uv_path:
+            uv_path = shutil.which("uv", path=search_env.get("PATH"))
+        if uv_path:
+            _append_unique_path(
+                dirs,
+                seen,
+                _uv_tool_bin_dir(uv_path, env=search_env),
+            )
+
+    return dirs
+
 def _build_env() -> dict:
     """Build an env dict that includes nvm Node 22 bin directory if available (cross-platform)."""
     env = {**os.environ, "CI": "true", "NO_COLOR": "1"}
     path_sep = _PATH_SEP
+    if not env.get("UV_CACHE_DIR"):
+        try:
+            _UV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            env["UV_CACHE_DIR"] = str(_UV_CACHE_DIR)
+        except Exception:
+            pass
 
     # nvm-sh (Linux/macOS/WSL): ~/.nvm/versions/node/v22.x.x/bin
     nvm_node22 = Path.home() / ".nvm" / "versions" / "node"
@@ -210,13 +454,23 @@ def _build_env() -> dict:
         current_path = env.get("PATH", "")
         if node_bin not in current_path:
             env["PATH"] = node_bin + _PATH_SEP + current_path
+
+    for extra_dir in reversed(_common_user_bin_dirs(env) + _python_user_script_dirs()):
+        extra_dir_str = str(extra_dir)
+        current_path = env.get("PATH", "")
+        if extra_dir_str and extra_dir_str not in current_path:
+            env["PATH"] = extra_dir_str + _PATH_SEP + current_path
     return env
 
 
 def _find_uv_executable(*, env: dict | None = None) -> Optional[str]:
     """Locate the uv executable used for tool-based nanobot installs."""
     search_env = env or _build_env()
-    return shutil.which("uv", path=search_env.get("PATH"))
+    dirs = _candidate_search_dirs(search_env, include_uv_tool_bin=False)
+    return _find_executable_in_dirs(_UV_EXECUTABLES, dirs) or shutil.which(
+        "uv",
+        path=search_env.get("PATH"),
+    )
 
 
 def _find_source_checkout_root() -> Path | None:
@@ -241,12 +495,30 @@ def _nanobot_tool_install_binding() -> tuple[str, str]:
     return "--with", f"xsafeclaw=={version}"
 
 
-def _nanobot_tool_install_args(
+def _nanobot_official_install_args(
+    *,
+    env: dict | None = None,
+    uv_executable: str | None = None,
+    force: bool = False,
+) -> list[str]:
+    """Build the official uv-tool install command for nanobot."""
+    args = [
+        uv_executable or _find_uv_executable(env=env) or "uv",
+        "tool",
+        "install",
+        "nanobot-ai",
+    ]
+    if force:
+        args.append("--force")
+    return args
+
+
+def _nanobot_overlay_install_args(
     *,
     env: dict | None = None,
     uv_executable: str | None = None,
 ) -> list[str]:
-    """Build the uv tool install command for nanobot plus XSafeClaw integration."""
+    """Build the XSafeClaw overlay command for nanobot's uv tool env."""
     binding_flag, binding_value = _nanobot_tool_install_binding()
     return [
         uv_executable or _find_uv_executable(env=env) or "uv",
@@ -261,9 +533,125 @@ def _nanobot_tool_install_args(
 
 def _format_command(args: list[str]) -> str:
     """Render a subprocess argument list as a shell command for logs/UI."""
-    if os.name == "nt":
+    if _host_is_windows():
         return subprocess.list2cmdline(args)
     return shlex.join(args)
+
+
+def _host_is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _host_platform() -> str:
+    return sys.platform
+
+
+def _uv_official_install_args() -> list[str]:
+    """Return the official uv installer command for the current host OS."""
+    if _host_is_windows():
+        shell = _find_available_launcher(("pwsh", "powershell"), fallback="powershell") or "powershell"
+        return [
+            shell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "irm https://astral.sh/uv/install.ps1 | iex",
+        ]
+    return [
+        "/bin/sh",
+        "-c",
+        "curl -LsSf https://astral.sh/uv/install.sh | sh",
+    ]
+
+
+def _uv_official_install_command() -> str:
+    """Return the official uv installer command for logs/UI."""
+    return _format_command(_uv_official_install_args())
+
+
+def _uv_install_attempts() -> list[tuple[str, list[str], str]]:
+    """Return uv installation attempts in preferred order for the host OS."""
+    attempts: list[tuple[str, list[str], str]] = []
+
+    if _host_is_windows():
+        official_args = _uv_official_install_args()
+        attempts.append(("official-installer", official_args, _format_command(official_args)))
+
+        winget = shutil.which("winget")
+        if winget:
+            winget_args = [
+                winget,
+                "install",
+                "--id",
+                "astral-sh.uv",
+                "-e",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ]
+            attempts.append(("winget", winget_args, "winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements"))
+
+        scoop = shutil.which("scoop")
+        if scoop:
+            scoop_args = [scoop, "install", "main/uv"]
+            attempts.append(("scoop", scoop_args, "scoop install main/uv"))
+
+        python_launcher = _find_available_launcher(("py", "python"), fallback=sys.executable)
+        if python_launcher:
+            pip_args = [python_launcher, "-m", "pip", "install", "--user", "uv"]
+            launcher_name = Path(python_launcher).name.lower()
+            display = "py -m pip install --user uv" if launcher_name in {"py", "py.exe"} else "python -m pip install --user uv"
+            attempts.append(("pip-user", pip_args, display))
+        return attempts
+
+    curl = shutil.which("curl")
+    if curl:
+        curl_args = ["/bin/sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]
+        attempts.append(("official-installer-curl", curl_args, _format_command(curl_args)))
+
+    wget = shutil.which("wget")
+    if wget:
+        wget_args = ["/bin/sh", "-c", "wget -qO- https://astral.sh/uv/install.sh | sh"]
+        attempts.append(("official-installer-wget", wget_args, _format_command(wget_args)))
+
+    if _host_platform() == "darwin":
+        brew = shutil.which("brew")
+        if brew:
+            brew_args = [brew, "install", "uv"]
+            attempts.append(("homebrew", brew_args, "brew install uv"))
+
+    python_launcher = _find_available_launcher(("python3", "python"), fallback=sys.executable)
+    if python_launcher:
+        pip_args = [python_launcher, "-m", "pip", "install", "--user", "uv"]
+        launcher_name = Path(python_launcher).name.lower()
+        display = "python3 -m pip install --user uv" if launcher_name.startswith("python3") else "python -m pip install --user uv"
+        attempts.append(("pip-user", pip_args, display))
+    return attempts
+
+
+def _classify_uv_install_failure(outputs: list[str]) -> str:
+    """Return a user-facing hint for common uv installation failures."""
+    haystack = "\n".join(outputs).lower()
+    if any(token in haystack for token in ("authentication failed", "certificate", "tls", "ssl", "schannel", "sec_e_no_credentials", "基础连接已经关闭")):
+        return "The host could not establish a trusted HTTPS connection while downloading uv. Check system certificates, proxy settings, or corporate network interception."
+    if "timed out" in haystack or "timeout" in haystack:
+        return "Downloading uv timed out. Check outbound network access and retry."
+    if "access is denied" in haystack or "permission denied" in haystack:
+        return "Installing uv was blocked by local permissions. Retry with a user-level package manager or fix write permissions for the user install directory."
+    return "All uv installation attempts failed."
+
+
+def _nanobot_official_install_command(*, force: bool = False) -> str:
+    """Return the official nanobot installation command for logs/UI."""
+    args = ["uv", "tool", "install", "nanobot-ai"]
+    if force:
+        args.append("--force")
+    return _format_command(args)
+
+
+def _nanobot_overlay_install_command() -> str:
+    """Return the XSafeClaw overlay command for logs/UI."""
+    return _format_command(_nanobot_overlay_install_args(uv_executable="uv"))
 
 def _find_openclaw() -> Optional[str]:
     """Locate the openclaw binary, checking nvm Node 22 paths first."""
@@ -416,15 +804,7 @@ def _active_python_script_dirs() -> list[Path]:
 
 def _nanobot_candidate_dirs(env: dict | None = None) -> list[Path]:
     """Return nanobot search directories, preferring the active Python env."""
-    dirs = _active_python_script_dirs()
-    search_env = env or _build_env()
-    for value in search_env.get("PATH", "").split(_PATH_SEP):
-        if not value:
-            continue
-        candidate = Path(value)
-        if candidate not in dirs:
-            dirs.append(candidate)
-    return dirs
+    return _candidate_search_dirs(env or _build_env(), include_uv_tool_bin=True)
 
 
 def _find_nanobot(*, env: dict | None = None) -> Optional[str]:
@@ -503,7 +883,7 @@ async def _probe_nanobot_cli_async(
     except Exception as exc:
         return False, None, str(exc)
 
-    raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
+    raw = _decode_subprocess_output(stdout or stderr or b"").strip()
     first_line = raw.splitlines()[0] if raw else None
     if (
         proc.returncode == 0
@@ -518,23 +898,17 @@ async def _probe_nanobot_cli_async(
 
 def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
     """Build a subprocess command that can launch OpenClaw across platforms."""
-    suffix = Path(openclaw_path).suffix.lower()
-    if suffix == ".ps1":
-        return [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            openclaw_path,
-            *args,
-        ]
-    return [openclaw_path, *args]
+    return _build_tool_command(openclaw_path, args)
 
 
 def _build_nanobot_command(nanobot_path: str, args: list[str]) -> list[str]:
     """Build a subprocess command that can launch nanobot across platforms."""
-    suffix = Path(nanobot_path).suffix.lower()
+    return _build_tool_command(nanobot_path, args)
+
+
+def _build_tool_command(executable_path: str, args: list[str]) -> list[str]:
+    """Build a subprocess command for a local CLI wrapper or executable."""
+    suffix = Path(executable_path).suffix.lower()
     if suffix == ".ps1":
         return [
             "powershell",
@@ -542,10 +916,10 @@ def _build_nanobot_command(nanobot_path: str, args: list[str]) -> list[str]:
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            nanobot_path,
+            executable_path,
             *args,
         ]
-    return [nanobot_path, *args]
+    return [executable_path, *args]
 
 
 def _build_agent_command(agent_path: str, args: list[str]) -> list[str]:
@@ -1040,6 +1414,33 @@ def _nanobot_default_config_payload() -> dict[str, Any]:
     }
 
 
+def _ensure_nanobot_websocket_token(data: dict[str, Any]) -> str | None:
+    """Generate and persist a websocket token when Nanobot requires one."""
+    channels = data.setdefault("channels", {})
+    if not isinstance(channels, dict):
+        channels = {}
+        data["channels"] = channels
+
+    websocket = channels.setdefault("websocket", {})
+    if not isinstance(websocket, dict):
+        websocket = {}
+        channels["websocket"] = websocket
+
+    websocket.setdefault("allowFrom", ["xsafeclaw"])
+    websocket.setdefault("streaming", True)
+
+    if not bool(websocket.get("websocketRequiresToken")):
+        return None
+
+    token = str(websocket.get("token") or "").strip()
+    if token:
+        return None
+
+    token = secrets.token_urlsafe(32)
+    websocket["token"] = token
+    return token
+
+
 def _nanobot_selected_provider(defaults: dict[str, Any]) -> str:
     model = str(defaults.get("model") or "").strip()
     provider = str(defaults.get("provider") or "").strip()
@@ -1066,6 +1467,22 @@ def _nanobot_config_flags(config_path: Path | None = None) -> tuple[bool, bool, 
     return True, _nanobot_model_configured(provider, model), provider, model
 
 
+def _nanobot_active_provider_has_api_key(config_path: Path | None = None) -> bool:
+    path = Path(config_path or NANOBOT_DEFAULT_CONFIG).expanduser()
+    if not path.exists():
+        return False
+
+    data = _read_json_mapping(path)
+    defaults = _json_mapping(_json_mapping(data.get("agents")).get("defaults"))
+    provider = _nanobot_selected_provider(defaults)
+    if not provider:
+        return False
+
+    providers = _json_mapping(data.get("providers"))
+    active_provider_config = _json_mapping(providers.get(provider))
+    return bool(str(active_provider_config.get("apiKey") or "").strip())
+
+
 def _redacted_nanobot_provider_configs(providers: dict[str, Any]) -> dict[str, dict[str, Any]]:
     redacted: dict[str, dict[str, Any]] = {}
     for provider_id, raw_config in providers.items():
@@ -1076,6 +1493,127 @@ def _redacted_nanobot_provider_configs(providers: dict[str, Any]) -> dict[str, d
             "api_base": config.get("apiBase"),
         }
     return redacted
+
+
+def _nanobot_provider_catalog_aliases(provider_id: str) -> tuple[str, ...]:
+    aliases = _NANOBOT_PROVIDER_CATALOG_ALIASES.get(provider_id)
+    if aliases:
+        return aliases
+    return (provider_id,)
+
+
+def _normalize_nanobot_catalog_model_id(provider_id: str, model_id: str) -> str:
+    raw = str(model_id or "").strip()
+    if not raw:
+        return ""
+    for alias in _nanobot_provider_catalog_aliases(provider_id):
+        prefix = f"{alias}/"
+        if raw.lower().startswith(prefix.lower()):
+            return f"{provider_id}/{raw[len(prefix):]}"
+    if "/" not in raw:
+        return f"{provider_id}/{raw}"
+    return raw
+
+
+def _nanobot_fallback_models_for_provider(provider_id: str) -> list[dict[str, Any]]:
+    defaults = next((item for item in _NANOBOT_PROVIDER_OPTIONS if item["id"] == provider_id), None)
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_entry(model_id: str, *, name: str | None = None, reasoning: bool = False) -> None:
+        normalized_id = _normalize_nanobot_catalog_model_id(provider_id, model_id)
+        if not normalized_id:
+            return
+        key = normalized_id.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        models.append(
+            {
+                "id": normalized_id,
+                "name": name or normalized_id.split("/", 1)[1],
+                "contextWindow": 0,
+                "reasoning": reasoning,
+                "available": True,
+                "input": "text",
+            }
+        )
+
+    if defaults:
+        add_entry(str(defaults["default_model"]))
+    for extra in _NANOBOT_PROVIDER_EXTRA_FALLBACK_MODELS.get(provider_id, []):
+        add_entry(
+            str(extra.get("id") or ""),
+            name=str(extra.get("name") or "") or None,
+            reasoning=bool(extra.get("reasoning")),
+        )
+    return models
+
+
+async def _build_nanobot_model_catalog(refresh: bool = False) -> dict[str, Any]:
+    providers: dict[str, dict[str, Any]] = {
+        option["id"]: {
+            "id": option["id"],
+            "name": option["name"],
+            "models": [],
+        }
+        for option in _NANOBOT_PROVIDER_OPTIONS
+    }
+    seen: dict[str, set[str]] = {provider_id: set() for provider_id in providers}
+
+    def add_model(provider_id: str, model: dict[str, Any]) -> None:
+        raw_id = str(model.get("id") or "").strip()
+        normalized_id = _normalize_nanobot_catalog_model_id(provider_id, raw_id)
+        if not normalized_id:
+            return
+        key = normalized_id.lower()
+        if key in seen[provider_id]:
+            return
+        seen[provider_id].add(key)
+        providers[provider_id]["models"].append(
+            {
+                "id": normalized_id,
+                "name": str(model.get("name") or normalized_id.split("/", 1)[1]).strip(),
+                "contextWindow": int(model.get("contextWindow") or 0),
+                "reasoning": bool(model.get("reasoning")),
+                "available": bool(model.get("available", True)),
+                "input": str(model.get("input") or "text"),
+            }
+        )
+
+    try:
+        scan_data = await _get_openclaw_onboard_scan_data(refresh=refresh)
+    except Exception:
+        scan_data = {}
+
+    for provider_info in scan_data.get("model_providers", []) or []:
+        scan_provider_id = str(provider_info.get("id") or "").strip().lower()
+        models = provider_info.get("models", []) or []
+        for provider_id in providers:
+            aliases = _nanobot_provider_catalog_aliases(provider_id)
+            alias_keys = {alias.lower() for alias in aliases}
+            provider_matches = scan_provider_id in alias_keys
+            for model in models:
+                model_id = str(model.get("id") or "").strip().lower()
+                id_matches = any(model_id.startswith(f"{alias.lower()}/") for alias in aliases)
+                if provider_matches or id_matches:
+                    add_model(provider_id, model)
+
+    for provider_id in providers:
+        for model in _nanobot_fallback_models_for_provider(provider_id):
+            add_model(provider_id, model)
+        providers[provider_id]["models"].sort(key=lambda item: str(item.get("name") or item.get("id") or "").lower())
+
+    config_exists, model_configured, provider, model = _nanobot_config_flags()
+    default_model = ""
+    if config_exists and model_configured and provider and model:
+        default_model = _normalize_nanobot_catalog_model_id(provider, model)
+
+    return {
+        "provider_options": _NANOBOT_PROVIDER_OPTIONS,
+        "model_providers": list(providers.values()),
+        "default_model": default_model,
+    }
 
 
 def _nanobot_config_response(config_path: Path | None = None) -> dict[str, Any]:
@@ -1241,9 +1779,16 @@ async def get_nanobot_config():
     return _nanobot_config_response()
 
 
+@router.get("/nanobot/model-catalog")
+async def get_nanobot_model_catalog(refresh: bool = False):
+    """Return the normalized model catalog used by Nanobot Configure."""
+    return await _build_nanobot_model_catalog(refresh=refresh)
+
+
 @router.post("/nanobot/config")
 async def set_nanobot_config(body: NanobotConfigRequest):
     """Write the default nanobot configuration used by the setup wizard."""
+    env = _build_env()
     path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
     data = _read_json_mapping(path) if path.exists() else _nanobot_default_config_payload()
     try:
@@ -1251,6 +1796,7 @@ async def set_nanobot_config(body: NanobotConfigRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    generated_websocket_token = _ensure_nanobot_websocket_token(data)
     _write_json_mapping(path, data)
     plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
     _deploy_safety_files(str(Path(body.workspace or _nanobot_default_workspace()).expanduser()))
@@ -1262,15 +1808,24 @@ async def set_nanobot_config(body: NanobotConfigRequest):
         timeout_s=body.guard_timeout_s,
         plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
     )
+    overlay_success, overlay_status, overlay_detail = await _ensure_nanobot_xsafeclaw_overlay(
+        env=env,
+    )
     response = _nanobot_config_response(path)
     try:
-        instances = await runtime_registry.discover()
+        instances = prime_instances_cache(await runtime_registry.discover())
     except Exception:
         instances = []
     return {
         "success": True,
         **response,
         "guard": response["guard"] | {"mode": guard["mode"]},
+        "overlay": {
+            "success": overlay_success,
+            "status": overlay_status,
+            "detail": overlay_detail,
+        },
+        "websocket_token_generated": bool(generated_websocket_token),
         "instances": [serialize_instance(instance) for instance in instances],
     }
 
@@ -1368,8 +1923,11 @@ async def set_nanobot_guard_config(instance_id: str, body: NanobotGuardConfigReq
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    refreshed_instance = await get_instance(instance_id)
-    instances = await list_instances()
+    instances = prime_instances_cache(await runtime_registry.discover())
+    refreshed_instance = next(
+        (item for item in instances if item.instance_id == instance_id),
+        instance,
+    )
     return {
         "instance_id": refreshed_instance.instance_id,
         "platform": refreshed_instance.platform,
@@ -1510,7 +2068,52 @@ async def _run_cmd(
         except Exception:
             pass
         return 124, "timeout"
-    return proc.returncode or 0, stdout_bytes.decode("utf-8", errors="replace").strip()
+    return proc.returncode or 0, _decode_subprocess_output(stdout_bytes).strip()
+
+
+def _nanobot_onboard_args(
+    nanobot_path: str,
+    *,
+    config_path: Path | None = None,
+    workspace: Path | None = None,
+) -> list[str]:
+    """Build the official non-interactive nanobot onboard command."""
+    target_config = Path(config_path or NANOBOT_DEFAULT_CONFIG).expanduser()
+    target_workspace = Path(workspace or _nanobot_default_workspace()).expanduser()
+    return _build_nanobot_command(
+        nanobot_path,
+        [
+            "onboard",
+            "--config",
+            str(target_config),
+            "--workspace",
+            str(target_workspace),
+        ],
+    )
+
+
+async def _ensure_nanobot_xsafeclaw_overlay(
+    *,
+    env: dict,
+    uv_executable: str | None = None,
+) -> tuple[bool, str, str]:
+    """Ensure nanobot's uv tool environment can import XSafeClaw."""
+    resolved_uv = uv_executable or _find_uv_executable(env=env)
+    if not resolved_uv:
+        return False, "skipped", "uv executable not found"
+
+    overlay_args = _nanobot_overlay_install_args(
+        env=env,
+        uv_executable=resolved_uv,
+    )
+    rc, output = await _run_cmd(
+        _build_uv_command(overlay_args[0], overlay_args[1:]),
+        env=env,
+        timeout_s=180.0,
+    )
+    if rc == 0:
+        return True, "success", output
+    return False, "failed", output or f"uv overlay exited with code {rc}"
 
 
 async def _find_hermes_user_units(env: dict) -> list[str]:
@@ -2589,42 +3192,197 @@ async def install_openclaw():
 
 @router.post("/nanobot/install")
 async def install_nanobot():
-    """Install nanobot via uv tool install. Streams SSE output."""
+    """Install nanobot via the official uv flow, then apply XSafeClaw overlay."""
     env = _build_env()
 
     async def generate():
+        local_env = dict(env)
         try:
-            uv_executable = _find_uv_executable(env=env)
+            uv_executable = _find_uv_executable(env=local_env)
             if not uv_executable:
-                raise RuntimeError(
-                    "uv executable not found in PATH. Install uv first, then retry."
-                )
+                yield f"data: {json.dumps({'type': 'output', 'text': 'uv not found; installing uv via the official installer...'})}\n\n"
+                attempts = _uv_install_attempts()
+                attempt_outputs: list[str] = []
+                for index, (attempt_name, attempt_args, attempt_display) in enumerate(attempts, start=1):
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Trying uv installer {index}/{len(attempts)}: {attempt_name}'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {attempt_display}'})}\n\n"
+                    timeout_s = 420.0 if attempt_name in {'winget', 'scoop'} else 240.0
+                    rc, out = await _run_cmd(
+                        attempt_args,
+                        env=local_env,
+                        timeout_s=timeout_s,
+                    )
+                    if out:
+                        attempt_outputs.append(out)
+                    for segment in (out or "").splitlines():
+                        if segment.strip():
+                            yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
+                    local_env = _build_env()
+                    uv_executable = _find_uv_executable(env=local_env)
+                    if rc == 0 and uv_executable:
+                        yield f"data: {json.dumps({'type': 'output', 'text': f'uv installed successfully via {attempt_name}.'})}\n\n"
+                        break
+                    if rc == 0 and not uv_executable:
+                        yield f"data: {json.dumps({'type': 'output', 'text': 'Installer finished, but uv is still not detectable from the current user environment.'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'output', 'text': f'uv installer {attempt_name} exited with code {rc}.'})}\n\n"
+                if not uv_executable:
+                    raise RuntimeError(
+                        f"{_classify_uv_install_failure(attempt_outputs)} "
+                        "Check the manual commands below and verify your user bin directory is on PATH."
+                    )
+            else:
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Using uv: {uv_executable}'})}\n\n"
 
-            install_args = _nanobot_tool_install_args(
-                env=env,
+            nanobot_path = _find_nanobot(env=local_env)
+            nanobot_ready = False
+            nanobot_error: str | None = None
+            if nanobot_path:
+                nanobot_ready, _, nanobot_error = await _probe_nanobot_cli_async(
+                    nanobot_path,
+                    env=local_env,
+                    timeout_s=15.0,
+                )
+            yield f"data: {json.dumps({'type': 'nanobot_install_start'})}\n\n"
+            if not nanobot_path or not nanobot_ready:
+                repairing_nanobot = bool(nanobot_path and not nanobot_ready)
+                if repairing_nanobot:
+                    repair_reason = nanobot_error or "unknown error"
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Existing Nanobot CLI at {nanobot_path} is not usable ({repair_reason}); reinstalling it.'})}\n\n"
+                install_args = _nanobot_official_install_args(
+                    env=local_env,
+                    uv_executable=uv_executable,
+                    force=repairing_nanobot,
+                )
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_nanobot_official_install_command(force=repairing_nanobot)}'})}\n\n"
+                proc = await asyncio.create_subprocess_exec(
+                    *_build_uv_command(install_args[0], install_args[1:]),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=local_env,
+                )
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    text = _decode_subprocess_output(line).rstrip()
+                    if text:
+                        yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                await proc.wait()
+                if proc.returncode != 0:
+                    yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+                    return
+
+                local_env = _build_env()
+                uv_executable = _find_uv_executable(env=local_env) or uv_executable
+                nanobot_path = _find_nanobot(env=local_env)
+                nanobot_ready, _, nanobot_error = await _probe_nanobot_cli_async(
+                    nanobot_path,
+                    env=local_env,
+                    timeout_s=15.0,
+                )
+                if not nanobot_path or not nanobot_ready:
+                    raise RuntimeError(
+                        "The official nanobot install completed, but the nanobot CLI is still not usable. "
+                        f"{nanobot_error or 'The executable could not be detected.'}"
+                    )
+            else:
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Nanobot CLI already detected at {nanobot_path}; skipping reinstall.'})}\n\n"
+
+            config_path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
+            workspace = Path(_nanobot_default_workspace()).expanduser()
+            if not config_path.exists():
+                onboard_args = _nanobot_onboard_args(
+                    nanobot_path,
+                    config_path=config_path,
+                    workspace=workspace,
+                )
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Running: nanobot onboard --config {config_path} --workspace {workspace}'})}\n\n"
+                rc, out = await _run_cmd(
+                    onboard_args,
+                    env=local_env,
+                    timeout_s=120.0,
+                )
+                for segment in (out or "").splitlines():
+                    if segment.strip():
+                        yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
+                if rc != 0:
+                    yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': rc})}\n\n"
+                    return
+            else:
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Existing Nanobot config found at {config_path}; skipping onboard to preserve user settings.'})}\n\n"
+
+            config_data = _read_json_mapping(config_path)
+            generated_websocket_token = _ensure_nanobot_websocket_token(config_data)
+            if generated_websocket_token:
+                _write_json_mapping(config_path, config_data)
+                yield f"data: {json.dumps({'type': 'output', 'text': 'Nanobot websocket required a token but none was configured; generated one automatically.'})}\n\n"
+
+            overlay_args = _nanobot_overlay_install_args(
+                env=local_env,
                 uv_executable=uv_executable,
             )
-            install_cmd = _format_command(install_args)
-            yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {install_cmd}'})}\n\n"
-            yield f"data: {json.dumps({'type': 'nanobot_install_start'})}\n\n"
-            proc = await asyncio.create_subprocess_exec(
-                *install_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                stdin=asyncio.subprocess.DEVNULL,
-                env=env,
+            yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_nanobot_overlay_install_command()}'})}\n\n"
+            rc, out = await _run_cmd(
+                _build_uv_command(overlay_args[0], overlay_args[1:]),
+                env=local_env,
+                timeout_s=180.0,
             )
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
-            await proc.wait()
-            if proc.returncode == 0:
-                yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
-            else:
-                yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+            for segment in (out or "").splitlines():
+                if segment.strip():
+                    yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
+            if rc != 0:
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': rc})}\n\n"
+                return
+
+            config_data = _read_json_mapping(config_path)
+            defaults = _json_mapping(_json_mapping(config_data.get("agents")).get("defaults"))
+            workspace_str = str(defaults.get("workspace") or _nanobot_default_workspace()).strip()
+            plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
+            _deploy_safety_files(workspace_str)
+            gateway = update_nanobot_gateway_state(config_path)
+            guard = update_nanobot_guard_state(
+                config_path,
+                instance_id="nanobot-default",
+                mode="blocking",
+                plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
+            )
+            gateway_health_url = gateway["gateway_health_url"]
+            guard_mode = guard["mode"]
+            yield f"data: {json.dumps({'type': 'output', 'text': f'Configured Nanobot gateway at {gateway_health_url} and enabled XSafeClaw Guard ({guard_mode}).'})}\n\n"
+
+            _, model_configured, _, _ = _nanobot_config_flags(config_path)
+            gateway_credentials_configured = model_configured and _nanobot_active_provider_has_api_key(config_path)
+            if not gateway_credentials_configured:
+                detail = (
+                    "Nanobot is installed and XSafeClaw Guard is configured. "
+                    "Gateway autostart is waiting for provider/model/API key setup in Nanobot Configure."
+                )
+                yield f"data: {json.dumps({'type': 'output', 'text': detail})}\n\n"
+                instances = prime_instances_cache(await runtime_registry.discover())
+                trigger_onboard_scan_preload()
+                yield f"data: {json.dumps({'type': 'done', 'success': True, 'instances': len(instances), 'configure_required': True, 'autostart': 'skipped', 'detail': detail})}\n\n"
+                return
+
+            try:
+                from ...services.runtime_autostart import autostart_nanobot
+
+                status, detail = await autostart_nanobot()
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                yield f"data: {json.dumps({'type': 'output', 'text': f'Autostart failed: {detail}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'detail': detail})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'type': 'output', 'text': f'Autostart {status}: {detail}'})}\n\n"
+            if status not in {"started", "already_running"}:
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'detail': detail})}\n\n"
+                return
+
+            instances = prime_instances_cache(await runtime_registry.discover())
+            trigger_onboard_scan_preload()
+            yield f"data: {json.dumps({'type': 'done', 'success': True, 'instances': len(instances)})}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
@@ -2636,8 +3394,8 @@ async def install_nanobot():
 
 
 def _nanobot_tool_install_command() -> str:
-    """Return the supported developer install command for uv-tool nanobot."""
-    return _format_command(_nanobot_tool_install_args())
+    """Return the official nanobot install command used in docs and hints."""
+    return _nanobot_official_install_command()
 
 
 @router.post("/nanobot/init-default")
@@ -2652,10 +3410,11 @@ async def init_default_nanobot():
             detail={
                 "message": f"nanobot CLI is not installed or not usable: {error}",
                 "install_command": _nanobot_tool_install_command(),
+                "overlay_command": _nanobot_overlay_install_command(),
             },
         )
 
-    workspace = Path.home() / ".nanobot" / "workspace"
+    workspace = Path(_nanobot_default_workspace()).expanduser()
     workspace.mkdir(parents=True, exist_ok=True)
     config_path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
     created = not config_path.exists()
@@ -2669,6 +3428,7 @@ async def init_default_nanobot():
         defaults = {}
         agents["defaults"] = defaults
     defaults["workspace"] = str(workspace)
+    generated_websocket_token = _ensure_nanobot_websocket_token(data)
     _write_json_mapping(config_path, data)
 
     plugin_dir = _install_safeclaw_guard_plugin(platform="nanobot")
@@ -2680,7 +3440,10 @@ async def init_default_nanobot():
         mode="blocking",
         plugin_path=plugin_dir or XSAFECLAW_NANOBOT_PLUGIN_PATH,
     )
-    instances = await runtime_registry.discover()
+    overlay_success, overlay_status, overlay_detail = await _ensure_nanobot_xsafeclaw_overlay(
+        env=env,
+    )
+    instances = prime_instances_cache(await runtime_registry.discover())
 
     # §48 — best-effort auto-start of the nanobot gateway now that the
     # config file (which the gateway needs to bind its port + channels)
@@ -2704,6 +3467,13 @@ async def init_default_nanobot():
         "gateway_command": "nanobot gateway --port 18790 --verbose",
         "guard": guard,
         "install_command": _nanobot_tool_install_command(),
+        "overlay_command": _nanobot_overlay_install_command(),
+        "overlay": {
+            "success": overlay_success,
+            "status": overlay_status,
+            "detail": overlay_detail,
+        },
+        "websocket_token_generated": bool(generated_websocket_token),
         "model_configured": False,
         "instances": [serialize_instance(instance) for instance in instances],
         "autostart": autostart,
@@ -3705,8 +4475,10 @@ PROVIDERS: list[dict] = [
         "api": "openai-completions",
         "keyUrl": "https://platform.deepseek.com/api_keys",
         "models": [
-            {"id": "deepseek-chat", "name": "DeepSeek V3", "reasoning": False},
-            {"id": "deepseek-reasoner", "name": "DeepSeek R1", "reasoning": True},
+            {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "reasoning": False},
+            {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "reasoning": False},
+            {"id": "deepseek-chat", "name": "deepseek-chat", "reasoning": False},
+            {"id": "deepseek-reasoner", "name": "deepseek-reasoner", "reasoning": True},
         ],
     },
     {
@@ -5523,6 +6295,51 @@ def _build_onboard_scan_data_hermes() -> dict:
 
 def _count_scan_models(data: dict) -> int:
     return sum(len(p.get("models", [])) for p in data.get("model_providers", []))
+
+
+async def _get_openclaw_onboard_scan_data(refresh: bool = False) -> dict[str, Any]:
+    """Return the OpenClaw catalog payload, reusing the existing scan cache."""
+    global _onboard_scan_cache, _onboard_scan_version, _onboard_scan_task
+
+    if refresh:
+        _onboard_scan_cache.clear()
+        _onboard_scan_version = ""
+
+    version = _get_openclaw_version_sync()
+    cache_matches = bool(
+        _onboard_scan_cache
+        and (
+            (version and _onboard_scan_version == version)
+            or (not version and _onboard_scan_cache.get("model_providers"))
+        )
+    )
+    if cache_matches:
+        return _onboard_scan_cache
+
+    if _onboard_scan_task and not _onboard_scan_task.done():
+        print("⏳ Waiting for background onboard-scan preload...")
+        try:
+            await asyncio.wait_for(asyncio.shield(_onboard_scan_task), timeout=150)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    cache_matches = bool(
+        _onboard_scan_cache
+        and (
+            (version and _onboard_scan_version == version)
+            or (not version and _onboard_scan_cache.get("model_providers"))
+        )
+    )
+    if cache_matches:
+        return _onboard_scan_cache
+
+    data = await _build_onboard_scan_data()
+    if data.get("model_providers"):
+        _onboard_scan_cache = data
+        if version:
+            _onboard_scan_version = version
+            _save_scan_to_disk(data, version)
+    return data
 
 
 async def _preload_onboard_scan() -> None:
