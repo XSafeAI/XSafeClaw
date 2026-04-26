@@ -38,7 +38,7 @@ def _package_version() -> str:
     try:
         return importlib_metadata.version("xsafeclaw")
     except importlib_metadata.PackageNotFoundError:
-        return "1.0.3"
+        return "1.0.5"
 
 
 # Global sync service instance
