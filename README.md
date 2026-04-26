@@ -1,6 +1,6 @@
 [English](README.md) · [中文文档](README_zh.md)
 
-<h2 align="center"> XSafeClaw: Monitor and Secure Your Claws in One Place 🚀 </h2>
+<h2 align="center"> XSafeClaw: Monitor and Secure Your (Many) Claws in One Place 🚀 </h2>
 
 <div align="center">
 <img src="assets/logo.png" alt="XSafeClaw Logo" width="520" style="max-width: 100%; height: auto;">
