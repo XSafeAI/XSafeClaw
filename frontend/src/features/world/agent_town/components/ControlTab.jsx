@@ -2,22 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ImageSwitch from './ImageSwitch';
 import { getAgentTownText } from '../i18n';
 
-const LANGUAGE_OPTIONS = [
-  { id: 'zh-CN', label: 'Chinese' },
-  { id: 'en-US', label: 'English' },
-];
-
-const DENSITY_OPTIONS = [
-  { id: 'cozy', label: 'Cozy' },
-  { id: 'compact', label: 'Compact' },
-  { id: 'dense', label: 'Dense' },
-];
-
-const AMBIENT_OPTIONS = [
-  { id: 'soft', label: 'Soft FX' },
-  { id: 'normal', label: 'Balanced FX' },
-  { id: 'cinematic', label: 'Cinematic FX' },
-];
+const LANGUAGE_OPTION_IDS = ['zh-CN', 'en-US'];
+const DENSITY_OPTION_IDS = ['cozy', 'compact', 'dense'];
+const AMBIENT_OPTION_IDS = ['soft', 'normal', 'cinematic'];
 
 function CircularProgress({ percent, size = 40, stroke = 3 }) {
   const r = (size - stroke) / 2;
@@ -368,6 +355,23 @@ export default function ControlTab({
     { id: 'capped', label: townText.control.customCap },
   ], [townText]);
 
+  const languageOptions = useMemo(() => [
+    { id: LANGUAGE_OPTION_IDS[0], label: townText.control.languageChinese },
+    { id: LANGUAGE_OPTION_IDS[1], label: townText.control.languageEnglish },
+  ], [townText]);
+
+  const densityOptions = useMemo(() => [
+    { id: DENSITY_OPTION_IDS[0], label: townText.control.densityCozy },
+    { id: DENSITY_OPTION_IDS[1], label: townText.control.densityCompact },
+    { id: DENSITY_OPTION_IDS[2], label: townText.control.densityDense },
+  ], [townText]);
+
+  const ambientOptions = useMemo(() => [
+    { id: AMBIENT_OPTION_IDS[0], label: townText.control.ambientSoft },
+    { id: AMBIENT_OPTION_IDS[1], label: townText.control.ambientBalanced },
+    { id: AMBIENT_OPTION_IDS[2], label: townText.control.ambientCinematic },
+  ], [townText]);
+
   return (
     <div className="tc-control-layout">
       <div className="tc-control-main tc-ornate-panel">
@@ -566,17 +570,17 @@ export default function ControlTab({
 
             <div className="tc-control-setting">
               <span className="tc-control-setting-label">{townText.control.language}</span>
-              <OptionChipGroup options={LANGUAGE_OPTIONS} value={language} onChange={setLanguage} comingSoon comingSoonText={townText.control.comingSoon} />
+              <OptionChipGroup options={languageOptions} value={language} onChange={setLanguage} comingSoon comingSoonText={townText.control.comingSoon} />
             </div>
 
             <div className="tc-control-setting">
               <span className="tc-control-setting-label">{townText.control.consoleDensity}</span>
-              <OptionChipGroup options={DENSITY_OPTIONS} value={density} onChange={setDensity} comingSoon comingSoonText={townText.control.comingSoon} />
+              <OptionChipGroup options={densityOptions} value={density} onChange={setDensity} comingSoon comingSoonText={townText.control.comingSoon} />
             </div>
 
             <div className="tc-control-setting">
               <span className="tc-control-setting-label">{townText.control.ambientFx}</span>
-              <OptionChipGroup options={AMBIENT_OPTIONS} value={ambientFx} onChange={setAmbientFx} comingSoon comingSoonText={townText.control.comingSoon} />
+              <OptionChipGroup options={ambientOptions} value={ambientFx} onChange={setAmbientFx} comingSoon comingSoonText={townText.control.comingSoon} />
             </div>
           </div>
         </div>

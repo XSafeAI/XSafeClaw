@@ -42,47 +42,28 @@ def _package_version() -> str:
 
 
 def _open_browser_landing(host: str, port: int) -> None:
-    """Open setup, configure or home based on backend status."""
+    """Always land the user on the Setup wizard.
+
+    Per product spec (§57): ``xsafeclaw start`` must always open ``/setup``
+    regardless of whether OpenClaw / Hermes / Nanobot are already installed
+    or configured.  The Setup screen itself now surfaces the "enter town"
+    / "enter backend" shortcuts for already-installed runtimes, so we no
+    longer need to branch on ``install-status`` here.
+
+    We still keep a guarded ``urlopen`` probe to wait until the backend is
+    reachable; on any error we still fall back to opening ``/setup``.
+    """
     base = f"http://{host}:{port}"
     try:
         req = urllib.request.Request(
             f"{base}/api/system/install-status",
             headers={"Accept": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-
-        # Nothing installed at all → setup wizard.
-        if data.get("requires_setup") or not (
-            data.get("openclaw_installed")
-            or data.get("nanobot_installed")
-            or data.get("hermes_installed")
-        ):
-            webbrowser.open(f"{base}/setup")
-            return
-
-        # Multiple installed runtimes still need their first-time configure
-        # step → drop the user on the multi-card selector. Single-runtime
-        # cases land directly on that runtime's configure page.
-        unconfigured = [
-            ("openclaw", data.get("requires_configure")),
-            ("hermes", data.get("requires_hermes_configure")),
-            ("nanobot", data.get("requires_nanobot_configure")),
-        ]
-        unconfigured = [name for name, flag in unconfigured if flag]
-
-        if len(unconfigured) >= 2:
-            webbrowser.open(f"{base}/configure_select")
-        elif unconfigured == ["nanobot"]:
-            webbrowser.open(f"{base}/nanobot_configure")
-        elif unconfigured == ["hermes"]:
-            webbrowser.open(f"{base}/configure")
-        elif unconfigured == ["openclaw"]:
-            webbrowser.open(f"{base}/openclaw_configure")
-        else:
-            webbrowser.open(base)
+        with urllib.request.urlopen(req, timeout=8):
+            pass
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
-        webbrowser.open(base)
+        pass
+    webbrowser.open(f"{base}/setup")
 
 
 @app.command()

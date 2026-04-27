@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   CheckCircle, Download, Loader2, XCircle, ChevronRight, Terminal,
-  ArrowDownToLine, Zap, Bot, SkipForward, Code2, Settings2,
+  ArrowDownToLine, Zap, Bot, Code2, Settings2, MapPin, Activity,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
@@ -176,7 +176,11 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
           <div className="flex items-center gap-2 mb-1">
             <h3 className="text-base font-bold text-text-primary">{name}</h3>
             <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase ${isInstalled ? badgeInstalled : badgeNotInstalled}`}>
-              {isInstalled ? (info.configured ? 'ready' : 'installed') : isUnknown ? 'unknown' : 'not installed'}
+              {isInstalled
+                ? (info.configured ? (t.setup.badgeReady || 'ready') : (t.setup.badgeInstalled || 'installed'))
+                : isUnknown
+                  ? (t.setup.badgeUnknown || 'unknown')
+                  : (t.setup.badgeNotInstalled || 'not installed')}
             </span>
           </div>
           <p className="text-[12px] text-text-muted leading-relaxed">
@@ -227,6 +231,36 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
           {t.setup.openConfigure || 'Open Configure'}
           <ChevronRight className="w-4 h-4" />
         </button>
+      )}
+
+      {/* §57 — installed → also show quick shortcuts to Agent Town and the
+          Backend monitor. Kept as a secondary (outline) style so the primary
+          "Open Configure" CTA remains visually dominant for first-time setup. */}
+      {isInstalled && !installing && (
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              window.location.replace('/agent-valley');
+            }}
+            className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"
+          >
+            <MapPin className="w-3.5 h-3.5" />
+            {t.setup.enterTown || 'Enter Town'}
+          </button>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              window.location.replace('/monitor');
+            }}
+            className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"
+          >
+            <Activity className="w-3.5 h-3.5" />
+            {t.setup.enterBackend || 'Enter Backend'}
+          </button>
+        </div>
       )}
 
       {installing && (
@@ -485,22 +519,6 @@ export default function Setup() {
     }
   };
 
-  const handleSkip = () => {
-    const openclawNeedsConfigure = openclawInfo.installed === true && openclawInfo.configured === false;
-    const nanobotNeedsConfigure = nanobotInfo.installed === true && nanobotInfo.configured === false;
-    if (openclawNeedsConfigure && nanobotNeedsConfigure) {
-      navigate('/configure_select', { replace: true });
-    } else if (nanobotNeedsConfigure) {
-      navigate('/nanobot_configure', { replace: true });
-    } else if (openclawNeedsConfigure) {
-      navigate('/openclaw_configure', { replace: true });
-    } else if (hermesInfo.installed === true) {
-      navigate('/configure', { replace: true });
-    } else {
-      navigate('/agent-valley', { replace: true });
-    }
-  };
-
   const handleRetry = () => {
     setLogs([]);
     setNodeStatus(null);
@@ -517,8 +535,6 @@ export default function Setup() {
     stage === 'checking' || stage === 'selecting' ? 1
     : stage === 'downloading_node' ? 2
     : 3;
-
-  const hasAnyInstalled = openclawInfo.installed === true || nanobotInfo.installed === true || hermesInfo.installed === true;
 
   return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
@@ -626,16 +642,6 @@ export default function Setup() {
                   className="w-full py-2.5 bg-cyan-500 hover:bg-cyan-600 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-cyan-500/25"
                 >
                   {t.setup.nanobotContinueConfigure || 'Continue to Nanobot Configure'}
-                </button>
-              )}
-
-              {hasAnyInstalled && stage !== 'install_failed' && (
-                <button
-                  onClick={handleSkip}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 text-[13px] text-text-muted hover:text-text-primary transition-colors"
-                >
-                  <SkipForward className="w-4 h-4" />
-                  {t.setup.skipBtn}
                 </button>
               )}
 

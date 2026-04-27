@@ -1618,7 +1618,11 @@ export default function TownConsole({
       setModelCatalogLoadedFor(platformKey);
     } catch (err) {
       console.warn('[TownConsole] onboard-scan fetch error:', err);
-      setModelCatalogError(err?.response?.data?.detail || err?.message || 'Failed to discover configure-time models.');
+      setModelCatalogError(
+        err?.response?.data?.detail
+        || err?.message
+        || (locale === 'zh' ? '发现配置阶段模型失败。' : 'Failed to discover configure-time models.')
+      );
       try {
         const st = await systemAPI.status();
         const dw = st.data?.default_workspace;
@@ -1629,7 +1633,7 @@ export default function TownConsole({
     } finally {
       setModelCatalogLoading(false);
     }
-  }, [modelCatalogLoadedFor, modelCatalogLoading, selectedRuntime?.platform, onboardScanPlatform]);
+  }, [modelCatalogLoadedFor, modelCatalogLoading, selectedRuntime?.platform, onboardScanPlatform, locale]);
 
   const loadConsoleData = useCallback(async () => {
     if (USE_AGENT_TOWN_MOCK) {
@@ -1717,12 +1721,22 @@ export default function TownConsole({
 
     loadAvailableModels();
     load();
-    const timer = window.setInterval(load, 10000);
+    // §57 sync target: backend and town views must converge within 5s.
+    const timer = window.setInterval(load, 5000);
     return () => {
       disposed = true;
       window.clearInterval(timer);
     };
   }, [loadAvailableModels, loadConsoleData]);
+
+  // Ensure delete/new session actions refresh trace/events immediately
+  // instead of waiting for the next poll tick.
+  const handleDeleteAgentAndRefresh = useCallback(async (agent) => {
+    if (!onDeleteAgent) return;
+    await onDeleteAgent(agent);
+    await loadConsoleData();
+    onDataChangedRef.current?.();
+  }, [loadConsoleData, onDeleteAgent]);
 
   useEffect(() => {
     if (!modelPickerOpen) return;
@@ -2474,6 +2488,8 @@ export default function TownConsole({
       setModelPickerOpen(false);
       setModelSearch('');
       setPendingModelId('');
+      await loadConsoleData();
+      onDataChangedRef.current?.();
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : townText.create.failed);
     } finally {
@@ -2798,7 +2814,7 @@ export default function TownConsole({
                   pendingApprovals={pendingApprovals}
                   onResolveGuardPending={handleResolveGuardPending}
                   guardResolvingId={guardResolvingId}
-                  onDeleteAgent={onDeleteAgent}
+                  onDeleteAgent={handleDeleteAgentAndRefresh}
                   tokensByAgent={tokensByAgent}
                   helpers={crewHelpers}
                   pendingImages={currentPendingImages}

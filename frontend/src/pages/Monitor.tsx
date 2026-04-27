@@ -145,14 +145,19 @@ function monitorEventStatusBadgeClass(status: string | undefined): string {
   return 'bg-yellow-500/15 text-yellow-400';
 }
 
-/** Badge for agent source platform (openclaw / nanobot). */
+/** Badge for agent source platform (openclaw / hermes / nanobot). */
 function PlatformBadge({ platform }: { platform: string }) {
-  const isNanobot = platform === 'nanobot';
+  const normalized = (platform || '').toLowerCase();
+  const isNanobot = normalized === 'nanobot';
+  const isHermes = normalized === 'hermes';
+  const badgeClass = isNanobot
+    ? 'bg-cyan-500/15 text-cyan-400'
+    : isHermes
+      ? 'bg-violet-500/15 text-violet-400'
+      : 'bg-blue-500/15 text-blue-400';
   return (
-    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
-      isNanobot ? 'bg-cyan-500/15 text-cyan-400' : 'bg-blue-500/15 text-blue-400'
-    }`}>
-      {platform}
+    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${badgeClass}`}>
+      {normalized || platform}
     </span>
   );
 }
@@ -1464,6 +1469,15 @@ export default function Monitor() {
                     {/* Session rows */}
                     {visibleRows.map((row) => {
                       const c = colorOf(row.sessionId);
+                      const rowPlatform =
+                        row.session?.platform
+                        || row.events.find((ev) => typeof ev.platform === 'string' && ev.platform)?.platform
+                        || (
+                          row.session?.instance_id?.startsWith('hermes') ? 'hermes'
+                            : row.session?.instance_id?.startsWith('nanobot') ? 'nanobot'
+                              : row.session?.instance_id?.startsWith('openclaw') ? 'openclaw'
+                                : ''
+                        );
                       return (
                         <div key={row.sessionId} className="flex border-t border-border group hover:bg-surface-0/40 transition-colors">
                           {/* Label — sticky so it stays visible on horizontal scroll */}
@@ -1478,10 +1492,10 @@ export default function Monitor() {
                               {row.events.length} task{row.events.length !== 1 && 's'}
                               {row.session && ` · ${fmtTokens(row.session.total_tokens)}`}
                             </p>
-                            {row.session?.platform && (
+                            {rowPlatform && (
                               <div className="flex items-center gap-1.5 mt-0.5">
-                                <PlatformBadge platform={row.session.platform} />
-                                {row.session.instance_id && (
+                                <PlatformBadge platform={rowPlatform} />
+                                {row.session?.instance_id && (
                                   <span className="text-[10px] text-text-muted">{row.session.instance_id}</span>
                                 )}
                               </div>

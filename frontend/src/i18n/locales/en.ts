@@ -36,11 +36,13 @@ export const en = {
     safeChat: 'Safe Chat',
     assetShield: 'Asset Shield',
     riskTest: 'Risk Test',
+    approvals: 'Approvals',
     safetyRehearsal: 'Safety Rehearsal',
     descMonitor: 'Real-time Monitoring',
     descChat: 'Chat with Agent',
     descAsset: 'Asset Scanning',
     descRiskTest: 'Safe adversarial preview',
+    descApprovals: 'Review unsafe tool calls',
     descRehearsal: 'Safety Rehearsal',
     lightMode: 'Light Mode',
     darkMode: 'Dark Mode',
@@ -48,7 +50,7 @@ export const en = {
     switchToDark: 'Switch to dark mode',
     systemOnline: 'System Online',
     allServicesRunning: 'All services running',
-    langToggle: '中文',
+    langToggle: 'Chinese',
     agentTown: 'Agent Valley',
     agentTownDesc: 'Manage and observe all your AI agents in one place',
   },
@@ -550,8 +552,16 @@ export const en = {
     // §50 — installed-card click target
     openConfigure: 'Open Configure',
     openConfigureAria: 'Open configure wizard for',
+    // §57 — installed-card navigation shortcuts to Agent Town / Backend.
+    enterTown: 'Enter Town',
+    enterBackend: 'Enter Backend',
     // Skip
     skipBtn: 'Skip, continue to use',
+    // Badges — §57 i18n-ize hard-coded labels.
+    badgeReady: 'Ready',
+    badgeInstalled: 'Installed',
+    badgeUnknown: 'Unknown',
+    badgeNotInstalled: 'Not Installed',
   },
 
   configure: {
@@ -582,6 +592,8 @@ export const en = {
     configComplete: 'Configuration Complete!',
     configCompleteDesc: 'XSafeClaw is fully configured and ready to use',
     enterAgentValley: 'Enter Agent Valley',
+    enterTown: 'Enter Town',
+    enterBackendMonitor: 'Enter Backend Monitor',
     reviewTitle: 'Review Configuration',
 
     mode: {

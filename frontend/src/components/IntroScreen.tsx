@@ -78,7 +78,7 @@ export default function IntroScreen({ exiting = false }: IntroScreenProps) {
 
       <div className="intro-screen__content">
         <img
-          src="/intro/logo_no-bg.png"
+          src="/logo.png"
           alt="Safe Agent Valley"
           className="intro-screen__logo"
         />

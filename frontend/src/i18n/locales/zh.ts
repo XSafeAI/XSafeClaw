@@ -30,11 +30,13 @@ export const zh: Translations = {
     safeChat: '安全对话',
     assetShield: '资产防护',
     riskTest: '风险测试',
+    approvals: '人工审核',
     safetyRehearsal: '安全预演',
     descMonitor: '实时监控',
     descChat: '与智能体对话',
     descAsset: '资产扫描',
     descRiskTest: '安全攻击预演',
+    descApprovals: '审核不安全工具调用',
     descRehearsal: '安全预演',
     lightMode: '浅色模式',
     darkMode: '深色模式',
@@ -65,7 +67,7 @@ export const zh: Translations = {
       activities: '活动',
       skills: '技能',
       memory: '记忆',
-      approvals: '待审批',
+      approvals: '人工审核',
     },
     dashboard: {
       sessions: '会话',
@@ -544,8 +546,16 @@ export const zh: Translations = {
     // §50 — installed-card click target
     openConfigure: '进入配置',
     openConfigureAria: '打开配置向导：',
+    // §57 — installed-card navigation shortcuts to Agent Town / Backend.
+    enterTown: '进入小镇',
+    enterBackend: '进入后台',
     // Skip
     skipBtn: '跳过，继续使用',
+    // Badges — §57 i18n-ize hard-coded labels.
+    badgeReady: '就绪',
+    badgeInstalled: '已安装',
+    badgeUnknown: '未知',
+    badgeNotInstalled: '未安装',
   },
 
   configure: {
@@ -576,6 +586,8 @@ export const zh: Translations = {
     configComplete: '配置完成！',
     configCompleteDesc: 'XSafeClaw 已完全配置并可以使用',
     enterAgentValley: '进入智能体小镇',
+    enterTown: '进入小镇',
+    enterBackendMonitor: '进入后台监控',
     reviewTitle: '配置预览',
 
     mode: {

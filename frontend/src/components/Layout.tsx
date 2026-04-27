@@ -53,7 +53,7 @@ export default function Layout() {
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,       desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
-    { name: 'Approvals',              href: '/approvals',        icon: ShieldAlert,    desc: 'Review unsafe tool calls', badge: pendingCount },
+    { name: t.layout.approvals,       href: '/approvals',        icon: ShieldAlert,    desc: t.layout.descApprovals, badge: pendingCount },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
     { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },
   ];

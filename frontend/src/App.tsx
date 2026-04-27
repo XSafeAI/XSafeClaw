@@ -13,7 +13,7 @@ import Setup from './pages/Setup';
 import Configure from './pages/Configure';
 import ConfigureSelector from './pages/ConfigureSelector';
 import NanobotConfigure from './pages/NanobotConfigure';
-import { systemAPI, type InstallStatusResponse } from './services/api';
+import { systemAPI } from './services/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,26 +29,23 @@ const queryClient = new QueryClient({
 // Hermes and Nanobot simultaneously and the user picks per-session in
 // Agent Town. We only need the install / configure routing now.
 //
-// §51: forced auto-redirect to ``*_configure`` removed. Per the user's
-// updated routing contract (Case 1 / Case 2), the **only** flows that
-// should land the user on a Configure page are:
-//   1. user explicitly clicks【download】on a Setup card → after install
-//      success, ``Setup.tsx`` itself navigates to that platform's
-//      Configure (handled inside Setup.tsx, not here);
-//   2. user explicitly clicks an installed Setup card → ``Setup.tsx``
-//      calls ``navigate('/<platform>_configure')`` directly.
-// Any other entry path (boot to ``/``, deep link to ``/agent-valley``,
-// SET button in town, etc.) **must not** be hijacked by App.tsx based on
-// stale ``requires_configure`` flags. The only auto-redirect kept is
-// ``setup``: when nothing is installed at all, the app must force the
-// user through Setup because the rest of the app cannot function.
+// §51: forced auto-redirect to ``*_configure`` removed. Configure is
+// reachable only via Setup cards / post-install auto-jump.
+//
+// §57: Per product spec — ``xsafeclaw start`` must land the user on
+// ``/setup`` regardless of install status. The CLI handles the initial
+// browser open; App.tsx here enforces the same contract for the first
+// visit of each browser session (page refresh / deep-link / type-in
+// URL). A ``sessionStorage`` flag is flipped on once the user reaches
+// Setup so subsequent navigations to Monitor / Chat / Agent Valley are
+// not hijacked.
 type CheckState = 'pending' | 'setup' | 'ok';
 
-// EXEMPT_PATHS still meaningful: pages the ``setup`` redirect must not
-// kick the user out of (Setup itself + every Configure entry, in case
-// they're mid-config of a freshly installed framework). Kept full on
-// purpose — see §51 audit log for the "trim to only /setup breaks the
-// post-install navigate" trap.
+// EXEMPT_PATHS: pages the initial ``setup`` redirect must not kick the
+// user out of (Setup itself + every Configure entry, in case they're
+// mid-config of a freshly installed framework, plus the landing app
+// shell pages Setup itself links to via the new "enter town / enter
+// backend" shortcuts).
 const EXEMPT_PATHS = [
   '/setup',
   '/configure',
@@ -57,6 +54,8 @@ const EXEMPT_PATHS = [
   '/nanobot_configure',
   '/configure_select',
 ];
+
+const SETUP_VISITED_KEY = 'xsafeclaw:setup_visited';
 
 function AppRoutes() {
   const [checkState, setCheckState] = useState<CheckState>('pending');
@@ -68,29 +67,23 @@ function AppRoutes() {
 
     (async () => {
       try {
-        const res = await systemAPI.installStatus();
+        // Still probe install-status so the backend is awake before we
+        // commit to a route. We intentionally ignore the result: §57
+        // requires landing on ``/setup`` regardless of install flags.
+        await systemAPI.installStatus();
         if (cancelled) return;
-        const d = res.data as InstallStatusResponse & {
-          openclaw_installed?: boolean;
-          hermes_installed?: boolean;
-          nanobot_installed?: boolean;
-        };
-
-        const anyInstalled =
-          d.openclaw_installed || d.nanobot_installed || d.hermes_installed;
-        // §51: only ``requires_setup`` (or "nothing installed at all")
-        // forces a redirect now. ``requires_configure`` and friends are
-        // intentionally ignored — Configure is reachable only via Case 1
-        // (post-install auto-jump from Setup) or Case 2 (clicking a
-        // Setup card or the SET HUD button).
-        if (d.requires_setup || !anyInstalled) {
-          setCheckState('setup');
-        } else {
-          setCheckState('ok');
-        }
       } catch {
-        if (!cancelled) setCheckState('ok');
+        /* swallow — fall through to the Setup redirect anyway */
       }
+      if (cancelled) return;
+
+      let visited = false;
+      try {
+        visited = sessionStorage.getItem(SETUP_VISITED_KEY) === '1';
+      } catch {
+        /* sessionStorage unavailable (incognito etc.) — treat as first visit */
+      }
+      setCheckState(visited ? 'ok' : 'setup');
     })();
 
     return () => {
@@ -101,12 +94,21 @@ function AppRoutes() {
   useEffect(() => {
     if (checkState === 'pending') return;
     const currentPath = location.pathname;
+
+    // Record the visit once the user actually reaches Setup so later
+    // navigations (Enter Town / Enter Backend) aren't bounced back.
+    if (currentPath === '/setup') {
+      try {
+        sessionStorage.setItem(SETUP_VISITED_KEY, '1');
+      } catch {
+        /* ignore */
+      }
+      if (checkState === 'setup') setCheckState('ok');
+      return;
+    }
+
     if (EXEMPT_PATHS.includes(currentPath)) return;
 
-    // §51: only the ``setup`` branch survives — see the type comment
-    // above for the rationale. Other branches (openclaw_configure,
-    // hermes_configure, nanobot_configure, configure_select) used to
-    // forcibly hijack the user; they're gone on purpose.
     if (checkState === 'setup') {
       navigate('/setup', { replace: true });
     }

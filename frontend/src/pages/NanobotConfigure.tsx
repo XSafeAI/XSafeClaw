@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
+  Activity,
   Bot,
   CheckCircle,
   ChevronLeft,
@@ -10,6 +11,7 @@ import {
   FolderOpen,
   Key,
   Loader2,
+  MapPin,
   Plug,
   Search,
   Settings2,
@@ -65,6 +67,8 @@ const copy = {
     catalogFailed: 'Nanobot 模型目录暂不可用，已回退到当前 provider 的默认模型。',
     backSetup: '返回安装向导',
     enterValley: '进入 Agent Valley',
+    enterTown: '进入小镇',
+    enterBackendMonitor: '进入后台监控',
     editAgain: '继续编辑',
     commonBack: '返回',
     commonNext: '下一步',
@@ -209,6 +213,8 @@ const copy = {
     catalogFailed: 'Nanobot model catalog is unavailable, falling back to the selected provider default.',
     backSetup: 'Back to Setup',
     enterValley: 'Enter Agent Valley',
+    enterTown: 'Enter Town',
+    enterBackendMonitor: 'Enter Backend Monitor',
     editAgain: 'Edit Again',
     commonBack: 'Back',
     commonNext: 'Next',
@@ -1268,13 +1274,22 @@ export default function NanobotConfigure() {
               </div>
               <div className="flex flex-col sm:flex-row gap-3">
                 {complete && (
-                  <button
-                    type="button"
-                    onClick={() => window.location.replace('/agent-valley')}
-                    className="flex items-center justify-center gap-2 px-6 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25"
-                  >
-                    <Settings2 className="w-4 h-4" /> {labels.enterValley} <ChevronRight className="w-4 h-4" />
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => window.location.replace('/agent-valley')}
+                      className="flex items-center justify-center gap-2 px-6 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25"
+                    >
+                      <MapPin className="w-4 h-4" /> {(labels as any).enterTown || labels.enterValley} <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => window.location.replace('/monitor')}
+                      className="flex items-center justify-center gap-2 px-6 py-3 border border-accent/40 bg-surface-0 text-accent hover:bg-accent/10 font-semibold rounded-xl transition-all"
+                    >
+                      <Activity className="w-4 h-4" /> {(labels as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"

@@ -9,7 +9,7 @@ import {
   Shield, Zap, Settings2, Key, Server, Plug, Wrench, CheckCircle,
   ChevronRight, ChevronLeft, Eye, EyeOff, Loader2, XCircle,
   RefreshCw, Trash2, Globe, FolderOpen, Search, Rocket,
-  Sparkles, Copy, AlertTriangle, Info,
+  Sparkles, Copy, AlertTriangle, Info, MapPin, Activity,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import type { SystemStatusResponse } from '../services/api';
@@ -2281,10 +2281,17 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                 <p className="text-[12px] font-semibold text-text-primary">{h.hintTitle}</p>
                 <p className="text-[12px] text-text-muted leading-relaxed">{h.hintBody}</p>
               </div>
-              <button type="button" onClick={() => window.location.replace('/agent-valley')}
-                className="flex items-center gap-2 px-8 py-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
-                <Settings2 className="w-4 h-4" /> {t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
-              </button>
+              {/* §57 — dual CTA, Hermes tint. */}
+              <div className="flex flex-col sm:flex-row items-center gap-3">
+                <button type="button" onClick={() => window.location.replace('/agent-valley')}
+                  className="flex items-center gap-2 px-6 py-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
+                  <MapPin className="w-4 h-4" /> {(t.configure as any).enterTown || t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
+                </button>
+                <button type="button" onClick={() => window.location.replace('/monitor')}
+                  className="flex items-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all border border-violet-500/40 text-violet-300 hover:bg-violet-500/10">
+                  <Activity className="w-4 h-4" /> {(t.configure as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           )}
 
@@ -2561,10 +2568,20 @@ export default function Configure() {
               <p className="text-lg font-bold text-text-primary">{form.mode === 'remote' ? t.configure.remoteComplete : t.configure.configComplete}</p>
               <p className="text-[13px] text-text-secondary mt-2">{form.mode === 'remote' ? t.configure.remoteCompleteDesc : t.configure.configCompleteDesc}</p>
             </div>
-            <button onClick={() => window.location.replace('/agent-valley')}
-              className="flex items-center gap-2 px-8 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
-              <Settings2 className="w-4 h-4" /> {t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
-            </button>
+            {/* §57 — unified dual-CTA: Enter Town (primary) + Enter Backend
+                Monitor (secondary). Replaces the single "Enter Agent Valley"
+                button so OpenClaw / Hermes / Nanobot all share the same
+                post-config navigation pattern. */}
+            <div className="flex flex-col sm:flex-row items-center gap-3">
+              <button onClick={() => window.location.replace('/agent-valley')}
+                className="flex items-center gap-2 px-6 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
+                <MapPin className="w-4 h-4" /> {(t.configure as any).enterTown || t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
+              </button>
+              <button onClick={() => window.location.replace('/monitor')}
+                className="flex items-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all border border-accent/40 text-accent hover:bg-accent/10">
+                <Activity className="w-4 h-4" /> {(t.configure as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -993,7 +993,7 @@ export default function CrewTab({
                         className="tc-inline-error-link"
                         onClick={() => { window.location.href = '/setup'; }}
                       >
-                        前往安装
+                        {townText.create.goToSetup}
                       </button>
                     )}
                   </div>
@@ -1066,7 +1066,7 @@ export default function CrewTab({
                     <div className="tc-stage-agent-name-row">
                       <div className="tc-stage-agent-name">{formatAgentDisplayName(currentAgent)}</div>
                       <div className={`tc-stage-status-chip tc-status-${currentAgent.status || 'offline'}`}>
-                        {(currentAgent.status || 'offline').toUpperCase()}
+                        {townText.stage[currentAgent.status || 'offline'] || String(currentAgent.status || 'offline').toUpperCase()}
                       </div>
                       <button
                         type="button"
@@ -1103,15 +1103,15 @@ export default function CrewTab({
                     <div className="tc-stage-meta-strip tc-stage-meta-strip-top">
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">{townText.stage.provider}</span>
-                        <span className="tc-stage-meta-pill-value">{currentAgent.provider || 'unknown'}</span>
+                        <span className="tc-stage-meta-pill-value">{currentAgent.provider || townText.stage.unknown}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">{townText.stage.model}</span>
-                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.model || 'model pending'}</span>
+                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.model || townText.stage.modelPending}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">{townText.stage.channel}</span>
-                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.channel || 'default'}</span>
+                        <span className="tc-stage-meta-pill-value tc-stage-meta-pill-value-mono">{currentAgent.channel || townText.stage.channelDefault}</span>
                       </div>
                       <div className="tc-stage-meta-pill">
                         <span className="tc-stage-meta-pill-label">{townText.stage.tokens}</span>
@@ -1201,9 +1201,9 @@ export default function CrewTab({
                             const eff = getEffectiveRisk(item) || {};
                             return (
                               <div className="cd-pending-risk-row">
-                                <span className="cd-pending-tag cd-pending-tag-risk"><b>Risk Source</b> {eff.risk_source || 'None'}</span>
-                                <span className="cd-pending-tag cd-pending-tag-failure"><b>Failure Mode</b> {eff.failure_mode || 'None'}</span>
-                                <span className="cd-pending-tag cd-pending-tag-harm"><b>Real World Harm</b> {eff.real_world_harm || 'None'}</span>
+                                <span className="cd-pending-tag cd-pending-tag-risk"><b>{townText.tasks.riskSource}</b> {eff.risk_source || townText.tasks.none}</span>
+                                <span className="cd-pending-tag cd-pending-tag-failure"><b>{townText.tasks.failureMode}</b> {eff.failure_mode || townText.tasks.none}</span>
+                                <span className="cd-pending-tag cd-pending-tag-harm"><b>{townText.tasks.realWorldHarm}</b> {eff.real_world_harm || townText.tasks.none}</span>
                               </div>
                             );
                           })()}
@@ -1213,13 +1213,13 @@ export default function CrewTab({
                               className="cd-pending-btn cd-pending-btn-approve"
                               disabled={guardResolvingId === item.id}
                               onClick={() => onResolveGuardPending?.(item.id, 'approved')}
-                            >{guardResolvingId === item.id ? '…' : '✓ Approve'}</button>
+                            >{guardResolvingId === item.id ? '…' : `✓ ${townText.tasks.approve}`}</button>
                             <button
                               type="button"
                               className="cd-pending-btn cd-pending-btn-reject"
                               disabled={guardResolvingId === item.id}
                               onClick={() => onResolveGuardPending?.(item.id, 'rejected')}
-                            >✗ Reject</button>
+                            >✗ {townText.tasks.reject}</button>
                           </span>
                         </div>
                       </div>
@@ -1378,16 +1378,16 @@ export default function CrewTab({
 
             {detailTask?.error_message || selectedLedgerTask.task.error_message ? (
               <div className="tc-task-detail-alert">
-                <div className="tc-task-detail-context-title">ERROR</div>
+                <div className="tc-task-detail-context-title">{townText.tasks.errorTitle}</div>
                 <div className="tc-task-detail-alert-copy">{detailTask?.error_message || selectedLedgerTask.task.error_message}</div>
               </div>
             ) : null}
 
             <div className="tc-task-detail-stream">
               {detailLoading ? (
-                <div className="tc-empty">Loading task detail…</div>
+                <div className="tc-empty">{townText.tasks.loadingDetail}</div>
               ) : detailMessages.length === 0 ? (
-                <div className="tc-empty">{detailError || 'No task detail messages found.'}</div>
+                <div className="tc-empty">{detailError || townText.tasks.noTaskDetail}</div>
               ) : (
                 detailMessages.map((msg) => (
                   <StageTaskDetailMessage key={msg.message_id} msg={msg} helpers={helpers} />
