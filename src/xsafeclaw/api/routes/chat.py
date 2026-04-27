@@ -1852,7 +1852,11 @@ async def _persist_hermes_chat_turn(
     source_session_id: str | None = None,
 ) -> None:
     """Write user + assistant messages to DB and trigger event sync (Hermes only)."""
-    sid = session_id or session_key
+    # Use one stable internal session id for Hermes (the encoded public key).
+    # ``session_id`` from ``X-Hermes-Session-Id`` is treated as runtime/source
+    # metadata only; using it as DB primary session id fragments one chat into
+    # multiple rows and makes Monitor aggregation inconsistent.
+    sid = session_key
     now = datetime.now(timezone.utc)
     _, _, local_session_key = decode_chat_session_key(session_key)
     source_sid = source_session_id or session_id or local_session_key
