@@ -1369,11 +1369,13 @@ export default function TownConsole({
   const modelValidationMapRef = useRef({});
   const pendingModelIdRef = useRef('');
   const recentlyConfiguredModelIdRef = useRef('');
+  const selectedRuntimeIdRef = useRef('');
   const didAutoSelectModelRef = useRef(false);
 
   modelValidationMapRef.current = modelValidationMap;
   pendingModelIdRef.current = pendingModelId;
   recentlyConfiguredModelIdRef.current = recentlyConfiguredModelId;
+  selectedRuntimeIdRef.current = selectedRuntimeId || '';
 
   const MAX_IMAGES = 8;
   const MAX_SINGLE_SIZE = 5 * 1024 * 1024;
@@ -1481,6 +1483,8 @@ export default function TownConsole({
   }, [runtimeInstances]);
 
   const loadAvailableModels = useCallback(async () => {
+    const requestRuntimeId = selectedRuntimeId || '';
+
     if (USE_AGENT_TOWN_MOCK) {
       setAvailableModels(MOCK_MODEL_PROVIDERS.flatMap((provider) =>
         (provider.models || []).map((model) => ({
@@ -1503,6 +1507,9 @@ export default function TownConsole({
         throw new Error(`Available models request failed: ${response.status}`);
       }
       const json = await response.json();
+      if (selectedRuntimeIdRef.current !== requestRuntimeId) {
+        return;
+      }
       const nextModels = Array.isArray(json.models) ? json.models : [];
       setAvailableModels((prev) => {
         if (nextModels.length === 0 && prev.length > 0) return prev;
@@ -2354,6 +2361,7 @@ export default function TownConsole({
     setAvailableModels([]);
     setDefaultModel('');
     setPendingModelId('');
+    setRecentlyConfiguredModelId('');
     setCreateError('');
     setModelValidationMap({});
     didAutoSelectModelRef.current = false;
