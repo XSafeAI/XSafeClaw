@@ -5352,11 +5352,44 @@ async def _run_hermes_json(args: list[str], timeout: int = 30) -> dict | list | 
         return None
 
 
+async def _openclaw_gateway_reachable(*, timeout_s: float = 1.5) -> bool:
+    """Return True if ``127.0.0.1:18789`` is TCP-accepting connections.
+
+    Used to short-circuit ``_run_openclaw_json`` calls under OpenClaw 4.25 —
+    every ``openclaw <subcommand> --json`` now routes through the gateway
+    WebSocket, so when the gateway is down the CLI blocks for its whole
+    timeout window (we've seen 500s). A quick TCP probe turns that into a
+    sub-second "skip" and keeps the chat page responsive on a cold boot.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", 18789),
+            timeout=timeout_s,
+        )
+    except (OSError, asyncio.TimeoutError):
+        return False
+    try:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return True
+
+
 async def _run_openclaw_json(args: list[str], timeout: int = 30) -> dict | list | None:
     """Run an openclaw CLI command with --json and return parsed output."""
     openclaw_path = _find_openclaw()
     if not openclaw_path:
         print(f"[openclaw-json] openclaw executable not found for args={args!r}")
+        return None
+    if not await _openclaw_gateway_reachable():
+        print(
+            f"[openclaw-json] skipped cmd={args!r}: gateway :18789 not "
+            "accepting TCP connections (autostart may still be coming up)"
+        )
         return None
     env = _build_env()
     cmd = _build_openclaw_command(openclaw_path, [*args, "--json"])
@@ -5412,6 +5445,13 @@ _ONBOARD_SCAN_DISK_CACHE = _OPENCLAW_DIR / "xsafeclaw-model-catalog-cache.json"
 
 def _save_scan_to_disk(data: dict, version: str = "") -> None:
     try:
+        # Never persist an empty catalog (e.g. all `openclaw ... list --json`
+        # timed out). An empty disk cache poisons the next cold-start path,
+        # because subsequent boots either read it back and think the scan is
+        # done, or at least waste the 120s retry budget again. Returning here
+        # leaves the previous good cache (if any) intact on disk.
+        if not isinstance(data, dict) or not data.get("model_providers"):
+            return
         payload = {**data, "_cache_version": version}
         tmp = _ONBOARD_SCAN_DISK_CACHE.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -5436,11 +5476,17 @@ def _load_scan_from_disk() -> tuple[dict, str]:
 
 async def _build_onboard_scan_data() -> dict:
     """Execute all openclaw CLI scans and assemble the full onboard-scan response."""
-    models_task = _run_openclaw_json(["models", "list", "--all"], timeout=500)
-    status_task = _run_openclaw_json(["models", "status"], timeout=500)
-    channels_task = _run_openclaw_json(["channels", "list"], timeout=500)
-    skills_task = _run_openclaw_json(["skills", "list"], timeout=500)
-    hooks_task = _run_openclaw_json(["hooks", "list"], timeout=500)
+    # OpenClaw 4.25: these CLI subcommands go through the gateway WebSocket
+    # and hang for their whole timeout window when the gateway is unhealthy.
+    # Keep the budget tight enough that a slow boot doesn't block the UI for
+    # 8 minutes; the TCP short-circuit inside _run_openclaw_json returns
+    # ``None`` immediately if :18789 isn't bound, so 120s is only really
+    # consumed when the gateway is up but slow.
+    models_task = _run_openclaw_json(["models", "list", "--all"], timeout=120)
+    status_task = _run_openclaw_json(["models", "status"], timeout=120)
+    channels_task = _run_openclaw_json(["channels", "list"], timeout=120)
+    skills_task = _run_openclaw_json(["skills", "list"], timeout=120)
+    hooks_task = _run_openclaw_json(["hooks", "list"], timeout=120)
 
     models_raw, status_raw, channels_raw, skills_raw, hooks_raw = await asyncio.gather(
         models_task, status_task, channels_task, skills_task, hooks_task,
@@ -6389,7 +6435,23 @@ async def _preload_onboard_scan() -> None:
         new_count = _count_scan_models(data)
         old_count = _count_scan_models(_onboard_scan_cache)
 
-        if new_count >= old_count or new_count >= 200:
+        # Never persist an empty catalog — if every `openclaw <x> list --json`
+        # timed out (e.g. OpenClaw 4.25 gateway is warming up or a plugin is
+        # stuck in a metadata-upgrade loop), the chat page falls back to the
+        # configured-models path anyway. Writing `0 models` to disk would just
+        # poison the next boot's cold-start path.
+        if new_count == 0:
+            if old_count > 0:
+                print(
+                    f"⚠️  Model list: scan returned 0 models (previous cache has "
+                    f"{old_count}); keeping existing cache"
+                )
+            else:
+                print(
+                    "⚠️  Model list: scan returned 0 models (gateway may still be "
+                    "warming up); not saving empty catalog to disk — will retry later"
+                )
+        elif new_count >= old_count or new_count >= 200:
             _onboard_scan_cache = data
             _onboard_scan_version = version
             _save_scan_to_disk(data, version)

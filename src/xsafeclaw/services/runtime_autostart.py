@@ -99,6 +99,37 @@ async def _probe_http_health(
         return False
 
 
+async def _probe_tcp_listener(
+    host: str,
+    port: int,
+    *,
+    timeout_s: float = 1.5,
+) -> bool:
+    """Return True if a TCP connection to host:port can be established.
+
+    Used as a lightweight "is something bound on this port?" check — much more
+    reliable under OpenClaw 4.25 than ``_probe_http_health`` because 4.25's
+    gateway only responds to full WebSocket handshakes, and an HTTP GET may
+    return a non-accept_status response (or hang) even when the listener is up.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout_s,
+        )
+    except (OSError, asyncio.TimeoutError):
+        return False
+    try:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return True
+
+
 async def _wait_http_health(
     url: str,
     *,
@@ -172,46 +203,165 @@ def _openclaw_installed() -> tuple[bool, str | None]:
     return True, cli
 
 
-async def autostart_openclaw(*, timeout_s: float = 10.0) -> StartResult:
+_OPENCLAW_PENDING_JSON = Path.home() / ".openclaw" / "devices" / "pending.json"
+
+
+async def _auto_approve_openclaw_plugin_repairs() -> None:
+    """Approve OpenClaw plugin-owned ``metadata-upgrade`` pending requests.
+
+    Under OpenClaw 2026.4.25, a plugin whose device identity was paired on an
+    earlier OpenClaw version (or on a different platform — e.g. qqbot's
+    ``native-approvals`` sub-device originally pinned as ``linux``, now
+    reporting ``win32``) is rejected with ``PAIRING_REQUIRED / metadata-upgrade``
+    every time the plugin reloads. The gateway responds by reloading the
+    plugin again, which starves the main WebSocket handler and makes every
+    ``openclaw <subcommand> --json`` call hang for its whole timeout window.
+
+    The pending queue in ``~/.openclaw/devices/pending.json`` marks these as
+    ``clientMode=backend`` + ``isRepair=true``. They are *local* plugin
+    self-repair requests (not external pairings), so auto-approving them here
+    is both safe and required to keep the gateway healthy enough for
+    XSafeClaw's own chat path.
+
+    This runs best-effort in background after ``autostart_openclaw`` reports
+    the gateway is reachable; any exception is swallowed because a stale
+    plugin pending should never prevent XSafeClaw from serving its UI.
+    """
+    try:
+        import json as _json
+
+        if not _OPENCLAW_PENDING_JSON.exists():
+            return
+        try:
+            raw = _OPENCLAW_PENDING_JSON.read_text(encoding="utf-8")
+            parsed = _json.loads(raw)
+        except Exception:
+            return
+
+        repair_ids: list[str] = []
+        if isinstance(parsed, dict):
+            iterable = parsed.items()
+        elif isinstance(parsed, list):
+            iterable = [(None, entry) for entry in parsed if isinstance(entry, dict)]
+        else:
+            return
+        for key, value in iterable:
+            if not isinstance(value, dict):
+                continue
+            if value.get("clientMode") != "backend":
+                continue
+            if not value.get("isRepair"):
+                continue
+            req_id = value.get("requestId") or value.get("request_id") or key
+            if isinstance(req_id, str) and req_id:
+                repair_ids.append(req_id)
+
+        if not repair_ids:
+            return
+
+        from ..gateway_client import _find_openclaw_binary  # local import, avoids cycles
+
+        openclaw_bin = _find_openclaw_binary()
+        if not openclaw_bin:
+            return
+
+        for req_id in repair_ids:
+            for cmd in (
+                [openclaw_bin, "approve", req_id],
+                [openclaw_bin, "devices", "approve", req_id],
+                [openclaw_bin, "pairing", "approve", req_id],
+            ):
+                rc, _out = await _run_cmd(cmd, timeout_s=45.0)
+                if rc == 0:
+                    logger.info(
+                        "[autostart] approved openclaw plugin repair request %s", req_id
+                    )
+                    break
+    except Exception as exc:
+        logger.debug("[autostart] plugin-repair approval skipped: %s", exc)
+
+
+async def autostart_openclaw(*, timeout_s: float = 90.0) -> StartResult:
     """Best-effort start of the local OpenClaw gateway service.
 
-    Strategy:
+    Strategy (adapted for OpenClaw 2026.4.25):
       1. Skip if CLI is missing or ``~/.openclaw/openclaw.json`` is absent
          (the daemon would refuse to start without ``gateway.mode=local``).
-      2. ``openclaw gateway start --json`` — the upstream service-control
-         command (works on systemd / launchd / schtasks).
-      3. Re-probe ``ws://127.0.0.1:18789`` via a quick HTTP GET. The
-         WebSocket port responds with ``426 Upgrade Required`` on plain
-         HTTP, which is enough to confirm a listener is bound — we don't
-         need a real WS handshake here, the runtime registry will do that
-         when a chat actually starts.
+      2. First check **TCP-level** readiness on ``127.0.0.1:18789``. 4.25's
+         gateway may take ~80s to finish plugin loading but the port binds
+         early, so a raw TCP accept is the most reliable "is anything
+         listening?" signal. An HTTP GET is no longer authoritative — 4.25
+         sometimes serves a dashboard at ``/`` and sometimes rejects plain
+         HTTP until plugins finish booting.
+      3. If nothing is bound, invoke ``openclaw gateway start --json``. In
+         4.25 this command itself can legitimately take 60‑90s because the
+         upstream service wrapper waits for a WebSocket health probe before
+         returning. We give it ``timeout_s`` (default 90s) instead of 10s.
+      4. If ``start`` ultimately times out but the TCP listener is already
+         bound, we treat this as ``already_running`` — the CLI's own WS
+         probe may have been rejected (pairing/metadata upgrade issues) while
+         the actual gateway is fine for XSafeClaw's signed connects.
+      5. Whenever the gateway is reachable, approve any ``isRepair=true``
+         plugin pending request (see :func:`_auto_approve_openclaw_plugin_repairs`)
+         so the qqbot / memory-core / safeclaw-guard metadata-upgrade loops
+         don't starve the main gateway handler.
     """
     installed, cli = _openclaw_installed()
     if not installed:
         return "skipped", "openclaw CLI or ~/.openclaw/openclaw.json missing"
 
-    probe_url = "http://127.0.0.1:18789/"
-    if await _probe_http_health(probe_url, accept_status=(200, 400, 401, 426)):
-        return "already_running", "openclaw gateway already listening on :18789"
+    host, port = "127.0.0.1", 18789
+    probe_url = f"http://{host}:{port}/"
+
+    async def _final(status: str, detail: str) -> StartResult:
+        if status in ("already_running", "started"):
+            try:
+                await asyncio.wait_for(
+                    _auto_approve_openclaw_plugin_repairs(), timeout=90.0
+                )
+            except Exception as exc:
+                logger.debug("[autostart] plugin-repair approval failed: %s", exc)
+        return status, detail
+
+    if await _probe_tcp_listener(host, port):
+        return await _final(
+            "already_running", f"openclaw gateway already listening on :{port}"
+        )
 
     rc, out = await _run_cmd(
         [cli, "gateway", "start", "--json"], timeout_s=timeout_s
     )
     snippet = out.strip().splitlines()[-1][:240] if out.strip() else ""
-    if rc != 0:
+
+    if rc == 0:
+        if await _wait_http_health(
+            probe_url,
+            timeout_s=min(timeout_s, 15.0),
+            accept_status=(200, 400, 401, 403, 404, 426, 503),
+        ) or await _probe_tcp_listener(host, port):
+            return await _final(
+                "started", f"openclaw gateway is now listening on :{port}"
+            )
         return (
             "failed",
-            f"`openclaw gateway start` exited rc={rc}: {snippet or 'no output'}",
+            "openclaw gateway start returned 0 but no listener bound on "
+            f":{port} after wait — check `openclaw gateway status` for details.",
         )
 
-    if await _wait_http_health(
-        probe_url, timeout_s=timeout_s, accept_status=(200, 400, 401, 426)
-    ):
-        return "started", "openclaw gateway is now listening on :18789"
+    # rc != 0: the CLI itself timed out or errored. Under 4.25 this is common
+    # when the internal WS health probe is rejected (metadata-upgrade, scope
+    # upgrades, or a stuck plugin), even though the real listener is up and
+    # reachable for XSafeClaw's own device-signed connects.
+    if await _probe_tcp_listener(host, port):
+        return await _final(
+            "already_running",
+            f"openclaw gateway start exited rc={rc} (CLI health probe failed: "
+            f"{snippet or 'no output'}), but a TCP listener is bound on :{port}",
+        )
+
     return (
         "failed",
-        "openclaw gateway start returned 0 but no listener bound on :18789 "
-        "after wait — check `openclaw gateway status` for details.",
+        f"`openclaw gateway start` exited rc={rc}: {snippet or 'no output'}",
     )
 
 
@@ -438,7 +588,7 @@ async def _spawn_nanobot_gateway(
             pass
 
 
-async def autostart_nanobot(*, timeout_s: float = 12.0) -> StartResult:
+async def autostart_nanobot(*, timeout_s: float = 45.0) -> StartResult:
     """Best-effort start of the local Nanobot gateway.
 
     Nanobot has no service-mode (no ``nanobot gateway install`` equivalent
