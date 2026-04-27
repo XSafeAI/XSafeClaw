@@ -1730,15 +1730,24 @@ async def _persist_hermes_session(
     *,
     model_provider: str | None = None,
     model_name: str | None = None,
+    instance_id: str = "hermes-default",
+    source_session_id: str | None = None,
 ) -> str:
     """Ensure a Session row exists for this Hermes chat. Returns session_id."""
     sid = session_id or session_key
+    _, _, local_session_key = decode_chat_session_key(session_key)
+    source_sid = source_session_id or session_id or local_session_key
     async with get_db_context() as db:
         result = await db.execute(
             select(Session).where(Session.session_id == sid)
         )
         session = result.scalar_one_or_none()
         if session:
+            # Hermes direct-persist path must not fall back to ORM defaults
+            # (openclaw/openclaw-default), otherwise Monitor "source" is wrong.
+            session.platform = "hermes"
+            session.instance_id = instance_id
+            session.source_session_id = source_sid or session.source_session_id
             session.last_activity_at = datetime.now(timezone.utc)
             if model_provider and not session.current_model_provider:
                 session.current_model_provider = model_provider
@@ -1751,6 +1760,9 @@ async def _persist_hermes_session(
 
         session = Session(
             session_id=sid,
+            platform="hermes",
+            instance_id=instance_id,
+            source_session_id=source_sid,
             session_key=session_key,
             channel="webchat",
             first_seen_at=datetime.now(timezone.utc),
@@ -1771,12 +1783,33 @@ async def _persist_hermes_chat_turn(
     *,
     stop_reason: str | None = None,
     usage: dict | None = None,
+    instance_id: str = "hermes-default",
+    source_session_id: str | None = None,
 ) -> None:
     """Write user + assistant messages to DB and trigger event sync (Hermes only)."""
     sid = session_id or session_key
     now = datetime.now(timezone.utc)
+    _, _, local_session_key = decode_chat_session_key(session_key)
+    source_sid = source_session_id or session_id or local_session_key
 
     model_info = _hermes_session_model_info.get(session_key, {})
+
+    def _usage_int(*keys: str) -> int | None:
+        for key in keys:
+            value = (usage or {}).get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    input_tokens = _usage_int("prompt_tokens", "input_tokens")
+    output_tokens = _usage_int("completion_tokens", "output_tokens")
+    total_tokens = _usage_int("total_tokens")
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
 
     async with get_db_context() as db:
         result = await db.execute(
@@ -1786,6 +1819,9 @@ async def _persist_hermes_chat_turn(
         if not session:
             session = Session(
                 session_id=sid,
+                platform="hermes",
+                instance_id=instance_id,
+                source_session_id=source_sid,
                 session_key=session_key,
                 channel="webchat",
                 first_seen_at=now,
@@ -1795,6 +1831,10 @@ async def _persist_hermes_chat_turn(
             )
             db.add(session)
             await db.flush()
+        else:
+            session.platform = "hermes"
+            session.instance_id = instance_id
+            session.source_session_id = source_sid or session.source_session_id
 
         count_result = await db.execute(
             select(func.count()).select_from(Message).where(Message.session_id == sid)
@@ -1811,6 +1851,9 @@ async def _persist_hermes_chat_turn(
         user_msg = Message(
             session_id=sid,
             message_id=user_msg_id,
+            platform="hermes",
+            instance_id=instance_id,
+            source_session_id=source_sid,
             role="user",
             timestamp=now,
             content_text=user_text,
@@ -1821,15 +1864,18 @@ async def _persist_hermes_chat_turn(
         asst_msg = Message(
             session_id=sid,
             message_id=asst_msg_id,
+            platform="hermes",
+            instance_id=instance_id,
+            source_session_id=source_sid,
             role="assistant",
             timestamp=now,
             content_text=assistant_text,
             provider=model_info.get("provider"),
             model_id=model_info.get("model"),
             stop_reason=stop_reason or "stop",
-            input_tokens=(usage or {}).get("prompt_tokens"),
-            output_tokens=(usage or {}).get("completion_tokens"),
-            total_tokens=(usage or {}).get("total_tokens"),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
         )
         db.add(asst_msg)
 
@@ -1931,6 +1977,8 @@ async def start_session(request: StartSessionRequest | None = None):
                 None,
                 model_provider=model_provider or "hermes",
                 model_name=model_name or "hermes-agent",
+                instance_id=instance.instance_id,
+                source_session_id=local_session_key,
             )
         except Exception as exc:
             print(f"[hermes-persist] session create warning: {exc}")
@@ -2028,6 +2076,8 @@ async def send_message(request: SendMessageRequest):
                     result.get("response_text", ""),
                     stop_reason=result.get("stop_reason"),
                     usage=result.get("usage"),
+                    instance_id=instance.instance_id,
+                    source_session_id=local_session_key,
                 )
             except Exception as exc:
                 print(f"[hermes-persist] send_message warning: {exc}")
@@ -2099,6 +2149,7 @@ async def send_message_stream(request: SendMessageRequest):
 
     async def event_generator():
         final_text = ""
+        final_usage: dict | None = None
         client: GatewayClient | HermesClient | NanobotGatewayClient | None = None
         stream_local_session_key = local_session_key
         stream_public_session_key = public_session_key
@@ -2160,6 +2211,8 @@ async def send_message_stream(request: SendMessageRequest):
                                 async for chunk in client.stream_chat(**stream_kwargs):
                                     if isinstance(chunk, dict) and chunk.get("text"):
                                         final_text = str(chunk["text"])
+                                    if isinstance(chunk, dict) and chunk.get("usage") is not None:
+                                        final_usage = chunk.get("usage")
                                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                                 break
                         async with _hermes_yaml_lock.write():
@@ -2182,6 +2235,9 @@ async def send_message_stream(request: SendMessageRequest):
                     hermes_sid,
                     request.message,
                     final_text,
+                    usage=final_usage,
+                    instance_id=instance.instance_id,
+                    source_session_id=stream_local_session_key,
                 )
             except Exception as exc:
                 print(f"[hermes-persist] stream warning: {exc}")

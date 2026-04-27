@@ -504,13 +504,25 @@
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  /* Keep the whole create panel scrollable on short viewports so
+     runtime cards cannot squeeze the model area out of sight. */
+  max-height: min(62vh, 540px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(240, 187, 96, 0.45) transparent;
+}
+.tc-model-drawer::-webkit-scrollbar { width: 6px; }
+.tc-model-drawer::-webkit-scrollbar-thumb {
+  background: rgba(240, 187, 96, 0.45);
+  border-radius: 999px;
 }
 
 .tc-runtime-picker {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 7px;
+  gap: 5px;
+  padding: 6px;
   border: 1px solid rgba(239, 193, 106, 0.18);
   border-radius: 9px;
   background: rgba(11, 9, 22, 0.32);
@@ -540,13 +552,10 @@
 .tc-runtime-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-  /* §47b — cap height so installing all 3 frameworks (Openclaw +
-     Hermes + Nanobot) doesn't push the model list off-screen.
-     ~118px fits 2 rows of compacted cards comfortably; 3+ rows
-     trigger an internal scrollbar without inflating the surrounding
-     create-agent panel. */
-  max-height: 118px;
+  gap: 4px;
+  /* Compact the runtime chooser so the model picker remains visible
+     even when all three frameworks are installed. */
+  max-height: 92px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
@@ -563,11 +572,9 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
-  /* §47b — tighter padding to win back vertical space in the
-     create-agent column. */
-  padding: 5px 7px;
+  padding: 4px 6px;
   border: 1px solid rgba(255, 224, 177, 0.12);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
@@ -600,7 +607,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--px-font);
-  font-size: 8px;
+  font-size: 7px;
 }
 
 .tc-runtime-option-meta {
@@ -609,7 +616,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #bfa985;
-  font-size: 9px;
+  font-size: 8px;
 }
 
 .tc-model-search,
@@ -629,7 +636,7 @@
 }
 
 .tc-model-list {
-  max-height: 240px;
+  max-height: min(34vh, 240px);
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;

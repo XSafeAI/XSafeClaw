@@ -43,16 +43,42 @@ class SessionListResponse(BaseModel):
     page_size: int
 
 
+def _infer_runtime_identity(session: Session) -> tuple[str, str]:
+    """Best-effort runtime inference for legacy mis-tagged rows."""
+    platform = session.platform or "openclaw"
+    instance_id = session.instance_id or "openclaw-default"
+
+    if not (platform == "openclaw" and instance_id == "openclaw-default"):
+        return platform, instance_id
+
+    candidates = [
+        session.session_id or "",
+        session.session_key or "",
+        session.source_session_id or "",
+    ]
+    for raw in candidates:
+        parts = str(raw).split("::")
+        if len(parts) < 2:
+            continue
+        maybe_platform = parts[0].strip().lower()
+        if maybe_platform in {"openclaw", "hermes", "nanobot"}:
+            maybe_instance = parts[1].strip() or instance_id
+            return maybe_platform, maybe_instance
+
+    return platform, instance_id
+
+
 def _to_session_response(
     session: Session,
     *,
     total_runs: int,
     total_tokens: int,
 ) -> SessionResponse:
+    platform, instance_id = _infer_runtime_identity(session)
     return SessionResponse(
         session_id=session.session_id,
-        platform=session.platform,
-        instance_id=session.instance_id,
+        platform=platform,
+        instance_id=instance_id,
         source_session_id=session.source_session_id,
         display_session_id=session.source_session_id or session.session_id,
         session_key=session.session_key,
