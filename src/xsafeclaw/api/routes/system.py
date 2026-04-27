@@ -3176,7 +3176,18 @@ async def install_openclaw():
                 yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
             await proc.wait()
             if proc.returncode == 0:
-                yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
+                autostart_status = "disabled"
+                autostart_detail = "auto_start_runtimes=false"
+                if settings.auto_start_runtimes:
+                    try:
+                        from ...services.runtime_autostart import autostart_openclaw
+                        autostart_status, autostart_detail = await autostart_openclaw()
+                        yield f"data: {json.dumps({'type': 'output', 'text': f'OpenClaw autostart {autostart_status}: {autostart_detail}'})}\n\n"
+                    except Exception as exc:
+                        autostart_status = "failed"
+                        autostart_detail = f"{type(exc).__name__}: {exc}"
+                        yield f"data: {json.dumps({'type': 'output', 'text': f'OpenClaw autostart failed: {autostart_detail}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'success': True, 'autostart': {'status': autostart_status, 'detail': autostart_detail}})}\n\n"
                 trigger_onboard_scan_preload()
             else:
                 yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
@@ -3452,7 +3463,7 @@ async def init_default_nanobot():
     autostart: dict[str, str] = {"status": "disabled", "detail": "auto_start_runtimes=false"}
     if settings.auto_start_runtimes:
         try:
-            from ..services.runtime_autostart import autostart_nanobot
+            from ...services.runtime_autostart import autostart_nanobot
             status, detail = await autostart_nanobot()
             autostart = {"status": status, "detail": detail}
         except Exception as exc:
@@ -8467,12 +8478,24 @@ async def onboard_config(body: OnboardConfigRequest):
     # Refresh onboard-scan cache in background (don't block the response)
     trigger_onboard_scan_preload(force=True)
 
+    autostart: dict[str, str] = {"status": "disabled", "detail": "auto_start_runtimes=false"}
+    if body.mode != "local":
+        autostart = {"status": "skipped", "detail": "remote mode has no local OpenClaw gateway to start"}
+    elif settings.auto_start_runtimes:
+        try:
+            from ...services.runtime_autostart import autostart_openclaw
+            status, detail = await autostart_openclaw()
+            autostart = {"status": status, "detail": detail}
+        except Exception as exc:
+            autostart = {"status": "failed", "detail": f"{type(exc).__name__}: {exc}"}
+
     workspace = str(Path(body.workspace).expanduser())
     return {
         "success": True,
         "config_path": str(_CONFIG_PATH),
         "workspace": workspace,
         "output": output,
+        "autostart": autostart,
     }
 
 

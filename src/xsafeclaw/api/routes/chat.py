@@ -1456,6 +1456,7 @@ async def _connect_gateway_with_retries(
     """
     last_error: Exception | None = None
     is_hermes = instance.platform == "hermes"
+    openclaw_autostart_attempted = False
 
     for attempt in range(1, _GATEWAY_CONNECT_RETRY_ATTEMPTS + 1):
         if is_hermes:
@@ -1473,6 +1474,24 @@ async def _connect_gateway_with_retries(
                 await client.disconnect()
             except Exception:
                 pass
+
+            # New cloud hosts often have OpenClaw installed/configured but the
+            # gateway daemon has not yet been started. Try one best-effort
+            # autostart before exhausting retries so "Create Agent" can self-heal.
+            if (
+                not is_hermes
+                and settings.auto_start_runtimes
+                and not openclaw_autostart_attempted
+            ):
+                openclaw_autostart_attempted = True
+                try:
+                    from ...services.runtime_autostart import autostart_openclaw
+                    status, detail = await autostart_openclaw(timeout_s=10.0)
+                    if status in {"started", "already_running"}:
+                        continue
+                    print(f"[openclaw-autostart] status={status} detail={detail}")
+                except Exception as autostart_exc:
+                    print(f"[openclaw-autostart] failed: {autostart_exc}")
 
             if attempt < _GATEWAY_CONNECT_RETRY_ATTEMPTS:
                 await asyncio.sleep(_GATEWAY_CONNECT_RETRY_DELAY_S)
