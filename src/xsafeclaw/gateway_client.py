@@ -289,6 +289,31 @@ async def auto_approve_pending_devices() -> list[str]:
     local_identity = _load_device_identity()
     local_device_id = local_identity.get("deviceId", "") if local_identity else ""
 
+    def _approve_with_variants(*args: str) -> tuple[bool, str]:
+        """Try modern + legacy approve command shapes."""
+        variants = [
+            [openclaw_bin, "approve", *args],            # OpenClaw newer shape
+            [openclaw_bin, "devices", "approve", *args], # OpenClaw legacy shape
+        ]
+        last_err = ""
+        for cmd in variants:
+            try:
+                sub = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception as exc:
+                last_err = str(exc)
+                continue
+            out = (sub.stdout or "").strip()
+            err = (sub.stderr or "").strip()
+            if sub.returncode == 0:
+                return True, out or err
+            last_err = err or out or f"exit={sub.returncode}"
+        return False, last_err
+
     openclaw_bin = shutil.which("openclaw")
     if not openclaw_bin:
         search_bases: list[Path] = []
@@ -316,7 +341,13 @@ async def auto_approve_pending_devices() -> list[str]:
                 search_bases.append(prefix)
         else:
             # Unix/macOS: Homebrew, system bin, local bin
-            for p in [Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path.home() / ".local" / "bin"]:
+            for p in [
+                Path("/opt/homebrew/bin"),
+                Path("/usr/local/bin"),
+                Path.home() / ".local" / "bin",
+                Path.home() / ".xsafeclaw" / "node" / "bin",
+                Path.home() / ".xsafeclaw" / "node",
+            ]:
                 if p.exists():
                     search_bases.append(p)
 
@@ -358,18 +389,23 @@ async def auto_approve_pending_devices() -> list[str]:
         print(f"🔍 openclaw devices list --json: exit={result.returncode}, stdout_len={len(raw)}")
         if not raw:
             print("⚠️  Empty output from 'openclaw devices list --json', trying approve --latest...")
-            sub = subprocess.run(
-                [openclaw_bin, "devices", "approve", "--latest"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if sub.returncode == 0:
+            ok, detail = _approve_with_variants("--latest")
+            if ok:
                 approved.append("latest")
                 print(f"✅ Auto-approved latest pending device (blind)")
+            else:
+                print(f"⚠️  approve --latest failed: {detail[:200]}")
             return approved
 
         devices = _extract_json_from_output(raw)
         if devices is None:
             print(f"⚠️  Could not parse JSON from 'openclaw devices list': {raw[:300]}")
+            ok, detail = _approve_with_variants("--latest")
+            if ok:
+                approved.append("latest")
+                print("✅ Auto-approved latest pending device after non-JSON list output")
+            else:
+                print(f"⚠️  approve --latest failed after non-JSON list output: {detail[:200]}")
             return approved
 
         if isinstance(devices, dict):
@@ -406,28 +442,22 @@ async def auto_approve_pending_devices() -> list[str]:
                 print(f"   ↳ Skipping (not ours)")
                 continue
 
-            sub = subprocess.run(
-                [openclaw_bin, "devices", "approve", str(req_id)],
-                capture_output=True, text=True, timeout=15,
-            )
-            if sub.returncode == 0:
+            ok, detail = _approve_with_variants(str(req_id))
+            if ok:
                 approved.append(str(req_id))
                 print(f"✅ Auto-approved XSafeClaw device: {req_id}")
             else:
-                print(f"⚠️  Failed to approve device {req_id}: {sub.stderr.strip()}")
+                print(f"⚠️  Failed to approve device {req_id}: {detail[:200]}")
 
         if not approved:
-            print(f"⚠️  No matching pending device via JSON, trying 'openclaw devices approve --latest'...")
-            sub = subprocess.run(
-                [openclaw_bin, "devices", "approve", "--latest"],
-                capture_output=True, text=True, timeout=15,
-            )
-            print(f"   approve --latest: exit={sub.returncode} stdout={sub.stdout.strip()[:200]}")
-            if sub.returncode == 0:
+            print("⚠️  No matching pending device via JSON, trying 'openclaw approve --latest' fallback...")
+            ok, detail = _approve_with_variants("--latest")
+            print(f"   approve --latest: {'ok' if ok else 'failed'} detail={detail[:200]}")
+            if ok:
                 approved.append("latest")
                 print(f"✅ Auto-approved latest pending device")
             else:
-                print(f"⚠️  approve --latest failed: {sub.stderr.strip()[:200]}")
+                print(f"⚠️  approve --latest failed: {detail[:200]}")
 
     except FileNotFoundError:
         print("⚠️  openclaw binary not found in PATH")
@@ -470,8 +500,24 @@ class GatewayClient:
                 marker in message
                 for marker in ("pairing", "metadata", "connect failed", "1008", "policy")
             )
+            scope_error = "missing scope" in message
             if not retryable_device_error and not self._token:
                 raise
+
+            # Some gateway builds report scope errors before surfacing a pairing
+            # prompt. Try one best-effort approval + reconnect using device auth.
+            if scope_error:
+                try:
+                    approved = await auto_approve_pending_devices()
+                    if approved:
+                        print("🔑 Approved pending device(s) after scope rejection; retrying device auth...")
+                        await self.disconnect()
+                        await asyncio.sleep(1.5)
+                        self._connected = asyncio.Event()
+                        await self._try_connect()
+                        return
+                except Exception:
+                    pass
 
             if "pairing" in message:
                 print("🔑 Device pairing required — auto-approving...")
@@ -485,6 +531,17 @@ class GatewayClient:
                         return
                     except Exception as retry_error:
                         first_error = retry_error
+
+        # Token-only auth rarely carries operator.read/operator.write scopes.
+        # If the gateway already rejected scopes, fail fast with a targeted hint
+        # instead of doing a second token-only attempt that will likely fail too.
+        if "missing scope" in str(first_error).lower():
+            raise Exception(
+                "Gateway denied required operator scopes "
+                "(missing scope: operator.read/operator.write). "
+                "Run `openclaw approve --latest`, ensure XSafeClaw and OpenClaw "
+                "use the same OS user, then retry."
+            ) from first_error
 
         print("⚠️  Device auth failed, falling back to token-only auth...")
         await self.disconnect()
