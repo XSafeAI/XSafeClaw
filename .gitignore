@@ -55,6 +55,7 @@ Thumbs.db
 # Testing
 .pytest_cache/
 .pytest-tmp/
+.pytest_tmp/
 pytest-cache-files-*/
 .coverage
 htmlcov/
@@ -75,6 +76,7 @@ debug/
 # Local dev helpers
 start.sh
 release_work/
+.release_main_pypi/
 
 # Optional downloaded map skins (fetched at runtime, not shipped in repo)
 src/xsafeclaw/static/Map-opensorce/Map[2-9].png
