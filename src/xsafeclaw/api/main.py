@@ -96,6 +96,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if noteworthy:
                     parts = [f"{k}={v['status']}" for k, v in noteworthy.items()]
                     print(f"🧩 Runtime autostart: {', '.join(parts)}")
+                    # Surface failure detail so the operator can see *why*
+                    # (e.g. "nanobot CLI missing on PATH") instead of just the
+                    # one-word status. Kept on separate lines because some
+                    # details include log-tail snippets with pipes / newlines.
+                    for name, info in noteworthy.items():
+                        if info.get("status") == "failed":
+                            detail = str(info.get("detail", "")).strip()
+                            if detail:
+                                print(f"   ↳ {name} failed: {detail[:400]}")
             except Exception as exc:
                 print(f"⚠️  Runtime autostart raised {type(exc).__name__}: {exc}")
 

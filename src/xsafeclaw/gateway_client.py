@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -276,24 +277,156 @@ def _extract_json_from_output(raw: str) -> Any:
     return None
 
 
-async def auto_approve_pending_devices() -> list[str]:
-    """Approve only the XSafeClaw device's pending pairing request.
+_OPENCLAW_PENDING_JSON = Path.home() / ".openclaw" / "devices" / "pending.json"
+# OpenClaw 4.25's CLI cold-start (config load + schema validate) can take ~20s
+# on Windows before any subcommand does real work, so give the subprocess some
+# headroom before we give up and mark the approval as failed.
+_APPROVE_SUBPROCESS_TIMEOUT_S = 45
 
-    Reads the local device identity to get our deviceId, then only
-    approves requests that match it — never touches other devices.
+
+def _find_openclaw_binary() -> str | None:
+    """Locate the ``openclaw`` CLI on the current machine.
+
+    Preference order:
+
+    1. ``shutil.which("openclaw")``
+    2. nvm-sh and nvm-windows Node installs
+    3. Python Scripts/ dir on Windows (uv/pipx installs symlink here)
+    4. Common POSIX system + XSafeClaw-managed dirs
     """
     import shutil
+
+    found = shutil.which("openclaw")
+    if found:
+        return found
+
+    search_bases: list[Path] = []
+
+    nvm_sh_base = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_sh_base.exists():
+        search_bases.append(nvm_sh_base)
+
+    nvm_home = os.environ.get("NVM_HOME") or os.environ.get("NVM_SYMLINK")
+    if nvm_home:
+        nvm_windows_base = Path(nvm_home).parent / "versions" / "node"
+        if nvm_windows_base.exists():
+            search_bases.append(nvm_windows_base)
+
+    if os.name == "nt":
+        for prefix in [Path(sys.prefix), Path(sys.executable).resolve().parent]:
+            scripts = prefix / "Scripts"
+            if scripts.exists():
+                search_bases.append(scripts)
+            search_bases.append(prefix)
+    else:
+        for p in [
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+            Path.home() / ".local" / "bin",
+            Path.home() / ".xsafeclaw" / "node" / "bin",
+            Path.home() / ".xsafeclaw" / "node",
+        ]:
+            if p.exists():
+                search_bases.append(p)
+
+    for search_base in search_bases:
+        if search_base.name == "node" and search_base.exists():
+            for vdir in sorted(search_base.iterdir(), reverse=True):
+                for suffix in ("", ".cmd", ".bat", ".exe"):
+                    if (vdir / "bin").exists():
+                        candidate = vdir / "bin" / f"openclaw{suffix}"
+                    else:
+                        candidate = vdir / f"openclaw{suffix}"
+                    if candidate.is_file():
+                        return str(candidate)
+        else:
+            if search_base.is_dir():
+                suffixes = ("", ".cmd", ".bat", ".exe") if os.name == "nt" else ("",)
+                for suffix in suffixes:
+                    candidate = search_base / f"openclaw{suffix}"
+                    if candidate.is_file():
+                        return str(candidate)
+    return None
+
+
+def _read_local_pending_requests() -> list[dict[str, Any]]:
+    """Read ``~/.openclaw/devices/pending.json`` directly.
+
+    Under OpenClaw 4.25 the ``openclaw devices list --json`` subcommand is
+    routed through the gateway WebSocket with a hard 10s internal timeout,
+    so if the gateway is the very thing we're trying to repair (stuck on a
+    metadata-upgrade pairing loop), invoking it just hangs. Reading the
+    plain-text JSON is both much faster and immune to that deadlock.
+    """
+    try:
+        if not _OPENCLAW_PENDING_JSON.exists():
+            return []
+        raw = _OPENCLAW_PENDING_JSON.read_text(encoding="utf-8")
+    except Exception as exc:
+        print(f"⚠️  Could not read {_OPENCLAW_PENDING_JSON}: {exc}")
+        return []
+
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        print(f"⚠️  Could not parse {_OPENCLAW_PENDING_JSON}: {exc}")
+        return []
+
+    # Observed shape in 4.25: a dict keyed by requestId. Legacy shape: list.
+    if isinstance(parsed, dict):
+        entries = []
+        for key, value in parsed.items():
+            if not isinstance(value, dict):
+                continue
+            if "requestId" not in value and isinstance(key, str):
+                value = {**value, "requestId": key}
+            entries.append(value)
+        return entries
+    if isinstance(parsed, list):
+        return [entry for entry in parsed if isinstance(entry, dict)]
+    return []
+
+
+async def auto_approve_pending_devices(
+    *,
+    preferred_request_id: str | None = None,
+) -> list[str]:
+    """Approve the XSafeClaw device's pending pairing request.
+
+    Strategy for OpenClaw 2026.4.25:
+
+    1. Locate the ``openclaw`` CLI (needed only for the actual approve step).
+    2. Read ``~/.openclaw/devices/pending.json`` directly — this replaces
+       the legacy ``openclaw devices list --json`` call, which in 4.25
+       requires an authenticated WebSocket to the gateway (and therefore
+       deadlocks exactly when we most need it).
+    3. Approve ``preferred_request_id`` first if supplied (this is how the
+       WebSocket handshake can tell us *precisely* which request was
+       blocking it, e.g. the PAIRING_REQUIRED/metadata-upgrade case).
+    4. Then approve any pending request whose ``deviceId`` matches our local
+       XSafeClaw identity or whose ``displayName`` mentions XSafeClaw.
+    5. If nothing matched, fall back to ``openclaw approve --latest`` so a
+       freshly generated (not yet file-logged) identity still has a path
+       to self-heal.
+    """
     import subprocess
+
     approved: list[str] = []
 
     local_identity = _load_device_identity()
     local_device_id = local_identity.get("deviceId", "") if local_identity else ""
+
+    openclaw_bin = _find_openclaw_binary()
+    if not openclaw_bin:
+        print("⚠️  openclaw binary not found; cannot auto-approve devices")
+        return approved
 
     def _approve_with_variants(*args: str) -> tuple[bool, str]:
         """Try modern + legacy approve command shapes."""
         variants = [
             [openclaw_bin, "approve", *args],            # OpenClaw newer shape
             [openclaw_bin, "devices", "approve", *args], # OpenClaw legacy shape
+            [openclaw_bin, "pairing", "approve", *args], # Future shape (see `openclaw --help`)
         ]
         last_err = ""
         for cmd in variants:
@@ -302,7 +435,7 @@ async def auto_approve_pending_devices() -> list[str]:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=15,
+                    timeout=_APPROVE_SUBPROCESS_TIMEOUT_S,
                 )
             except Exception as exc:
                 last_err = str(exc)
@@ -314,156 +447,91 @@ async def auto_approve_pending_devices() -> list[str]:
             last_err = err or out or f"exit={sub.returncode}"
         return False, last_err
 
-    openclaw_bin = shutil.which("openclaw")
-    if not openclaw_bin:
-        search_bases: list[Path] = []
-
-        # nvm-sh (Linux/macOS/WSL): ~/.nvm/versions/node
-        nvm_sh_base = Path.home() / ".nvm" / "versions" / "node"
-        if nvm_sh_base.exists():
-            search_bases.append(nvm_sh_base)
-
-        # nvm-windows: %NVM_HOME%\..\versions\node
-        nvm_home = os.environ.get("NVM_HOME") or os.environ.get("NVM_SYMLINK")
-        if nvm_home:
-            nvm_windows_base = Path(nvm_home).parent / "versions" / "node"
-            if nvm_windows_base.exists():
-                search_bases.append(nvm_windows_base)
-
-        # Platform-specific system paths
-        if os.name == "nt":
-            # Windows: check Python Scripts directories and common locations
-            import sys as _sys
-            for prefix in [Path(_sys.prefix), Path(_sys.executable).resolve().parent]:
-                scripts = prefix / "Scripts"
-                if scripts.exists():
-                    search_bases.append(scripts)
-                search_bases.append(prefix)
+    def _try_approve(req_id: str, label: str) -> None:
+        if not req_id or req_id in approved:
+            return
+        ok, detail = _approve_with_variants(req_id)
+        if ok:
+            approved.append(req_id)
+            print(f"✅ Auto-approved {label}: {req_id}")
         else:
-            # Unix/macOS: Homebrew, system bin, local bin
-            for p in [
-                Path("/opt/homebrew/bin"),
-                Path("/usr/local/bin"),
-                Path.home() / ".local" / "bin",
-                Path.home() / ".xsafeclaw" / "node" / "bin",
-                Path.home() / ".xsafeclaw" / "node",
-            ]:
-                if p.exists():
-                    search_bases.append(p)
+            print(f"⚠️  Failed to approve {label} {req_id}: {detail[:200]}")
 
-        for search_base in search_bases:
-            if search_base.name == "node" and search_base.exists():
-                # nvm-style directory: look for v22.*/bin/openclaw
-                for vdir in sorted(search_base.iterdir(), reverse=True):
-                    for suffix in ("", ".cmd", ".bat", ".exe"):
-                        if (vdir / "bin").exists():
-                            candidate = vdir / "bin" / f"openclaw{suffix}"
-                        else:
-                            candidate = vdir / f"openclaw{suffix}"
-                        if candidate.is_file():
-                            openclaw_bin = str(candidate)
-                            break
-                    if openclaw_bin:
-                        break
-            else:
-                # Direct binary directory: look for openclaw with common suffixes
-                if search_base.is_dir():
-                    suffixes = ("", ".cmd", ".bat", ".exe") if os.name == "nt" else ("",)
-                    for suffix in suffixes:
-                        candidate = search_base / f"openclaw{suffix}"
-                        if candidate.is_file():
-                            openclaw_bin = str(candidate)
-                            break
-            if openclaw_bin:
-                break
-    if not openclaw_bin:
-        print("⚠️  openclaw binary not found; cannot auto-approve devices")
-        return approved
+    # (1) Priority path: if the caller already knows which request was
+    # blocking them (parsed from the WS close reason), approve that first.
+    if preferred_request_id:
+        _try_approve(preferred_request_id, "preferred pairing")
 
-    try:
-        result = subprocess.run(
-            [openclaw_bin, "devices", "list", "--json"],
-            capture_output=True, text=True, timeout=15,
+    # (2) Walk the on-disk pending queue for XSafeClaw-owned entries.
+    pending = _read_local_pending_requests()
+    if pending:
+        print(f"🔍 Found {len(pending)} pending pairing request(s) in {_OPENCLAW_PENDING_JSON}")
+    for entry in pending:
+        req_id = (
+            entry.get("requestId")
+            or entry.get("request_id")
+            or entry.get("id")
+            or ""
         )
-        raw = result.stdout.strip()
-        print(f"🔍 openclaw devices list --json: exit={result.returncode}, stdout_len={len(raw)}")
-        if not raw:
-            print("⚠️  Empty output from 'openclaw devices list --json', trying approve --latest...")
-            ok, detail = _approve_with_variants("--latest")
-            if ok:
-                approved.append("latest")
-                print(f"✅ Auto-approved latest pending device (blind)")
-            else:
-                print(f"⚠️  approve --latest failed: {detail[:200]}")
-            return approved
+        dev_id = entry.get("deviceId") or entry.get("device_id", "") or ""
+        display_name = (
+            entry.get("displayName")
+            or entry.get("display_name")
+            or entry.get("name", "")
+            or ""
+        )
+        req_id = str(req_id).strip()
+        dev_id_preview = (dev_id or "")[:16]
+        print(f"   Pending: reqId={req_id} id={dev_id_preview}… name={display_name}")
+        if not req_id or req_id in approved:
+            continue
+        is_ours = (
+            (local_device_id and dev_id == local_device_id)
+            or "safeclaw" in display_name.lower()
+        )
+        if not is_ours:
+            print("   ↳ Skipping (not ours)")
+            continue
+        _try_approve(req_id, "XSafeClaw pairing")
 
-        devices = _extract_json_from_output(raw)
-        if devices is None:
-            print(f"⚠️  Could not parse JSON from 'openclaw devices list': {raw[:300]}")
-            ok, detail = _approve_with_variants("--latest")
-            if ok:
-                approved.append("latest")
-                print("✅ Auto-approved latest pending device after non-JSON list output")
-            else:
-                print(f"⚠️  approve --latest failed after non-JSON list output: {detail[:200]}")
-            return approved
-
-        if isinstance(devices, dict):
-            pending_list = devices.get("pending", devices.get("requests", []))
-            paired_list = devices.get("paired", devices.get("devices", []))
-            if not pending_list and not isinstance(pending_list, list):
-                all_devs = devices.get("devices", [devices])
-                pending_list = [d for d in all_devs if d.get("status", "").lower() != "approved"] if isinstance(all_devs, list) else []
-            devices = pending_list if isinstance(pending_list, list) else []
-            print(f"🔍 Found {len(devices)} pending, {len(paired_list) if isinstance(paired_list, list) else '?'} paired")
-        elif isinstance(devices, list):
-            devices = [d for d in devices if d.get("status", "").lower() != "approved"]
-            print(f"🔍 Found {len(devices)} pending device(s) from list")
+    # (3) Fallback: approve --latest if we still have nothing. Covers the
+    # bootstrap case where ``pending.json`` hasn't been written yet (the
+    # gateway sometimes holds in-memory pending state before persisting).
+    if not approved:
+        print("⚠️  No matching pending request on disk; trying `openclaw approve --latest`…")
+        ok, detail = _approve_with_variants("--latest")
+        if ok:
+            approved.append("latest")
+            print("✅ Auto-approved latest pending device (fallback)")
         else:
-            print(f"⚠️  Unexpected devices format: {type(devices)}")
-            return approved
+            print(f"⚠️  approve --latest failed: {detail[:200]}")
 
-        for dev in devices:
-            dev_id = dev.get("deviceId") or dev.get("device_id", "")
-            req_id = dev.get("requestId") or dev.get("request_id") or dev.get("id") or dev_id
-            display_name = dev.get("displayName") or dev.get("display_name") or dev.get("name", "")
-            status = dev.get("status", "").lower()
-            print(f"   Pending device: id={dev_id[:16]}… name={display_name} reqId={req_id} status={status}")
-
-            if status == "approved" or not req_id:
-                continue
-
-            is_ours = (
-                (local_device_id and dev_id == local_device_id) or
-                "safeclaw" in display_name.lower() or
-                "xsafeclaw" in display_name.lower()
-            )
-            if not is_ours:
-                print(f"   ↳ Skipping (not ours)")
-                continue
-
-            ok, detail = _approve_with_variants(str(req_id))
-            if ok:
-                approved.append(str(req_id))
-                print(f"✅ Auto-approved XSafeClaw device: {req_id}")
-            else:
-                print(f"⚠️  Failed to approve device {req_id}: {detail[:200]}")
-
-        if not approved:
-            print("⚠️  No matching pending device via JSON, trying 'openclaw approve --latest' fallback...")
-            ok, detail = _approve_with_variants("--latest")
-            print(f"   approve --latest: {'ok' if ok else 'failed'} detail={detail[:200]}")
-            if ok:
-                approved.append("latest")
-                print(f"✅ Auto-approved latest pending device")
-            else:
-                print(f"⚠️  approve --latest failed: {detail[:200]}")
-
-    except FileNotFoundError:
-        print("⚠️  openclaw binary not found in PATH")
-    except Exception as e:
-        print(f"⚠️  auto_approve_pending_devices error: {e}")
     return approved
+
+
+_PAIRING_REQUEST_ID_RE = re.compile(
+    r"requestId[:=]\s*\"?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\"?",
+    re.IGNORECASE,
+)
+
+
+def _extract_pairing_request_id(message: str) -> str | None:
+    """Pull the ``requestId`` out of a gateway ``PAIRING_REQUIRED`` error.
+
+    OpenClaw 2026.4.25 formats the WebSocket close reason as e.g.::
+
+        pairing required: device identity changed and must be re-approved
+        (requestId: 8dd85120-00b8-41ea-a55f-119adfceb004)
+
+    and may also embed it inside a JSON error payload. We accept either
+    shape; any UUID immediately after a ``requestId`` token counts.
+    """
+    if not message:
+        return None
+    match = _PAIRING_REQUEST_ID_RE.search(message)
+    if match:
+        return match.group(1)
+    return None
 
 
 # ─── GatewayClient ──────────────────────────────────────────────────────────
@@ -486,7 +554,10 @@ class GatewayClient:
 
         Strategy:
         1. Try connecting with device identity + token
-        2. If pairing required, auto-approve and retry
+        2. If pairing required, auto-approve and retry (OpenClaw 4.25 now
+           surfaces an explicit ``PAIRING_REQUIRED`` code and, for stale
+           platform pins, ``reason: metadata-upgrade`` + ``requestId`` — we
+           parse those and approve the exact request instead of guessing.)
         3. If device metadata/pairing still fails, fall back to token-only auth
         """
         first_error: Exception | None = None
@@ -498,7 +569,15 @@ class GatewayClient:
             message = str(e).lower()
             retryable_device_error = any(
                 marker in message
-                for marker in ("pairing", "metadata", "connect failed", "1008", "policy")
+                for marker in (
+                    "pairing",
+                    "metadata",
+                    "metadata-upgrade",
+                    "pairing_required",
+                    "connect failed",
+                    "1008",
+                    "policy",
+                )
             )
             scope_error = "missing scope" in message
             if not retryable_device_error and not self._token:
@@ -519,10 +598,19 @@ class GatewayClient:
                 except Exception:
                     pass
 
-            if "pairing" in message:
-                print("🔑 Device pairing required — auto-approving...")
+            if "pairing" in message or "metadata-upgrade" in message:
+                preferred_request_id = _extract_pairing_request_id(str(e))
+                if preferred_request_id:
+                    print(
+                        "🔑 Device pairing required — auto-approving "
+                        f"requestId={preferred_request_id}..."
+                    )
+                else:
+                    print("🔑 Device pairing required — auto-approving...")
                 await self.disconnect()
-                approved = await auto_approve_pending_devices()
+                approved = await auto_approve_pending_devices(
+                    preferred_request_id=preferred_request_id,
+                )
                 if approved:
                     await asyncio.sleep(2)
                     self._connected = asyncio.Event()

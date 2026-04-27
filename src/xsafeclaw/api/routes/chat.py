@@ -84,6 +84,12 @@ _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
 _GATEWAY_CONNECT_RETRY_ATTEMPTS = 6
 _GATEWAY_CONNECT_RETRY_DELAY_S = 1.0
+# Exponential backoff used specifically after we trigger a runtime autostart.
+# OpenClaw 4.25 can take 60‑80s of plugin loading before the gateway is ready
+# to accept a fresh device-signed connect, so a flat 1s retry produces a
+# cascade of ``WinError 1225`` (TCP refused) frames. These delays cover the
+# first ~12 seconds; further attempts fall back to the flat delay.
+_GATEWAY_POST_AUTOSTART_BACKOFF_S = (1.0, 3.0, 8.0)
 # Per-instance cache: keyed by ``RuntimeInstance.instance_id`` so OpenClaw
 # and Hermes (and Nanobot, although it has its own short-circuit) can each
 # serve their own model list from this endpoint without trampling each
@@ -1444,6 +1450,48 @@ async def _get_nanobot_gateway_session(
     )
 
 
+def _is_transport_refused(exc: BaseException | None) -> bool:
+    """Return True if ``exc`` is a real TCP-level connection refusal.
+
+    Under OpenClaw 4.25 our chat-retry loop must distinguish:
+
+    * **Transport-level refusal** — the listener is not bound, typically
+      because the service was just restarted or the daemon is still booting.
+      These are the only cases where invoking ``autostart_openclaw`` is the
+      right response.
+    * **Handshake / protocol errors** — the listener is up but the gateway
+      rejected us (``PAIRING_REQUIRED``, ``missing scope``, 1008 close, etc.).
+      Calling ``openclaw gateway start`` here would just kill the live
+      process and amplify the restart storm; we must retry the handshake
+      instead (after approving any pending pairings upstream).
+
+    The following Windows / POSIX signatures all map to "transport refused":
+
+    * ``ConnectionRefusedError`` (cross-platform)
+    * ``OSError(errno=ECONNREFUSED)`` → Linux "[Errno 111]"
+    * ``OSError(winerror=1225)`` → Windows "远程计算机拒绝网络连接"
+    * the error string contains ``WinError 1225`` or ``ECONNREFUSED``
+    """
+    if exc is None:
+        return False
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    if isinstance(exc, OSError):
+        winerror = getattr(exc, "winerror", None)
+        if winerror in (1225, 10061):
+            return True
+        if getattr(exc, "errno", None) == 111:
+            return True
+    message = str(exc)
+    return (
+        "WinError 1225" in message
+        or "WinError 10061" in message
+        or "ECONNREFUSED" in message
+        or "Connection refused" in message
+        or "[Errno 111]" in message
+    )
+
+
 async def _connect_gateway_with_retries(
     instance: RuntimeInstance,
 ) -> GatewayClient | HermesClient:
@@ -1453,11 +1501,19 @@ async def _connect_gateway_with_retries(
     otherwise a ``GatewayClient`` (OpenClaw WebSocket). The choice is now
     keyed off the resolved ``RuntimeInstance`` so an OpenClaw-default process
     can still talk to a Hermes session and vice-versa.
+
+    OpenClaw 2026.4.25 compatibility: we only invoke ``autostart_openclaw``
+    when the failure is a transport-level refusal (see
+    :func:`_is_transport_refused`). Handshake / auth / pairing errors retry
+    the WebSocket handshake directly — ``GatewayClient.connect`` handles the
+    pairing-approval dance itself, and triggering a schtasks restart would
+    just churn the listener and produce cascading ``WinError 1225`` frames.
     """
     last_error: Exception | None = None
     is_hermes = instance.platform == "hermes"
     openclaw_autostart_attempted = False
     hermes_autostart_attempted = False
+    autostarts_used = 0
 
     for attempt in range(1, _GATEWAY_CONNECT_RETRY_ATTEMPTS + 1):
         if is_hermes:
@@ -1476,18 +1532,22 @@ async def _connect_gateway_with_retries(
             except Exception:
                 pass
 
-            # New cloud hosts often have OpenClaw installed/configured but the
-            # gateway daemon has not yet been started. Try one best-effort
-            # autostart before exhausting retries so "Create Agent" can self-heal.
-            if settings.auto_start_runtimes:
+            transport_refused = _is_transport_refused(last_error)
+            just_autostarted = False
+
+            # Only run autostart when the TCP listener is actually missing.
+            # Pairing / scope / handshake errors must not trigger a schtasks
+            # (or launchd / systemd) restart — that would kill the live
+            # listener mid-flight and produce a cascade of refused frames.
+            if settings.auto_start_runtimes and transport_refused:
                 if not is_hermes and not openclaw_autostart_attempted:
                     openclaw_autostart_attempted = True
                     try:
                         from ...services.runtime_autostart import autostart_openclaw
-                        status, detail = await autostart_openclaw(timeout_s=10.0)
-                        if status in {"started", "already_running"}:
-                            continue
+                        status, detail = await autostart_openclaw(timeout_s=90.0)
                         print(f"[openclaw-autostart] status={status} detail={detail}")
+                        if status in {"started", "already_running"}:
+                            just_autostarted = True
                     except Exception as autostart_exc:
                         print(f"[openclaw-autostart] failed: {autostart_exc}")
                 if is_hermes and not hermes_autostart_attempted:
@@ -1495,14 +1555,21 @@ async def _connect_gateway_with_retries(
                     try:
                         from ...services.runtime_autostart import autostart_hermes
                         status, detail = await autostart_hermes(timeout_s=20.0)
-                        if status in {"started", "already_running"}:
-                            continue
                         print(f"[hermes-autostart] status={status} detail={detail}")
+                        if status in {"started", "already_running"}:
+                            just_autostarted = True
                     except Exception as autostart_exc:
                         print(f"[hermes-autostart] failed: {autostart_exc}")
 
             if attempt < _GATEWAY_CONNECT_RETRY_ATTEMPTS:
-                await asyncio.sleep(_GATEWAY_CONNECT_RETRY_DELAY_S)
+                if just_autostarted and autostarts_used < len(
+                    _GATEWAY_POST_AUTOSTART_BACKOFF_S
+                ):
+                    delay = _GATEWAY_POST_AUTOSTART_BACKOFF_S[autostarts_used]
+                    autostarts_used += 1
+                else:
+                    delay = _GATEWAY_CONNECT_RETRY_DELAY_S
+                await asyncio.sleep(delay)
 
     platform_name = "Hermes API server" if is_hermes else "OpenClaw gateway"
     detail = (
