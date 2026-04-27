@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ...config import settings
 from ...database import get_db_context
@@ -1050,8 +1050,11 @@ def _read_history_from_jsonl(
 
             # ── Detect format: wrapped (OpenClaw) vs flat (Hermes) ────
             if "message" in entry and isinstance(entry.get("message"), dict):
-                # OpenClaw wrapped format
-                if entry.get("type") != "message":
+                # Wrapped format:
+                # - OpenClaw: {"type":"message","message":{...}}
+                # - Hermes (some builds): {"message":{...}} (no type field)
+                wrapped_type = str(entry.get("type") or "").strip().lower()
+                if wrapped_type and wrapped_type != "message":
                     continue
                 msg       = entry["message"]
                 timestamp = entry.get("timestamp")
@@ -1200,8 +1203,10 @@ def _read_tool_calls_from_jsonl(
         for i, e in enumerate(entries):
             # OpenClaw: {"type":"message","message":{"role":"user",...}}
             # Hermes:   {"role":"user","content":"..."}
-            if e.get("type") == "message" and e.get("message", {}).get("role") == "user":
-                last_user_idx = i
+            if "message" in e and isinstance(e.get("message"), dict):
+                wrapped_type = str(e.get("type") or "").strip().lower()
+                if (not wrapped_type or wrapped_type == "message") and e.get("message", {}).get("role") == "user":
+                    last_user_idx = i
             elif e.get("role") == "user":
                 last_user_idx = i
 
@@ -1215,7 +1220,8 @@ def _read_tool_calls_from_jsonl(
         for entry in recent:
             # Resolve msg from wrapped or flat format
             if "message" in entry and isinstance(entry.get("message"), dict):
-                if entry.get("type") != "message":
+                wrapped_type = str(entry.get("type") or "").strip().lower()
+                if wrapped_type and wrapped_type != "message":
                     continue
                 msg = entry["message"]
             elif "role" in entry:
@@ -1283,6 +1289,65 @@ def _read_tool_calls_from_jsonl(
 
     except Exception:
         return []
+
+
+async def _read_history_from_db_fallback(
+    *,
+    public_session_key: str,
+    local_session_key: str,
+    limit: int,
+) -> list[dict]:
+    """Fallback history source when JSONL lookup fails.
+
+    Hermes deployments can differ in on-disk session index shape. If file-based
+    history cannot be resolved, return persisted DB turns so the chat sidebar
+    still loads conversation history.
+    """
+    limit = max(1, int(limit or 100))
+    session_ids_to_try = [public_session_key, local_session_key]
+    source_ids_to_try = [local_session_key, public_session_key]
+
+    async with get_db_context() as db:
+        session_result = await db.execute(
+            select(Session)
+            .where(
+                or_(
+                    Session.session_key == public_session_key,
+                    Session.session_id.in_(session_ids_to_try),
+                    Session.source_session_id.in_(source_ids_to_try),
+                )
+            )
+            .order_by(Session.last_activity_at.desc().nullslast(), Session.updated_at.desc())
+            .limit(1)
+        )
+        session = session_result.scalar_one_or_none()
+        if session is None:
+            return []
+
+        msg_result = await db.execute(
+            select(Message)
+            .where(Message.session_id == session.session_id)
+            .order_by(Message.timestamp.desc())
+            .limit(limit)
+        )
+        rows = list(reversed(msg_result.scalars().all()))
+
+    messages: list[dict] = []
+    for msg in rows:
+        if msg.role not in {"user", "assistant"}:
+            continue
+        text = (msg.content_text or "").strip()
+        if not text:
+            continue
+        messages.append(
+            {
+                "role": msg.role,
+                "content": text,
+                "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                "id": msg.message_id,
+            }
+        )
+    return messages
 
 
 router = APIRouter()
@@ -2371,6 +2436,12 @@ async def get_history(
         if instance.platform == "nanobot"
         else _read_history_from_jsonl(instance, local_session_key, limit=limit)
     )
+    if not messages and instance.platform == "hermes":
+        messages = await _read_history_from_db_fallback(
+            public_session_key=public_session_key,
+            local_session_key=local_session_key,
+            limit=limit,
+        )
     return {
         "session_key": public_session_key,
         "messages": messages,
