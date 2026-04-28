@@ -18,18 +18,6 @@ export default function World() {
           navigate('/setup', { replace: true });
           return;
         }
-        if (d.requires_configure && d.requires_nanobot_configure) {
-          navigate('/configure_select', { replace: true });
-          return;
-        }
-        if (d.requires_nanobot_configure) {
-          navigate('/nanobot_configure', { replace: true });
-          return;
-        }
-        if (d.requires_configure) {
-          navigate('/openclaw_configure', { replace: true });
-          return;
-        }
       } catch {
         // status failed — proceed to valley anyway
       }
