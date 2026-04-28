@@ -351,7 +351,7 @@ export default function Chat() {
   const [gpExpandedId, setGpExpandedId] = useState<string | null>(null);
 
   const [installModalOpen, setInstallModalOpen] = useState(false);
-  const [installModalPlatform, setInstallModalPlatform] = useState<'openclaw' | 'nanobot'>('openclaw');
+  const [installModalPlatform, setInstallModalPlatform] = useState<'openclaw' | 'hermes' | 'nanobot'>('openclaw');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -720,19 +720,19 @@ export default function Chat() {
 
     // Detect which platform the selected instance belongs to
     const selectedInstance = availableInstances.find(i => i.instance_id === selectedInstanceId) ?? null;
-    const isNanobot = selectedInstance?.platform === 'nanobot';
+    const selectedPlatform = selectedInstance?.platform ?? 'openclaw';
 
     // Check installation status from system status
     try {
       const statusRes = await systemAPI.installStatus();
       const d = statusRes.data as any;
-      if (isNanobot && !d.nanobot_installed) {
-        setInstallModalPlatform('nanobot');
-        setInstallModalOpen(true);
-        return;
-      }
-      if (!isNanobot && !d.openclaw_installed) {
-        setInstallModalPlatform('openclaw');
+      const installedByPlatform = {
+        openclaw: Boolean(d.openclaw_installed),
+        hermes: Boolean(d.hermes_installed),
+        nanobot: Boolean(d.nanobot_installed),
+      } as const;
+      if (!installedByPlatform[selectedPlatform]) {
+        setInstallModalPlatform(selectedPlatform);
         setInstallModalOpen(true);
         return;
       }
@@ -1837,18 +1837,32 @@ export default function Chat() {
           <div className="bg-surface-1 border border-border rounded-2xl p-6 w-full max-w-sm shadow-2xl">
             <div className="flex items-start gap-4 mb-5">
               <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
-                installModalPlatform === 'nanobot' ? 'bg-cyan-500/15' : 'bg-blue-500/15'
+                installModalPlatform === 'nanobot'
+                  ? 'bg-cyan-500/15'
+                  : installModalPlatform === 'hermes'
+                    ? 'bg-violet-500/15'
+                    : 'bg-blue-500/15'
               }`}>
                 {installModalPlatform === 'nanobot'
                   ? <Bot className="w-6 h-6 text-cyan-400" />
-                  : <Zap className="w-6 h-6 text-blue-400" />}
+                  : installModalPlatform === 'hermes'
+                    ? <Cpu className="w-6 h-6 text-violet-400" />
+                    : <Zap className="w-6 h-6 text-blue-400" />}
               </div>
               <div className="flex-1">
                 <h3 className="text-base font-bold text-text-primary mb-1">
-                  {installModalPlatform === 'nanobot' ? t.chat.installModalNanobotTitle : t.chat.installModalOpenclawTitle}
+                  {installModalPlatform === 'nanobot'
+                    ? t.chat.installModalNanobotTitle
+                    : installModalPlatform === 'hermes'
+                      ? t.chat.installModalHermesTitle
+                      : t.chat.installModalOpenclawTitle}
                 </h3>
                 <p className="text-[12px] text-text-muted leading-relaxed">
-                  {installModalPlatform === 'nanobot' ? t.chat.installModalNanobotDesc : t.chat.installModalOpenclawDesc}
+                  {installModalPlatform === 'nanobot'
+                    ? t.chat.installModalNanobotDesc
+                    : installModalPlatform === 'hermes'
+                      ? t.chat.installModalHermesDesc
+                      : t.chat.installModalOpenclawDesc}
                 </p>
               </div>
               <button onClick={() => setInstallModalOpen(false)} className="text-text-muted hover:text-text-primary flex-shrink-0">
@@ -1864,6 +1878,8 @@ export default function Chat() {
                 className={`flex-1 py-2.5 text-white text-[13px] font-semibold rounded-xl transition-all shadow ${
                   installModalPlatform === 'nanobot'
                     ? 'bg-cyan-500 hover:bg-cyan-600 shadow-cyan-500/25'
+                    : installModalPlatform === 'hermes'
+                      ? 'bg-violet-500 hover:bg-violet-600 shadow-violet-500/25'
                     : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/25'
                 }`}>
                 {t.chat.installModalGo}

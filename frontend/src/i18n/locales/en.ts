@@ -227,6 +227,8 @@ export const en = {
     // Install modal
     installModalOpenclawTitle: 'OpenClaw Not Installed',
     installModalOpenclawDesc: 'OpenClaw must be installed before creating a session. Go to the setup wizard to complete the installation.',
+    installModalHermesTitle: 'Hermes Not Installed',
+    installModalHermesDesc: 'Hermes must be installed before creating a session with this runtime. Go to the setup wizard to complete the installation.',
     installModalNanobotTitle: 'Nanobot Not Installed',
     installModalNanobotDesc: 'Nanobot must be installed before creating a session. Go to the setup wizard to complete the installation.',
     installModalCancel: 'Cancel',

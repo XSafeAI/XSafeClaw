@@ -221,6 +221,8 @@ export const zh: Translations = {
     // Install modal
     installModalOpenclawTitle: 'OpenClaw 未安装',
     installModalOpenclawDesc: '需要先安装 OpenClaw 才能创建会话。前往安装向导完成设置。',
+    installModalHermesTitle: 'Hermes 未安装',
+    installModalHermesDesc: '需要先安装 Hermes 才能使用该运行时创建会话。前往安装向导完成设置。',
     installModalNanobotTitle: 'Nanobot 未安装',
     installModalNanobotDesc: '需要先安装 Nanobot 才能创建会话。前往安装向导完成设置。',
     installModalCancel: '取消',
