@@ -342,6 +342,40 @@ function getMessageTimestampValue(value) {
   return Number.isNaN(time) ? 0 : time;
 }
 
+function localSessionKey(sessionKey) {
+  const value = String(sessionKey || '');
+  const parts = value.split('::');
+  if (parts.length >= 3 && ['openclaw', 'hermes', 'nanobot'].includes(parts[0])) {
+    return parts.slice(2).join('::');
+  }
+  return value;
+}
+
+function sessionKeysMatch(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const localA = localSessionKey(a);
+  const localB = localSessionKey(b);
+  return Boolean(localA && localB && localA === localB);
+}
+
+function pendingApprovalToolMessage(item) {
+  return {
+    id: `pending-tool-${item.id}`,
+    role: 'tool_call',
+    content: '',
+    timestamp: item.created_at ? new Date(item.created_at * 1000) : new Date(),
+    tool_id: item.id,
+    tool_name: item.tool_name || 'tool-call',
+    args: item.params ?? null,
+    result: null,
+    is_error: false,
+    result_pending: true,
+  };
+}
+
 function ToolCallBubble({ msg, helpers }) {
   const argsPreview = previewChatValue(msg.args || msg.content || '');
   const resultPreview = msg.result_pending ? 'Running...' : previewChatValue(msg.result);
@@ -765,20 +799,30 @@ export default function CrewTab({
   const [detailError, setDetailError] = useState('');
   const [detailEventData, setDetailEventData] = useState(null);
   const [copiedField, setCopiedField] = useState('');
-  const conversationMessages = useMemo(() => activeMessages
-    .filter((msg) => (
-      msg.role === 'assistant'
-      || msg.role === 'user'
-      || msg.role === 'error'
-      || msg.role === 'tool_call'
-    ))
-    .sort((a, b) => getMessageTimestampValue(a.timestamp) - getMessageTimestampValue(b.timestamp)), [activeMessages]);
-
   const currentSessionKey = currentAgent ? helpers.getAgentSessionKey(currentAgent) : '';
   const agentPendingItems = useMemo(() => {
     if (!currentSessionKey || !pendingApprovals?.length) return [];
-    return pendingApprovals.filter((item) => !item.resolved && item.session_key === currentSessionKey);
+    return pendingApprovals.filter((item) => !item.resolved && sessionKeysMatch(item.session_key, currentSessionKey));
   }, [currentSessionKey, pendingApprovals]);
+  const conversationMessages = useMemo(() => {
+    const baseMessages = activeMessages
+      .filter((msg) => (
+        msg.role === 'assistant'
+        || msg.role === 'user'
+        || msg.role === 'error'
+        || msg.role === 'tool_call'
+      ));
+    const existingToolIds = new Set(
+      baseMessages
+        .filter((msg) => msg.role === 'tool_call')
+        .map((msg) => String(msg.tool_id || msg.id || '')),
+    );
+    const pendingToolMessages = agentPendingItems
+      .filter((item) => !existingToolIds.has(String(item.id)))
+      .map(pendingApprovalToolMessage);
+    return [...baseMessages, ...pendingToolMessages]
+      .sort((a, b) => getMessageTimestampValue(a.timestamp) - getMessageTimestampValue(b.timestamp));
+  }, [activeMessages, agentPendingItems]);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: 'end' });
   }, [conversationMessages, currentAgent?.id, loadingHistory, sending]);

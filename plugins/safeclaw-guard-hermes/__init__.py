@@ -166,14 +166,31 @@ def _pre_tool_call_handler(
 
     The request body is fully aligned with OpenClaw's TS plugin so the
     backend ``check_tool_call`` runs the same risk-rule / denylist /
-    guard-model / human-approval pipeline. The only Hermes-specific
-    bit is ``messages`` — we pre-fetch trajectory locally because
-    Hermes does not pass it to ``pre_tool_call`` hooks.
+    guard-model / human-approval pipeline. Hermes-specific:
+
+    - ``messages`` — we pre-fetch trajectory locally because Hermes
+      does not pass it to ``pre_tool_call`` hooks.
+    - ``session_key`` — Hermes's main tool-execution path
+      (``run_agent.py::_invoke_tool`` / ``_execute_tool_calls``) calls
+      ``get_pre_tool_call_block_message(...)`` with ONLY ``task_id``
+      (no ``session_id``). Without a fallback, every blocked tool would
+      surface in the Approvals page with an empty session id and could
+      not be tied back to the live Agent Town conversation. We fall
+      back to ``task_id`` and then encode it into XSafeClaw's
+      ``hermes::hermes-default::<id>`` chat session key so the
+      pending-approval card shows up inside the matching Agent Town
+      dialog (mirroring the OpenClaw TS plugin's behaviour, where the
+      session key already arrives encoded).
     """
     import requests
 
     base_url = _get_base_url()
     tool_check_url = f"{base_url}/api/guard/tool-check"
+
+    bare_session_key = (session_id or task_id or "").strip()
+    encoded_session_key = (
+        f"hermes::hermes-default::{bare_session_key}" if bare_session_key else ""
+    )
 
     try:
         resp = requests.post(
@@ -181,10 +198,10 @@ def _pre_tool_call_handler(
             json={
                 "tool_name": tool_name,
                 "params": args if isinstance(args, dict) else {},
-                "session_key": session_id or "",
+                "session_key": encoded_session_key,
                 "platform": "hermes",
                 "instance_id": "hermes-default",
-                "messages": _fetch_session_messages(session_id),
+                "messages": _fetch_session_messages(bare_session_key),
             },
             timeout=TIMEOUT_SECONDS,
         )

@@ -290,6 +290,25 @@ function isNanobotAgent(agent) {
   );
 }
 
+function localSessionKey(sessionKey) {
+  const value = String(sessionKey || '');
+  const parts = value.split('::');
+  if (parts.length >= 3 && ['openclaw', 'hermes', 'nanobot'].includes(parts[0])) {
+    return parts.slice(2).join('::');
+  }
+  return value;
+}
+
+function sessionKeysMatch(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const localA = localSessionKey(a);
+  const localB = localSessionKey(b);
+  return Boolean(localA && localB && localA === localB);
+}
+
 function buildDraftAgent(sessionKey, modelOption, runtimeInstance = null) {
   const modelRef = modelOption?.id || 'unknown/model';
   const provider = modelOption?.provider || modelRef.split('/')[0] || 'unknown';
@@ -446,16 +465,12 @@ function isTaskTerminalStatus(status) {
 }
 
 function applyPendingStatusToAgents(agents = [], pendingApprovals = []) {
-  const pendingSessionKeys = new Set(
-    (pendingApprovals || [])
-      .filter((item) => item && !item.resolved && item.session_key)
-      .map((item) => item.session_key),
-  );
-  if (pendingSessionKeys.size === 0) return agents;
+  const unresolved = (pendingApprovals || []).filter((item) => item && !item.resolved && item.session_key);
+  if (unresolved.length === 0) return agents;
 
   return agents.map((agent) => {
     const sessionKey = getAgentSessionKey(agent);
-    if (!sessionKey || !pendingSessionKeys.has(sessionKey)) return agent;
+    if (!sessionKey || !unresolved.some((item) => sessionKeysMatch(item.session_key, sessionKey))) return agent;
     if (String(agent?.status || '').toLowerCase() === 'offline') return agent;
     if (agent.status === 'pending') return agent;
     return { ...agent, status: 'pending' };
@@ -471,7 +486,8 @@ function applyPendingStatusToDashboardEvents(eventRows = [], pendingApprovals = 
   unresolved.forEach((item) => {
     const sessionIds = new Set();
     sessionIds.add(item.session_key);
-    const liveAgent = agentsBySessionKey[item.session_key];
+    const liveAgent = agentsBySessionKey[item.session_key]
+      || Object.values(agentsBySessionKey).find((agent) => sessionKeysMatch(item.session_key, getAgentSessionKey(agent)));
     if (liveAgent?.id) sessionIds.add(liveAgent.id);
 
     let bestIndex = -1;
