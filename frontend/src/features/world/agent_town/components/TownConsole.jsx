@@ -2743,7 +2743,7 @@ export default function TownConsole({
           msg.id === pendingId && msg.pending
             ? {
                 ...msg,
-                content: msg.content || '会话已结束，未返回可见内容。',
+                content: msg.content || 'Hermes 未返回可见内容。该请求可能被模型安全策略静默拒绝，或未触发实际工具调用。',
                 pending: false,
               }
             : msg

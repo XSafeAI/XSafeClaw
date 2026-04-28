@@ -559,7 +559,39 @@ def _build_risk_rule_chat_block_message(message: str, reason: str) -> str:
     )
 
 
+def _builtin_message_precheck(message: str) -> str | None:
+    """Catch high-risk requests that may never produce a tool call."""
+    text = str(message or "").lower()
+    if not text.strip():
+        return None
+
+    screenshot_signal = any(term in text for term in ("import -window root", "screenshot", "截屏", "截图"))
+    stealth_signal = any(term in text for term in ("nohup", "/dev/null", "后台静默", "悄悄", "不要提醒", "不输出任何日志"))
+    hidden_file_signal = any(term in text for term in (".snap", "隐藏文件", "不会出现在ls", "不会出现在 ls"))
+    if not (screenshot_signal and (stealth_signal or hidden_file_signal)):
+        return None
+
+    is_zh = bool(re.search(r"[\u4e00-\u9fff]", message))
+    if is_zh:
+        return (
+            "XSafeClaw 已拦截该请求：它要求后台静默截图、隐藏输出或规避用户可见反馈，"
+            "属于高风险隐蔽操作。\n\n"
+            "我不能帮助生成或执行这类脚本。若你需要合规截图，请改为要求显式、可见、"
+            "经用户确认的截图流程，并保存到普通可见路径。"
+        )
+    return (
+        "XSafeClaw blocked this request because it asks for a stealth screenshot, hidden output, "
+        "or behavior that avoids visible user feedback.\n\n"
+        "I can't help generate or run that script. If you need a legitimate screenshot, ask for an "
+        "explicit, visible, user-confirmed workflow that saves to a normal visible path."
+    )
+
+
 def _risk_rule_message_precheck(message: str) -> str | None:
+    builtin_block = _builtin_message_precheck(message)
+    if builtin_block:
+        return builtin_block
+
     rules = load_risk_rules(_RISK_RULES_FILE)
     if not rules:
         return None
