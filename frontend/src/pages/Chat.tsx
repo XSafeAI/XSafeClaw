@@ -913,6 +913,7 @@ export default function Chat() {
               type: string; text?: string;
               session_key?: string;
               tool_id?: string; tool_name?: string; args?: any; result?: any; is_error?: boolean;
+              reason?: string;
             };
 
             if (chunk.type === 'session_relinked' && chunk.session_key) {
@@ -974,6 +975,39 @@ export default function Chat() {
                     ? { ...m, result: chunk.result, is_error: chunk.is_error, result_pending: false }
                     : m
                 ),
+              }));
+            } else if (chunk.type === 'tool_blocked') {
+              const blockedText =
+                chunk.text ||
+                (chunk.reason
+                  ? `工具调用已被安全审核拒绝。\n原因：${chunk.reason}`
+                  : '工具调用已被安全审核拒绝。');
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(m => {
+                  if (m.id === pendingId) {
+                    return {
+                      ...m,
+                      role: 'assistant' as const,
+                      content: blockedText,
+                      pending: false,
+                    };
+                  }
+                  if (
+                    m.role === 'tool_call' &&
+                    m.result_pending &&
+                    chunk.tool_name &&
+                    m.tool_name === chunk.tool_name
+                  ) {
+                    return {
+                      ...m,
+                      result: chunk.reason || blockedText,
+                      is_error: true,
+                      result_pending: false,
+                    };
+                  }
+                  return m;
+                }),
               }));
 
             } else if (chunk.type === 'final') {

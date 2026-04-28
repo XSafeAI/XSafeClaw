@@ -23,6 +23,7 @@ from ...nanobot_gateway_client import NanobotGatewayClient
 from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_session_key
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
+from ...services.guard_service import GUARD_REJECTION_MARKER
 from ..runtime_helpers import resolve_instance, serialize_instance
 
 # ── Per-instance path helpers (was: module-level platform switch) ─────────
@@ -82,6 +83,7 @@ _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
+_HERMES_STREAM_KEEPALIVE_INTERVAL_S = 20.0
 _GATEWAY_CONNECT_RETRY_ATTEMPTS = 6
 _GATEWAY_CONNECT_RETRY_DELAY_S = 1.0
 # Exponential backoff used specifically after we trigger a runtime autostart.
@@ -1297,6 +1299,44 @@ def _read_tool_calls_from_jsonl(
         return []
 
 
+async def _iter_stream_with_keepalive(stream, interval_s: float):
+    """Yield stream chunks and inject periodic status keepalives."""
+    iterator = stream.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(iterator.__anext__(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            yield {"type": "status", "text": "Waiting for agent response..."}
+            continue
+        except StopAsyncIteration:
+            break
+        yield chunk
+
+
+def _extract_guard_rejection_from_tool_events(tool_events: list[dict]) -> dict | None:
+    """Return the latest guard-rejection tool result, if present."""
+    marker = GUARD_REJECTION_MARKER.lower()
+    for evt in reversed(tool_events):
+        if evt.get("type") != "tool_result" or not evt.get("is_error"):
+            continue
+        raw_result = str(evt.get("result") or "").strip()
+        if marker not in raw_result.lower():
+            continue
+        reason = raw_result
+        try:
+            parsed = json.loads(raw_result)
+            if isinstance(parsed, dict):
+                reason = str(parsed.get("error") or parsed.get("message") or raw_result)
+        except Exception:
+            pass
+        reason = reason.strip() or "This tool call was rejected by safety review."
+        return {
+            "tool_name": str(evt.get("tool_name") or "tool"),
+            "reason": reason,
+        }
+    return None
+
+
 async def _read_history_from_db_fallback(
     *,
     public_session_key: str,
@@ -2316,6 +2356,8 @@ async def send_message_stream(request: SendMessageRequest):
         client: GatewayClient | HermesClient | NanobotGatewayClient | None = None
         stream_local_session_key = local_session_key
         stream_public_session_key = public_session_key
+        last_terminal_type: str | None = None
+        stream_error_text: str | None = None
         try:
             if instance.platform == "nanobot":
                 if request.images:
@@ -2371,23 +2413,36 @@ async def send_message_stream(request: SendMessageRequest):
                                 not target_full
                                 or _hermes_active_yaml_model == (target_full, target_slug)
                             ):
-                                async for chunk in client.stream_chat(**stream_kwargs):
-                                    if isinstance(chunk, dict) and chunk.get("text"):
-                                        final_text = str(chunk["text"])
-                                    if isinstance(chunk, dict) and chunk.get("usage") is not None:
-                                        final_usage = chunk.get("usage")
+                                async for chunk in _iter_stream_with_keepalive(
+                                    client.stream_chat(**stream_kwargs),
+                                    _HERMES_STREAM_KEEPALIVE_INTERVAL_S,
+                                ):
+                                    if isinstance(chunk, dict):
+                                        chunk_type = str(chunk.get("type") or "")
+                                        if chunk_type in {"delta", "final"} and chunk.get("text"):
+                                            final_text = str(chunk["text"])
+                                        if chunk.get("usage") is not None:
+                                            final_usage = chunk.get("usage")
+                                        if chunk_type in {"final", "error", "timeout", "aborted"}:
+                                            last_terminal_type = chunk_type
                                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                                 break
                         async with _hermes_yaml_lock.write():
                             await _ensure_hermes_yaml_pinned_to(target_full, target_slug)
                 else:
                     async for chunk in client.stream_chat(**stream_kwargs):
-                        if isinstance(chunk, dict) and chunk.get("text"):
-                            final_text = str(chunk["text"])
+                        if isinstance(chunk, dict):
+                            chunk_type = str(chunk.get("type") or "")
+                            if chunk_type in {"delta", "final"} and chunk.get("text"):
+                                final_text = str(chunk["text"])
+                            if chunk_type in {"final", "error", "timeout", "aborted"}:
+                                last_terminal_type = chunk_type
                         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
-            return
+            stream_error_text = str(e)
+            if instance.platform != "hermes":
+                yield f"data: {json.dumps({'type': 'error', 'text': stream_error_text})}\n\n"
+                return
 
         # Hermes: persist turn directly to DB after streaming completes
         if instance.platform == "hermes" and final_text:
@@ -2414,8 +2469,40 @@ async def send_message_stream(request: SendMessageRequest):
             )
             for evt in tool_events:
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+            if instance.platform == "hermes":
+                rejection = _extract_guard_rejection_from_tool_events(tool_events)
+                should_emit_rejection_fallback = (
+                    rejection is not None
+                    and (last_terminal_type in {"error", "timeout"} or last_terminal_type is None)
+                )
+                if should_emit_rejection_fallback:
+                    tool_name = str(rejection.get("tool_name") or "tool")
+                    reason = str(rejection.get("reason") or "This tool call was rejected by safety review.")
+                    fallback_text = (
+                        f"工具调用 `{tool_name}` 已被安全审核拒绝。\n"
+                        f"原因：{reason}\n"
+                        "请根据风险提示调整请求后再继续。"
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "tool_blocked",
+                                "tool_name": tool_name,
+                                "reason": reason,
+                                "text": fallback_text,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+                    yield f"data: {json.dumps({'type': 'final', 'text': fallback_text}, ensure_ascii=False)}\n\n"
+                    stream_error_text = None
         except Exception:
             pass  # non-fatal
+
+        if stream_error_text:
+            yield f"data: {json.dumps({'type': 'error', 'text': stream_error_text}, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
 
