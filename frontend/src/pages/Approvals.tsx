@@ -87,14 +87,14 @@ export default function Approvals() {
             <ShieldAlert className="w-5 h-5 text-red-400" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-text-primary">{t.dashboard.approvals.title}</h1>
-            <p className="text-xs text-text-muted">{t.dashboard.approvals.subtitle}</p>
+            <h1 className="text-xl font-bold text-text-primary">{t.monitor.approvals.title}</h1>
+            <p className="text-xs text-text-muted">{t.monitor.approvals.subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
           {pending.length > 0 && (
             <span className="px-2.5 py-1 rounded-full bg-red-500/15 text-red-400 text-xs font-semibold animate-pulse">
-              {t.dashboard.approvals.nPending.replace('{n}', String(pending.length))}
+              {t.monitor.approvals.nPending.replace('{n}', String(pending.length))}
             </span>
           )}
           <button
@@ -110,8 +110,8 @@ export default function Approvals() {
       {pending.length === 0 && !loading && (
         <div className="text-center py-16 bg-surface-1 rounded-xl border border-border">
           <CheckCircle2 className="w-12 h-12 text-emerald-400/40 mx-auto mb-3" />
-          <p className="text-text-muted text-sm">{t.dashboard.approvals.noApprovals}</p>
-          <p className="text-text-muted/60 text-xs mt-1">{t.dashboard.approvals.noApprovalsDesc}</p>
+          <p className="text-text-muted text-sm">{t.monitor.approvals.noApprovals}</p>
+          <p className="text-text-muted/60 text-xs mt-1">{t.monitor.approvals.noApprovalsDesc}</p>
         </div>
       )}
 
@@ -183,7 +183,7 @@ export default function Approvals() {
             className="flex items-center gap-2 text-sm text-text-muted hover:text-text-primary transition-colors mb-3"
           >
             {showResolved ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-            {t.dashboard.approvals.resolved.replace('{n}', String(resolved.length))}
+            {t.monitor.approvals.resolved.replace('{n}', String(resolved.length))}
           </button>
           {showResolved && (
             <div className="space-y-2">
