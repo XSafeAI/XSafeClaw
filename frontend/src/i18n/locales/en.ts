@@ -152,6 +152,7 @@ export const en = {
     },
     approvals: {
       title: 'Tool Call Approvals',
+      subtitle: 'Review and approve unsafe tool calls',
       nPending: '{n} pending',
       noApprovals: 'No Pending Approvals',
       noApprovalsDesc: 'Tool calls flagged as unsafe will appear here for review',

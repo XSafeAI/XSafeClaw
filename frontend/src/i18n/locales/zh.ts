@@ -145,7 +145,8 @@ export const zh: Translations = {
       kb: 'KB',
     },
     approvals: {
-      title: '工具调用审批',
+      title: '工具调用审核',
+      subtitle: '审核并批准不安全的工具调用',
       nPending: '{n} 个待审批',
       noApprovals: '暂无待审批',
       noApprovalsDesc: '被标记为不安全的工具调用将显示在这里等待审核',
