@@ -2737,6 +2737,18 @@ export default function TownConsole({
           }
         }
       }
+      setMessageMap((prev) => ({
+        ...prev,
+        [currentIdentity]: (prev[currentIdentity] || []).map((msg) => (
+          msg.id === pendingId && msg.pending
+            ? {
+                ...msg,
+                content: msg.content || '会话已结束，未返回可见内容。',
+                pending: false,
+              }
+            : msg
+        )),
+      }));
     } catch (err) {
       if (stopRequestedRef.current || isAbortError(err)) {
         finalizeStoppedMessage();

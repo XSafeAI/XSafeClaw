@@ -1284,7 +1284,7 @@ def _read_tool_calls_from_jsonl(
                     else:
                         result_text = str(result_content)
                     tool_calls[tc_id]["result"]   = result_text
-                    tool_calls[tc_id]["is_error"] = bool(msg.get("isError") or msg.get("is_error", False))
+                    tool_calls[tc_id]["is_error"] = _tool_result_is_error(msg, result_text)
 
         # Emit: first a tool_start, then a tool_result for each tool
         events = []
@@ -1313,14 +1313,29 @@ async def _iter_stream_with_keepalive(stream, interval_s: float):
         yield chunk
 
 
+def _tool_result_contains_guard_rejection(result_text: str) -> bool:
+    return GUARD_REJECTION_MARKER.lower() in str(result_text or "").lower()
+
+
+def _tool_result_is_error(msg: dict, result_text: str) -> bool:
+    if bool(msg.get("isError") or msg.get("is_error", False)):
+        return True
+    if _tool_result_contains_guard_rejection(result_text):
+        return True
+    try:
+        parsed = json.loads(str(result_text or ""))
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
 def _extract_guard_rejection_from_tool_events(tool_events: list[dict]) -> dict | None:
     """Return the latest guard-rejection tool result, if present."""
-    marker = GUARD_REJECTION_MARKER.lower()
     for evt in reversed(tool_events):
-        if evt.get("type") != "tool_result" or not evt.get("is_error"):
+        if evt.get("type") != "tool_result":
             continue
         raw_result = str(evt.get("result") or "").strip()
-        if marker not in raw_result.lower():
+        if not _tool_result_contains_guard_rejection(raw_result):
             continue
         reason = raw_result
         try:
