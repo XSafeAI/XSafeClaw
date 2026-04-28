@@ -88,9 +88,46 @@ def _get_fg_taxonomy() -> str:
 # ---------------------------------------------------------------------------
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+_NANOBOT_CONFIG_PATH = Path.home() / ".nanobot" / "config.json"
 
 _cached_model_info: dict[str, str] | None = None
 _ANTHROPIC_VERSION = "2023-06-01"
+_DEFAULT_PROVIDER_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "minimax": "https://api.minimax.io/v1",
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "alibaba": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "ollama": "http://127.0.0.1:11434/v1",
+}
+_DEFAULT_PROVIDER_API_TYPES = {
+    "anthropic": "anthropic-messages",
+}
+
+
+def _read_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _read_dotenv_value(path: Path, key: str) -> str:
+    try:
+        lines = path.expanduser().read_text("utf-8").splitlines()
+    except OSError:
+        return ""
+    prefix = f"{key}="
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith(prefix):
+            continue
+        return stripped[len(prefix):].strip().strip('"').strip("'")
+    return ""
 
 
 def _get_openclaw_model_info() -> dict[str, str]:
@@ -109,16 +146,6 @@ def _get_openclaw_model_info() -> dict[str, str]:
     global _cached_model_info
     if _cached_model_info is not None:
         return _cached_model_info
-
-    _DEFAULT_PROVIDER_URLS = {
-        "openai": "https://api.openai.com/v1",
-        "anthropic": "https://api.anthropic.com/v1",
-        "moonshot": "https://api.moonshot.cn/v1",
-        "deepseek": "https://api.deepseek.com/v1",
-    }
-    _DEFAULT_PROVIDER_API_TYPES = {
-        "anthropic": "anthropic-messages",
-    }
 
     def _resolve_provider(
         prov: str,
@@ -220,8 +247,130 @@ def _get_openclaw_model_info() -> dict[str, str]:
     return _cached_model_info
 
 
+def _get_hermes_model_info() -> dict[str, str] | None:
+    """Resolve Guard model info from the configured Hermes runtime."""
+    config_path = Path(settings.hermes_config_path).expanduser()
+    try:
+        import yaml
+
+        config = yaml.safe_load(config_path.read_text("utf-8")) or {}
+    except Exception:
+        return None
+    if not isinstance(config, dict):
+        return None
+
+    model_cfg = config.get("model", "")
+    if isinstance(model_cfg, dict):
+        model_id = str(
+            model_cfg.get("default")
+            or model_cfg.get("model")
+            or model_cfg.get("primary")
+            or ""
+        ).strip()
+    else:
+        model_id = str(model_cfg or "").strip()
+    if not model_id:
+        return None
+
+    api_key = (
+        str(settings.hermes_api_key or "").strip()
+        or _read_dotenv_value(Path(settings.hermes_home) / ".env", "API_SERVER_KEY")
+        or "EMPTY"
+    )
+    return {
+        "provider": "hermes",
+        "model": model_id,
+        "base_url": f"http://127.0.0.1:{settings.hermes_api_port}/v1",
+        "api_key": api_key,
+        "api_type": "openai-completions",
+    }
+
+
+def _get_nanobot_model_info() -> dict[str, str] | None:
+    """Resolve Guard model info from Nanobot's default runtime config."""
+    path = _NANOBOT_CONFIG_PATH.expanduser()
+    try:
+        config = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(config, dict):
+        return None
+
+    agents = _read_mapping(config.get("agents"))
+    defaults = _read_mapping(agents.get("defaults"))
+    raw_model = str(defaults.get("model") or "").strip()
+    provider = str(defaults.get("provider") or "").strip()
+    if not provider and "/" in raw_model:
+        provider = raw_model.split("/", 1)[0].strip()
+    if not raw_model or not provider:
+        return None
+
+    providers = _read_mapping(config.get("providers"))
+    provider_cfg = _read_mapping(providers.get(provider))
+    base_url = str(
+        provider_cfg.get("apiBase")
+        or provider_cfg.get("baseUrl")
+        or provider_cfg.get("base_url")
+        or _DEFAULT_PROVIDER_URLS.get(provider, "")
+    ).strip()
+    api_key = str(
+        provider_cfg.get("apiKey")
+        or provider_cfg.get("api_key")
+        or provider_cfg.get("key")
+        or ""
+    ).strip()
+    api_type = str(
+        provider_cfg.get("api")
+        or provider_cfg.get("apiType")
+        or _DEFAULT_PROVIDER_API_TYPES.get(provider, "openai-completions")
+    ).strip()
+
+    if not base_url:
+        return None
+    return {
+        "provider": provider,
+        "model": raw_model,
+        "base_url": base_url,
+        "api_key": api_key or "EMPTY",
+        "api_type": api_type,
+    }
+
+
+def _get_settings_model_info() -> dict[str, str]:
+    return {
+        "model": settings.guard_base_model,
+        "base_url": settings.guard_base_url,
+        "api_key": settings.guard_api_key,
+        "api_type": "openai-completions",
+        "provider": "settings",
+    }
+
+
+def _resolve_guard_model_info(
+    *,
+    platform: str = "openclaw",
+    instance_id: str = "",
+) -> dict[str, str]:
+    """Resolve Guard model settings from the active runtime when possible."""
+    normalized_platform = str(platform or "openclaw").strip().lower()
+
+    if normalized_platform == "hermes":
+        hermes_info = _get_hermes_model_info()
+        if hermes_info:
+            return hermes_info
+    elif normalized_platform == "nanobot":
+        nanobot_info = _get_nanobot_model_info()
+        if nanobot_info:
+            return nanobot_info
+
+    try:
+        return _get_openclaw_model_info()
+    except Exception:
+        return _get_settings_model_info()
+
+
 def invalidate_model_cache() -> None:
-    """Force re-read of openclaw.json on next guard call."""
+    """Force re-read of runtime model configs on next guard call."""
     global _cached_model_info
     _cached_model_info = None
 
@@ -602,20 +751,27 @@ def _build_runtime_trajectory_text(
 
 
 # ---------------------------------------------------------------------------
-# Model invocation — uses OpenClaw's configured model
+# Model invocation — uses the active runtime's configured model
 # ---------------------------------------------------------------------------
 
-async def _call_guard_model(trajectory_text: str) -> str:
+async def _call_guard_model(
+    trajectory_text: str,
+    *,
+    platform: str = "openclaw",
+    instance_id: str = "",
+) -> str:
     """Call the guard model and return raw output text.
 
     Always uses the fine-grained prompt with full taxonomy.
-    The model/baseUrl/apiKey are read from OpenClaw's config.
+    The model/baseUrl/apiKey are read from the calling runtime when possible:
+    Hermes uses its local OpenAI-compatible API, Nanobot reads config.json,
+    and OpenClaw preserves the legacy openclaw.json path.
     """
-    model_info = _get_openclaw_model_info()
+    model_info = _resolve_guard_model_info(platform=platform, instance_id=instance_id)
     api_type = model_info.get("api_type", "openai-completions")
     base_url = _normalize_model_api_base(model_info.get("base_url", ""), api_type)
     print(
-        f"[guard] provider={model_info.get('provider', 'unknown')} "
+        f"[guard] provider={model_info.get('provider', 'unknown')} platform={platform} "
         f"api_type={api_type} model={model_info['model']} base_url={base_url}"
     )
     prompt_template = _get_fg_prompt()
@@ -1089,7 +1245,11 @@ async def check_runtime_tool_call(
         return {"action": "allow"}
 
     try:
-        raw = await _call_guard_model(trajectory_text)
+        raw = await _call_guard_model(
+            trajectory_text,
+            platform=platform,
+            instance_id=instance_id,
+        )
         parsed = _parse_guard_output(raw)
         verdict = parsed.get("verdict", "error")
     except Exception as exc:
@@ -1292,7 +1452,11 @@ async def check_tool_call(
         f"(platform={platform} session={session_key})"
     )
     try:
-        raw = await _call_guard_model(trajectory_text)
+        raw = await _call_guard_model(
+            trajectory_text,
+            platform=platform,
+            instance_id=instance_id,
+        )
         parsed = _parse_guard_output(raw)
         verdict = parsed.get("verdict", "error")
         print(f"[guard] tool-check: verdict={verdict} for {tool_name}")

@@ -104,6 +104,64 @@ def test_get_openclaw_model_info_reads_api_type_and_provider_api_key(monkeypatch
     assert info["api_type"] == "anthropic-messages"
 
 
+def test_resolve_guard_model_info_uses_hermes_runtime_model(monkeypatch, tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    config_path = hermes_home / "config.yaml"
+    hermes_home.mkdir(parents=True)
+    config_path.write_text("model:\n  default: openai/gpt-4.1\n", encoding="utf-8")
+    (hermes_home / ".env").write_text("API_SERVER_KEY=hermes-secret\n", encoding="utf-8")
+    monkeypatch.setattr(guard_service.settings, "hermes_config_path", config_path)
+    monkeypatch.setattr(guard_service.settings, "hermes_home", hermes_home)
+    monkeypatch.setattr(guard_service.settings, "hermes_api_port", 8642)
+    monkeypatch.setattr(guard_service.settings, "hermes_api_key", "")
+
+    info = guard_service._resolve_guard_model_info(platform="hermes", instance_id="hermes-default")
+
+    assert info == {
+        "provider": "hermes",
+        "model": "openai/gpt-4.1",
+        "base_url": "http://127.0.0.1:8642/v1",
+        "api_key": "hermes-secret",
+        "api_type": "openai-completions",
+    }
+
+
+def test_resolve_guard_model_info_uses_nanobot_runtime_model(monkeypatch, tmp_path):
+    config_path = tmp_path / ".nanobot" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "provider": "minimax",
+                        "model": "minimax/MiniMax-M2.7",
+                    }
+                },
+                "providers": {
+                    "minimax": {
+                        "apiKey": "nanobot-secret",
+                        "apiBase": "https://api.minimax.io/v1",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(guard_service, "_NANOBOT_CONFIG_PATH", config_path)
+
+    info = guard_service._resolve_guard_model_info(platform="nanobot", instance_id="nanobot-default")
+
+    assert info == {
+        "provider": "minimax",
+        "model": "minimax/MiniMax-M2.7",
+        "base_url": "https://api.minimax.io/v1",
+        "api_key": "nanobot-secret",
+        "api_type": "openai-completions",
+    }
+
+
 @pytest.mark.asyncio
 async def test_call_guard_model_uses_openai_chat_completions(monkeypatch):
     seen: dict[str, object] = {}
@@ -162,8 +220,8 @@ async def test_check_tool_call_uses_anthropic_messages_and_creates_pending(monke
     )
     monkeypatch.setattr(
         guard_service,
-        "_get_openclaw_model_info",
-        lambda: {
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
             "provider": "custom-api-deepseek-com",
             "model": "deepseek-v4-pro",
             "base_url": "https://api.deepseek.com/anthropic",
@@ -229,8 +287,8 @@ async def test_runtime_tool_check_blocking_uses_anthropic_messages(monkeypatch):
     )
     monkeypatch.setattr(
         guard_service,
-        "_get_openclaw_model_info",
-        lambda: {
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
             "provider": "custom-api-deepseek-com",
             "model": "deepseek-v4-pro",
             "base_url": "https://api.deepseek.com/anthropic",

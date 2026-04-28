@@ -1966,7 +1966,7 @@ async def test_nanobot_health_probe_ignores_environment_ssl_settings(monkeypatch
 
 @pytest.mark.asyncio
 async def test_runtime_tool_check_observe_records_unsafe_without_blocking(monkeypatch):
-    async def fake_call_guard_model(_trajectory_text: str) -> str:
+    async def fake_call_guard_model(_trajectory_text: str, **_kwargs) -> str:
         return (
             "unsafe\n"
             "Risk Source: test\n"
