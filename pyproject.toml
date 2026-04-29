@@ -1,6 +1,6 @@
 [project]
 name = "xsafeclaw"
-version = "1.0.5"
+version = "1.0.7"
 description = "XSafeClaw - Keeping Your Claw Safe. Real-time monitoring and security for OpenClaw, Hermes, and nanobot AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -71,6 +71,10 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+# hatch_build.py at project root — auto-runs `npm run build` before packaging
+# so src/xsafeclaw/static/{index,agent-town,agent-valley}.html are always present.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xsafeclaw"]
