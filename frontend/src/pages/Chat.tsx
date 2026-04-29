@@ -617,11 +617,14 @@ export default function Chat() {
     // we widen the match to "same platform + instance and not claimed
     // by any other stored session". OpenClaw / Nanobot keep the strict
     // exact/suffix match.
-    const isHermesActive = activeSession?.platform === 'hermes';
-    const activeInstanceId = activeSession?.instanceId ?? null;
+    const activeKeyParts = activeKey.split('::');
+    const activeKeyPlatform = activeKeyParts.length >= 3 ? activeKeyParts[0] : null;
+    const activeKeyInstanceId = activeKeyParts.length >= 3 ? activeKeyParts[1] : null;
+    const isHermesActive = activeSession?.platform === 'hermes' || activeKeyPlatform === 'hermes';
+    const activeInstanceId = activeSession?.instanceId ?? activeKeyInstanceId ?? null;
     const otherHermesKeys = isHermesActive
       ? sessions
-          .filter(s => s.platform === 'hermes' && s.key !== activeKey)
+          .filter(s => (s.platform === 'hermes' || s.key.startsWith('hermes::')) && s.key !== activeKey)
           .map(s => s.key)
       : [];
 
@@ -632,8 +635,11 @@ export default function Chat() {
       if (pk.endsWith(activeKey)) return true;
 
       if (!isHermesActive) return false;
-      if (p?.platform !== 'hermes') return false;
-      if (activeInstanceId && p?.instance_id && p.instance_id !== activeInstanceId) return false;
+      const pendingKeyParts = pk.split('::');
+      const pendingPlatform = p?.platform || (pendingKeyParts.length >= 3 ? pendingKeyParts[0] : null);
+      const pendingInstanceId = p?.instance_id || (pendingKeyParts.length >= 3 ? pendingKeyParts[1] : null);
+      if (pendingPlatform !== 'hermes') return false;
+      if (activeInstanceId && pendingInstanceId && pendingInstanceId !== activeInstanceId) return false;
       const claimedByOther = otherHermesKeys.some(k => pk === k || pk.endsWith(k));
       return !claimedByOther;
     };
