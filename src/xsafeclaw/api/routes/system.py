@@ -2043,6 +2043,101 @@ def _kill_pid_on_port(port: int, grace_s: float = 3.0) -> list[int]:
     return pids
 
 
+def _stop_running_nanobot_processes(*, grace_s: float = 3.0) -> list[dict[str, Any]]:
+    """Stop any running nanobot CLI process to free its on-disk files.
+
+    On Windows ``uv tool install nanobot-ai --force`` cannot replace the
+    ``Scripts/`` directory of the existing tool env while the launcher
+    (``C:\\Users\\<u>\\.local\\bin\\nanobot.exe``) or any process loaded
+    from ``...\\AppData\\Roaming\\uv\\tools\\nanobot-ai\\Scripts`` is still
+    running — Windows refuses with ``os error 5`` (拒绝访问). Our own
+    ``autostart_nanobot`` spawns ``nanobot gateway --port <p>`` at boot,
+    so a reinstall triggered from /setup almost always hits this lock.
+
+    This helper enumerates processes via ``psutil`` and terminates anything
+    that looks like the nanobot CLI (matched by executable basename, exe
+    path containing ``nanobot-ai``/``nanobot``, or python launcher whose
+    first argv ends with ``nanobot``). Returns one dict per stopped
+    process so the caller can stream a friendly log line back to the UI.
+    """
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+
+    targets: list[Any] = []
+    own_pid = os.getpid()
+    needles = ("nanobot",)
+    for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+        try:
+            info = proc.info
+        except Exception:
+            continue
+        pid = info.get("pid")
+        if not pid or pid == own_pid:
+            continue
+        name = (info.get("name") or "").lower()
+        exe = (info.get("exe") or "").lower()
+        cmdline = info.get("cmdline") or []
+        first_arg = ""
+        if cmdline:
+            try:
+                first_arg = Path(cmdline[0]).name.lower()
+            except Exception:
+                first_arg = str(cmdline[0]).lower()
+
+        # Match the nanobot CLI itself, the uv tool launcher, and
+        # python.exe processes whose first argv resolves to ``nanobot``.
+        is_nanobot_name = name in {"nanobot", "nanobot.exe"} or first_arg in {
+            "nanobot",
+            "nanobot.exe",
+        }
+        is_nanobot_exe = "nanobot-ai" in exe or any(needle in exe for needle in needles) and (
+            exe.endswith("nanobot") or exe.endswith("nanobot.exe")
+        )
+        if is_nanobot_name or is_nanobot_exe:
+            targets.append(proc)
+
+    stopped: list[dict[str, Any]] = []
+    for proc in targets:
+        record: dict[str, Any] = {
+            "pid": proc.pid,
+            "name": (proc.info.get("name") or "") if hasattr(proc, "info") else "",
+            "exe": (proc.info.get("exe") or "") if hasattr(proc, "info") else "",
+            "cmdline": (proc.info.get("cmdline") or []) if hasattr(proc, "info") else [],
+            "method": "terminate",
+        }
+        try:
+            proc.terminate()
+        except Exception as exc:
+            record["method"] = "terminate-failed"
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            stopped.append(record)
+            continue
+        stopped.append(record)
+
+    if not stopped:
+        return stopped
+
+    try:
+        psutil.wait_procs([t for t in targets], timeout=max(0.5, grace_s))
+    except Exception:
+        pass
+
+    for proc, record in zip(targets, stopped):
+        try:
+            if proc.is_running():
+                try:
+                    proc.kill()
+                    record["method"] = "kill"
+                except Exception as exc:
+                    record["method"] = "kill-failed"
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            pass
+    return stopped
+
+
 async def _run_cmd(
     cmd: list[str], *, env: dict, timeout_s: float = 10.0
 ) -> tuple[int, str]:
@@ -3260,29 +3355,85 @@ async def install_nanobot():
                 if repairing_nanobot:
                     repair_reason = nanobot_error or "unknown error"
                     yield f"data: {json.dumps({'type': 'output', 'text': f'Existing Nanobot CLI at {nanobot_path} is not usable ({repair_reason}); reinstalling it.'})}\n\n"
+
+                # On Windows `uv tool install --force` cannot replace files
+                # that a running nanobot.exe (e.g. our own auto-started
+                # gateway) is holding open. Stop any nanobot processes
+                # before the reinstall so uv is free to delete the old
+                # tool env. Cross-platform safe: a no-op on machines
+                # without a running nanobot.
+                stopped_procs = _stop_running_nanobot_processes()
+                for record in stopped_procs:
+                    detail = record.get("exe") or " ".join(record.get("cmdline") or [])
+                    msg = (
+                        f"Stopped running Nanobot process pid={record.get('pid')} "
+                        f"({record.get('method')}): {detail}"
+                    )
+                    yield f"data: {json.dumps({'type': 'output', 'text': msg})}\n\n"
+
                 install_args = _nanobot_official_install_args(
                     env=local_env,
                     uv_executable=uv_executable,
                     force=repairing_nanobot,
                 )
+
+                async def _run_uv_install_collect() -> tuple[int, str]:
+                    """Run uv install in a subprocess and capture merged stdout/stderr."""
+                    collected: list[str] = []
+                    sub = await asyncio.create_subprocess_exec(
+                        *_build_uv_command(install_args[0], install_args[1:]),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        env=local_env,
+                    )
+                    while True:
+                        line = await sub.stdout.readline()
+                        if not line:
+                            break
+                        decoded = _decode_subprocess_output(line).rstrip()
+                        if decoded:
+                            collected.append(decoded)
+                    await sub.wait()
+                    return sub.returncode or 0, "\n".join(collected)
+
                 yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_nanobot_official_install_command(force=repairing_nanobot)}'})}\n\n"
-                proc = await asyncio.create_subprocess_exec(
-                    *_build_uv_command(install_args[0], install_args[1:]),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    env=local_env,
+                rc, install_output = await _run_uv_install_collect()
+                for segment in install_output.splitlines():
+                    if segment.strip():
+                        yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
+
+                # Retry-once fallback: on Windows uv prints a generic
+                # "failed to remove directory ... (os error 5)" when the
+                # tool env is still being held open. If we see that
+                # marker, force-stop nanobot processes and try again —
+                # this catches user-spawned nanobot.exe instances that
+                # we missed during the pre-install sweep.
+                lowered = install_output.lower()
+                file_lock_markers = (
+                    "failed to remove directory",
+                    "os error 5",
+                    "拒绝访问",
+                    "permission denied",
                 )
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    text = _decode_subprocess_output(line).rstrip()
-                    if text:
-                        yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
-                await proc.wait()
-                if proc.returncode != 0:
-                    yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+                if rc != 0 and any(marker in lowered for marker in file_lock_markers):
+                    yield f"data: {json.dumps({'type': 'output', 'text': 'uv install failed because a Nanobot process was holding the tool directory open; stopping it and retrying...'})}\n\n"
+                    retry_stopped = _stop_running_nanobot_processes()
+                    for record in retry_stopped:
+                        detail = record.get("exe") or " ".join(record.get("cmdline") or [])
+                        msg = (
+                            f"Stopped running Nanobot process pid={record.get('pid')} "
+                            f"({record.get('method')}): {detail}"
+                        )
+                        yield f"data: {json.dumps({'type': 'output', 'text': msg})}\n\n"
+                    await asyncio.sleep(1.5)
+                    rc, install_output = await _run_uv_install_collect()
+                    for segment in install_output.splitlines():
+                        if segment.strip():
+                            yield f"data: {json.dumps({'type': 'output', 'text': segment.strip()})}\n\n"
+
+                if rc != 0:
+                    yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': rc})}\n\n"
                     return
 
                 local_env = _build_env()

@@ -496,12 +496,26 @@ async def _repair_nanobot_tool_env(reason: str) -> tuple[bool, str, str | None]:
         _nanobot_official_install_args,
         _nanobot_overlay_install_args,
         _probe_nanobot_cli_async,
+        _stop_running_nanobot_processes,
     )
 
     env = _build_env()
     uv_executable = _find_uv_executable(env=env)
     if not uv_executable:
         return False, f"nanobot repair needed ({reason}) but uv is not available", None
+
+    # On Windows, `uv tool install --force` cannot replace files inside
+    # the existing tool env while a nanobot.exe (e.g. our auto-started
+    # gateway) still has them open. Stop those processes up front so the
+    # repair has a chance to succeed instead of looping forever on the
+    # same "拒绝访问 / os error 5" Windows file-lock.
+    stopped_pre = _stop_running_nanobot_processes()
+    if stopped_pre:
+        logger.info(
+            "[autostart] nanobot repair stopped %d running process(es) before reinstall: %s",
+            len(stopped_pre),
+            ", ".join(f"pid={r.get('pid')}({r.get('method')})" for r in stopped_pre),
+        )
 
     install_args = _nanobot_official_install_args(
         env=env,
@@ -513,6 +527,31 @@ async def _repair_nanobot_tool_env(reason: str) -> tuple[bool, str, str | None]:
         env=env,
         timeout_s=240.0,
     )
+
+    # Retry-once fallback for Windows file-lock failures from external
+    # nanobot processes that we missed in the pre-sweep.
+    if rc != 0:
+        lowered = (out or "").lower()
+        file_lock_markers = (
+            "failed to remove directory",
+            "os error 5",
+            "拒绝访问",
+            "permission denied",
+        )
+        if any(marker in lowered for marker in file_lock_markers):
+            stopped_retry = _stop_running_nanobot_processes()
+            if stopped_retry:
+                logger.info(
+                    "[autostart] nanobot repair retrying after stopping %d holdout process(es)",
+                    len(stopped_retry),
+                )
+            await asyncio.sleep(1.5)
+            rc, out = await _run_cmd(
+                _build_uv_command(install_args[0], install_args[1:]),
+                env=env,
+                timeout_s=240.0,
+            )
+
     if rc != 0:
         return (
             False,

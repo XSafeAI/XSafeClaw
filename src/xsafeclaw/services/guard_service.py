@@ -785,7 +785,7 @@ async def _call_guard_model(
         payload = {
             "model": model_info["model"],
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
+            "max_tokens": 8192,
         }
         url = f"{base_url}/chat/completions"
         headers["Authorization"] = f"Bearer {model_info['api_key']}"
@@ -793,7 +793,7 @@ async def _call_guard_model(
         payload = {
             "model": model_info["model"],
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
+            "max_tokens": 8192,
         }
         url = f"{base_url}/messages"
         headers["x-api-key"] = model_info["api_key"]
