@@ -610,11 +610,45 @@ export default function Chat() {
   useEffect(() => {
     if (!activeKey) { setGuardPending([]); return; }
     let cancelled = false;
+
+    // §B2: only the hermes plugin produces tool-check requests with an
+    // unstable session_key (task_id-based or 'default' fallback when
+    // Hermes's _invoke_tool path doesn't pass session_id). For those
+    // we widen the match to "same platform + instance and not claimed
+    // by any other stored session". OpenClaw / Nanobot keep the strict
+    // exact/suffix match.
+    const activeKeyParts = activeKey.split('::');
+    const activeKeyPlatform = activeKeyParts.length >= 3 ? activeKeyParts[0] : null;
+    const activeKeyInstanceId = activeKeyParts.length >= 3 ? activeKeyParts[1] : null;
+    const isHermesActive = activeSession?.platform === 'hermes' || activeKeyPlatform === 'hermes';
+    const activeInstanceId = activeSession?.instanceId ?? activeKeyInstanceId ?? null;
+    const otherHermesKeys = isHermesActive
+      ? sessions
+          .filter(s => (s.platform === 'hermes' || s.key.startsWith('hermes::')) && s.key !== activeKey)
+          .map(s => s.key)
+      : [];
+
+    const matches = (p: any): boolean => {
+      const pk = String(p?.session_key || '');
+      if (!pk) return false;
+      if (pk === activeKey) return true;
+      if (pk.endsWith(activeKey)) return true;
+
+      if (!isHermesActive) return false;
+      const pendingKeyParts = pk.split('::');
+      const pendingPlatform = p?.platform || (pendingKeyParts.length >= 3 ? pendingKeyParts[0] : null);
+      const pendingInstanceId = p?.instance_id || (pendingKeyParts.length >= 3 ? pendingKeyParts[1] : null);
+      if (pendingPlatform !== 'hermes') return false;
+      if (activeInstanceId && pendingInstanceId && pendingInstanceId !== activeInstanceId) return false;
+      const claimedByOther = otherHermesKeys.some(k => pk === k || pk.endsWith(k));
+      return !claimedByOther;
+    };
+
     const poll = async () => {
       try {
         const { data } = await guardAPI.pending(false);
         if (cancelled) return;
-        const forSession = data.filter((p: any) => p.session_key === activeKey || p.session_key?.endsWith(activeKey));
+        const forSession = data.filter(matches);
         setGuardPending(forSession.map((p: any) => ({
           id: p.id,
           tool_name: p.tool_name,
@@ -631,7 +665,7 @@ export default function Chat() {
     poll();
     const timer = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [activeKey]);
+  }, [activeKey, activeSession?.platform, activeSession?.instanceId, sessions]);
 
   // Close model dropdown on outside click
   const modelDropdownRef = useRef<HTMLDivElement>(null);
@@ -913,6 +947,7 @@ export default function Chat() {
               type: string; text?: string;
               session_key?: string;
               tool_id?: string; tool_name?: string; args?: any; result?: any; is_error?: boolean;
+              reason?: string;
             };
 
             if (chunk.type === 'session_relinked' && chunk.session_key) {
@@ -974,6 +1009,39 @@ export default function Chat() {
                     ? { ...m, result: chunk.result, is_error: chunk.is_error, result_pending: false }
                     : m
                 ),
+              }));
+            } else if (chunk.type === 'tool_blocked') {
+              const blockedText =
+                chunk.text ||
+                (chunk.reason
+                  ? `工具调用已被安全审核拒绝。\n原因：${chunk.reason}`
+                  : '工具调用已被安全审核拒绝。');
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(m => {
+                  if (m.id === pendingId) {
+                    return {
+                      ...m,
+                      role: 'assistant' as const,
+                      content: blockedText,
+                      pending: false,
+                    };
+                  }
+                  if (
+                    m.role === 'tool_call' &&
+                    m.result_pending &&
+                    chunk.tool_name &&
+                    m.tool_name === chunk.tool_name
+                  ) {
+                    return {
+                      ...m,
+                      result: chunk.reason || blockedText,
+                      is_error: true,
+                      result_pending: false,
+                    };
+                  }
+                  return m;
+                }),
               }));
 
             } else if (chunk.type === 'final') {

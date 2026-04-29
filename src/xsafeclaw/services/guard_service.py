@@ -44,9 +44,9 @@ from ..risk_rules import build_risk_rule_block_reason, load_risk_rules, match_ri
 
 logger = logging.getLogger(__name__)
 _GUARD_BLOCK_REASON = (
-    "This tool call has been rejected by the safety reviewer due to potential security risks. "
-    "You MUST immediately stop all subsequent actions, inform the user about the risk, and wait "
-    "for explicit user confirmation before proceeding with any further operations."
+    "Tool call blocked: this action was rejected by the safety reviewer due to potential security risks. "
+    "Inform the user that the action was blocked, briefly explain the risk, do not retry this tool call, "
+    "and ask how they want to proceed."
 )
 
 # ---------------------------------------------------------------------------

@@ -2676,6 +2676,38 @@ export default function TownConsole({
                     : msg
                 )),
               }));
+            } else if (chunk.type === 'tool_blocked') {
+              const blockedText = chunk.text
+                || (chunk.reason
+                  ? `工具调用已被安全审核拒绝。\n原因：${chunk.reason}`
+                  : '工具调用已被安全审核拒绝。');
+              setMessageMap((prev) => ({
+                ...prev,
+                [currentIdentity]: (prev[currentIdentity] || []).map((msg) => {
+                  if (msg.id === pendingId) {
+                    return {
+                      ...msg,
+                      role: 'assistant',
+                      content: blockedText,
+                      pending: false,
+                    };
+                  }
+                  if (
+                    msg.role === 'tool_call'
+                    && msg.result_pending
+                    && chunk.tool_name
+                    && msg.tool_name === chunk.tool_name
+                  ) {
+                    return {
+                      ...msg,
+                      result: chunk.reason || blockedText,
+                      is_error: true,
+                      result_pending: false,
+                    };
+                  }
+                  return msg;
+                }),
+              }));
             } else if (chunk.type === 'final') {
               setMessageMap((prev) => ({
                 ...prev,
@@ -2705,6 +2737,18 @@ export default function TownConsole({
           }
         }
       }
+      setMessageMap((prev) => ({
+        ...prev,
+        [currentIdentity]: (prev[currentIdentity] || []).map((msg) => (
+          msg.id === pendingId && msg.pending
+            ? {
+                ...msg,
+                content: msg.content || 'Hermes 未返回可见内容。该请求可能被模型安全策略静默拒绝，或未触发实际工具调用。',
+                pending: false,
+              }
+            : msg
+        )),
+      }));
     } catch (err) {
       if (stopRequestedRef.current || isAbortError(err)) {
         finalizeStoppedMessage();
