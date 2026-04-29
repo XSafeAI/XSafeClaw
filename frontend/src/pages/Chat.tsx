@@ -610,11 +610,39 @@ export default function Chat() {
   useEffect(() => {
     if (!activeKey) { setGuardPending([]); return; }
     let cancelled = false;
+
+    // §B2: only the hermes plugin produces tool-check requests with an
+    // unstable session_key (task_id-based or 'default' fallback when
+    // Hermes's _invoke_tool path doesn't pass session_id). For those
+    // we widen the match to "same platform + instance and not claimed
+    // by any other stored session". OpenClaw / Nanobot keep the strict
+    // exact/suffix match.
+    const isHermesActive = activeSession?.platform === 'hermes';
+    const activeInstanceId = activeSession?.instanceId ?? null;
+    const otherHermesKeys = isHermesActive
+      ? sessions
+          .filter(s => s.platform === 'hermes' && s.key !== activeKey)
+          .map(s => s.key)
+      : [];
+
+    const matches = (p: any): boolean => {
+      const pk = String(p?.session_key || '');
+      if (!pk) return false;
+      if (pk === activeKey) return true;
+      if (pk.endsWith(activeKey)) return true;
+
+      if (!isHermesActive) return false;
+      if (p?.platform !== 'hermes') return false;
+      if (activeInstanceId && p?.instance_id && p.instance_id !== activeInstanceId) return false;
+      const claimedByOther = otherHermesKeys.some(k => pk === k || pk.endsWith(k));
+      return !claimedByOther;
+    };
+
     const poll = async () => {
       try {
         const { data } = await guardAPI.pending(false);
         if (cancelled) return;
-        const forSession = data.filter((p: any) => p.session_key === activeKey || p.session_key?.endsWith(activeKey));
+        const forSession = data.filter(matches);
         setGuardPending(forSession.map((p: any) => ({
           id: p.id,
           tool_name: p.tool_name,
@@ -631,7 +659,7 @@ export default function Chat() {
     poll();
     const timer = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [activeKey]);
+  }, [activeKey, activeSession?.platform, activeSession?.instanceId, sessions]);
 
   // Close model dropdown on outside click
   const modelDropdownRef = useRef<HTMLDivElement>(null);

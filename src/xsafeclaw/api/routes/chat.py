@@ -1332,17 +1332,51 @@ def _read_tool_calls_from_jsonl(
 
 
 async def _iter_stream_with_keepalive(stream, interval_s: float):
-    """Yield stream chunks and inject periodic status keepalives."""
-    iterator = stream.__aiter__()
-    while True:
+    """Yield stream chunks and inject periodic status keepalives.
+
+    Implementation note: a background fetcher task drives the upstream
+    iterator; this generator only races a queue read against the
+    keepalive interval. Driving the upstream via ``asyncio.wait_for(
+    iterator.__anext__(), ...)`` would cancel the in-flight
+    ``socket.recv`` on every keepalive tick, which httpx's
+    ``aiter_lines`` propagates as ``response.aclose()``, causing the
+    upstream Hermes SSE to be torn down mid-stream and the agent task
+    to be interrupted server-side.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+
+    async def _fetcher():
         try:
-            chunk = await asyncio.wait_for(iterator.__anext__(), timeout=interval_s)
-        except asyncio.TimeoutError:
-            yield {"type": "status", "text": "Waiting for agent response..."}
-            continue
-        except StopAsyncIteration:
-            break
-        yield chunk
+            async for chunk in stream:
+                await queue.put(("chunk", chunk))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", DONE))
+
+    task = asyncio.create_task(_fetcher())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=interval_s)
+            except asyncio.TimeoutError:
+                yield {"type": "status", "text": "Waiting for agent response..."}
+                continue
+            if kind == "done":
+                break
+            if kind == "error":
+                raise payload
+            yield payload
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 def _tool_result_contains_guard_rejection(result_text: str) -> bool:
