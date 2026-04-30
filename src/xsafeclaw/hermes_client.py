@@ -75,6 +75,7 @@ class HermesClient:
         timeout_ms: int | None = None,
         attachments: list[dict] | None = None,
         model: str | None = None,
+        safety_system_prompt: str | None = None,
     ):
         """Async generator that streams chat response via SSE.
 
@@ -99,10 +100,24 @@ class HermesClient:
         next outbound call with no restart and no hot-reload polling wait.
         We still write ``body["model"]`` so the response echoes the right
         id back to compliant OpenAI clients.
+
+        ``safety_system_prompt`` (§57) — when non-empty, prepended to the
+        outbound ``messages`` array as ``{"role": "system", "content":
+        ...}``. Hermes API server layers any inbound system message on
+        top of its core system prompt
+        (``api_server.py::_handle_chat_completions`` builds
+        ``ephemeral_system_prompt`` from inbound system-role messages),
+        which is the only sanctioned non-CLI path that reaches Hermes's
+        system layer. ``None`` / empty preserves the previous body
+        byte-for-byte so OpenClaw / Nanobot callers (which never pass
+        this kwarg) see no behaviour change.
         """
         client = await self._ensure_client()
 
-        messages: list[dict[str, str]] = [{"role": "user", "content": message}]
+        messages: list[dict[str, str]] = []
+        if safety_system_prompt:
+            messages.append({"role": "system", "content": safety_system_prompt})
+        messages.append({"role": "user", "content": message})
 
         body: dict[str, Any] = {
             "model": (model or "").strip() or "hermes-agent",
@@ -220,6 +235,7 @@ class HermesClient:
                     message=message,
                     timeout_ms=timeout_ms,
                     model=model,
+                    safety_system_prompt=safety_system_prompt,
                 )
             except Exception as exc:
                 yield {
@@ -260,16 +276,26 @@ class HermesClient:
         thinking: str | None = None,
         timeout_ms: int | None = None,
         model: str | None = None,
+        safety_system_prompt: str | None = None,
     ) -> dict:
         """Send a message and wait for the complete response (non-streaming).
 
         ``model`` (§43f / §43i) — see ``stream_chat`` docstring; same contract.
         Cosmetic only; routing comes from ``chat.py``'s yaml-pin under
         ``_HermesYamlRWLock``.
+
+        ``safety_system_prompt`` (§57) — see ``stream_chat`` docstring;
+        when non-empty it is prepended to ``messages`` as a
+        ``role: "system"`` entry so Hermes treats it as host-enforced
+        system policy, not as user input. ``None`` keeps the legacy
+        request body shape.
         """
         client = await self._ensure_client()
 
-        messages: list[dict[str, str]] = [{"role": "user", "content": message}]
+        messages: list[dict[str, str]] = []
+        if safety_system_prompt:
+            messages.append({"role": "system", "content": safety_system_prompt})
+        messages.append({"role": "user", "content": message})
         body: dict[str, Any] = {
             "model": (model or "").strip() or "hermes-agent",
             "messages": messages,

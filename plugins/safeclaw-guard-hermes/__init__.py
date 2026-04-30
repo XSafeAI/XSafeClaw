@@ -1,14 +1,19 @@
 """
 XSafeClaw Guard Plugin for Hermes Agent.
 
-This plugin registers two hooks:
+This plugin registers one hook by default:
 
 * ``pre_tool_call`` — sends every tool call to XSafeClaw for safety
   evaluation; unsafe calls are blocked with a reason message and may be
   long-polled for human approval (see XSafeClaw §55).
+
+A second hook is available but **disabled by default** as of §57:
+
 * ``pre_llm_call`` — injects SAFETY.md + PERMISSION.md into the current
-  turn's user message as a hard fallback for Hermes's API-server path
-  (see §56b history note below).
+  turn's user message. Only registered when
+  ``XSAFECLAW_HERMES_PRE_LLM_CONTEXT_FALLBACK=1`` so XSafeClaw can
+  emergency-revert to the §56b behaviour without re-deploying the
+  plugin. See §57 below for why this is off by default.
 
 This is the Hermes-native counterpart of the OpenClaw TypeScript plugin
 (plugins/safeclaw-guard/index.ts).
@@ -31,20 +36,32 @@ History:
   result the SAFETY block written by ``_deploy_hermes_system_prompt``
   reaches Hermes CLI users but is silently dropped for every chat
   completion that flows through XSafeClaw's UI → Hermes API → upstream
-  LLM. The most reliable proof: ask any Hermes-fronted Claude session
-  to grep its own context for the literal sentinel
-  ``xsafeclaw:safety-block:begin`` and it returns ``NOT FOUND``.
-  This commit re-introduces the §54 ``pre_llm_call`` hook as a hard
-  fallback so the SAFETY/PERMISSION text reaches the model regardless
-  of which Hermes entry point is used. Prompt-cache reuse is sacrificed
-  in exchange for not silently shipping an agent without policy
-  context — the correct trade-off for a safety plugin.
+  LLM. §56b re-introduced ``pre_llm_call`` as a hard fallback so SAFETY
+  text reached the model regardless of entry point — at the cost of
+  shipping the policy as **user-message context**, which some upstream
+  models flag as a prompt-injection attempt.
+* §57 — XSafeClaw now sends the same SAFETY/PERMISSION block as a real
+  ``role: "system"`` message on every ``HermesClient.{stream,send}_chat``
+  call (``api/routes/chat.py`` + ``hermes_client.py``). Hermes API
+  server layers inbound system messages on top of its core system
+  prompt, which is exactly the channel a host policy belongs in. This
+  removes the need for the plugin-side user-message injection, so we
+  default it off to avoid duplicate SAFETY text appearing in both the
+  system layer AND the user-message context. The hook implementation
+  is preserved verbatim so operators can re-enable it with
+  ``XSAFECLAW_HERMES_PRE_LLM_CONTEXT_FALLBACK=1`` if a Hermes version
+  ever drops support for inbound system messages.
 
 Install:
     Copy this directory to ``~/.hermes/plugins/safeclaw-guard/``
 
 Environment variables:
     SAFECLAW_URL       — XSafeClaw backend URL (default: http://localhost:6874)
+    XSAFECLAW_HERMES_PRE_LLM_CONTEXT_FALLBACK
+                       — Set to ``1`` to re-register the §56b
+                         ``pre_llm_call`` user-message injection as an
+                         emergency fallback. Leave unset for normal
+                         operation (default: not set).
 """
 
 from __future__ import annotations
@@ -270,21 +287,42 @@ def _pre_llm_call_handler(**kwargs: Any) -> Optional[Dict[str, str]]:
     return {"context": block}
 
 
+_PRE_LLM_CALL_FALLBACK_ENV = "XSAFECLAW_HERMES_PRE_LLM_CONTEXT_FALLBACK"
+
+
+def _pre_llm_call_fallback_enabled() -> bool:
+    """Return True when the operator opted into §56b user-message injection.
+
+    Treats ``"1"``, ``"true"``, ``"yes"`` (case-insensitive) as truthy.
+    Anything else — including unset / empty — leaves ``pre_llm_call``
+    unregistered, which is the §57 default.
+    """
+    raw = os.environ.get(_PRE_LLM_CALL_FALLBACK_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def register(ctx: Any) -> None:
     """Hermes plugin entry point — register guard hooks.
 
-    §56b: registers BOTH ``pre_tool_call`` (Asset Shield + Guard Model
-    runtime check) and ``pre_llm_call`` (SAFETY/PERMISSION fallback
-    injection). The original §56 design tried to push policy through
-    ``config.yaml::agent.system_prompt`` alone but that path is silently
-    bypassed by ``api_server.py`` — see module docstring for the
-    post-mortem.
+    §57: ``pre_tool_call`` is always registered (Asset Shield + Guard
+    Model runtime check). ``pre_llm_call`` is **not** registered by
+    default — XSafeClaw injects the same SAFETY/PERMISSION block as a
+    real ``role: "system"`` message on the API-server path, so the
+    plugin-side user-message injection is redundant and would cause
+    duplicate policy text in every turn.
+
+    Set ``XSAFECLAW_HERMES_PRE_LLM_CONTEXT_FALLBACK=1`` to re-enable
+    the §56b behaviour as an emergency fallback (e.g. if a Hermes
+    upgrade ever drops support for inbound system messages).
     """
     ctx.register_hook("pre_tool_call", _pre_tool_call_handler)
-    ctx.register_hook("pre_llm_call", _pre_llm_call_handler)
+    hooks_registered = ["pre_tool_call"]
+    if _pre_llm_call_fallback_enabled():
+        ctx.register_hook("pre_llm_call", _pre_llm_call_handler)
+        hooks_registered.append("pre_llm_call")
     logger.info(
-        "safeclaw-guard: registered hooks=[pre_tool_call,pre_llm_call] "
-        "backend=%s workspace=%s",
+        "safeclaw-guard: registered hooks=%s backend=%s workspace=%s",
+        hooks_registered,
         _get_base_url(),
         _HERMES_WORKSPACE,
     )

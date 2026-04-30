@@ -7844,44 +7844,18 @@ def _deploy_safety_files(workspace: str) -> None:
 # ``~/.hermes/config.yaml::agent.system_prompt``. We always rewrite the
 # block on every onboard so SAFETY/PERMISSION updates propagate, but we
 # preserve any user-authored prompt content sitting outside the sentinels.
-_HERMES_SAFETY_BLOCK_BEGIN = "<!-- xsafeclaw:safety-block:begin v1 -->"
-_HERMES_SAFETY_BLOCK_END = "<!-- xsafeclaw:safety-block:end -->"
-
-
-def _build_hermes_safety_block(workspace: str) -> str:
-    """Assemble the SAFETY+PERMISSION text that goes into the ephemeral
-    system prompt. Reads from the deployed workspace first (so user edits
-    win), falls back to the bundled templates when the workspace copy is
-    missing — this matches how the Hermes plugin resolves these files.
-    """
-    templates_dir = Path(__file__).resolve().parent.parent.parent / "data" / "templates"
-    ws = Path(workspace).expanduser()
-
-    sections: list[str] = []
-    titles = {"SAFETY.md": "Safety Policies", "PERMISSION.md": "Permission Boundaries"}
-    for fname in ("SAFETY.md", "PERMISSION.md"):
-        candidates = [ws / fname, templates_dir / fname]
-        body = ""
-        for cand in candidates:
-            if cand.exists():
-                try:
-                    body = cand.read_text(encoding="utf-8").strip()
-                except Exception:
-                    body = ""
-                if body:
-                    break
-        if body:
-            sections.append(f"# {titles[fname]}\n\n{body}")
-
-    if not sections:
-        return ""
-
-    inner = "\n\n".join(sections)
-    return (
-        f"{_HERMES_SAFETY_BLOCK_BEGIN}\n"
-        f"{inner}\n"
-        f"{_HERMES_SAFETY_BLOCK_END}"
-    )
+#
+# §57 — the actual assembly logic now lives in
+# ``services.hermes_safety_prompt`` so ``HermesClient`` can reuse it for
+# the ``role: "system"`` injection on the API-server path. We re-export
+# the block builder + sentinels from this module to keep the original
+# private names valid for everything that already imports them
+# (``_deploy_hermes_system_prompt``, ``_splice_hermes_safety_block``).
+from ...services.hermes_safety_prompt import (
+    _HERMES_SAFETY_BLOCK_BEGIN,
+    _HERMES_SAFETY_BLOCK_END,
+    build_hermes_safety_block as _build_hermes_safety_block,
+)
 
 
 def _splice_hermes_safety_block(existing: str, new_block: str) -> str:

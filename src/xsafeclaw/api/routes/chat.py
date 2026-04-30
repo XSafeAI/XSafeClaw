@@ -24,6 +24,7 @@ from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_ses
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
 from ...services.guard_service import GUARD_REJECTION_MARKER
+from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
 from ..runtime_helpers import resolve_instance, serialize_instance
 
 # ── Per-instance path helpers (was: module-level platform switch) ─────────
@@ -2331,6 +2332,13 @@ async def send_message(request: SendMessageRequest):
                 # but it has zero effect on routing.
                 if target_full:
                     chat_kwargs["model"] = target_full
+                # §57: layer SAFETY/PERMISSION as a real ``role: "system"``
+                # message on the API-server path. Empty when no policy
+                # files are deployed → kwarg is omitted entirely so the
+                # request body matches the legacy shape byte-for-byte.
+                safety_prompt = load_hermes_safety_system_prompt()
+                if safety_prompt:
+                    chat_kwargs["safety_system_prompt"] = safety_prompt
                 # Acquire-or-rewrite-then-send loop: read-lock fast path for
                 # cache hits (parallel reads); write-lock to rewrite on miss
                 # (drains in-flight readers first to prevent A's request being
@@ -2488,6 +2496,12 @@ async def send_message_stream(request: SendMessageRequest):
                     target_slug = (info.get("provider") or "").strip()
                     if target_full:
                         stream_kwargs["model"] = target_full  # cosmetic
+                    # §57: same role=system injection as the non-stream
+                    # branch in send_message. Cached in-process so the
+                    # extra IO is a single ``stat()`` per file per turn.
+                    safety_prompt = load_hermes_safety_system_prompt()
+                    if safety_prompt:
+                        stream_kwargs["safety_system_prompt"] = safety_prompt
                     while True:
                         async with _hermes_yaml_lock.read():
                             if (
@@ -2652,6 +2666,13 @@ async def transcribe_clean(request: TranscribeCleanRequest):
                 # (Hermes ignores body["model"]); real routing comes from
                 # the yaml pin under the same RWLock pattern as
                 # ``send_message`` to avoid race against concurrent chats.
+                # §57: voice transcription is a one-shot agent task that
+                # benefits just as much from system-role policy framing
+                # as a regular chat turn (the prompt below tells the
+                # model to operate on user-supplied raw transcript text).
+                safety_prompt = load_hermes_safety_system_prompt()
+                if safety_prompt:
+                    transcribe_kwargs["safety_system_prompt"] = safety_prompt
                 req_model = (request.model or "").strip()
                 if req_model:
                     transcribe_kwargs["model"] = req_model  # cosmetic
