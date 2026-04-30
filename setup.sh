@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# One-time bootstrap: creates .venv, installs backend + frontend deps.
+# One-time bootstrap: creates .venv, installs frontend deps + builds the
+# bundle, then installs the backend.
+#
+# Order matters: ``pip install -e .`` triggers hatch_build.py which shells
+# out to ``npm run build`` inside ./frontend. That command only works when
+# ``./frontend/node_modules/.bin/tsc`` exists, otherwise the install fails
+# with ``sh: 1: tsc: not found``. So we run ``npm install`` *first* and
+# ``pip install -e .`` *second* — the hatch hook then reuses the populated
+# node_modules and the second build is a near-instant no-op.
+#
 # After this, use: bash start.sh
 set -euo pipefail
 
@@ -17,21 +26,15 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 11)' 2>/dev/null; th
     exit 1
 fi
 
+if ! command -v npm >/dev/null 2>&1; then
+    echo "npm not found. Install Node.js 18+ first (e.g. from nodesource or apt)."
+    echo "Then re-run: bash setup.sh"
+    exit 1
+fi
+
 echo "Creating .venv ..."
 python3 -m venv .venv
 "$PROJECT_DIR/.venv/bin/pip" install -U pip
-"$PROJECT_DIR/.venv/bin/pip" install -e .
-
-if [ ! -f "$PROJECT_DIR/.env" ]; then
-    cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
-    echo "Created .env from .env.example"
-fi
-
-if ! command -v npm >/dev/null 2>&1; then
-    echo "npm not found. Install Node.js 18+ (e.g. from nodesource or apt), then run:"
-    echo "  cd \"$PROJECT_DIR/frontend\" && npm install"
-    exit 1
-fi
 
 echo "Installing frontend dependencies ..."
 cd "$PROJECT_DIR/frontend"
@@ -43,6 +46,15 @@ npm install
 # Setup page would be missing newly added agent-framework cards.
 echo "Building frontend bundle into src/xsafeclaw/static ..."
 npm run build
+
+cd "$PROJECT_DIR"
+echo "Installing backend (editable) ..."
+"$PROJECT_DIR/.venv/bin/pip" install -e .
+
+if [ ! -f "$PROJECT_DIR/.env" ]; then
+    cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
+    echo "Created .env from .env.example"
+fi
 
 echo ""
 echo "Done. Start with:  bash start.sh"
