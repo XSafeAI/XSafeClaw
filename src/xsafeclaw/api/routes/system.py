@@ -1787,7 +1787,18 @@ async def get_nanobot_model_catalog(refresh: bool = False):
 
 @router.post("/nanobot/config")
 async def set_nanobot_config(body: NanobotConfigRequest):
-    """Write the default nanobot configuration used by the setup wizard."""
+    """Write the default nanobot configuration used by the setup wizard.
+
+    After the on-disk config (``~/.nanobot/config.json``), Guard plugin and
+    XSafeClaw overlay are written, this endpoint also tries to hot-reload
+    the local ``nanobot gateway`` so the new provider/model/websocket
+    settings take effect without forcing the user to restart XSafeClaw.
+
+    The restart is best-effort: if it fails we still return ``success:
+    True`` (the config file write itself succeeded) but expose
+    ``restart_status`` / ``restart_detail`` so the frontend can surface a
+    clear error and let the user retry.
+    """
     env = _build_env()
     path = Path(NANOBOT_DEFAULT_CONFIG).expanduser()
     data = _read_json_mapping(path) if path.exists() else _nanobot_default_config_payload()
@@ -1811,6 +1822,16 @@ async def set_nanobot_config(body: NanobotConfigRequest):
     overlay_success, overlay_status, overlay_detail = await _ensure_nanobot_xsafeclaw_overlay(
         env=env,
     )
+
+    # ── nanobot gateway hot-reload ──────────────────────────────────────
+    # Order matters: write config → stop OLD gateway → autostart NEW.
+    # If we skipped the stop step, ``autostart_nanobot()`` would short-
+    # circuit on ``/health`` 200 with ``already_running`` and the user
+    # would still be running the old config.
+    restart_status, restart_detail, stopped_gateway_processes = (
+        await _restart_nanobot_gateway_after_config_save()
+    )
+
     response = _nanobot_config_response(path)
     try:
         instances = prime_instances_cache(await runtime_registry.discover())
@@ -1827,6 +1848,10 @@ async def set_nanobot_config(body: NanobotConfigRequest):
         },
         "websocket_token_generated": bool(generated_websocket_token),
         "instances": [serialize_instance(instance) for instance in instances],
+        "restart_attempted": True,
+        "restart_status": restart_status,
+        "restart_detail": restart_detail,
+        "stopped_gateway_processes": len(stopped_gateway_processes),
     }
 
 
@@ -2136,6 +2161,150 @@ def _stop_running_nanobot_processes(*, grace_s: float = 3.0) -> list[dict[str, A
         except Exception:
             pass
     return stopped
+
+
+def _stop_running_nanobot_gateway_processes(*, grace_s: float = 3.0) -> list[dict[str, Any]]:
+    """Stop only ``nanobot gateway`` processes — leave other nanobot CLI runs alone.
+
+    ``set_nanobot_config()`` calls this when the user finishes the Configure
+    wizard so we can hot-reload the gateway without rebooting XSafeClaw. The
+    broader ``_stop_running_nanobot_processes()`` helper is intentionally
+    aggressive (it is used during reinstall to free file locks); reusing it
+    here would also kill ``nanobot run`` / ``nanobot tools`` style sessions a
+    user may have started manually. So we narrow the matcher to processes
+    whose argv explicitly contains ``gateway``.
+
+    Returns one record per terminated process so the caller can stream a
+    friendly log line back to the UI.
+    """
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+
+    targets: list[Any] = []
+    own_pid = os.getpid()
+    for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+        try:
+            info = proc.info
+        except Exception:
+            continue
+        pid = info.get("pid")
+        if not pid or pid == own_pid:
+            continue
+        name = (info.get("name") or "").lower()
+        exe = (info.get("exe") or "").lower()
+        cmdline = info.get("cmdline") or []
+        if not cmdline:
+            continue
+        try:
+            first_arg = Path(cmdline[0]).name.lower()
+        except Exception:
+            first_arg = str(cmdline[0]).lower()
+
+        looks_like_nanobot = (
+            name in {"nanobot", "nanobot.exe"}
+            or first_arg in {"nanobot", "nanobot.exe"}
+            or "nanobot-ai" in exe
+            or exe.endswith("nanobot")
+            or exe.endswith("nanobot.exe")
+        )
+        if not looks_like_nanobot:
+            continue
+
+        # Only target processes whose argv explicitly contains the
+        # ``gateway`` subcommand. This protects user-launched ``nanobot run``
+        # / ``nanobot tools`` sessions from being killed by a Configure save.
+        argv_tail = [str(token).lower() for token in cmdline[1:]]
+        if "gateway" not in argv_tail:
+            continue
+        targets.append(proc)
+
+    stopped: list[dict[str, Any]] = []
+    for proc in targets:
+        record: dict[str, Any] = {
+            "pid": proc.pid,
+            "name": (proc.info.get("name") or "") if hasattr(proc, "info") else "",
+            "exe": (proc.info.get("exe") or "") if hasattr(proc, "info") else "",
+            "cmdline": (proc.info.get("cmdline") or []) if hasattr(proc, "info") else [],
+            "method": "terminate",
+        }
+        try:
+            proc.terminate()
+        except Exception as exc:
+            record["method"] = "terminate-failed"
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            stopped.append(record)
+            continue
+        stopped.append(record)
+
+    if not stopped:
+        return stopped
+
+    try:
+        psutil.wait_procs([t for t in targets], timeout=max(0.5, grace_s))
+    except Exception:
+        pass
+
+    for proc, record in zip(targets, stopped):
+        try:
+            if proc.is_running():
+                try:
+                    proc.kill()
+                    record["method"] = "kill"
+                except Exception as exc:
+                    record["method"] = "kill-failed"
+                    record["error"] = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            pass
+    return stopped
+
+
+async def _restart_nanobot_gateway_after_config_save(
+    *,
+    timeout_s: float = 45.0,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    """Stop the running nanobot gateway and autostart a fresh one.
+
+    Returns ``(restart_status, restart_detail, stopped_gateway_processes)``.
+    Each step is wrapped in its own ``try`` so a failure surfaces a clear
+    ``restart_detail`` instead of a 500 — the config file write itself has
+    already succeeded by the time this helper runs.
+
+    Tests can monkeypatch this helper to short-circuit the gateway restart
+    (e.g. ``monkeypatch.setattr(system, "_restart_nanobot_gateway_after_config_save", fake)``)
+    without having to mock ``psutil`` or ``autostart_nanobot`` individually.
+    """
+    stopped_gateway_processes: list[dict[str, Any]] = []
+    try:
+        stopped_gateway_processes = await asyncio.to_thread(
+            _stop_running_nanobot_gateway_processes
+        )
+    except Exception as exc:  # noqa: BLE001 – stop is best-effort
+        return (
+            "failed",
+            (
+                f"failed to stop running nanobot gateway processes: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            stopped_gateway_processes,
+        )
+
+    try:
+        from ...services.runtime_autostart import autostart_nanobot
+
+        status, detail = await autostart_nanobot(timeout_s=timeout_s)
+    except Exception as exc:  # noqa: BLE001 – we never want to 500 here
+        return (
+            "failed",
+            (
+                f"unhandled error while restarting nanobot gateway: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            stopped_gateway_processes,
+        )
+
+    return status, detail, stopped_gateway_processes
 
 
 async def _run_cmd(

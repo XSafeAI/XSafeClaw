@@ -1276,6 +1276,15 @@ def test_nanobot_config_api_redacts_and_updates_default_config(monkeypatch, tmp_
         lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
     )
 
+    async def _fake_restart(**_kwargs):
+        return "skipped", "stubbed in test", []
+
+    monkeypatch.setattr(
+        system_routes,
+        "_restart_nanobot_gateway_after_config_save",
+        _fake_restart,
+    )
+
     client = TestClient(app)
     initial = client.get("/api/system/nanobot/config")
 
@@ -1361,6 +1370,15 @@ def test_nanobot_config_api_allows_base_config_without_provider_model(monkeypatc
         lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
     )
 
+    async def _fake_restart(**_kwargs):
+        return "skipped", "stubbed in test", []
+
+    monkeypatch.setattr(
+        system_routes,
+        "_restart_nanobot_gateway_after_config_save",
+        _fake_restart,
+    )
+
     client = TestClient(app)
     response = client.post(
         "/api/system/nanobot/config",
@@ -1423,6 +1441,15 @@ def test_nanobot_config_api_generates_websocket_token_when_required(monkeypatch,
         system_routes,
         "_ensure_nanobot_xsafeclaw_overlay",
         lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
+    )
+
+    async def _fake_restart(**_kwargs):
+        return "skipped", "stubbed in test", []
+
+    monkeypatch.setattr(
+        system_routes,
+        "_restart_nanobot_gateway_after_config_save",
+        _fake_restart,
     )
 
     client = TestClient(app)
@@ -1545,6 +1572,15 @@ def test_nanobot_config_save_repairs_legacy_integer_heartbeat(monkeypatch, tmp_p
         system_routes,
         "_ensure_nanobot_xsafeclaw_overlay",
         lambda **_kwargs: asyncio.sleep(0, result=(True, "success", "overlay installed")),
+    )
+
+    async def _fake_restart(**_kwargs):
+        return "skipped", "stubbed in test", []
+
+    monkeypatch.setattr(
+        system_routes,
+        "_restart_nanobot_gateway_after_config_save",
+        _fake_restart,
     )
 
     client = TestClient(app)

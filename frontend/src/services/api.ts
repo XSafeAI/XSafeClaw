@@ -223,6 +223,27 @@ export interface NanobotConfigResponse {
     configured_instance_id: string | null;
   };
   instances?: RuntimeInstance[];
+  /**
+   * Set by ``POST /system/nanobot/config`` when the backend tries to hot-reload
+   * the local ``nanobot gateway`` after writing the new config. ``GET`` of the
+   * same endpoint never sets these because it doesn't restart anything.
+   */
+  restart_attempted?: boolean;
+  /**
+   * Status of the gateway restart attempt. Mirrors ``StartResult`` from the
+   * backend ``runtime_autostart`` module:
+   *   - ``"started"``         – old gateway was stopped, new one is now serving ``/health``
+   *   - ``"already_running"`` – ``/health`` was already 200 (typically after we
+   *     successfully stopped the old gateway, the new one came up before the
+   *     post-write probe)
+   *   - ``"skipped"``         – nanobot CLI / config not present, so nothing to start
+   *   - ``"failed"``          – stop or autostart raised; see ``restart_detail``
+   */
+  restart_status?: 'started' | 'already_running' | 'skipped' | 'failed' | string;
+  /** Human-readable detail / failure reason corresponding to ``restart_status``. */
+  restart_detail?: string;
+  /** Number of nanobot gateway processes the backend terminated before restart. */
+  stopped_gateway_processes?: number;
 }
 
 export interface NanobotConfigPayload {

@@ -13,6 +13,7 @@ import {
   Loader2,
   MapPin,
   Plug,
+  RefreshCw,
   Search,
   Settings2,
   Shield,
@@ -75,8 +76,20 @@ const copy = {
     applying: '正在应用配置...',
     applyBtn: '应用配置',
     applyingBtn: '应用中...',
+    applyingRestart: '正在写入 Nanobot 配置并重启 gateway，通常需要 10-45 秒。请不要关闭此页面。',
+    applyingRestartHint: '完成前请勿离开本页或重新点击应用按钮，重启过程中后台正在停止旧 gateway 并启动新 gateway。',
     saved: 'Nanobot 配置已保存',
-    savedDesc: 'Nanobot 运行时已完成配置。修改 provider、model、gateway、WebSocket 或 token 后，请重启 nanobot gateway 让运行时加载最新配置。',
+    savedDesc: 'Nanobot 配置已保存并已重启，最新配置已生效。',
+    savedAlreadyRunning: 'Nanobot 配置已保存，gateway 已在运行中并复用最新配置。',
+    savedSkippedDesc: '配置已保存。未检测到正在运行的 nanobot gateway，下次启动时会自动加载最新配置。',
+    savedRestartFailed: '配置已保存，但 Nanobot gateway 自动重启失败。',
+    savedRestartFailedDesc: '请在下方查看失败详情，可点击“重试重启”重新尝试，或返回向导重新提交。',
+    savedRestartFailedRetry: '重试重启',
+    savedRestartFailedRetrying: '重启中...',
+    savedRestartFailedRetrySuccess: '重启成功，最新配置已生效。',
+    savedRestartFailedRetrySkipped: '未触发重启：未检测到 nanobot 安装或可重启的 gateway。',
+    savedStoppedSummary: '已停止旧 gateway 进程数：{count}',
+    savedRestartDetailLabel: '重启详情',
     savedPartial: '配置已保存但仍不完整',
     savedPartialDesc: '后端返回 provider/model 尚未完整配置，请返回向导补齐模型与密钥。',
     continueConfigure: '继续配置',
@@ -175,7 +188,7 @@ const copy = {
       desc: '向导已收集 Nanobot 默认运行时配置。下一步会预览即将写入的 ~/.nanobot/config.json。',
       quickstart: '快速开始会使用默认工作区、Gateway、WebSocket 和 Guard 设置。',
       manual: '手动配置会按你刚才填写的每一项写入。',
-      restart: '保存后如已启动 nanobot gateway，请重启它以加载新配置。',
+      restart: '点击"应用配置"后，XSafeClaw 会自动停止旧的 nanobot gateway 并启动新 gateway，无需重启 XSafeClaw 本体。整个过程通常需要 10-45 秒。',
     },
     review: {
       title: '配置预览',
@@ -221,8 +234,20 @@ const copy = {
     applying: 'Applying configuration...',
     applyBtn: 'Apply Configuration',
     applyingBtn: 'Applying...',
+    applyingRestart: 'Writing Nanobot config and restarting the gateway. This usually takes 10-45 seconds. Please keep this page open.',
+    applyingRestartHint: 'Do not leave this page or click apply again. The backend is stopping the old gateway and starting a new one with the latest config.',
     saved: 'Nanobot config saved',
-    savedDesc: 'The Nanobot runtime is configured. Restart nanobot gateway after changing provider, model, gateway, WebSocket, or token settings.',
+    savedDesc: 'Nanobot config has been saved and the gateway restarted. The latest config is active.',
+    savedAlreadyRunning: 'Nanobot config has been saved. The gateway is already running and will pick up the latest config.',
+    savedSkippedDesc: 'Config saved. No running nanobot gateway was detected, so the latest config will load on the next start.',
+    savedRestartFailed: 'Config was saved, but Nanobot gateway failed to restart automatically.',
+    savedRestartFailedDesc: 'Check the failure detail below. You can click "Retry Restart" to try again or return to the wizard to resubmit.',
+    savedRestartFailedRetry: 'Retry Restart',
+    savedRestartFailedRetrying: 'Restarting...',
+    savedRestartFailedRetrySuccess: 'Restart succeeded. The latest config is active.',
+    savedRestartFailedRetrySkipped: 'Restart not triggered: nanobot installation or a restartable gateway was not detected.',
+    savedStoppedSummary: 'Old gateway processes stopped: {count}',
+    savedRestartDetailLabel: 'Restart detail',
     savedPartial: 'Config saved but still incomplete',
     savedPartialDesc: 'The backend reports provider/model is still incomplete. Return to the wizard and finish model setup.',
     continueConfigure: 'Continue Configuring',
@@ -321,7 +346,7 @@ const copy = {
       desc: 'The wizard has collected the default Nanobot runtime config. The next step reviews what will be written to ~/.nanobot/config.json.',
       quickstart: 'QuickStart will use default workspace, Gateway, WebSocket, and Guard settings.',
       manual: 'Manual setup will write each value you just reviewed.',
-      restart: 'After saving, restart nanobot gateway if it is already running.',
+      restart: 'After you click "Apply Configuration", XSafeClaw will stop the old nanobot gateway and start a new one — no XSafeClaw restart is required. This usually takes 10-45 seconds.',
     },
     review: {
       title: 'Review Configuration',
@@ -1023,7 +1048,17 @@ function ReviewStep({
           ))}
         </tbody></table>
       </div>
-      {submitting && <div className="flex items-center gap-2 text-accent text-[13px]"><Loader2 className="w-4 h-4 animate-spin" /> {copy[locale].applying}</div>}
+      {submitting && (
+        <div className="rounded-xl border border-accent/30 bg-accent/5 p-4 space-y-2">
+          <div className="flex items-start gap-2 text-accent text-[13px] font-semibold">
+            <Loader2 className="w-4 h-4 animate-spin flex-shrink-0 mt-0.5" />
+            <span>{copy[locale].applyingRestart}</span>
+          </div>
+          <p className="text-[11px] leading-5 text-text-muted pl-6">
+            {copy[locale].applyingRestartHint}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -1040,6 +1075,10 @@ export default function NanobotConfigure() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [savedModelConfigured, setSavedModelConfigured] = useState(false);
+  const [restartStatus, setRestartStatus] = useState<string>('');
+  const [restartDetail, setRestartDetail] = useState<string>('');
+  const [stoppedGatewayCount, setStoppedGatewayCount] = useState<number>(0);
+  const [retryingRestart, setRetryingRestart] = useState(false);
   const [error, setError] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showWsToken, setShowWsToken] = useState(false);
@@ -1235,12 +1274,51 @@ export default function NanobotConfigure() {
       setConfig(res.data);
       setForm(formFromConfig(res.data));
       setSavedModelConfigured(Boolean(res.data.model_configured));
+      setRestartStatus(typeof res.data.restart_status === 'string' ? res.data.restart_status : '');
+      setRestartDetail(typeof res.data.restart_detail === 'string' ? res.data.restart_detail : '');
+      setStoppedGatewayCount(
+        typeof res.data.stopped_gateway_processes === 'number' ? res.data.stopped_gateway_processes : 0,
+      );
       setSaved(true);
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       setError(typeof detail === 'string' ? detail : detail?.message || err?.message || labels.errorFallback);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Re-trigger ``POST /system/nanobot/config`` with the current form so the
+  // backend re-runs the gateway stop+autostart sequence. This is the user-
+  // facing "Retry Restart" button on the success page when the first save
+  // succeeded but the auto-restart leg failed.
+  const handleRetryRestart = async () => {
+    setRetryingRestart(true);
+    setError('');
+    try {
+      const payload: NanobotConfigPayload = {
+        ...form,
+        provider: form.provider.trim(),
+        model: normalizeModelForProvider(form.provider, form.model),
+        api_key: form.api_key?.trim() || null,
+        clear_api_key: form.clear_api_key,
+        api_base: form.api_base?.trim() || null,
+        websocket_token: form.websocket_token?.trim() || null,
+      };
+      const res = await systemAPI.setNanobotConfig(payload);
+      setConfig(res.data);
+      setForm(formFromConfig(res.data));
+      setSavedModelConfigured(Boolean(res.data.model_configured));
+      setRestartStatus(typeof res.data.restart_status === 'string' ? res.data.restart_status : '');
+      setRestartDetail(typeof res.data.restart_detail === 'string' ? res.data.restart_detail : '');
+      setStoppedGatewayCount(
+        typeof res.data.stopped_gateway_processes === 'number' ? res.data.stopped_gateway_processes : 0,
+      );
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : detail?.message || err?.message || labels.errorFallback);
+    } finally {
+      setRetryingRestart(false);
     }
   };
 
@@ -1257,6 +1335,42 @@ export default function NanobotConfigure() {
 
   if (saved) {
     const complete = savedModelConfigured;
+    // ``restart_status`` was added in the same commit that introduced the
+    // gateway hot-reload. Older backends won't return it, so absence means
+    // "the backend didn't try to restart" — we treat that as the legacy
+    // success path and show the original copy.
+    const restartFailed = complete && restartStatus === 'failed';
+    const restartSkipped = complete && restartStatus === 'skipped';
+    const restartAlreadyRunning = complete && restartStatus === 'already_running';
+    let title: string;
+    let description: string;
+    let iconKind: 'success' | 'warning' | 'failure';
+    if (!complete) {
+      title = labels.savedPartial;
+      description = labels.savedPartialDesc;
+      iconKind = 'warning';
+    } else if (restartFailed) {
+      title = labels.savedRestartFailed;
+      description = labels.savedRestartFailedDesc;
+      iconKind = 'failure';
+    } else if (restartSkipped) {
+      title = labels.saved;
+      description = labels.savedSkippedDesc;
+      iconKind = 'success';
+    } else if (restartAlreadyRunning) {
+      title = labels.saved;
+      description = labels.savedAlreadyRunning;
+      iconKind = 'success';
+    } else {
+      title = labels.saved;
+      description = labels.savedDesc;
+      iconKind = 'success';
+    }
+    const stoppedSummary = stoppedGatewayCount > 0
+      ? labels.savedStoppedSummary.replace('{count}', String(stoppedGatewayCount))
+      : '';
+    const showRetryButton = restartFailed;
+
     return (
       <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
         <div className="w-full max-w-lg">
@@ -1265,15 +1379,38 @@ export default function NanobotConfigure() {
           </div>
           <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
             <div className="flex flex-col items-center gap-6 py-4">
-              <div className={`w-16 h-16 rounded-full flex items-center justify-center ${complete ? 'bg-emerald-500/15' : 'bg-amber-500/15'}`}>
-                {complete ? <CheckCircle className="w-9 h-9 text-emerald-400" /> : <AlertTriangle className="w-9 h-9 text-amber-300" />}
+              <div className={`w-16 h-16 rounded-full flex items-center justify-center ${
+                iconKind === 'success'
+                  ? 'bg-emerald-500/15'
+                  : iconKind === 'failure'
+                    ? 'bg-red-500/15'
+                    : 'bg-amber-500/15'
+              }`}>
+                {iconKind === 'success' && <CheckCircle className="w-9 h-9 text-emerald-400" />}
+                {iconKind === 'warning' && <AlertTriangle className="w-9 h-9 text-amber-300" />}
+                {iconKind === 'failure' && <XCircle className="w-9 h-9 text-red-400" />}
               </div>
-              <div className="text-center">
-                <p className="text-lg font-bold text-text-primary">{complete ? labels.saved : labels.savedPartial}</p>
-                <p className="text-[13px] text-text-secondary mt-2 leading-6">{complete ? labels.savedDesc : labels.savedPartialDesc}</p>
+              <div className="text-center w-full">
+                <p className="text-lg font-bold text-text-primary">{title}</p>
+                <p className="text-[13px] text-text-secondary mt-2 leading-6">{description}</p>
+                {(stoppedSummary || (restartFailed && restartDetail)) && (
+                  <div className="mt-4 rounded-xl border border-border bg-surface-0 p-3 text-left space-y-1">
+                    {stoppedSummary && (
+                      <p className="text-[11px] text-text-muted">{stoppedSummary}</p>
+                    )}
+                    {restartFailed && restartDetail && (
+                      <div className="text-[11px] text-text-secondary leading-5">
+                        <p className="text-text-muted">{labels.savedRestartDetailLabel}:</p>
+                        <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-[10px] text-text-secondary">
+                          {restartDetail}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <div className="flex flex-col sm:flex-row gap-3">
-                {complete && (
+              <div className="flex flex-col sm:flex-row gap-3 flex-wrap justify-center">
+                {complete && !restartFailed && (
                   <>
                     <button
                       type="button"
@@ -1291,17 +1428,36 @@ export default function NanobotConfigure() {
                     </button>
                   </>
                 )}
+                {showRetryButton && (
+                  <button
+                    type="button"
+                    onClick={handleRetryRestart}
+                    disabled={retryingRestart}
+                    className="flex items-center justify-center gap-2 px-6 py-3 bg-accent hover:bg-accent/90 disabled:opacity-50 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25"
+                  >
+                    {retryingRestart ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    {retryingRestart ? labels.savedRestartFailedRetrying : labels.savedRestartFailedRetry}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
                     setSaved(false);
                     setStep(2);
+                    setRestartStatus('');
+                    setRestartDetail('');
+                    setStoppedGatewayCount(0);
                   }}
                   className="flex items-center justify-center gap-2 px-6 py-3 border border-border bg-surface-0 text-text-secondary hover:text-text-primary font-semibold rounded-xl transition-all"
                 >
                   {complete ? labels.editAgain : labels.continueConfigure}
                 </button>
               </div>
+              {error && (
+                <div className="flex items-center gap-2 text-red-400 text-[12px]">
+                  <XCircle className="w-4 h-4" /> {error}
+                </div>
+              )}
             </div>
           </div>
         </div>
