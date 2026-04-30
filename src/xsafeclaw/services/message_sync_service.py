@@ -123,17 +123,34 @@ class RuntimeSyncWorker:
         return source_session_id
 
     async def _cleanup_stale_sessions(self, existing_source_ids: set[str]) -> None:
+        # Only purge sessions whose ``jsonl_file_path`` is non-empty — those rows
+        # were created by JSONL ingestion and the runtime file is the source of
+        # truth, so a missing file means the session was deleted upstream.
+        # Sessions written directly to SQLite by ``chat.py`` (Hermes
+        # direct-persist path, see ``_persist_hermes_session`` /
+        # ``_persist_hermes_chat_turn``) leave ``jsonl_file_path`` NULL and must
+        # survive XSafeClaw restarts even when the runtime never produced a
+        # corresponding JSONL on disk.
         try:
             async with get_db_context() as db:
                 result = await db.execute(
-                    select(Session.session_id, Session.source_session_id)
+                    select(
+                        Session.session_id,
+                        Session.source_session_id,
+                        Session.jsonl_file_path,
+                    )
                     .where(Session.platform == self.instance.platform)
                     .where(Session.instance_id == self.instance.instance_id)
                 )
                 stale: list[str] = []
-                for session_id, source_session_id in result.all():
-                    if source_session_id and source_session_id not in existing_source_ids:
-                        stale.append(session_id)
+                for session_id, source_session_id, jsonl_file_path in result.all():
+                    if not source_session_id:
+                        continue
+                    if not jsonl_file_path:
+                        continue
+                    if source_session_id in existing_source_ids:
+                        continue
+                    stale.append(session_id)
                 for session_id in stale:
                     await self._delete_session_data_by_internal_id(db, session_id)
         except Exception as exc:
