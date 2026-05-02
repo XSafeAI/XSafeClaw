@@ -343,7 +343,7 @@ For the repository dev loop on Linux/macOS, `bash setup.sh` installs backend and
 
 - [**OpenClaw**](https://github.com/openclaw/openclaw) — The personal AI assistant platform that XSafeClaw is designed to protect. OpenClaw's open plugin architecture makes our guard integration possible.
 - [**Hermes Agent**](https://github.com/NousResearch/hermes-agent) — The local Python agent runtime and multi-platform gateway now supported as a first-class XSafeClaw runtime.
-- **nanobot** — The lightweight local agent runtime integrated through XSafeClaw's gateway, WebSocket, and Python hook support.
+- [**nanobot**](https://github.com/HKUDS/nanobot) — The lightweight local agent runtime integrated through XSafeClaw's gateway, WebSocket, and Python hook support.
 - [**AgentDoG**](https://github.com/AI45Lab/AgentDoG) — The diagnostic guardrail framework for AI agent safety. XSafeClaw's guard module is powered by AgentDoG's trajectory-level risk assessment and fine-grained safety taxonomy.
 - [**ISC-Bench**](https://github.com/wuyoscar/ISC-Bench) — Research on Internal Safety Collapse in frontier LLMs. ISC-Bench's insights into task-completion-driven safety failures have informed our red team testing design.
 - [**AgentHazard**](https://github.com/Yunhao-Feng/AgentHazard) — A benchmark for evaluating harmful behavior in computer-use agents. AgentHazard's attack taxonomy and execution-level risk categories have shaped our threat modeling.

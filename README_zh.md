@@ -330,7 +330,7 @@ cd frontend && npm run build     # 输出被 git 忽略的 Vite 产物到 src/xs
 
 - [**OpenClaw**](https://github.com/openclaw/openclaw) — XSafeClaw 所守护的个人 AI 助手平台。OpenClaw 开放的插件架构使我们的安全守卫集成成为可能。
 - [**Hermes Agent**](https://github.com/NousResearch/hermes-agent) — XSafeClaw 现在作为一等运行时支持的本机 Python 智能体与多平台 gateway。
-- **nanobot** — 通过 gateway、WebSocket 与 Python hook 接入 XSafeClaw 的轻量级本机智能体运行时。
+- [**nanobot**](https://github.com/HKUDS/nanobot) — 通过 gateway、WebSocket 与 Python hook 接入 XSafeClaw 的轻量级本机智能体运行时。
 - [**AgentDoG**](https://github.com/AI45Lab/AgentDoG) — AI 智能体安全诊断守卫框架。XSafeClaw 的 Guard 模块基于 AgentDoG 的轨迹级风险评估和细粒度安全分类体系构建。
 - [**ISC-Bench**](https://github.com/wuyoscar/ISC-Bench) — 前沿大语言模型内部安全崩溃研究。ISC-Bench 对任务完成驱动型安全失败的深入洞察，为我们的红队测试设计提供了重要参考。
 - [**AgentHazard**](https://github.com/Yunhao-Feng/AgentHazard) — 计算机使用智能体有害行为评估基准。AgentHazard 的攻击分类体系和执行级风险类别为我们的威胁建模提供了借鉴。
