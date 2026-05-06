@@ -1125,7 +1125,13 @@ async def get_install_status():
         config_exists=config_exists,
     )
 
+    try:
+        xsafeclaw_version = importlib_metadata.version("xsafeclaw")
+    except importlib_metadata.PackageNotFoundError:
+        xsafeclaw_version = None
+
     return {
+        "xsafeclaw_version": xsafeclaw_version,
         "openclaw_installed": openclaw_ready,
         "openclaw_version": openclaw_version,
         "openclaw_error": openclaw_error,

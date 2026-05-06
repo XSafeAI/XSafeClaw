@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, ShieldAlert, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical } from 'lucide-react';
+import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { guardAPI } from '../services/api';
+import { systemAPI } from '../services/api';
 
 function useTheme() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -22,25 +22,21 @@ export default function Layout() {
   const location = useLocation();
   const { theme, toggle } = useTheme();
   const { locale, setLocale, t } = useI18n();
-  const [pendingCount, setPendingCount] = useState(0);
+  const [packageVersion, setPackageVersion] = useState<string | null>(null);
 
-  // Poll the global PendingApproval list so the sidebar badge reflects unsafe
-  // tool calls awaiting a human reviewer regardless of which runtime / session
-  // produced them. Failures stay silent so a transient backend hiccup never
-  // empties the badge in a way that hides real pending work.
   useEffect(() => {
     let cancelled = false;
-    const poll = async () => {
+    (async () => {
       try {
-        const { data } = await guardAPI.pending(false);
-        if (!cancelled) setPendingCount(Array.isArray(data) ? data.length : 0);
+        const { data } = await systemAPI.installStatus();
+        if (!cancelled && data.xsafeclaw_version) {
+          setPackageVersion(data.xsafeclaw_version);
+        }
       } catch {
-        // ignore
+        // ignore — keep badge empty or fallback below
       }
-    };
-    poll();
-    const timer = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(timer); };
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const navigation: Array<{
@@ -48,12 +44,10 @@ export default function Layout() {
     href: string;
     icon: typeof Shield;
     desc: string;
-    badge?: number;
   }> = [
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,       desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
-    { name: t.layout.approvals,       href: '/approvals',        icon: ShieldAlert,    desc: t.layout.descApprovals, badge: pendingCount },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
     { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },
   ];
@@ -67,7 +61,9 @@ export default function Layout() {
           <img src="/logo.png" alt="XSafeClaw" className="w-10 h-10 object-contain" />
           <div className="flex items-center gap-2">
             <span className="text-[15px] font-bold text-text-primary tracking-tight">{t.layout.brand}</span>
-            <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">V1.0</span>
+            <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded" title="XSafeClaw package version">
+              {packageVersion ? `v${packageVersion}` : 'v?'}
+            </span>
           </div>
         </div>
 
@@ -95,11 +91,7 @@ export default function Layout() {
               >
                 <Icon className={`w-[18px] h-[18px] ${isActive ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}`} />
                 <span>{item.name}</span>
-                {item.badge && item.badge > 0 ? (
-                  <span className="ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[10px] font-bold animate-pulse">
-                    {item.badge}
-                  </span>
-                ) : isActive && (
+                {isActive && (
                   <ChevronRight className="w-3.5 h-3.5 ml-auto text-accent/50" />
                 )}
               </NavLink>

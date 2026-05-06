@@ -983,16 +983,21 @@ export default function CrewTab({
                           aria-pressed={isSelected}
                         >
                           <div className="tc-model-option-head">
-                            <span className="tc-model-option-name">{model.name}</span>
-                            {model.isNew || model.isLastUsed ? (
-                              <span className="tc-model-option-flags">
-                                {model.isNew ? (
-                                  <span className="tc-model-option-flag tc-model-option-flag-new">{townText.create.newFlag}</span>
-                                ) : null}
-                                {model.isLastUsed ? (
-                                  <span className="tc-model-option-flag tc-model-option-flag-last-used">{townText.create.lastUsedFlag}</span>
-                                ) : null}
-                              </span>
+                            <div className="tc-model-option-head-main">
+                              <span className="tc-model-option-name">{model.name}</span>
+                              {model.isNew || model.isLastUsed ? (
+                                <span className="tc-model-option-flags">
+                                  {model.isNew ? (
+                                    <span className="tc-model-option-flag tc-model-option-flag-new">{townText.create.newFlag}</span>
+                                  ) : null}
+                                  {model.isLastUsed ? (
+                                    <span className="tc-model-option-flag tc-model-option-flag-last-used">{townText.create.lastUsedFlag}</span>
+                                  ) : null}
+                                </span>
+                              ) : null}
+                            </div>
+                            {isSelected ? (
+                              <span className="tc-model-option-flag tc-model-option-flag-selected">{townText.create.selectedLabel}</span>
                             ) : null}
                           </div>
                         </button>

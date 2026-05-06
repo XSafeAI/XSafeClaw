@@ -55,14 +55,14 @@ function StepBar({ active, steps }: { active: number; steps: { id: number; label
         <div key={step.id} className="flex items-center">
           <div className="flex flex-col items-center gap-1">
             <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all
-              ${active > step.id ? 'bg-emerald-500 text-white' : active === step.id ? 'bg-accent text-white ring-2 ring-accent/40' : 'bg-surface-2 text-text-muted'}`}>
+              ${active > step.id ? 'bg-blue-600 text-white' : active === step.id ? 'bg-blue-600 text-white ring-2 ring-blue-400/50' : 'bg-surface-2 text-text-muted'}`}>
               {active > step.id ? <CheckCircle className="w-4 h-4" /> : step.id}
             </div>
-            <span className={`text-[11px] font-medium whitespace-nowrap ${active === step.id ? 'text-accent' : active > step.id ? 'text-emerald-400' : 'text-text-muted'}`}>
+            <span className={`text-[11px] font-medium whitespace-nowrap ${active === step.id ? 'text-blue-300' : active > step.id ? 'text-blue-400' : 'text-text-muted'}`}>
               {step.label}
             </span>
           </div>
-          {i < steps.length - 1 && <div className={`w-16 h-0.5 mx-2 mb-5 ${active > step.id ? 'bg-emerald-500/60' : 'bg-border'}`} />}
+          {i < steps.length - 1 && <div className={`w-16 h-0.5 mx-2 mb-5 ${active > step.id ? 'bg-blue-600/60' : 'bg-border'}`} />}
         </div>
       ))}
     </div>
@@ -76,7 +76,7 @@ function TerminalLog({ lines, waitingText }: { lines: LogLine[]; waitingText?: s
     <div ref={ref} className="bg-[#0d0d0d] border border-border rounded-xl p-4 font-mono text-[12px] leading-5 h-40 overflow-y-auto space-y-0.5">
       {lines.length === 0 && <span className="text-text-muted">{waitingText}</span>}
       {lines.map(l => (
-        <div key={l.id} className={l.kind === 'success' ? 'text-emerald-400' : l.kind === 'error' ? 'text-red-400' : l.kind === 'info' ? 'text-sky-400' : 'text-text-secondary'}>
+        <div key={l.id} className={l.kind === 'success' ? 'text-blue-400' : l.kind === 'error' ? 'text-red-400' : l.kind === 'info' ? 'text-sky-400' : 'text-text-secondary'}>
           <span className="text-text-muted select-none">$ </span>{l.text}
         </div>
       ))}
@@ -93,7 +93,7 @@ function ProgressBar({ percent, label }: { percent: number; label: string }) {
       </div>
       <div className="w-full h-2 bg-surface-2 rounded-full overflow-hidden">
         <div
-          className="h-full bg-gradient-to-r from-accent to-emerald-400 rounded-full transition-all duration-300 ease-out"
+          className="h-full bg-gradient-to-r from-blue-600 to-blue-400 rounded-full transition-all duration-300 ease-out"
           style={{ width: `${percent}%` }}
         />
       </div>
@@ -153,7 +153,7 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
 
   return (
     <div
-      className={`border rounded-2xl p-6 transition-all ${isInstalled ? 'border-emerald-500/30 bg-emerald-500/5' : accentColor} ${cardClickable ? 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-emerald-500/10' : ''}`}
+      className={`border rounded-2xl p-6 transition-all ${isInstalled ? 'border-blue-500/30 bg-blue-500/5' : accentColor} ${cardClickable ? 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-blue-500/10' : ''}`}
       role={cardClickable ? 'button' : undefined}
       tabIndex={cardClickable ? 0 : undefined}
       onClick={handleCardClick}
@@ -161,9 +161,9 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
       aria-label={cardClickable ? `${t.setup.openConfigureAria || 'Open configure wizard for'} ${name}` : undefined}
     >
       <div className="flex items-start gap-4">
-        <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${isInstalled ? 'bg-emerald-500/15' : iconBg}`}>
+        <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${isInstalled ? 'bg-blue-500/15' : iconBg}`}>
           {isInstalled ? (
-            <CheckCircle className="w-6 h-6 text-emerald-400" />
+            <CheckCircle className="w-6 h-6 text-blue-400" />
           ) : installing ? (
             <Loader2 className="w-6 h-6 text-text-muted animate-spin" />
           ) : isUnknown ? (
@@ -225,7 +225,7 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
             event.stopPropagation();
             onConfigure();
           }}
-          className="w-full mt-4 flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-[13px] transition-all shadow bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/25"
+          className="w-full mt-4 flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-[13px] transition-all shadow bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/25"
         >
           <Settings2 className="w-4 h-4" />
           {t.setup.openConfigure || 'Open Configure'}
@@ -244,7 +244,7 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
               event.stopPropagation();
               window.location.replace('/agent-valley');
             }}
-            className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"
+            className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-blue-500/30 text-blue-300 hover:bg-blue-500/10"
           >
             <MapPin className="w-3.5 h-3.5" />
             {t.setup.enterTown || 'Enter Town'}
@@ -255,7 +255,7 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
               event.stopPropagation();
               window.location.replace('/monitor');
             }}
-            className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"
+            className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-blue-500/30 text-blue-300 hover:bg-blue-500/10"
           >
             <Activity className="w-3.5 h-3.5" />
             {t.setup.enterBackend || 'Enter Backend'}
@@ -622,16 +622,16 @@ export default function Setup() {
                   </p>
                   <div className="space-y-1.5 font-mono text-[12px]">
                     <p className="text-text-secondary"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNode}</span></p>
-                    <p className="text-emerald-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
+                    <p className="text-blue-400 select-all">curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && nvm install 22</p>
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentOpenClaw}</span></p>
-                    <p className="text-emerald-400 select-all">npm install -g openclaw@latest</p>
+                    <p className="text-blue-400 select-all">npm install -g openclaw@latest</p>
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{t.setup.commentNanobot}</span></p>
-                    <p className="text-emerald-400 select-all break-all">{manualNanobot.uv}</p>
-                    <p className="text-emerald-400 select-all">{manualNanobot.install}</p>
-                    <p className="text-emerald-400 select-all">{manualNanobot.onboard}</p>
+                    <p className="text-blue-400 select-all break-all">{manualNanobot.uv}</p>
+                    <p className="text-blue-400 select-all">{manualNanobot.install}</p>
+                    <p className="text-blue-400 select-all">{manualNanobot.onboard}</p>
                     <p className="text-text-secondary mt-1 leading-5 not-italic font-sans">{t.setup.nanobotOfficialFlowHint}</p>
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
-                    <p className="text-emerald-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
+                    <p className="text-blue-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
                   </div>
                 </div>
               )}
@@ -647,7 +647,7 @@ export default function Setup() {
 
               {(stage === 'install_failed' || stage === 'install_hermes_failed' || detectionError) && (
                 <button onClick={handleRetry}
-                  className="w-full py-2.5 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-accent/25">
+                  className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-all text-sm shadow-lg shadow-blue-500/25">
                   {detectionError ? (t.setup.retryDetect || 'Retry detection') : t.setup.retryInstall}
                 </button>
               )}
@@ -672,7 +672,7 @@ export default function Setup() {
                   {nodeStatus.step === 'resolving' ? (
                     <Loader2 className="w-4 h-4 text-accent animate-spin flex-shrink-0" />
                   ) : (
-                    <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                    <CheckCircle className="w-4 h-4 text-blue-400 flex-shrink-0" />
                   )}
                   <span className={`text-[13px] ${nodeStatus.step === 'resolving' ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
                     {nodeStatus.step === 'resolving' ? t.setup.resolvingLTS : t.setup.nodeLTS.replace('{v}', nodeStatus.version ?? '')}
@@ -685,7 +685,7 @@ export default function Setup() {
                       {nodeStatus.step === 'downloading' ? (
                         <Loader2 className="w-4 h-4 text-accent animate-spin flex-shrink-0" />
                       ) : (
-                        <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                        <CheckCircle className="w-4 h-4 text-blue-400 flex-shrink-0" />
                       )}
                       <span className={`text-[13px] ${nodeStatus.step === 'downloading' ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
                         {nodeStatus.step === 'downloading' ? t.setup.downloading : t.setup.downloadComplete}
@@ -707,7 +707,7 @@ export default function Setup() {
                     {nodeStatus.step === 'extracting' ? (
                       <Loader2 className="w-4 h-4 text-accent animate-spin flex-shrink-0" />
                     ) : (
-                      <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                      <CheckCircle className="w-4 h-4 text-blue-400 flex-shrink-0" />
                     )}
                     <span className={`text-[13px] ${nodeStatus.step === 'extracting' ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
                       {nodeStatus.step === 'extracting' ? t.setup.extracting : t.setup.nodeReady}

@@ -178,6 +178,30 @@ function classifyActiveSessions(events: EventItem[], cutoffMs: number): Set<stri
   return active;
 }
 
+/** Sessions whose *latest* event time falls on the browser's local calendar day (00:00–23:59:59.999). */
+function classifySessionsLatestEventOnLocalCalendarDay(
+  events: EventItem[],
+  reference: Date = new Date(),
+): Set<string> {
+  const latestPerSession = new Map<string, number>();
+  events.forEach((e) => {
+    const t = new Date(e.started_at).getTime();
+    const prev = latestPerSession.get(e.session_id) ?? 0;
+    if (t > prev) latestPerSession.set(e.session_id, t);
+  });
+  const start = new Date(reference);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(reference);
+  end.setHours(23, 59, 59, 999);
+  const lo = start.getTime();
+  const hi = end.getTime();
+  const out = new Set<string>();
+  latestPerSession.forEach((t, sid) => {
+    if (t >= lo && t <= hi) out.add(sid);
+  });
+  return out;
+}
+
 /* ============ Sub-Components ============ */
 const roleConfig: Record<string, { icon: typeof User; color: string; bg: string; label: string }> = {
   user:       { icon: User,     color: 'text-blue-400',    bg: 'bg-blue-500/10 border-blue-500/20',    label: 'User' },
@@ -1233,7 +1257,10 @@ export default function Monitor() {
 
   /* ---------- Session filter sets ---------- */
   const activeSessionIds = useMemo(() => classifyActiveSessions(allEvents, 3600_000), [allEvents]);       // last 1h
-  const todaySessionIds  = useMemo(() => classifyActiveSessions(allEvents, 86400_000), [allEvents]);      // last 24h
+  const todaySessionIds = useMemo(
+    () => classifySessionsLatestEventOnLocalCalendarDay(allEvents),
+    [allEvents],
+  );
 
   /* ---------- Derived timeline data ---------- */
   const eventsBySession = useMemo(() => {
@@ -1267,12 +1294,15 @@ export default function Monitor() {
     if (sessionFilter === 'all') return allRows;
     const allowed = sessionFilter === 'active' ? activeSessionIds : todaySessionIds;
     const filtered = allRows.filter(r => allowed.has(r.sessionId));
-    // If "active" is empty, fall back to "today"; if that's also empty, show all
-    if (filtered.length === 0 && sessionFilter === 'active') {
-      const todayFiltered = allRows.filter(r => todaySessionIds.has(r.sessionId));
-      return todayFiltered.length > 0 ? todayFiltered : allRows;
+    if (sessionFilter === 'active') {
+      if (filtered.length === 0) {
+        const todayFiltered = allRows.filter(r => todaySessionIds.has(r.sessionId));
+        return todayFiltered.length > 0 ? todayFiltered : allRows;
+      }
+      return filtered;
     }
-    return filtered.length > 0 ? filtered : allRows;
+    // 'today' — strict: no fallback to all rows when empty
+    return filtered;
   }, [allRows, sessionFilter, activeSessionIds, todaySessionIds]);
 
   /* Events from visible rows only */

@@ -23,6 +23,11 @@ export default function World() {
       }
 
       if (!cancelled) {
+        try {
+          sessionStorage.setItem('xsafeclaw:setup_visited', '1');
+        } catch {
+          /* ignore */
+        }
         const { search, hash } = window.location;
         window.location.replace(`/agent-valley.html${search}${hash}`);
       }

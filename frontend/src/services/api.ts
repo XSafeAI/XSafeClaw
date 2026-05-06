@@ -95,6 +95,7 @@ export interface SystemStatusResponse {
 }
 
 export interface InstallStatusResponse {
+  xsafeclaw_version?: string | null;
   openclaw_installed: boolean;
   hermes_installed?: boolean;
   openclaw_version: string | null;

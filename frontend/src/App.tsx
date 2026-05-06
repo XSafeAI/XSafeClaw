@@ -8,7 +8,6 @@ import Assets from './pages/Assets';
 import RiskScanner from './pages/RiskScanner';
 import RiskTest from './pages/RiskTest';
 import Chat from './pages/Chat';
-import Approvals from './pages/Approvals';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
 import ConfigureSelector from './pages/ConfigureSelector';
@@ -135,7 +134,6 @@ function AppRoutes() {
         <Route path="/risk-test" element={<RiskTest />} />
         <Route path="/safety-rehearsal" element={<RiskScanner />} />
         <Route path="/chat" element={<Chat />} />
-        <Route path="/approvals" element={<Approvals />} />
       </Route>
     </Routes>
   );
