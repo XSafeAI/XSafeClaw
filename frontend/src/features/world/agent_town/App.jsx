@@ -302,15 +302,6 @@ export default function App() {
     >
       <audio ref={audioRef} preload="auto" hidden />
       <nav className="town-hud">
-        {/* 与 backend Layout 顶栏相同：/logo.png 40×40，爪形品牌一致 */}
-        <img
-          src="/logo.png"
-          alt="XSafeClaw"
-          className="town-hud-brand"
-          width={40}
-          height={40}
-          draggable={false}
-        />
         <button
           type="button"
           className={`town-hud-btn town-hud-console ${consoleOpen ? 'is-on' : ''}`}
