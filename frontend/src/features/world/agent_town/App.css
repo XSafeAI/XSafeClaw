@@ -271,6 +271,17 @@ body.agent-town-page-cursor.cursor-grab-full *,
   image-rendering: pixelated;
 }
 
+.town-hud-brand {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  flex-shrink: 0;
+  pointer-events: none;
+  margin-right: 4px;
+  /* 与 backend Layout 侧栏 logo 同源 /logo.png，避免整栏 pixelation 糊边 */
+  image-rendering: auto;
+}
+
 .town-hud::before {
   content: '';
   position: absolute;

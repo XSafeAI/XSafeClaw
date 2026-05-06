@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical } from 'lucide-react';
+import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical, type LucideIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { systemAPI } from '../services/api';
 
@@ -42,10 +42,10 @@ export default function Layout() {
   const navigation: Array<{
     name: string;
     href: string;
-    icon: typeof Shield;
+    icon: LucideIcon;
     desc: string;
   }> = [
-    { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,       desc: t.layout.agentTownDesc },
+    { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,      desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },

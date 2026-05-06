@@ -50,7 +50,6 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-surface-0 flex flex-col items-center justify-center px-8 py-16">
 
-      {/* ── Logo + title ── */}
       <div className="flex flex-col items-center gap-4 mb-16">
         <img src="/logo.png" alt="XSafeClaw" className="w-20 h-20 object-contain rounded-2xl shadow-xl shadow-accent/25" />
         <div className="text-center space-y-2">
@@ -61,7 +60,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* ── Two cards in one row ── */}
       <div className="grid grid-cols-2 gap-6 w-full max-w-2xl">
         <Card
           icon={Globe}
