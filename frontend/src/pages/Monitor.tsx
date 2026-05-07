@@ -12,10 +12,11 @@ import {
   Brain, FileText,
   Hash, Cpu, DollarSign, Radio,
 } from 'lucide-react';
-import { sessionsAPI, eventsAPI, statsAPI, guardAPI, skillsAPI, memoryAPI } from '../services/api';
+import { sessionsAPI, eventsAPI, statsAPI, guardAPI, skillsAPI, memoryAPI, type RuntimeInstance } from '../services/api';
 import api from '../services/api';
 import ActivityTab from './ActivityTab';
 import { useI18n } from '../i18n';
+import { useRuntimeInstances } from '../hooks/useAPI';
 
 /* ============ Types ============ */
 interface SessionItem {
@@ -354,6 +355,7 @@ interface SkillItem {
 
 function SkillsPanel() {
   const { t } = useI18n();
+  const runtimeInstancesQuery = useRuntimeInstances();
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -367,24 +369,53 @@ function SkillsPanel() {
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
   const [expandedContent, setExpandedContent] = useState('');
   const [loadingContent, setLoadingContent] = useState(false);
+  const [selectedInstanceId, setSelectedInstanceId] = useState('');
+
+  const availableInstances: RuntimeInstance[] = useMemo(
+    () => (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled),
+    [runtimeInstancesQuery.data],
+  );
+  const selectedInstance = useMemo(
+    () => availableInstances.find(instance => instance.instance_id === selectedInstanceId) ?? null,
+    [availableInstances, selectedInstanceId],
+  );
+  const selectedIsNanobot = selectedInstance?.platform === 'nanobot';
+
+  useEffect(() => {
+    if (availableInstances.length === 0) {
+      setSelectedInstanceId('');
+      return;
+    }
+    const hasCurrent = availableInstances.some(instance => instance.instance_id === selectedInstanceId);
+    if (hasCurrent) return;
+    const defaultInstance = availableInstances.find(instance => instance.is_default) ?? availableInstances[0];
+    setSelectedInstanceId(defaultInstance.instance_id);
+  }, [availableInstances, selectedInstanceId]);
 
   const loadSkillContent = async (key: string) => {
     if (expandedSkill === key) { setExpandedSkill(null); return; }
     setExpandedSkill(key);
     setLoadingContent(true);
     try {
-      const res = await skillsAPI.content(key);
+      const res = await skillsAPI.content(key, selectedInstanceId || undefined);
       setExpandedContent(res.data.content || '');
     } catch { setExpandedContent('Failed to load content'); }
     setLoadingContent(false);
   };
 
   const fetchSkills = useCallback(async () => {
+    if (!selectedInstanceId) {
+      setSkills([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
-      const res = await skillsAPI.list();
+      const res = await skillsAPI.list(selectedInstanceId);
       const payload = res.data;
       setUnavailableReason(payload.unavailable ? (payload.reason || 'Unavailable for the current runtime.') : '');
       if (payload.error) setError(payload.error);
+      else setError('');
       const merged = (payload.skills || []).map((s: any) => {
         const scan = s.scanStatus;
         if (scan && typeof scan === 'object') {
@@ -404,14 +435,15 @@ function SkillsPanel() {
       setError(`Failed to fetch skills: ${err?.message || err}`);
     }
     setLoading(false);
-  }, []);
+  }, [selectedInstanceId]);
 
   useEffect(() => { fetchSkills(); }, [fetchSkills]);
 
   const toggleSkill = async (key: string, enabled: boolean) => {
+    if (selectedIsNanobot) return;
     setToggling(prev => new Set(prev).add(key));
     try {
-      await skillsAPI.update(key, { enabled });
+      await skillsAPI.update(key, { enabled }, selectedInstanceId || undefined);
       setSkills(prev => prev.map(s => (s.skillKey || s.name) === key ? { ...s, configEnabled: enabled } : s));
     } catch { /* ignore */ }
     setToggling(prev => { const n = new Set(prev); n.delete(key); return n; });
@@ -427,12 +459,12 @@ function SkillsPanel() {
       const total = eligibleKeys.length + otherKeys.length;
       if (eligibleKeys.length > 0) {
         setScanProgress(`Scanning ${eligibleKeys.length} eligible skills (${total} total)…`);
-        await skillsAPI.scanAll(eligibleKeys);
+        await skillsAPI.scanAll(eligibleKeys, undefined, selectedInstanceId || undefined);
         await fetchSkills();
       }
       if (otherKeys.length > 0) {
         setScanProgress(`Scanning ${otherKeys.length} remaining skills…`);
-        await skillsAPI.scanAll(otherKeys);
+        await skillsAPI.scanAll(otherKeys, undefined, selectedInstanceId || undefined);
       }
       setScanProgress('Scan complete. Refreshing…');
       await fetchSkills();
@@ -446,7 +478,7 @@ function SkillsPanel() {
   const scanSingleSkill = async (key: string) => {
     setScanningKeys(prev => new Set(prev).add(key));
     try {
-      const res = await skillsAPI.scanOne(key, true);
+      const res = await skillsAPI.scanOne(key, true, selectedInstanceId || undefined);
       setSkills(prev => prev.map(s => {
         if ((s.skillKey || s.name) !== key) return s;
         return { ...s, scanStatus: res.data?.status || 'error', scanRiskType: res.data?.risk_type || '', scanDetails: res.data?.details || '', scanTime: res.data?.scanned_at || 0 };
@@ -488,6 +520,26 @@ function SkillsPanel() {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <span className="text-[12px] text-text-muted">Runtime</span>
+        <select
+          value={selectedInstanceId}
+          onChange={e => setSelectedInstanceId(e.target.value)}
+          disabled={availableInstances.length === 0}
+          className="px-3 py-2 rounded-lg border border-border bg-surface-1 text-[12px] text-text-primary focus:outline-none focus:border-accent/50 disabled:opacity-60"
+        >
+          {availableInstances.length === 0 ? (
+            <option value="">{runtimeInstancesQuery.isError ? 'Runtime unavailable' : t.chat.connecting}</option>
+          ) : (
+            availableInstances.map(instance => (
+              <option key={instance.instance_id} value={instance.instance_id}>
+                {instance.display_name}
+                {instance.platform === 'nanobot' && instance.health_status !== 'healthy' ? ' · gateway offline' : ''}
+              </option>
+            ))
+          )}
+        </select>
+      </div>
       {unavailableReason && (
         <div className="px-4 py-3 bg-surface-1 border border-border rounded-lg text-[12px] text-text-muted">
           {unavailableReason}
@@ -547,6 +599,7 @@ function SkillsPanel() {
             const key = skill.skillKey || skill.name;
             const isToggling = toggling.has(key);
             const isSkillScanning = scanningKeys.has(key);
+            const canScanSkill = Boolean(skill.path);
             return (
               <div key={key}
                 onClick={() => loadSkillContent(key)}
@@ -574,13 +627,13 @@ function SkillsPanel() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5" onClick={e => e.stopPropagation()}>
-                    <button onClick={() => scanSingleSkill(key)} disabled={isSkillScanning}
+                    <button onClick={() => scanSingleSkill(key)} disabled={isSkillScanning || !canScanSkill}
                       className="p-1 rounded-md text-text-muted hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title={t.monitor.skills.rescan}>
+                      title={canScanSkill ? t.monitor.skills.rescan : 'No local SKILL.md path'}>
                       {isSkillScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanLine className="w-3.5 h-3.5" />}
                     </button>
-                    <button onClick={() => toggleSkill(key, !skill.configEnabled)} disabled={isToggling}
-                      title={skill.configEnabled ? t.monitor.skills.disable : t.monitor.skills.enable}>
+                    <button onClick={() => toggleSkill(key, !skill.configEnabled)} disabled={isToggling || selectedIsNanobot}
+                      title={selectedIsNanobot ? 'Nanobot skill config update is not supported yet' : (skill.configEnabled ? t.monitor.skills.disable : t.monitor.skills.enable)}>
                       {isToggling ? (
                         <Loader2 className="w-4 h-4 animate-spin text-text-muted" />
                       ) : (

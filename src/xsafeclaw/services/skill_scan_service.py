@@ -81,6 +81,36 @@ def _save_cache(cache: dict) -> None:
         logger.warning("Failed to save skill scan cache: %s", exc)
 
 
+def _cache_key(skill_key: str, cache_namespace: str | None) -> str:
+    if cache_namespace:
+        return f"{cache_namespace}:{skill_key}"
+    return skill_key
+
+
+def _resolve_cached_entry(cache: dict, skill_key: str, cache_namespace: str | None) -> dict[str, Any] | None:
+    if cache_namespace:
+        namespaced = cache.get(_cache_key(skill_key, cache_namespace))
+        if namespaced:
+            return namespaced
+    return cache.get(skill_key)
+
+
+def _resolve_cached_entry_with_fallbacks(
+    cache: dict,
+    skill_key: str,
+    cache_namespace: str | None,
+    legacy_cache_namespaces: list[str] | None = None,
+) -> dict[str, Any] | None:
+    entry = _resolve_cached_entry(cache, skill_key, cache_namespace)
+    if entry:
+        return entry
+    for legacy in legacy_cache_namespaces or []:
+        candidate = cache.get(_cache_key(skill_key, legacy))
+        if candidate:
+            return candidate
+    return cache.get(skill_key)
+
+
 def _file_sha256(path: str | Path) -> str:
     p = Path(path)
     if not p.exists():
@@ -240,13 +270,20 @@ async def scan_skill(
     skill_md_path: str | Path,
     *,
     force: bool = False,
+    cache_namespace: str | None = None,
+    legacy_cache_namespaces: list[str] | None = None,
 ) -> SkillScanResult:
     skill_md_path = Path(skill_md_path)
     file_hash = _file_sha256(skill_md_path)
 
     if not force:
         cache = _load_cache()
-        cached = cache.get(skill_key)
+        cached = _resolve_cached_entry_with_fallbacks(
+            cache,
+            skill_key,
+            cache_namespace,
+            legacy_cache_namespaces,
+        )
         if cached and cached.get("file_hash") == file_hash and file_hash:
             logger.debug("Cache hit for skill %s", skill_key)
             return SkillScanResult(
@@ -298,7 +335,7 @@ async def scan_skill(
     )
 
     cache = _load_cache()
-    cache[skill_key] = result.to_dict()
+    cache[_cache_key(skill_key, cache_namespace)] = result.to_dict()
     _save_cache(cache)
 
     return result
@@ -309,13 +346,22 @@ async def scan_all_skills(
     *,
     force: bool = False,
     concurrency: int = 5,
+    cache_namespace: str | None = None,
+    legacy_cache_namespaces: list[str] | None = None,
 ) -> list[SkillScanResult]:
     sem = asyncio.Semaphore(concurrency)
 
     async def _scan_one(key: str, dir_path: str) -> SkillScanResult:
         async with sem:
-            md_path = Path(dir_path) / "SKILL.md"
-            return await scan_skill(key, md_path, force=force)
+            path = Path(dir_path)
+            md_path = path if path.is_file() else path / "SKILL.md"
+            return await scan_skill(
+                key,
+                md_path,
+                force=force,
+                cache_namespace=cache_namespace,
+                legacy_cache_namespaces=legacy_cache_namespaces,
+            )
 
     tasks = [_scan_one(k, v) for k, v in skill_paths.items()]
     return list(await asyncio.gather(*tasks))

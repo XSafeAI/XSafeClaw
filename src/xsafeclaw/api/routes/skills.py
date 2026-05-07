@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from ...config import settings
 from ...runtime import RuntimeInstance
 from ...services import skill_scan_service
-from ..runtime_helpers import get_default_instance
+from ..runtime_helpers import get_default_instance, get_instance
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +24,60 @@ router = APIRouter()
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _HERMES_DIR = settings.hermes_home
+_SKILL_SCAN_PLATFORMS = {"openclaw", "hermes", "nanobot"}
+_NANOBOT_BUILTIN_SKILLS = [
+    {
+        "key": "deep-research",
+        "name": "deep-research",
+        "description": "Built-in Nanobot workflow for comprehensive multi-source research.",
+    },
+    {
+        "key": "python-scripts",
+        "name": "python-scripts",
+        "description": "Built-in Nanobot workflow for Python script tasks.",
+    },
+    {
+        "key": "workflows",
+        "name": "workflows",
+        "description": "Built-in Nanobot multi-step workflow guidance.",
+    },
+    {
+        "key": "mcp-curl",
+        "name": "mcp-curl",
+        "description": "Built-in Nanobot skill for MCP/curl request patterns.",
+    },
+]
 
 
 def _is_hermes(instance: RuntimeInstance | None) -> bool:
     """True when the resolved runtime instance is Hermes."""
     return bool(instance and instance.platform == "hermes")
+
+
+def _is_nanobot(instance: RuntimeInstance | None) -> bool:
+    return bool(instance and instance.platform == "nanobot")
+
+
+def _supports_skill_scan(instance: RuntimeInstance | None) -> bool:
+    return bool(instance and instance.platform in _SKILL_SCAN_PLATFORMS)
+
+
+def _cache_namespace(instance: RuntimeInstance | None) -> str | None:
+    if _supports_skill_scan(instance):
+        return str(instance.instance_id)
+    return None
+
+
+def _legacy_cache_namespaces(instance: RuntimeInstance | None) -> list[str]:
+    if not instance:
+        return []
+    return [str(instance.platform)]
+
+
+async def _resolve_skills_instance(instance_id: str | None) -> RuntimeInstance | None:
+    if instance_id:
+        return await get_instance(instance_id)
+    return await get_default_instance()
 
 
 def _config_path_for(instance: RuntimeInstance | None) -> Path:
@@ -182,6 +231,14 @@ def _build_skill_paths(instance: RuntimeInstance | None) -> dict[str, str]:
 
     scan_bases: list[Path] = []
 
+    if _is_nanobot(instance):
+        config_path = Path(instance.config_path).expanduser() if instance and instance.config_path else None
+        if config_path:
+            skills_dir = config_path.parent / "skills"
+            if skills_dir.is_dir():
+                for skill_file in sorted(skills_dir.glob("*.md")):
+                    skill_map[skill_file.stem] = str(skill_file)
+        return skill_map
     if _is_hermes(instance):
         # Hermes: ~/.hermes/skills/
         scan_bases.append(_HERMES_DIR / "skills")
@@ -226,6 +283,68 @@ def _build_skill_paths(instance: RuntimeInstance | None) -> dict[str, str]:
                 skill_map[subdir.name] = str(subdir)
 
     return skill_map
+
+
+def _skill_markdown_path(skill_path: str) -> Path:
+    base = Path(skill_path)
+    if base.is_file():
+        return base
+    return base / "SKILL.md"
+
+
+def _nanobot_skill_frontmatter(skill_md: Path) -> tuple[str, str]:
+    skill_name = skill_md.stem
+    skill_desc = ""
+    try:
+        raw = skill_md.read_text("utf-8")
+        if raw.startswith("---"):
+            parts = raw.split("---", 2)
+            if len(parts) >= 3:
+                import yaml
+
+                frontmatter = yaml.safe_load(parts[1]) or {}
+                if isinstance(frontmatter, dict):
+                    skill_name = str(frontmatter.get("name") or skill_name)
+                    skill_desc = str(frontmatter.get("description") or "")
+    except Exception:
+        pass
+    return skill_name, skill_desc
+
+
+def _build_nanobot_skills(skill_paths: dict[str, str]) -> list[dict]:
+    skills: list[dict] = []
+    for key, raw_path in sorted(skill_paths.items()):
+        md_path = Path(raw_path)
+        name, desc = _nanobot_skill_frontmatter(md_path)
+        skills.append(
+            {
+                "key": key,
+                "name": name,
+                "description": desc,
+                "emoji": "🧩",
+                "eligible": True,
+                "disabled": False,
+                "source": "nanobot:user",
+                "bundled": False,
+            }
+        )
+    existing_keys = {str(item.get("key") or item.get("name") or "") for item in skills}
+    for builtin in _NANOBOT_BUILTIN_SKILLS:
+        if builtin["key"] in existing_keys:
+            continue
+        skills.append(
+            {
+                "key": builtin["key"],
+                "name": builtin["name"],
+                "description": builtin["description"],
+                "emoji": "🧠",
+                "eligible": True,
+                "disabled": False,
+                "source": "nanobot:built-in",
+                "bundled": True,
+            }
+        )
+    return skills
 
 
 def _extract_json(raw: str) -> dict | list:
@@ -302,54 +421,53 @@ class ScanOneRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.get("/list")
-async def list_skills():
+async def list_skills(instance_id: str | None = None):
     """List skills/tools via agent CLI and enrich with config / scan data."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
-    if instance and instance.platform == "nanobot":
-        return {
-            "skills": [],
-            "unavailable": True,
-            "reason": "Skill management is currently only available for OpenClaw or Hermes runtimes.",
-        }
-    agent_bin = _find_agent_binary(instance)
-    if not agent_bin:
-        platform_name = "hermes" if _is_hermes(instance) else "openclaw"
-        raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
-
-    env = _build_env()
-
-    # Hermes: ``hermes tools list --json`` / OpenClaw: ``openclaw skills list --json``
-    if _is_hermes(instance):
-        cmd = [agent_bin, "tools", "list", "--json"]
+    skill_paths = _build_skill_paths(instance)
+    if _is_nanobot(instance):
+        skills_list = _build_nanobot_skills(skill_paths)
     else:
-        cmd = [agent_bin, "skills", "list", "--json"]
+        agent_bin = _find_agent_binary(instance)
+        if not agent_bin:
+            platform_name = "hermes" if _is_hermes(instance) else "openclaw"
+            raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to run agent CLI: {exc}")
+        env = _build_env()
 
-    if result.returncode != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"skills list failed (exit {result.returncode}): {result.stderr}",
-        )
+        # Hermes: ``hermes tools list --json`` / OpenClaw: ``openclaw skills list --json``
+        if _is_hermes(instance):
+            cmd = [agent_bin, "tools", "list", "--json"]
+        else:
+            cmd = [agent_bin, "skills", "list", "--json"]
 
-    try:
-        raw = result.stdout
-        data = _extract_json(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to run agent CLI: {exc}")
+
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"skills list failed (exit {result.returncode}): {result.stderr}",
+            )
+
+        try:
+            raw = result.stdout
+            data = _extract_json(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
+        skills_list = data.get("skills", []) if isinstance(data, dict) else data
 
     config = _read_config(instance)
     skills_config = config.get("skills", {})
-    skill_paths = _build_skill_paths(instance)
     cached_scans = skill_scan_service.get_all_cached()
 
-    skills_list = data.get("skills", []) if isinstance(data, dict) else data
+    namespace = _cache_namespace(instance)
+    legacy_namespaces = _legacy_cache_namespaces(instance)
     for skill in skills_list:
         key = skill.get("key") or skill.get("name", "")
         skill_cfg = skills_config.get(key, {})
@@ -359,12 +477,21 @@ async def list_skills():
         skill["configEnv"] = skill_cfg.get("env", {})
         skill["path"] = skill_paths.get(key, "")
 
-        scan_entry = cached_scans.get(key)
+        scan_entry = None
+        if namespace:
+            scan_entry = cached_scans.get(f"{namespace}:{key}")
+        if not scan_entry:
+            for legacy in legacy_namespaces:
+                scan_entry = cached_scans.get(f"{legacy}:{key}")
+                if scan_entry:
+                    break
+        if not scan_entry:
+            scan_entry = cached_scans.get(key)
         if scan_entry:
-            skill_dir = skill_paths.get(key)
-            if skill_dir:
-                current_hash = _file_sha256(Path(skill_dir) / "SKILL.md")
-                scanned_hash = scan_entry.get("fileHash", "")
+            skill_raw_path = skill_paths.get(key)
+            if skill_raw_path:
+                current_hash = _file_sha256(_skill_markdown_path(skill_raw_path))
+                scanned_hash = scan_entry.get("fileHash", "") or scan_entry.get("file_hash", "")
                 if current_hash and scanned_hash and current_hash != scanned_hash:
                     scan_entry = {**scan_entry, "status": "outdated"}
             skill["scanStatus"] = scan_entry
@@ -373,17 +500,16 @@ async def list_skills():
 
 
 @router.get("/check")
-async def check_skills():
+async def check_skills(instance_id: str | None = None):
     """Check skill/tool eligibility via agent CLI."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
-    if instance and instance.platform == "nanobot":
+    if _is_nanobot(instance):
         return {
             "checks": [],
-            "unavailable": True,
-            "reason": "Skill checks are currently only available for OpenClaw or Hermes runtimes.",
+            "unavailable": False,
         }
     agent_bin = _find_agent_binary(instance)
     if not agent_bin:
@@ -410,17 +536,17 @@ async def check_skills():
 
 
 @router.post("/scan-all")
-async def scan_all_skills(body: ScanAllRequest):
+async def scan_all_skills(body: ScanAllRequest, instance_id: str | None = None):
     """Trigger security scan on all (or selected) skills."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
-    if instance and instance.platform != "openclaw":
+    if not _supports_skill_scan(instance):
         return {
             "results": [],
             "unavailable": True,
-            "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
+            "reason": "Skill scanning is currently only available for discovered runtime instances.",
         }
     skill_paths = _build_skill_paths(instance)
     if body.keys:
@@ -431,6 +557,8 @@ async def scan_all_skills(body: ScanAllRequest):
         results = await skill_scan_service.scan_all_skills(
             skill_paths=skill_paths,
             force=body.force,
+            cache_namespace=_cache_namespace(instance),
+            legacy_cache_namespaces=_legacy_cache_namespaces(instance),
         )
         return {"results": [r.to_dict() for r in results]}
     except Exception as exc:
@@ -439,28 +567,33 @@ async def scan_all_skills(body: ScanAllRequest):
 
 
 @router.get("/scan-status")
-async def scan_status():
+async def scan_status(instance_id: str | None = None):
     """Return cached scan status for all skills."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
-    if instance and instance.platform != "openclaw":
+    if not _supports_skill_scan(instance):
         return {
             "results": {},
             "unavailable": True,
-            "reason": "Skill scanning is currently only available for OpenClaw runtimes.",
+            "reason": "Skill scanning is currently only available for discovered runtime instances.",
         }
     return {"results": skill_scan_service.get_all_cached(), "unavailable": False}
 
 
 @router.post("/{skill_key}/update")
-async def update_skill(skill_key: str, body: SkillUpdateRequest):
+async def update_skill(skill_key: str, body: SkillUpdateRequest, instance_id: str | None = None):
     """Update skill configuration in platform config file."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
+    if _is_nanobot(instance):
+        raise HTTPException(
+            status_code=501,
+            detail="Nanobot skill config update is not supported yet in XSafeClaw.",
+        )
     config = _read_config(instance)
     skills = config.setdefault("skills", {})
     entry = skills.setdefault(skill_key, {})
@@ -477,18 +610,18 @@ async def update_skill(skill_key: str, body: SkillUpdateRequest):
 
 
 @router.get("/{skill_key}/content")
-async def get_skill_content(skill_key: str):
+async def get_skill_content(skill_key: str, instance_id: str | None = None):
     """Read and return SKILL.md content for a skill."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
     skill_paths = _build_skill_paths(instance)
-    skill_dir = skill_paths.get(skill_key)
-    if not skill_dir:
+    skill_path = skill_paths.get(skill_key)
+    if not skill_path:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_key}' not found")
 
-    skill_md = Path(skill_dir) / "SKILL.md"
+    skill_md = _skill_markdown_path(skill_path)
     if not skill_md.exists():
         raise HTTPException(status_code=404, detail=f"SKILL.md not found for '{skill_key}'")
 
@@ -507,20 +640,26 @@ async def get_skill_content(skill_key: str):
 
 
 @router.post("/{skill_key}/scan")
-async def scan_skill(skill_key: str, body: ScanOneRequest):
+async def scan_skill(skill_key: str, body: ScanOneRequest, instance_id: str | None = None):
     """Scan a single skill."""
     try:
-        instance = await get_default_instance()
+        instance = await _resolve_skills_instance(instance_id)
     except HTTPException:
         instance = None
     skill_paths = _build_skill_paths(instance)
-    skill_dir = skill_paths.get(skill_key)
-    if not skill_dir:
+    skill_path = skill_paths.get(skill_key)
+    if not skill_path:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_key}' not found")
 
     try:
-        md_path = str(Path(skill_dir) / "SKILL.md")
-        result = await skill_scan_service.scan_skill(skill_key, md_path, force=body.force)
+        md_path = str(_skill_markdown_path(skill_path))
+        result = await skill_scan_service.scan_skill(
+            skill_key,
+            md_path,
+            force=body.force,
+            cache_namespace=_cache_namespace(instance),
+            legacy_cache_namespaces=_legacy_cache_namespaces(instance),
+        )
         return result.to_dict()
     except Exception as exc:
         logger.exception("scan_skill failed for %s", skill_key)
