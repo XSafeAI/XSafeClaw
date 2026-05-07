@@ -1056,10 +1056,10 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   const [modelId, setModelId] = useState('');
   const [modelApiKey, setModelApiKey] = useState('');
   const [modelShowKey, setModelShowKey] = useState(false);
-  const [savingModel, setSavingModel] = useState(false);
-  const [modelSaveResult, setModelSaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
-  const [modelSaveError, setModelSaveError] = useState('');
-  const [modelSaveNote, setModelSaveNote] = useState('');
+  const [, setSavingModel] = useState(false);
+  const [, setModelSaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const [, setModelSaveError] = useState('');
+  const [, setModelSaveNote] = useState('');
   const [finalApplying, setFinalApplying] = useState(false);
   const [finalApplyError, setFinalApplyError] = useState('');
   const [configurationComplete, setConfigurationComplete] = useState(false);
