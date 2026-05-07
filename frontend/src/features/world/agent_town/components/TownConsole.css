@@ -557,7 +557,7 @@
 .tc-runtime-picker-head small,
 .tc-runtime-hint {
   color: #bfa985;
-  font-family: var(--ui-font);
+  font-family: var(--font);
   font-size: 10px;
   line-height: 1.35;
   text-transform: none;
@@ -864,8 +864,8 @@
 
 .tc-inline-error-link {
   color: #60a5fa;
+  font-family: var(--font);
   font-size: 11px;
-  font-weight: 500;
   cursor: pointer;
   background: none;
   border: none;
@@ -5285,7 +5285,8 @@
 }
 
 .tc-model-setup-hint-mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: "SFMono-Regular", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.02em;
   color: #cdb28a;
   word-break: break-all;
 }
