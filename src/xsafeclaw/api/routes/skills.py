@@ -136,6 +136,21 @@ def _build_env() -> dict:
     return env
 
 
+_HERMES_EXECUTABLES = (
+    ("hermes.cmd", "hermes.exe", "hermes.bat", "hermes.ps1", "hermes")
+    if os.name == "nt"
+    else ("hermes",)
+)
+
+
+def _is_runnable_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if os.name == "nt":
+        return True
+    return os.access(path, os.X_OK)
+
+
 def _find_openclaw() -> str | None:
     """Find the openclaw binary (cross-platform)."""
     found = shutil.which("openclaw")
@@ -183,8 +198,38 @@ def _find_openclaw() -> str | None:
 
 
 def _find_hermes() -> str | None:
-    """Find the hermes binary."""
-    return shutil.which("hermes")
+    """Find the hermes binary.
+
+    Match ``system.py:_find_hermes``: non-login/service environments often lack
+    ``~/.local/bin`` on PATH even though the installer places ``hermes`` there.
+    """
+    env = _build_env()
+    extra_dirs: list[str] = []
+    local_bin = Path.home() / ".local" / "bin"
+    if local_bin.is_dir():
+        extra_dirs.append(str(local_bin))
+    for venv_bin in (
+        Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin",
+        Path.home() / "hermes-agent" / "venv" / "bin",
+    ):
+        if venv_bin.is_dir():
+            extra_dirs.append(str(venv_bin))
+            break
+
+    search_path = env.get("PATH", "") or ""
+    path_sep = os.pathsep
+    for d in extra_dirs:
+        if d not in search_path:
+            search_path = d + path_sep + search_path
+
+    for d in search_path.split(path_sep):
+        if not d:
+            continue
+        for executable in _HERMES_EXECUTABLES:
+            candidate = Path(d) / executable
+            if _is_runnable_file(candidate):
+                return str(candidate)
+    return shutil.which("hermes", path=search_path)
 
 
 def _find_agent_binary(instance: RuntimeInstance | None) -> str | None:
@@ -347,6 +392,29 @@ def _build_nanobot_skills(skill_paths: dict[str, str]) -> list[dict]:
     return skills
 
 
+def _skills_from_hermes_directories(skill_paths: dict[str, str]) -> list[dict]:
+    """When Hermes CLI JSON listing is unavailable, derive skills from ``~/.hermes/skills``."""
+    skills: list[dict] = []
+    for key, raw_path in sorted(skill_paths.items()):
+        md = _skill_markdown_path(raw_path)
+        if not md.exists():
+            continue
+        name, desc = _nanobot_skill_frontmatter(md)
+        skills.append(
+            {
+                "key": key,
+                "name": name or key,
+                "description": desc,
+                "emoji": "📦",
+                "eligible": True,
+                "disabled": False,
+                "source": "hermes:filesystem",
+                "bundled": False,
+            }
+        )
+    return skills
+
+
 def _extract_json(raw: str) -> dict | list:
     """Extract the first complete JSON object/array from a string that may
     contain non-JSON text before or after (e.g. plugin log lines)."""
@@ -384,6 +452,45 @@ def _extract_json(raw: str) -> dict | list:
             if depth == 0:
                 return json.loads(raw[start:i + 1])
     raise ValueError("Incomplete JSON in output")
+
+
+def _hermes_cli_skills_list(agent_bin: str, env: dict) -> list[dict] | None:
+    """Parse skills/tools from Hermes CLI; try ``--json`` then plain stdout.
+
+    Upstream Hermes versions differ: some reject ``tools list --json`` entirely.
+    """
+    attempts = (
+        [agent_bin, "tools", "list", "--json"],
+        [agent_bin, "skills", "list", "--json"],
+        [agent_bin, "tools", "list"],
+        [agent_bin, "skills", "list"],
+    )
+    for cmd in attempts:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+        except Exception:
+            continue
+        if result.returncode != 0:
+            continue
+        raw = (result.stdout or "").strip()
+        if not raw:
+            continue
+        try:
+            data = _extract_json(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            skills = data.get("skills") or data.get("tools") or []
+        elif isinstance(data, list):
+            skills = data
+        else:
+            skills = []
+        if not isinstance(skills, list):
+            continue
+        out = [s for s in skills if isinstance(s, dict)]
+        if out:
+            return out
+    return None
 
 
 def _file_sha256(path: Path) -> str:
@@ -430,19 +537,23 @@ async def list_skills(instance_id: str | None = None):
     skill_paths = _build_skill_paths(instance)
     if _is_nanobot(instance):
         skills_list = _build_nanobot_skills(skill_paths)
+    elif _is_hermes(instance):
+        env = _build_env()
+        agent_bin = _find_agent_binary(instance)
+        skills_list = []
+        if agent_bin:
+            cli_list = _hermes_cli_skills_list(agent_bin, env)
+            if cli_list is not None:
+                skills_list = cli_list
+        if not skills_list:
+            skills_list = _skills_from_hermes_directories(skill_paths)
     else:
         agent_bin = _find_agent_binary(instance)
         if not agent_bin:
-            platform_name = "hermes" if _is_hermes(instance) else "openclaw"
-            raise HTTPException(status_code=500, detail=f"{platform_name} binary not found")
+            raise HTTPException(status_code=500, detail="openclaw binary not found")
 
         env = _build_env()
-
-        # Hermes: ``hermes tools list --json`` / OpenClaw: ``openclaw skills list --json``
-        if _is_hermes(instance):
-            cmd = [agent_bin, "tools", "list", "--json"]
-        else:
-            cmd = [agent_bin, "skills", "list", "--json"]
+        cmd = [agent_bin, "skills", "list", "--json"]
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
@@ -460,17 +571,32 @@ async def list_skills(instance_id: str | None = None):
             data = _extract_json(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             raise HTTPException(status_code=500, detail=f"Invalid JSON from agent CLI: {exc}")
-        skills_list = data.get("skills", []) if isinstance(data, dict) else data
+        # ``.get("skills", [])`` does not default when the key exists with value null — that
+        # yielded None and caused TypeError in the merge loop (500 for OpenClaw/Hermes).
+        if isinstance(data, dict):
+            skills_list = data.get("skills") or []
+        elif isinstance(data, list):
+            skills_list = data
+        else:
+            skills_list = []
+        if not isinstance(skills_list, list):
+            skills_list = []
 
     config = _read_config(instance)
-    skills_config = config.get("skills", {})
+    skills_config = config.get("skills", {}) if isinstance(config, dict) else {}
+    if not isinstance(skills_config, dict):
+        skills_config = {}
     cached_scans = skill_scan_service.get_all_cached()
 
     namespace = _cache_namespace(instance)
     legacy_namespaces = _legacy_cache_namespaces(instance)
     for skill in skills_list:
+        if not isinstance(skill, dict):
+            continue
         key = skill.get("key") or skill.get("name", "")
         skill_cfg = skills_config.get(key, {})
+        if not isinstance(skill_cfg, dict):
+            skill_cfg = {}
 
         skill["configEnabled"] = skill_cfg.get("enabled", True)
         skill["hasApiKey"] = bool(skill_cfg.get("apiKey"))
@@ -487,7 +613,7 @@ async def list_skills(instance_id: str | None = None):
                     break
         if not scan_entry:
             scan_entry = cached_scans.get(key)
-        if scan_entry:
+        if scan_entry and isinstance(scan_entry, dict):
             skill_raw_path = skill_paths.get(key)
             if skill_raw_path:
                 current_hash = _file_sha256(_skill_markdown_path(skill_raw_path))
@@ -519,9 +645,29 @@ async def check_skills(instance_id: str | None = None):
     env = _build_env()
 
     if _is_hermes(instance):
-        cmd = [agent_bin, "tools", "check", "--json"]
-    else:
-        cmd = [agent_bin, "skills", "check", "--json"]
+        attempts = (
+            [agent_bin, "tools", "check", "--json"],
+            [agent_bin, "skills", "check", "--json"],
+            [agent_bin, "tools", "check"],
+            [agent_bin, "skills", "check"],
+        )
+        for cmd in attempts:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+            except Exception:
+                continue
+            if result.returncode != 0:
+                continue
+            raw = (result.stdout or "").strip()
+            if not raw:
+                continue
+            try:
+                return _extract_json(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return {"checks": [], "unavailable": False}
+
+    cmd = [agent_bin, "skills", "check", "--json"]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
