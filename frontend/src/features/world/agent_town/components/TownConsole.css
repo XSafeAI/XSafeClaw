@@ -270,7 +270,6 @@
 }
 
 .tc-roster-list,
-.tc-model-list,
 .tc-ledger-list,
 .tc-chat-messages,
 .tc-guard-list,
@@ -279,6 +278,17 @@
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
+}
+
+/* Create-agent model list: scroll with parent `.tc-summon-panel-top` only —
+   avoids nested wheels that pin the runtime block above a near-empty model area. */
+.tc-model-list {
+  overflow-x: hidden;
+  overflow-y: visible;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .tc-roster-list,
@@ -517,19 +527,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 0;
-  /* Keep the whole create panel scrollable on short viewports so
-     runtime cards cannot squeeze the model area out of sight. */
-  max-height: min(62vh, 540px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(240, 187, 96, 0.45) transparent;
-}
-.tc-model-drawer::-webkit-scrollbar { width: 6px; }
-.tc-model-drawer::-webkit-scrollbar-thumb {
-  background: rgba(240, 187, 96, 0.45);
-  border-radius: 999px;
+  overflow: visible;
 }
 
 .tc-runtime-picker {
@@ -567,19 +565,6 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
-  /* Compact the runtime chooser so the model picker remains visible
-     even when all three frameworks are installed. */
-  max-height: 92px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding-right: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(240, 187, 96, 0.45) transparent;
-}
-.tc-runtime-options::-webkit-scrollbar { width: 6px; }
-.tc-runtime-options::-webkit-scrollbar-thumb {
-  background: rgba(240, 187, 96, 0.45);
-  border-radius: 999px;
 }
 
 .tc-runtime-option {
@@ -647,15 +632,6 @@
 
 .tc-model-search {
   padding: 8px 10px;
-}
-
-.tc-model-list {
-  max-height: min(34vh, 240px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
 }
 
 .tc-model-drawer-actions {
@@ -5979,7 +5955,6 @@
 .tc-guard-list::-webkit-scrollbar,
 .tc-chat-messages::-webkit-scrollbar,
 .tc-roster-list::-webkit-scrollbar,
-.tc-model-list::-webkit-scrollbar,
 .tc-ledger-list::-webkit-scrollbar {
   width: 6px;
 }
@@ -5991,7 +5966,6 @@
 .tc-guard-list::-webkit-scrollbar-thumb,
 .tc-chat-messages::-webkit-scrollbar-thumb,
 .tc-roster-list::-webkit-scrollbar-thumb,
-.tc-model-list::-webkit-scrollbar-thumb,
 .tc-ledger-list::-webkit-scrollbar-thumb {
   background: rgba(240, 187, 96, 0.3);
   border-radius: 999px;
