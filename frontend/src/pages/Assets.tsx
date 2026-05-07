@@ -386,6 +386,11 @@ export default function Assets() {
     finally { setHwLoading(false); }
   }, []);
 
+  // Auto-trigger one hardware scan when users enter Asset Shield page.
+  useEffect(() => {
+    void loadHardware();
+  }, [loadHardware]);
+
   const loadBrowse = useCallback(async (path?: string) => {
     setBrowseLoading(true);
     setBrowseError('');

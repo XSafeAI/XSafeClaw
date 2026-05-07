@@ -954,18 +954,38 @@ export const systemAPI = {
 };
 
 export const skillsAPI = {
-  list: () => api.get<{ skills: any[]; error?: string; unavailable?: boolean; reason?: string }>('/skills/list'),
-  check: () => api.get<{ checks: any[] }>('/skills/check'),
-  update: (skillKey: string, data: { enabled?: boolean; api_key?: string; env?: Record<string, string> }) =>
-    api.post(`/skills/${skillKey}/update`, data),
-  content: (skillKey: string) =>
-    api.get<{ key: string; content: string; path: string; sizeBytes: number; modifiedAt: number }>(`/skills/${skillKey}/content`),
-  scanAll: (keys?: string[], force?: boolean) =>
-    api.post<{ results: any[] }>('/skills/scan-all', { keys, force }),
-  scanOne: (skillKey: string, force?: boolean) =>
-    api.post<any>(`/skills/${skillKey}/scan`, { force }),
-  scanStatus: () =>
-    api.get<Record<string, any>>('/skills/scan-status'),
+  list: (instanceId?: string) =>
+    api.get<{ skills: any[]; error?: string; unavailable?: boolean; reason?: string }>('/skills/list', {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  check: (instanceId?: string) =>
+    api.get<{ checks: any[] }>('/skills/check', {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  update: (
+    skillKey: string,
+    data: { enabled?: boolean; api_key?: string; env?: Record<string, string> },
+    instanceId?: string,
+  ) =>
+    api.post(`/skills/${skillKey}/update`, data, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  content: (skillKey: string, instanceId?: string) =>
+    api.get<{ key: string; content: string; path: string; sizeBytes: number; modifiedAt: number }>(`/skills/${skillKey}/content`, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  scanAll: (keys?: string[], force?: boolean, instanceId?: string) =>
+    api.post<{ results: any[] }>('/skills/scan-all', { keys, force }, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  scanOne: (skillKey: string, force?: boolean, instanceId?: string) =>
+    api.post<any>(`/skills/${skillKey}/scan`, { force }, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  scanStatus: (instanceId?: string) =>
+    api.get<Record<string, any>>('/skills/scan-status', {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
 };
 
 export const memoryAPI = {
