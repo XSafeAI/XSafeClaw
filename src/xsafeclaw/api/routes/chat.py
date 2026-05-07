@@ -139,6 +139,38 @@ def _safe_nanobot_filename(name: str) -> str:
     return _NANOBOT_UNSAFE_CHARS.sub("_", name).strip()
 
 
+# Storage prefixes that nanobot prepends to a chat_id when persisting a
+# session file. The websocket channel writes ``websocket:<chat_id>`` and the
+# REST channel writes ``api:<chat_id>`` — both surface as the JSONL metadata
+# ``key`` and therefore as the trace endpoint's ``source_session_id``.
+_NANOBOT_STORAGE_PREFIXES: tuple[str, ...] = ("websocket:", "api:")
+
+
+def _nanobot_canonical_session_key(chat_id: str | None) -> str:
+    """Return the storage-prefixed local session key for a nanobot chat.
+
+    nanobot's websocket channel persists every session under ``websocket:<chat_id>``
+    (see ``~/.nanobot/workspace/sessions/websocket_<chat_id>.jsonl``). The
+    chat_id we get back from ``NanobotGatewayClient.connect`` is the bare
+    UUID, so historically ``start_session`` stored the gateway client and
+    handed the frontend a ``session_key`` *without* the ``websocket:`` prefix.
+    The trace endpoint, however, derives its ``session_key`` from the JSONL
+    metadata, which always carries the prefix. The two views never matched
+    and Agent Town painted two cards for the same chat — and worse, every
+    follow-up send triggered ``_get_nanobot_gateway_session`` to relink
+    (because the cached client lived under the bare key) which forked a brand
+    new ``websocket:<new_chat_id>.jsonl`` and produced yet another duplicate.
+    Pinning every code path to the canonical prefixed form fixes both
+    duplications without requiring a frontend change.
+    """
+    text = str(chat_id or "").strip()
+    if not text:
+        return ""
+    if text.startswith(_NANOBOT_STORAGE_PREFIXES):
+        return text
+    return f"websocket:{text}"
+
+
 async def _resolve_chat_runtime(
     *,
     session_key: str | None = None,
@@ -162,6 +194,20 @@ async def _resolve_chat_runtime(
 
 
 def _nanobot_storage_session_keys(local_session_key: str) -> tuple[str, ...]:
+    """Return the candidate storage keys for a local nanobot session key.
+
+    Idempotent for keys that already carry a storage prefix
+    (``websocket:`` / ``api:``) — the prefixed key is tried first, then
+    the alternate channel + bare form as legacy fallbacks.
+    """
+    if local_session_key.startswith(_NANOBOT_STORAGE_PREFIXES):
+        prefix, _, bare = local_session_key.partition(":")
+        alt_prefix = "api" if prefix == "websocket" else "websocket"
+        return (
+            local_session_key,
+            f"{alt_prefix}:{bare}",
+            bare,
+        )
     return (
         f"websocket:{local_session_key}",
         f"api:{local_session_key}",
@@ -204,7 +250,14 @@ def _nanobot_session_file_path(
     if not instance.sessions_path:
         return None
     sessions_dir = Path(instance.sessions_path).expanduser()
-    candidate_key = f"websocket:{local_session_key}"
+    # Idempotent: already-prefixed keys (``websocket:abc`` / ``api:abc``)
+    # would otherwise become ``websocket:websocket:abc`` and write to a
+    # nonsensical second file.
+    candidate_key = (
+        local_session_key
+        if local_session_key.startswith(_NANOBOT_STORAGE_PREFIXES)
+        else f"websocket:{local_session_key}"
+    )
     file_name = f"{_safe_nanobot_filename(candidate_key.replace(':', '_'))}.jsonl"
     return sessions_dir / file_name
 
@@ -234,7 +287,13 @@ def _clone_nanobot_session_history(
             try:
                 first = json.loads(lines[0])
                 if first.get("_type") == "metadata":
-                    first["key"] = f"websocket:{new_local_session_key}"
+                    # Idempotent: the canonical local key already carries
+                    # the storage prefix, so don't double-prefix it.
+                    first["key"] = (
+                        new_local_session_key
+                        if new_local_session_key.startswith(_NANOBOT_STORAGE_PREFIXES)
+                        else f"websocket:{new_local_session_key}"
+                    )
                     lines[0] = json.dumps(first, ensure_ascii=False)
             except json.JSONDecodeError:
                 pass
@@ -1535,20 +1594,79 @@ async def _connect_nanobot_gateway(instance: RuntimeInstance) -> NanobotGatewayC
         ) from exc
 
 
+def _nanobot_session_lookup_keys(
+    instance: RuntimeInstance,
+    public_session_key: str,
+    local_session_key: str,
+) -> list[str]:
+    """Candidate gateway-cache keys for a nanobot chat session.
+
+    Tolerates legacy callers that still pass the bare ``<chat_id>`` form
+    while ``start_session`` (post-fix) caches under
+    ``websocket:<chat_id>``, and vice versa. Listed in priority order; the
+    first hit in ``_nanobot_gateway_sessions`` wins.
+    """
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for candidate_local in _nanobot_storage_session_keys(local_session_key):
+        candidate_public = encode_chat_session_key(instance, candidate_local)
+        if candidate_public in seen:
+            continue
+        seen.add(candidate_public)
+        candidates.append(candidate_public)
+    if public_session_key and public_session_key not in seen:
+        candidates.insert(0, public_session_key)
+    return candidates
+
+
 async def _get_nanobot_gateway_session(
     public_session_key: str,
     local_session_key: str,
     instance: RuntimeInstance,
 ) -> tuple[NanobotGatewayClient, str, str, bool]:
-    client = _nanobot_gateway_sessions.get(public_session_key)
-    if client is not None and client.is_open:
-        return client, local_session_key, public_session_key, False
-    if client is not None:
-        await client.disconnect()
-        _nanobot_gateway_sessions.pop(public_session_key, None)
+    # Look up the cached client under every form this session_key may have
+    # been registered with (bare ``<chat_id>``, ``websocket:<chat_id>``,
+    # ``api:<chat_id>``). A successful hit is then re-keyed to the
+    # canonical form so subsequent calls land directly in the fast path.
+    cached_client: NanobotGatewayClient | None = None
+    cached_key: str | None = None
+    for candidate_key in _nanobot_session_lookup_keys(
+        instance, public_session_key, local_session_key
+    ):
+        candidate_client = _nanobot_gateway_sessions.get(candidate_key)
+        if candidate_client is None:
+            continue
+        if candidate_client.is_open:
+            cached_client = candidate_client
+            cached_key = candidate_key
+            break
+        # Stale entry — drop it and keep looking.
+        await candidate_client.disconnect()
+        _nanobot_gateway_sessions.pop(candidate_key, None)
+
+    if cached_client is not None and cached_key is not None:
+        # Re-key under the canonical (websocket-prefixed) form so the trace
+        # endpoint and the gateway cache agree from this point forward.
+        canonical_local = _nanobot_canonical_session_key(local_session_key)
+        canonical_public = (
+            encode_chat_session_key(instance, canonical_local)
+            if canonical_local
+            else cached_key
+        )
+        if canonical_public and canonical_public != cached_key:
+            _nanobot_gateway_sessions.pop(cached_key, None)
+            _nanobot_gateway_sessions[canonical_public] = cached_client
+        return (
+            cached_client,
+            canonical_local or local_session_key,
+            canonical_public or cached_key,
+            False,
+        )
 
     relinked_client = await _connect_nanobot_gateway(instance)
-    relinked_local_session_key = relinked_client.chat_id or local_session_key
+    relinked_local_session_key = (
+        _nanobot_canonical_session_key(relinked_client.chat_id) or local_session_key
+    )
     relinked_public_session_key = encode_chat_session_key(
         instance,
         relinked_local_session_key,
@@ -2187,7 +2305,15 @@ async def start_session(request: StartSessionRequest | None = None):
     )
     if instance.platform == "nanobot":
         client = await _connect_nanobot_gateway(instance)
-        local_session_key = client.chat_id or local_session_key
+        # Pin the session_key to the same form nanobot writes to disk
+        # (``websocket:<chat_id>``). See ``_nanobot_canonical_session_key``
+        # for the full rationale — without this the trace endpoint and the
+        # gateway-session cache disagree on the key, Agent Town renders the
+        # same chat as two cards, and every follow-up message relinks into
+        # a brand-new chat (because the cache lookup misses).
+        local_session_key = (
+            _nanobot_canonical_session_key(client.chat_id) or local_session_key
+        )
         public_session_key = encode_chat_session_key(instance, local_session_key)
         _nanobot_gateway_sessions[public_session_key] = client
         return StartSessionResponse(
@@ -2740,11 +2866,27 @@ async def get_history(
 @router.post("/close-session")
 async def close_session(session_key: str = Query(..., description="Session key to close")):
     """Close a runtime chat session."""
-    instance, _, public_session_key = await _resolve_chat_runtime(session_key=session_key)
+    instance, local_session_key, public_session_key = await _resolve_chat_runtime(
+        session_key=session_key
+    )
     if instance.platform in {"openclaw", "hermes"}:
         client = _gateway_sessions.pop(public_session_key, None)
     else:
-        client = _nanobot_gateway_sessions.pop(public_session_key, None)
+        # Also drop any legacy bare/prefixed variants of the same chat so a
+        # client created before the canonicalisation fix doesn't linger as
+        # a half-open websocket after the user closes the agent card.
+        client = None
+        for candidate_key in _nanobot_session_lookup_keys(
+            instance, public_session_key, local_session_key
+        ):
+            popped = _nanobot_gateway_sessions.pop(candidate_key, None)
+            if popped is not None and client is None:
+                client = popped
+            elif popped is not None:
+                try:
+                    await popped.disconnect()
+                except Exception:
+                    pass
     if client:
         try:
             await client.disconnect()
