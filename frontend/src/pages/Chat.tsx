@@ -821,7 +821,12 @@ export default function Chat() {
       setMessageMap(prev => ({ ...prev, [key]: [] }));
       setActiveKey(key);
     } catch (err: any) {
-      alert(err.response?.data?.detail || t.chat.connectFailed);
+      const status = Number(err?.response?.status ?? 0);
+      const detail = String(err?.response?.data?.detail || '');
+      const isHermes401 = selectedPlatform === 'hermes' && (
+        status === 401 || /(^|\D)401(\D|$)|unauthorized/i.test(detail)
+      );
+      alert(isHermes401 ? t.chat.hermes401Reconfigure : (detail || t.chat.connectFailed));
     } finally {
       setConnecting(false);
     }

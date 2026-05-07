@@ -2495,7 +2495,16 @@ export default function TownConsole({
       });
 
       if (!res.ok) {
-        throw new Error(await readFetchError(res, 'Failed to create new agent session.'));
+        const detail = await readFetchError(res, 'Failed to create new agent session.');
+        const isHermes401 = selectedRuntime.platform === 'hermes' && (
+          res.status === 401 || /(^|\D)401(\D|$)|unauthorized/i.test(String(detail))
+        );
+        if (isHermes401) {
+          throw new Error(
+            townText.create.hermes401Reconfigure || '请回到setup界面，重新配置Hermes。',
+          );
+        }
+        throw new Error(detail);
       }
 
       const json = await res.json();

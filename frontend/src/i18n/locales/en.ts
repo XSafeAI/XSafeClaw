@@ -224,6 +224,7 @@ export const en = {
     hermesSwitchBannerDismiss: 'Dismiss',
     nanobotGatewayOffline: 'The nanobot Chat page requires nanobot gateway and the websocket channel. Run this in another terminal: nanobot gateway --port 18790 --verbose. The page will refresh status automatically after it starts.',
     connectFailed: 'Failed to connect to OpenClaw gateway, is it running?',
+    hermes401Reconfigure: 'Please return to Setup and reconfigure Hermes.',
     // Install modal
     installModalOpenclawTitle: 'OpenClaw Not Installed',
     installModalOpenclawDesc: 'OpenClaw must be installed before creating a session. Go to the setup wizard to complete the installation.',

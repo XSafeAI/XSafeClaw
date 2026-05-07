@@ -57,13 +57,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     print("🚀 Starting XSafeClaw Application...")
 
-    from .routes.system import sanitize_legacy_openclaw_config
+    from .routes.system import (
+        _ensure_hermes_api_key_synced,
+        sanitize_legacy_openclaw_config,
+    )
     if sanitize_legacy_openclaw_config():
         print("🧹 Removed legacy XSafeClaw config keys from openclaw.json")
     
     # Initialize database
     await init_db()
     print("✅ Database initialized")
+
+    # Mirror an existing Hermes API key into runtime settings without
+    # implicitly generating one when both sides are empty.
+    _ensure_hermes_api_key_synced(allow_generate_when_both_empty=False)
     
     # Start Message-based sync service
     if settings.enable_file_watcher:

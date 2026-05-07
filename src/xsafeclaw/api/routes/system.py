@@ -2595,6 +2595,8 @@ async def _wait_hermes_runtime_ready(
     from ...hermes_client import HermesClient
     from .chat import _extract_runtime_model_list, _runtime_catalog_match
 
+    _ensure_hermes_api_key_synced(allow_generate_when_both_empty=False)
+
     loop = asyncio.get_event_loop()
     deadline = loop.time() + timeout_s
     while loop.time() < deadline:
@@ -2836,7 +2838,9 @@ def _persist_hermes_api_key(key_value: str) -> None:
         _ensure_hermes_api_server_env()
 
 
-def _ensure_hermes_api_key_synced() -> tuple[str, str]:
+def _ensure_hermes_api_key_synced(
+    allow_generate_when_both_empty: bool = True,
+) -> tuple[str, str]:
     """Make XSafeClaw and Hermes share the same Hermes-API bearer token.
 
     §43b — fixes the "fresh-XSafeClaw-on-existing-Hermes" 401 trap.
@@ -2860,11 +2864,15 @@ def _ensure_hermes_api_key_synced() -> tuple[str, str]:
 
     | Hermes side | XSafeClaw side | Action                                  |
     |-------------|----------------|-----------------------------------------|
-    | empty       | empty          | generate new key, persist to both       |
+    | empty       | empty          | generate key or noop (see arg)          |
     | set         | empty          | mirror Hermes  → XSafeClaw              |
     | empty       | set            | mirror XSafeClaw → Hermes               |
     | set, equal  | set, equal     | no-op                                   |
     | set, differ | set, differ    | trust Hermes, overwrite XSafeClaw       |
+
+    ``allow_generate_when_both_empty=False`` is intended for implicit hot
+    paths (startup/readiness/model probes): when both sides are empty we
+    return ``("noop", "")`` and avoid writing new key material.
 
     Returns ``(action, key_value)`` where ``action`` is one of
     ``"noop"`` / ``"mirrored_from_hermes"`` / ``"mirrored_to_hermes"`` /
@@ -2890,6 +2898,11 @@ def _ensure_hermes_api_key_synced() -> tuple[str, str]:
         # request time. XSafeClaw's stale value would 401 forever otherwise.
         _persist_hermes_api_key(hermes_key)
         return ("synced_to_hermes_value", hermes_key)
+
+    # Both empty — caller controls whether this path should implicitly create
+    # new key material, or stay side-effect free.
+    if not allow_generate_when_both_empty:
+        return ("noop", "")
 
     # Both empty — first-time bring-up.
     import secrets
