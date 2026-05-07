@@ -1060,6 +1060,9 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   const [modelSaveResult, setModelSaveResult] = useState<'idle' | 'ok' | 'fail'>('idle');
   const [modelSaveError, setModelSaveError] = useState('');
   const [modelSaveNote, setModelSaveNote] = useState('');
+  const [finalApplying, setFinalApplying] = useState(false);
+  const [finalApplyError, setFinalApplyError] = useState('');
+  const [configurationComplete, setConfigurationComplete] = useState(false);
 
   // Per-provider endpoint presets shipped by the backend (§33).  Shape is
   // keyed by provider id; only ``alibaba`` populates anything today because
@@ -1292,8 +1295,8 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
     setModelSaveNote('');
   }
 
-  async function saveModelToHermes() {
-    if (!modelProviderId || !modelId) return;
+  async function saveModelToHermes(): Promise<{ ok: boolean; error?: string }> {
+    if (!modelProviderId || !modelId) return { ok: true };
     setSavingModel(true);
     setModelSaveResult('idle');
     setModelSaveError('');
@@ -1354,11 +1357,31 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
         // only, which is exactly what we want for cross-tab syncing.
         localStorage.setItem('xs_hermes_cfg_ping', String(detail.ts));
       } catch { /* non-fatal — the notification is best-effort */ }
+      return { ok: true };
     } catch (err: any) {
+      const error = err?.response?.data?.detail || String(err);
       setModelSaveResult('fail');
-      setModelSaveError(err?.response?.data?.detail || String(err));
+      setModelSaveError(error);
+      return { ok: false, error };
     } finally {
       setSavingModel(false);
+    }
+  }
+
+  async function finishHermesConfigure() {
+    setFinalApplying(true);
+    setFinalApplyError('');
+    try {
+      if (modelProviderId && modelId) {
+        const result = await saveModelToHermes();
+        if (!result.ok) {
+          setFinalApplyError(result.error || h.modelSaveFailed);
+          return;
+        }
+      }
+      setConfigurationComplete(true);
+    } finally {
+      setFinalApplying(false);
     }
   }
 
@@ -1585,6 +1608,55 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
   const home = (st.hermes_home as string) || '—';
   const gwOk = st.daemon_running === true;
   const cfgExists = st.config_exists === true;
+
+  if (configurationComplete) {
+    return (
+      <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
+        <div className="w-full max-w-lg">
+          <div className="flex flex-col items-center gap-3 mb-8">
+            <img src="/logo.png" alt="XSafeClaw" className="w-16 h-16 object-contain rounded-xl shadow-lg shadow-violet-600/25" />
+          </div>
+          <div className="bg-surface-1 border border-border rounded-2xl p-8 shadow-xl shadow-black/20">
+            <div className="flex flex-col items-center gap-6 py-4">
+              <div className="w-16 h-16 rounded-full flex items-center justify-center bg-emerald-500/15">
+                <CheckCircle className="w-9 h-9 text-emerald-400" />
+              </div>
+              <div className="text-center w-full">
+                <p className="text-lg font-bold text-text-primary">{h.completeTitle}</p>
+                <p className="text-[13px] text-text-secondary mt-2 leading-6">{h.completeDesc}</p>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-3 flex-wrap justify-center">
+                <button
+                  type="button"
+                  onClick={() => window.location.replace('/agent-valley')}
+                  className="flex items-center justify-center gap-2 px-6 py-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25"
+                >
+                  <MapPin className="w-4 h-4" /> {(t.configure as any).enterTown || t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.location.replace('/monitor')}
+                  className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all border border-violet-500/40 text-violet-300 hover:bg-violet-500/10"
+                >
+                  <Activity className="w-4 h-4" /> {(t.configure as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfigurationComplete(false);
+                    setStep(STEP_DONE);
+                  }}
+                  className="flex items-center justify-center gap-2 px-6 py-3 border border-border bg-surface-0 text-text-secondary hover:text-text-primary font-semibold rounded-xl transition-all"
+                >
+                  {h.completeEditAgain}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-surface-0 flex items-center justify-center p-6">
@@ -2083,30 +2155,6 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                     </div>
                   )}
 
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={saveModelToHermes}
-                      disabled={savingModel || !modelProviderId || !modelId}
-                      className="flex items-center gap-1.5 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[12px] font-semibold rounded-lg transition-all"
-                    >
-                      {savingModel ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
-                      {h.modelSaveBtn}
-                    </button>
-                    {modelSaveResult === 'ok' && (
-                      <span className="text-[12px] text-emerald-400 flex items-center gap-1">
-                        <CheckCircle className="w-3.5 h-3.5" /> {h.modelSaveSuccess}
-                      </span>
-                    )}
-                    {modelSaveResult === 'fail' && (
-                      <span className="text-[12px] text-red-400 flex items-center gap-1">
-                        <XCircle className="w-3.5 h-3.5" /> {modelSaveError || h.modelSaveFailed}
-                      </span>
-                    )}
-                  </div>
-                  {modelSaveNote && (
-                    <p className="text-[11px] text-text-muted">{modelSaveNote}</p>
-                  )}
                 </>
               )}
 
@@ -2281,17 +2329,15 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                 <p className="text-[12px] font-semibold text-text-primary">{h.hintTitle}</p>
                 <p className="text-[12px] text-text-muted leading-relaxed">{h.hintBody}</p>
               </div>
-              {/* §57 — dual CTA, Hermes tint. */}
-              <div className="flex flex-col sm:flex-row items-center gap-3">
-                <button type="button" onClick={() => window.location.replace('/agent-valley')}
-                  className="flex items-center gap-2 px-6 py-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25">
-                  <MapPin className="w-4 h-4" /> {(t.configure as any).enterTown || t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
-                </button>
-                <button type="button" onClick={() => window.location.replace('/monitor')}
-                  className="flex items-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all border border-violet-500/40 text-violet-300 hover:bg-violet-500/10">
-                  <Activity className="w-4 h-4" /> {(t.configure as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
-                </button>
+              <div className="bg-violet-500/5 border border-violet-500/20 rounded-xl p-4 text-[12px] text-text-secondary">
+                {h.doneSaveHint}
               </div>
+              {finalApplyError && (
+                <div className="flex items-start gap-2 bg-red-500/5 border border-red-500/30 rounded-xl p-3 text-[12px] text-red-300">
+                  <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>{finalApplyError}</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -2323,7 +2369,24 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                   </>
                 )}
               </button>
-            ) : null}
+            ) : (
+              <button
+                type="button"
+                onClick={finishHermesConfigure}
+                disabled={finalApplying}
+                className="flex items-center gap-1.5 px-6 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-[13px] font-semibold rounded-xl transition-all shadow-lg shadow-violet-600/25"
+              >
+                {finalApplying ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> {h.finishApplyingBtn}
+                  </>
+                ) : (
+                  <>
+                    {h.finishApplyBtn} <ChevronRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
         <p className="text-center text-[11px] text-text-muted mt-6">{t.common.poweredBy}</p>
