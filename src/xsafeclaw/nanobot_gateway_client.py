@@ -35,6 +35,38 @@ def _ws_is_open(ws: object | None) -> bool:
         return not bool(getattr(ws, "closed", False))
 
 
+def _nanobot_event_text(payload: dict[str, Any]) -> str:
+    """Best-effort text extraction from websocket event payloads.
+
+    Upstream websocket docs use ``text`` for outbound ``delta`` / ``message``,
+    but some gateway builds may surface equivalent text under ``content`` or
+    ``message``. We prefer ``text`` first and only fall back when needed.
+    """
+    for key in ("text", "content", "message"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            if value:
+                return value
+            continue
+        if isinstance(value, list):
+            joined = "".join(
+                str(item.get("text", ""))
+                for item in value
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+            if joined:
+                return joined
+            continue
+        if isinstance(value, dict):
+            nested = value.get("text")
+            if nested:
+                return str(nested)
+            continue
+        if value:
+            return str(value)
+    return ""
+
+
 class NanobotGatewayClient:
     """Small adapter over nanobot gateway's websocket channel."""
 
@@ -116,13 +148,22 @@ class NanobotGatewayClient:
         while True:
             payload = await asyncio.wait_for(self._recv_json(), timeout=deadline)
             event = str(payload.get("event") or "").strip()
-            text = str(payload.get("text") or "")
+            text = _nanobot_event_text(payload)
 
             if event == "delta":
+                if not text:
+                    continue
                 accumulated += text
                 yield {"type": "delta", "text": accumulated}
                 continue
             if event == "stream_end":
+                stream_id = str(payload.get("stream_id") or "").strip()
+                # nanobot websocket can emit segment boundaries mid-turn.
+                # ``tool-boundary`` marks a non-terminal segment end and must
+                # never close the current reply stream, even if we already
+                # accumulated partial assistant text.
+                if stream_id == "tool-boundary":
+                    continue
                 if not accumulated:
                     continue
                 yield {
@@ -133,7 +174,12 @@ class NanobotGatewayClient:
                 }
                 return
             if event == "message":
-                accumulated = text or accumulated
+                if text:
+                    accumulated = text
+                if not accumulated:
+                    # Ignore empty/non-text message frames; wait for a later
+                    # delta/finalizable segment instead of ending as empty.
+                    continue
                 yield {
                     "type": "final",
                     "text": accumulated,
