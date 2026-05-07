@@ -218,6 +218,7 @@ export const zh: Translations = {
     hermesSwitchBannerDismiss: '收起',
     nanobotGatewayOffline: 'nanobot 的 Chat 页面需要 nanobot gateway 和 websocket channel。请在另一个终端运行：nanobot gateway --port 18790 --verbose；启动后页面会自动刷新状态。',
     connectFailed: '无法连接到 OpenClaw 网关，请检查是否正在运行',
+    hermes401Reconfigure: '请回到setup界面，重新配置Hermes。',
     // Install modal
     installModalOpenclawTitle: 'OpenClaw 未安装',
     installModalOpenclawDesc: '需要先安装 OpenClaw 才能创建会话。前往安装向导完成设置。',

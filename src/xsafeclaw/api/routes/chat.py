@@ -1633,6 +1633,9 @@ async def _connect_gateway_with_retries(
     """
     last_error: Exception | None = None
     is_hermes = instance.platform == "hermes"
+    if is_hermes:
+        from .system import _ensure_hermes_api_key_synced
+        _ensure_hermes_api_key_synced(allow_generate_when_both_empty=False)
     openclaw_autostart_attempted = False
     hermes_autostart_attempted = False
     autostarts_used = 0
@@ -2843,6 +2846,8 @@ async def _build_available_models_from_hermes_api() -> dict:
     Called as a fallback when ``config.yaml`` has no usable model entry.
     """
     try:
+        from .system import _ensure_hermes_api_key_synced
+        _ensure_hermes_api_key_synced(allow_generate_when_both_empty=False)
         client = HermesClient(api_key=settings.hermes_api_key or None)
         await client.connect()
         raw = await client.list_models()
