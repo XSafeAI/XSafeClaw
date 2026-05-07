@@ -124,6 +124,17 @@ function durationStr(startStr: string, endStr: string | null): string {
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
+function shortNamespacedId(rawId: string | null | undefined, maxLen: number): string {
+  if (!rawId) return '';
+  const id = String(rawId);
+  const parts = id.split('::');
+  const marker = parts[2];
+  const isNamespacedRuntimeId =
+    parts.length >= 4 && (marker === 'message' || marker === 'session');
+  const displayId = isNamespacedRuntimeId ? parts[parts.length - 1] : id;
+  return displayId.slice(0, maxLen);
+}
+
 /** Same buckets as Agent Town / GET /api/events (Event.status). */
 function mapEventStatusToDashboardKey(status: string | undefined): string {
   const s = String(status || '').toLowerCase();
@@ -1516,7 +1527,7 @@ export default function Monitor() {
                             style={{ width: LABEL_W, minHeight: 56 }}
                           >
                             <p className="text-[11px] font-mono truncate" style={{ color: c.text }}>
-                              {(row.session?.display_session_id || row.session?.source_session_id || row.sessionId).slice(0, 14)}
+                              {shortNamespacedId((row.session?.display_session_id || row.session?.source_session_id || row.sessionId), 14)}
                             </p>
                             <p className="text-[10px] text-text-muted mt-0.5">
                               {row.events.length} task{row.events.length !== 1 && 's'}
@@ -1559,10 +1570,10 @@ export default function Monitor() {
                                     boxShadow: sel ? `0 0 16px ${c.bg}, 0 0 4px ${c.border}44` : 'none',
                                     zIndex: sel ? 10 : 1,
                                   }}
-                                  title={`Task ${ev.user_message_id}\n${ev.total_messages} msgs · ${ev.total_tool_calls} tools\n${formatDate(ev.started_at)} → ${ev.completed_at ? formatDate(ev.completed_at) : 'ongoing'}`}
+                                  title={`Task ${shortNamespacedId(ev.user_message_id, 10)}\nID ${ev.user_message_id}\n${ev.total_messages} msgs · ${ev.total_tool_calls} tools\n${formatDate(ev.started_at)} → ${ev.completed_at ? formatDate(ev.completed_at) : 'ongoing'}`}
                                 >
                                   <span className="font-bold opacity-90">{ev.total_messages}</span>
-                                  <span className="truncate opacity-70">{ev.user_message_id.slice(0, 8)}</span>
+                                  <span className="truncate opacity-70">{shortNamespacedId(ev.user_message_id, 8)}</span>
                                 </button>
                               );
                             })}
@@ -1587,7 +1598,7 @@ export default function Monitor() {
                     <div className="flex items-center gap-2">
                       <Zap className="w-4 h-4" style={{ color: colorOf(selectedEvent.session_id).text }} />
                       <span className="text-sm font-semibold text-text-primary">
-                        Task {selectedEvent.user_message_id.slice(0, 10)}
+                        Task {shortNamespacedId(selectedEvent.user_message_id, 10)}
                       </span>
                     </div>
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${monitorEventStatusBadgeClass(selectedEvent.status)}`}>
