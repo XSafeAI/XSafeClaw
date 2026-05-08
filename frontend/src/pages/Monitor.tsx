@@ -40,6 +40,7 @@ interface EventItem {
   platform?: string;
   instance_id?: string;
   user_message_id: string;
+  user_message_preview?: string | null;
   started_at: string;
   completed_at: string | null;
   total_messages: number;
@@ -134,6 +135,60 @@ function shortNamespacedId(rawId: string | null | undefined, maxLen: number): st
     parts.length >= 4 && (marker === 'message' || marker === 'session');
   const displayId = isNamespacedRuntimeId ? parts[parts.length - 1] : id;
   return displayId.slice(0, maxLen);
+}
+
+function clipText(text: string | null | undefined, maxChars: number): string {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxChars) return normalized;
+  if (maxChars <= 1) return normalized.slice(0, maxChars);
+  return `${normalized.slice(0, maxChars - 1)}…`;
+}
+
+function shortStableHash(input: string, len: number = 6): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0').slice(0, len);
+}
+
+function primaryTimelineLabel(ev: EventItem, maxChars: number = 36): string {
+  const preview = clipText(ev.user_message_preview, maxChars);
+  if (preview) return preview;
+  const basis = ev.user_message_id || ev.id || ev.started_at;
+  return `消息 · ${shortStableHash(basis, 6)}`;
+}
+
+function toHms(dateStr: string): string {
+  return new Date(dateStr).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
+function buildTimelineDisplayLabels(events: EventItem[]): Map<string, string> {
+  const primaryById = new Map<string, string>();
+  const counts = new Map<string, number>();
+  events.forEach((ev) => {
+    const label = primaryTimelineLabel(ev, 36);
+    primaryById.set(ev.id, label);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+
+  const result = new Map<string, string>();
+  events.forEach((ev) => {
+    const primary = primaryById.get(ev.id) || '';
+    if ((counts.get(primary) || 0) > 1) {
+      result.set(ev.id, `${primary} · ${toHms(ev.started_at)}`);
+      return;
+    }
+    result.set(ev.id, primary);
+  });
+  return result;
 }
 
 /** Same buckets as Agent Town / GET /api/events (Event.status). */
@@ -1410,6 +1465,15 @@ export default function Monitor() {
     return SESSION_COLORS[(idx >= 0 ? idx : 0) % SESSION_COLORS.length];
   }, [visibleRows]);
 
+  const timelineDisplayLabelsByEventId = useMemo(() => {
+    const map = new Map<string, string>();
+    visibleRows.forEach((row) => {
+      const rowMap = buildTimelineDisplayLabels(row.events);
+      rowMap.forEach((label, eventId) => map.set(eventId, label));
+    });
+    return map;
+  }, [visibleRows]);
+
   /* Event bar position */
   const barPos = useCallback((ev: EventItem) => {
     const s = new Date(ev.started_at).getTime();
@@ -1423,6 +1487,9 @@ export default function Monitor() {
   const zoomIn  = () => setZoomLevel(z => Math.min(z * 1.5, 10));
   const zoomOut = () => setZoomLevel(z => Math.max(z / 1.5, 1));
   const fitAll  = () => setZoomLevel(1);
+  const selectedEventDisplayLabel = selectedEvent
+    ? (timelineDisplayLabelsByEventId.get(selectedEvent.id) || primaryTimelineLabel(selectedEvent, 36))
+    : '';
 
   /* ---------- Render ---------- */
   if (loading) {
@@ -1607,6 +1674,7 @@ export default function Monitor() {
                             {row.events.map((ev) => {
                               const p = barPos(ev);
                               const sel = selectedEvent?.id === ev.id;
+                              const displayLabel = timelineDisplayLabelsByEventId.get(ev.id) || primaryTimelineLabel(ev, 36);
                               return (
                                 <button
                                   key={ev.id}
@@ -1623,10 +1691,10 @@ export default function Monitor() {
                                     boxShadow: sel ? `0 0 16px ${c.bg}, 0 0 4px ${c.border}44` : 'none',
                                     zIndex: sel ? 10 : 1,
                                   }}
-                                  title={`Task ${shortNamespacedId(ev.user_message_id, 10)}\nID ${ev.user_message_id}\n${ev.total_messages} msgs · ${ev.total_tool_calls} tools\n${formatDate(ev.started_at)} → ${ev.completed_at ? formatDate(ev.completed_at) : 'ongoing'}`}
+                                  title={`${displayLabel}\nID ${ev.user_message_id}\n${ev.total_messages} msgs · ${ev.total_tool_calls} tools\n${formatDate(ev.started_at)} → ${ev.completed_at ? formatDate(ev.completed_at) : 'ongoing'}`}
                                 >
                                   <span className="font-bold opacity-90">{ev.total_messages}</span>
-                                  <span className="truncate opacity-70">{shortNamespacedId(ev.user_message_id, 8)}</span>
+                                  <span className="truncate opacity-70">{displayLabel}</span>
                                 </button>
                               );
                             })}
@@ -1651,7 +1719,7 @@ export default function Monitor() {
                     <div className="flex items-center gap-2">
                       <Zap className="w-4 h-4" style={{ color: colorOf(selectedEvent.session_id).text }} />
                       <span className="text-sm font-semibold text-text-primary">
-                        Task {shortNamespacedId(selectedEvent.user_message_id, 10)}
+                        {selectedEventDisplayLabel}
                       </span>
                     </div>
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${monitorEventStatusBadgeClass(selectedEvent.status)}`}>
