@@ -765,6 +765,7 @@ interface MemoryFile {
 
 function MemoryPanel() {
   const { t } = useI18n();
+  const runtimeInstancesQuery = useRuntimeInstances();
   const [files, setFiles] = useState<MemoryFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -776,10 +777,35 @@ function MemoryPanel() {
   const [scanning, setScanning] = useState(false);
   const [scanningKeys, setScanningKeys] = useState<Set<string>>(new Set());
   const [scanProgress, setScanProgress] = useState('');
+  const [selectedInstanceId, setSelectedInstanceId] = useState('');
+
+  const availableInstances: RuntimeInstance[] = useMemo(
+    () => (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled),
+    [runtimeInstancesQuery.data],
+  );
+
+  useEffect(() => {
+    if (availableInstances.length === 0) {
+      setSelectedInstanceId('');
+      return;
+    }
+    const hasCurrent = availableInstances.some(instance => instance.instance_id === selectedInstanceId);
+    if (hasCurrent) return;
+    const defaultInstance = availableInstances.find(instance => instance.is_default) ?? availableInstances[0];
+    setSelectedInstanceId(defaultInstance.instance_id);
+  }, [availableInstances, selectedInstanceId]);
 
   const fetchFiles = useCallback(async () => {
+    if (!selectedInstanceId) {
+      setFiles([]);
+      setUnavailableReason('');
+      setError('');
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
-      const res = await memoryAPI.list();
+      const res = await memoryAPI.list(selectedInstanceId);
       setUnavailableReason(res.data.unavailable ? (res.data.reason || 'Unavailable for the current runtime.') : '');
       const merged = (res.data.files || []).map((f: any) => {
         const scan = f.scan;
@@ -799,16 +825,22 @@ function MemoryPanel() {
       setError(`Failed to fetch memory files: ${err?.message || err}`);
     }
     setLoading(false);
-  }, []);
+  }, [selectedInstanceId]);
 
   useEffect(() => { fetchFiles(); }, [fetchFiles]);
+
+  useEffect(() => {
+    setExpandedKey(null);
+    setExpandedContent('');
+    setError('');
+  }, [selectedInstanceId]);
 
   const loadContent = async (key: string) => {
     if (expandedKey === key) { setExpandedKey(null); return; }
     setExpandedKey(key);
     setLoadingContent(true);
     try {
-      const res = await memoryAPI.content(key);
+      const res = await memoryAPI.content(key, selectedInstanceId || undefined);
       setExpandedContent(res.data.content || '');
     } catch { setExpandedContent('Failed to load content'); }
     setLoadingContent(false);
@@ -824,12 +856,12 @@ function MemoryPanel() {
       const total = memKeys.length + wsKeys.length;
       if (memKeys.length > 0) {
         setScanProgress(`Scanning ${memKeys.length} memory files (${total} total)…`);
-        await memoryAPI.scanAll(memKeys);
+        await memoryAPI.scanAll(memKeys, undefined, selectedInstanceId || undefined);
         await fetchFiles();
       }
       if (wsKeys.length > 0) {
         setScanProgress(`Scanning ${wsKeys.length} workspace files…`);
-        await memoryAPI.scanAll(wsKeys);
+        await memoryAPI.scanAll(wsKeys, undefined, selectedInstanceId || undefined);
       }
       setScanProgress('Scan complete. Refreshing…');
       await fetchFiles();
@@ -843,7 +875,7 @@ function MemoryPanel() {
   const scanSingle = async (key: string) => {
     setScanningKeys(prev => new Set(prev).add(key));
     try {
-      const res = await memoryAPI.scanOne(key, true);
+      const res = await memoryAPI.scanOne(key, true, selectedInstanceId || undefined);
       setFiles(prev => prev.map(f => {
         if (f.key !== key) return f;
         return { ...f, scanStatus: res.data?.status || 'error', scanRiskType: res.data?.risk_type || '', scanDetails: res.data?.details || '', scanTime: res.data?.scanned_at || 0 };
@@ -871,6 +903,26 @@ function MemoryPanel() {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <span className="text-[12px] text-text-muted">Runtime</span>
+        <select
+          value={selectedInstanceId}
+          onChange={e => setSelectedInstanceId(e.target.value)}
+          disabled={availableInstances.length === 0}
+          className="px-3 py-2 rounded-lg border border-border bg-surface-1 text-[12px] text-text-primary focus:outline-none focus:border-accent/50 disabled:opacity-60"
+        >
+          {availableInstances.length === 0 ? (
+            <option value="">{runtimeInstancesQuery.isError ? 'Runtime unavailable' : t.chat.connecting}</option>
+          ) : (
+            availableInstances.map(instance => (
+              <option key={instance.instance_id} value={instance.instance_id}>
+                {instance.display_name}
+                {instance.platform === 'nanobot' && instance.health_status !== 'healthy' ? ' · gateway offline' : ''}
+              </option>
+            ))
+          )}
+        </select>
+      </div>
       {unavailableReason && (
         <div className="px-4 py-3 bg-surface-1 border border-border rounded-lg text-[12px] text-text-muted">
           {unavailableReason}

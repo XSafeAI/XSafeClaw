@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import os
 from pathlib import Path
-import time
 
 from fastapi import APIRouter, HTTPException
 
+from ...runtime import RuntimeInstance
 from ...services import memory_scan_service
-from ..runtime_helpers import get_default_instance, unavailable_payload
-
-logger = logging.getLogger(__name__)
+from ..runtime_helpers import get_default_instance, get_instance, unavailable_payload
 
 router = APIRouter()
 
@@ -28,7 +24,7 @@ _WORKSPACE_CONFIG_FILES = (
 )
 
 
-def _resolve_workspace() -> Path | None:
+def _resolve_openclaw_workspace_fallback() -> Path | None:
     if _CONFIG_PATH.exists():
         try:
             config = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -48,6 +44,39 @@ def _resolve_workspace() -> Path | None:
     for p in common:
         if p.is_dir():
             return p
+    return None
+
+
+async def _resolve_memory_instance(instance_id: str | None) -> RuntimeInstance | None:
+    if instance_id:
+        return await get_instance(instance_id)
+    try:
+        return await get_default_instance()
+    except HTTPException:
+        return None
+
+
+def _memory_root_for_instance(instance: RuntimeInstance | None) -> Path | None:
+    if instance is None:
+        return _resolve_openclaw_workspace_fallback()
+
+    platform = str(instance.platform or "").strip().lower()
+    workspace = Path(instance.workspace_path).expanduser() if instance.workspace_path else None
+
+    if platform == "openclaw":
+        if workspace and workspace.is_dir():
+            return workspace
+        return _resolve_openclaw_workspace_fallback()
+
+    if platform == "hermes":
+        if not workspace:
+            return None
+        memories = workspace / "memories"
+        return memories if memories.is_dir() else None
+
+    if platform == "nanobot":
+        return workspace if workspace and workspace.is_dir() else None
+
     return None
 
 
@@ -83,133 +112,169 @@ def _file_info(path: Path, key: str, category: str) -> dict:
     }
 
 
-def _collect_memory_files() -> list[dict]:
-    ws = _resolve_workspace()
-    if ws is None:
-        return []
+def _collect_memory_files(instance: RuntimeInstance | None) -> tuple[list[dict], str]:
+    root = _memory_root_for_instance(instance)
+    if root is None:
+        if instance and instance.platform in {"hermes", "nanobot"}:
+            return [], "Memory workspace not found for the selected runtime."
+        return [], ""
 
     files: list[dict] = []
     seen: set[str] = set()
 
-    for name in ("MEMORY.md", "memory.md"):
-        p = ws / name
-        if p.is_file() and str(p) not in seen:
-            seen.add(str(p))
-            key = name
-            files.append(_file_info(p, key, "memory"))
+    def _add_file(path: Path, *, key: str | None = None, category: str = "memory") -> None:
+        if not path.is_file():
+            return
+        resolved = str(path.resolve())
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        rel_key = key or str(path.relative_to(root))
+        files.append(_file_info(path, rel_key, category))
 
-    memory_dir = ws / "memory"
+    platform = str(instance.platform).strip().lower() if instance else "openclaw"
+
+    if platform == "hermes":
+        _add_file(root / "MEMORY.md")
+        _add_file(root / "USER.md")
+        return files, ""
+
+    if platform == "nanobot":
+        _add_file(root / "SOUL.md")
+        _add_file(root / "USER.md")
+        _add_file(root / "memory" / "MEMORY.md", key="memory/MEMORY.md")
+        return files, ""
+
+    # OpenClaw (default + fallback)
+    for name in ("MEMORY.md", "memory.md"):
+        _add_file(root / name, key=name)
+
+    memory_dir = root / "memory"
     if memory_dir.is_dir():
         for md in sorted(memory_dir.glob("*.md")):
-            if md.is_file() and str(md) not in seen:
-                seen.add(str(md))
-                key = str(md.relative_to(ws))
-                files.append(_file_info(md, key, "memory"))
+            _add_file(md, key=str(md.relative_to(root)))
 
     for name in _WORKSPACE_CONFIG_FILES:
-        p = ws / name
-        if p.is_file() and str(p) not in seen:
-            seen.add(str(p))
-            files.append(_file_info(p, name, "workspace"))
+        _add_file(root / name, key=name, category="workspace")
 
-    return files
+    return files, ""
+
+
+def _scan_cache_key(instance: RuntimeInstance | None, file_key: str) -> str:
+    instance_ns = str(instance.instance_id) if instance else "default"
+    return f"{instance_ns}:{file_key}"
+
+
+def _scan_record_for_file(
+    *,
+    cache: dict,
+    instance: RuntimeInstance | None,
+    file_key: str,
+) -> dict | None:
+    return cache.get(_scan_cache_key(instance, file_key)) or cache.get(file_key)
+
+
+def _public_scan_result(scan: dict | None, *, file_key: str) -> dict:
+    if not scan:
+        return {}
+    out = dict(scan)
+    out["file_key"] = file_key
+    return out
+
+
+def _memory_file_map(instance: RuntimeInstance | None) -> tuple[dict[str, str], str]:
+    files, reason = _collect_memory_files(instance)
+    return {f["key"]: f["path"] for f in files}, reason
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/list")
-async def list_memory_files():
-    try:
-        instance = await get_default_instance()
-    except HTTPException:
-        instance = None
-    if instance and instance.platform != "openclaw":
-        return unavailable_payload(
-            instance=instance,
-            reason="Memory file management is currently only available for OpenClaw workspaces.",
-            key="files",
-        )
-    files = _collect_memory_files()
+async def list_memory_files(instance_id: str | None = None):
+    instance = await _resolve_memory_instance(instance_id)
+    files, unavailable_reason = _collect_memory_files(instance)
+    if unavailable_reason:
+        return unavailable_payload(instance=instance, reason=unavailable_reason, key="files")
     cached = memory_scan_service.get_all_cached()
 
     for f in files:
-        scan = cached.get(f["key"])
+        scan = _scan_record_for_file(cache=cached, instance=instance, file_key=f["key"])
         if scan:
             current_hash = _file_sha256(Path(f["path"]))
             if scan.get("file_hash") and scan["file_hash"] != current_hash:
                 scan = {**scan, "status": "outdated"}
-            f["scan"] = scan
+            f["scan"] = _public_scan_result(scan, file_key=f["key"])
 
     return {"files": files, "unavailable": False}
 
 
 @router.post("/scan-all")
-async def scan_all(body: dict | None = None):
-    try:
-        instance = await get_default_instance()
-    except HTTPException:
-        instance = None
-    if instance and instance.platform != "openclaw":
-        return {
-            "results": [],
-            "total": 0,
-            "unavailable": True,
-            "reason": "Memory file scanning is currently only available for OpenClaw workspaces.",
-        }
+async def scan_all(body: dict | None = None, instance_id: str | None = None):
+    instance = await _resolve_memory_instance(instance_id)
+    _, unavailable_reason = _collect_memory_files(instance)
+    if unavailable_reason:
+        return {"results": [], "total": 0, "unavailable": True, "reason": unavailable_reason}
     body = body or {}
     keys: list[str] | None = body.get("keys")
     force: bool = body.get("force", False)
 
-    collected = _collect_memory_files()
+    collected, _ = _collect_memory_files(instance)
     file_map: dict[str, str] = {}
     for f in collected:
         if keys is None or f["key"] in keys:
-            file_map[f["key"]] = f["path"]
+            file_map[_scan_cache_key(instance, f["key"])] = f["path"]
 
     if not file_map:
         return {"results": [], "total": 0}
 
     results = await memory_scan_service.scan_all_files(file_map, force=force)
+    prefix = f"{instance.instance_id}:" if instance else "default:"
+    public_results = []
+    for r in results:
+        data = r.to_dict()
+        scan_key = data.get("file_key", "")
+        public_key = scan_key[len(prefix):] if scan_key.startswith(prefix) else scan_key
+        data["file_key"] = public_key
+        public_results.append(data)
     return {
-        "results": [r.to_dict() for r in results],
-        "total": len(results),
+        "results": public_results,
+        "total": len(public_results),
+        "unavailable": False,
     }
 
 
 @router.get("/scan-status")
-async def scan_status():
-    try:
-        instance = await get_default_instance()
-    except HTTPException:
-        instance = None
-    if instance and instance.platform != "openclaw":
-        return {
-            "scans": {},
-            "unavailable": True,
-            "reason": "Memory file scanning is currently only available for OpenClaw workspaces.",
-        }
-    return {"scans": memory_scan_service.get_all_cached(), "unavailable": False}
+async def scan_status(instance_id: str | None = None):
+    instance = await _resolve_memory_instance(instance_id)
+    file_map, unavailable_reason = _memory_file_map(instance)
+    if unavailable_reason:
+        return {"scans": {}, "unavailable": True, "reason": unavailable_reason}
+
+    cached = memory_scan_service.get_all_cached()
+    scans: dict[str, dict] = {}
+    for file_key in file_map.keys():
+        scan = _scan_record_for_file(cache=cached, instance=instance, file_key=file_key)
+        if scan:
+            scans[file_key] = _public_scan_result(scan, file_key=file_key)
+    return {"scans": scans, "unavailable": False}
 
 
 @router.get("/content/{file_key:path}")
-async def get_content(file_key: str):
+async def get_content(file_key: str, instance_id: str | None = None):
     if ".." in file_key.split("/"):
         raise HTTPException(status_code=400, detail="Path traversal not allowed")
 
-    ws = _resolve_workspace()
-    if ws is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    instance = await _resolve_memory_instance(instance_id)
+    file_map, unavailable_reason = _memory_file_map(instance)
+    if unavailable_reason:
+        raise HTTPException(status_code=404, detail=unavailable_reason)
 
-    target = ws / file_key
+    target_raw = file_map.get(file_key)
+    if not target_raw:
+        raise HTTPException(status_code=404, detail="File not found")
+    target = Path(target_raw)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-
-    try:
-        resolved = target.resolve()
-        if not str(resolved).startswith(str(ws.resolve())):
-            raise HTTPException(status_code=400, detail="Path traversal not allowed")
-    except (OSError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid path")
 
     try:
         content = target.read_text(encoding="utf-8")
@@ -226,27 +291,27 @@ async def get_content(file_key: str):
 
 
 @router.post("/{file_key:path}/scan")
-async def scan_single(file_key: str, body: dict | None = None):
+async def scan_single(file_key: str, body: dict | None = None, instance_id: str | None = None):
     body = body or {}
     force: bool = body.get("force", False)
 
     if ".." in file_key.split("/"):
         raise HTTPException(status_code=400, detail="Path traversal not allowed")
 
-    ws = _resolve_workspace()
-    if ws is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    instance = await _resolve_memory_instance(instance_id)
+    file_map, unavailable_reason = _memory_file_map(instance)
+    if unavailable_reason:
+        raise HTTPException(status_code=404, detail=unavailable_reason)
 
-    target = ws / file_key
+    target_raw = file_map.get(file_key)
+    if not target_raw:
+        raise HTTPException(status_code=404, detail="File not found")
+    target = Path(target_raw)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
-    try:
-        resolved = target.resolve()
-        if not str(resolved).startswith(str(ws.resolve())):
-            raise HTTPException(status_code=400, detail="Path traversal not allowed")
-    except (OSError, ValueError):
-        raise HTTPException(status_code=400, detail="Invalid path")
-
-    result = await memory_scan_service.scan_file(file_key, str(target), force=force)
-    return result.to_dict()
+    scan_key = _scan_cache_key(instance, file_key)
+    result = await memory_scan_service.scan_file(scan_key, str(target), force=force)
+    data = result.to_dict()
+    data["file_key"] = file_key
+    return data
