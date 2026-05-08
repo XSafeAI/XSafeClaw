@@ -265,9 +265,21 @@ function previewValue(value, limit = 180) {
   }
 }
 
+const TOOL_ARGS_PREVIEW_LIMIT = 4000;
+const TOOL_RESULT_PREVIEW_LIMIT = 6000;
+
+function previewToolPayload(value, limit) {
+  if (value === null || value === undefined || value === '') return '';
+  let text = previewValue(value, Number.POSITIVE_INFINITY);
+  if (!text) return '';
+  if (text.length <= limit) return text;
+  text = text.slice(0, limit);
+  return `${text}… [truncated, showing ${limit} chars]`;
+}
+
 function AgentDialogToolMessage({ msg }) {
-  const argsPreview = previewValue(msg.args || msg.content || '', Number.POSITIVE_INFINITY);
-  const resultPreview = msg.result_pending ? 'Running...' : previewValue(msg.result, Number.POSITIVE_INFINITY);
+  const argsPreview = previewToolPayload(msg.args || msg.content || '', TOOL_ARGS_PREVIEW_LIMIT);
+  const resultPreview = msg.result_pending ? 'Running...' : previewToolPayload(msg.result, TOOL_RESULT_PREVIEW_LIMIT);
   const metaTag = msg.result_pending
     ? 'RUNNING'
     : msg.is_error
@@ -531,7 +543,7 @@ function getDirectionalScaleLimit(anchorX, anchorY, dirX, dirY, viewport) {
 }
 
 export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
-  if (!data) return null;
+  if (!data?.agent) return null;
 
   const { agent, charName, state, event, events = [], isPending, totalTokens = 0 } = data;
   const [dialogFrame, setDialogFrame] = useState(() => createDefaultDialogFrame());
@@ -638,7 +650,12 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
       ? 'Syncing history'
       : null;
 
-  const latestTaskStatus = latestEvent?.status || null;
+  const latestTaskStatus = latestEvent?.status ?? null;
+  const latestTaskStatusText = latestTaskStatus == null ? '' : String(latestTaskStatus);
+  const latestTaskStatusClass = latestTaskStatusText
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 
   const threadSummary = useMemo(() => displayMessages.reduce((summary, msg) => {
     if (msg.role === 'user') summary.user += 1;
@@ -1166,9 +1183,9 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
                     {String(agent.provider || 'unknown')} · {String(agent.model || 'model pending')}
                   </div>
                   <div className="agent-card-summary-inline">
-                    {latestTaskStatus ? (
-                      <span className={`agent-card-task-status agent-card-task-status-${latestTaskStatus}`}>
-                        {latestTaskStatus.toUpperCase()}
+                    {latestTaskStatusText ? (
+                      <span className={`agent-card-task-status agent-card-task-status-${latestTaskStatusClass || 'unknown'}`}>
+                        {latestTaskStatusText.toUpperCase()}
                       </span>
                     ) : null}
                     <span className="agent-card-thread-chip">{sessionKey || 'No session'}</span>
