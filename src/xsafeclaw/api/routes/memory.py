@@ -69,10 +69,10 @@ def _memory_root_for_instance(instance: RuntimeInstance | None) -> Path | None:
         return _resolve_openclaw_workspace_fallback()
 
     if platform == "hermes":
-        if not workspace:
+        # Hermes home is the runtime root. We resolve memory/workspace files under it.
+        if not workspace or not workspace.is_dir():
             return None
-        memories = workspace / "memories"
-        return memories if memories.is_dir() else None
+        return workspace
 
     if platform == "nanobot":
         return workspace if workspace and workspace.is_dir() else None
@@ -132,31 +132,41 @@ def _collect_memory_files(instance: RuntimeInstance | None) -> tuple[list[dict],
         rel_key = key or str(path.relative_to(root))
         files.append(_file_info(path, rel_key, category))
 
+    def _add_openclaw_shape_files(base_root: Path) -> None:
+        # OpenClaw canonical scan shape: memory files + workspace config files.
+        for name in ("MEMORY.md", "memory.md"):
+            _add_file(base_root / name, key=name)
+
+        memory_dir = base_root / "memory"
+        if memory_dir.is_dir():
+            for md in sorted(memory_dir.glob("*.md")):
+                _add_file(md, key=str(md.relative_to(base_root)))
+
+        for name in _WORKSPACE_CONFIG_FILES:
+            _add_file(base_root / name, key=name, category="workspace")
+
     platform = str(instance.platform).strip().lower() if instance else "openclaw"
 
     if platform == "hermes":
-        _add_file(root / "MEMORY.md")
-        _add_file(root / "USER.md")
+        # Hermes persistent memory per docs: $HERMES_HOME/memories/{MEMORY.md,USER.md}
+        memories_root = root / "memories"
+        _add_file(memories_root / "MEMORY.md", key="MEMORY.md")
+        _add_file(memories_root / "USER.md", key="USER.md")
+
+        # Hermes personality is global ($HERMES_HOME/SOUL.md) and workspace context
+        # files live under $HERMES_HOME/workspace/.
+        _add_file(root / "SOUL.md", key="SOUL.md", category="workspace")
+        workspace_root = root / "workspace"
+        for name in _WORKSPACE_CONFIG_FILES:
+            _add_file(workspace_root / name, key=name, category="workspace")
         return files, ""
 
     if platform == "nanobot":
-        _add_file(root / "SOUL.md")
-        _add_file(root / "USER.md")
-        _add_file(root / "memory" / "MEMORY.md", key="memory/MEMORY.md")
+        _add_openclaw_shape_files(root)
         return files, ""
 
     # OpenClaw (default + fallback)
-    for name in ("MEMORY.md", "memory.md"):
-        _add_file(root / name, key=name)
-
-    memory_dir = root / "memory"
-    if memory_dir.is_dir():
-        for md in sorted(memory_dir.glob("*.md")):
-            _add_file(md, key=str(md.relative_to(root)))
-
-    for name in _WORKSPACE_CONFIG_FILES:
-        _add_file(root / name, key=name, category="workspace")
-
+    _add_openclaw_shape_files(root)
     return files, ""
 
 
