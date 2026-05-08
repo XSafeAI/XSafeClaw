@@ -309,6 +309,22 @@ function sessionKeysMatch(left, right) {
   return Boolean(localA && localB && localA === localB);
 }
 
+function agentDisplaySessionMatches(leftAgent, rightAgent) {
+  const leftKey = getAgentSessionKey(leftAgent);
+  const rightKey = getAgentSessionKey(rightAgent);
+  if (!leftKey || !rightKey) return false;
+
+  const leftPlatform = String(leftAgent?.platform || '').trim();
+  const rightPlatform = String(rightAgent?.platform || '').trim();
+  if (leftPlatform && rightPlatform && leftPlatform !== rightPlatform) return false;
+
+  const leftInstance = String(leftAgent?.instance_id || '').trim();
+  const rightInstance = String(rightAgent?.instance_id || '').trim();
+  if (leftInstance && rightInstance && leftInstance !== rightInstance) return false;
+
+  return sessionKeysMatch(leftKey, rightKey);
+}
+
 function buildDraftAgent(sessionKey, modelOption, runtimeInstance = null) {
   const modelRef = modelOption?.id || 'unknown/model';
   const provider = modelOption?.provider || modelRef.split('/')[0] || 'unknown';
@@ -345,9 +361,10 @@ function buildDraftAgent(sessionKey, modelOption, runtimeInstance = null) {
 }
 
 function mergeAgents(traceAgents, draftAgents) {
-  const traceKeys = new Set(traceAgents.map((agent) => getAgentIdentity(agent)).filter(Boolean));
   return [
-    ...draftAgents.filter((agent) => !traceKeys.has(getAgentIdentity(agent))),
+    ...draftAgents.filter((draftAgent) => (
+      !traceAgents.some((traceAgent) => agentDisplaySessionMatches(traceAgent, draftAgent))
+    )),
     ...traceAgents,
   ];
 }
@@ -1803,8 +1820,9 @@ export default function TownConsole({
 
   useEffect(() => {
     setDraftAgents((prev) => {
-      const liveKeys = new Set(traceAgents.map((agent) => getAgentIdentity(agent)).filter(Boolean));
-      return prev.filter((agent) => !liveKeys.has(getAgentIdentity(agent)));
+      return prev.filter((draftAgent) => (
+        !traceAgents.some((traceAgent) => agentDisplaySessionMatches(traceAgent, draftAgent))
+      ));
     });
   }, [traceAgents]);
 
