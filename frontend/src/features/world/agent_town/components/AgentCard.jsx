@@ -267,6 +267,7 @@ function previewValue(value, limit = 180) {
 
 const TOOL_ARGS_PREVIEW_LIMIT = 4000;
 const TOOL_RESULT_PREVIEW_LIMIT = 6000;
+const DIALOG_TEXT_PREVIEW_LIMIT = 8000;
 
 function previewToolPayload(value, limit) {
   if (value === null || value === undefined || value === '') return '';
@@ -378,7 +379,7 @@ function AgentDialogMessage({ msg }) {
             <span />
           </div>
         ) : (
-          msg.content
+          previewToolPayload(msg.content, DIALOG_TEXT_PREVIEW_LIMIT)
         )}
       </div>
     </div>
@@ -684,9 +685,12 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
 
     setLoadingHistory(true);
     try {
-      const res = await fetch(`/api/chat/history?session_key=${encodeURIComponent(sessionKey)}&limit=100`, {
+      const res = await fetch(
+        `/api/chat/history?session_key=${encodeURIComponent(sessionKey)}&limit=100&max_content_chars=${DIALOG_TEXT_PREVIEW_LIMIT}`,
+        {
         cache: 'no-store',
-      });
+        },
+      );
       if (!res.ok) {
         throw new Error('Failed to load history');
       }

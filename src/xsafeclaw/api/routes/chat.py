@@ -1537,6 +1537,51 @@ async def _read_history_from_db_fallback(
     return messages
 
 
+def _truncate_history_text(value: object, *, max_chars: int) -> str:
+    """Render history payload fields into bounded display-safe text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}... [truncated, showing {max_chars} chars]"
+
+
+def _apply_history_content_limit(
+    messages: list[dict],
+    *,
+    max_content_chars: int | None,
+) -> list[dict]:
+    """Optionally bound per-message payload size for heavy UI surfaces."""
+    if not max_content_chars or max_content_chars <= 0:
+        return messages
+
+    bounded: list[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            bounded.append(msg)
+            continue
+        item = dict(msg)
+        if str(item.get("role") or "") == "tool_call":
+            if "args" in item:
+                item["args"] = _truncate_history_text(item.get("args"), max_chars=max_content_chars)
+            if "result" in item:
+                item["result"] = _truncate_history_text(item.get("result"), max_chars=max_content_chars)
+            if "content" in item:
+                item["content"] = _truncate_history_text(item.get("content"), max_chars=max_content_chars)
+        else:
+            if "content" in item:
+                item["content"] = _truncate_history_text(item.get("content"), max_chars=max_content_chars)
+        bounded.append(item)
+    return bounded
+
+
 router = APIRouter()
 
 
@@ -2842,6 +2887,12 @@ async def transcribe_clean(request: TranscribeCleanRequest):
 async def get_history(
     session_key: str = Query(..., description="Session key to load history for"),
     limit: int = 100,
+    max_content_chars: int | None = Query(
+        default=None,
+        ge=200,
+        le=50000,
+        description="Optional per-message content cap for UI display surfaces.",
+    ),
 ):
     """
     Load chat history for a session by reading the runtime's local session files.
@@ -2858,6 +2909,7 @@ async def get_history(
             local_session_key=local_session_key,
             limit=limit,
         )
+    messages = _apply_history_content_limit(messages, max_content_chars=max_content_chars)
     return {
         "session_key": public_session_key,
         "messages": messages,

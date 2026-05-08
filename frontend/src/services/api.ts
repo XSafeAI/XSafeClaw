@@ -989,15 +989,26 @@ export const skillsAPI = {
 };
 
 export const memoryAPI = {
-  list: () => api.get<{ files: any[]; unavailable?: boolean; reason?: string }>('/memory/list'),
-  content: (fileKey: string) =>
-    api.get<{ key: string; content: string; sizeBytes: number; modifiedAt: number }>(`/memory/content/${fileKey}`),
-  scanAll: (keys?: string[], force?: boolean) =>
-    api.post<{ results: any[] }>('/memory/scan-all', { keys, force }),
-  scanOne: (fileKey: string, force?: boolean) =>
-    api.post<any>(`/memory/${fileKey}/scan`, { force }),
-  scanStatus: () =>
-    api.get<Record<string, any>>('/memory/scan-status'),
+  list: (instanceId?: string) =>
+    api.get<{ files: any[]; unavailable?: boolean; reason?: string }>('/memory/list', {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  content: (fileKey: string, instanceId?: string) =>
+    api.get<{ key: string; content: string; sizeBytes: number; modifiedAt: number }>(`/memory/content/${fileKey}`, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  scanAll: (keys?: string[], force?: boolean, instanceId?: string) =>
+    api.post<{ results: any[] }>('/memory/scan-all', { keys, force }, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  scanOne: (fileKey: string, force?: boolean, instanceId?: string) =>
+    api.post<any>(`/memory/${fileKey}/scan`, { force }, {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
+  scanStatus: (instanceId?: string) =>
+    api.get<Record<string, any>>('/memory/scan-status', {
+      params: instanceId ? { instance_id: instanceId } : undefined,
+    }),
 };
 
 export default api;
