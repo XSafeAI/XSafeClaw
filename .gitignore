@@ -27,9 +27,16 @@ ENV/
 env/
 external/
 
-# IDEs
+# Node / Frontend
+node_modules/
+*.tsbuildinfo
+dist-ssr/
+*.local
+
+# IDEs & Editors
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -37,6 +44,7 @@ external/
 # Environment variables
 .env
 .env.local
+.env.*.local
 
 # Database
 *.db
@@ -51,6 +59,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 
 # Testing
 .pytest_cache/
@@ -58,6 +68,7 @@ Thumbs.db
 .pytest_tmp/
 pytest-cache-files-*/
 .coverage
+.coverage.*
 htmlcov/
 .xsafeclaw/
 
@@ -65,12 +76,18 @@ htmlcov/
 frontend/public/Map-opensorce/Map[2-5].png
 src/xsafeclaw/static/Map-opensorce/Map[2-5].png
 
-# MyPy
+# MyPy / type checkers
 .mypy_cache/
 .dmypy.json
 dmypy.json
+.pytype/
 
+# Compressed / archives
 *.gz
+*.tar
+*.zip
+
+# Debug notes (dev-only, not needed in repo)
 debug/
 
 # Local dev helpers

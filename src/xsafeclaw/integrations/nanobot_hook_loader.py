@@ -273,11 +273,21 @@ def install_nanobot_hook_autoload() -> bool:
         **kwargs: Any,
     ) -> tuple[Any, ...]:
         session = kwargs.get("session")
+        raw_session_key = str(getattr(session, "key", "") or "").strip()
+        channel = str(kwargs.get("channel") or "cli")
+        chat_id = str(kwargs.get("chat_id") or "direct")
+
+        # If session.key is empty (common in websocket mode), construct from
+        # chat_id so the frontend's polling can match it to the active session.
+        # The canonical form for websocket sessions is "websocket:<chat_id>".
+        if not raw_session_key and chat_id and chat_id != "direct":
+            raw_session_key = f"websocket:{chat_id}"
+
         _set_hook_runtime_context(
             getattr(self, "_extra_hooks", None),
-            session_key=str(getattr(session, "key", "") or ""),
-            channel=str(kwargs.get("channel") or "cli"),
-            chat_id=str(kwargs.get("chat_id") or "direct"),
+            session_key=raw_session_key,
+            channel=channel,
+            chat_id=chat_id,
             message_id=kwargs.get("message_id"),
         )
         initial_messages = _prepare_initial_messages(

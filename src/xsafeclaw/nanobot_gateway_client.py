@@ -132,6 +132,16 @@ class NanobotGatewayClient:
             return {"event": "message", "text": raw}
         return payload if isinstance(payload, dict) else {"event": "message", "text": raw}
 
+    async def _drain_stale(self) -> None:
+        """Consume any leftover events from the previous turn's buffer."""
+        if self._ws is None:
+            return
+        try:
+            while True:
+                await asyncio.wait_for(self._recv_json(), timeout=0.002)
+        except (asyncio.TimeoutError, Exception):
+            pass
+
     async def stream_chat(
         self,
         message: str,
@@ -142,9 +152,11 @@ class NanobotGatewayClient:
         if self._ws is None or not self.is_open:
             raise RuntimeError("nanobot gateway websocket is not connected")
 
+        await self._drain_stale()
         await self._ws.send(json.dumps({"content": message}, ensure_ascii=False))
         deadline = timeout_s or self.message_timeout_s
         accumulated = ""
+        got_any_delta = False
         while True:
             payload = await asyncio.wait_for(self._recv_json(), timeout=deadline)
             event = str(payload.get("event") or "").strip()
@@ -153,16 +165,16 @@ class NanobotGatewayClient:
             if event == "delta":
                 if not text:
                     continue
+                got_any_delta = True
                 accumulated += text
                 yield {"type": "delta", "text": accumulated}
                 continue
             if event == "stream_end":
                 stream_id = str(payload.get("stream_id") or "").strip()
-                # nanobot websocket can emit segment boundaries mid-turn.
-                # ``tool-boundary`` marks a non-terminal segment end and must
-                # never close the current reply stream, even if we already
-                # accumulated partial assistant text.
-                if stream_id == "tool-boundary":
+                # nanobot websocket emits segment boundaries mid-turn.
+                # Known non-terminal stream_ids must not close the stream.
+                _NON_TERMINAL_IDS = {"tool-boundary", "tool-result", "thinking"}
+                if stream_id in _NON_TERMINAL_IDS:
                     continue
                 if not accumulated:
                     continue
@@ -177,8 +189,6 @@ class NanobotGatewayClient:
                 if text:
                     accumulated = text
                 if not accumulated:
-                    # Ignore empty/non-text message frames; wait for a later
-                    # delta/finalizable segment instead of ending as empty.
                     continue
                 yield {
                     "type": "final",

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 SAFETY_FILES = ("SAFETY.md", "PERMISSION.md")
 PROMPT_CONTEXT_MARKER = "<!-- XSafeClaw nanobot safety context -->"
+GUARD_REJECTION_MARKER = "rejected by the safety reviewer"
 
 
 class XSafeClawHook(AgentHook):
@@ -142,6 +143,19 @@ class XSafeClawHook(AgentHook):
         if response is not None and hasattr(response, "tool_calls"):
             response.tool_calls = remaining
 
+    def _encoded_session_key(self) -> str:
+        """Build the full public session key matching frontend's activeKey format.
+
+        Frontend expects: ``nanobot::<instance_id>::<local_session_key>``
+        This ensures ``pk === activeKey`` matches directly in the polling logic.
+        """
+        bare = self.session_key.strip()
+        if not bare:
+            bare = f"websocket:{self.chat_id}" if self.chat_id else ""
+        if not bare:
+            return ""
+        return f"nanobot::{self.instance_id}::{bare}"
+
     async def _check_tool_call(
         self,
         context: AgentHookContext,
@@ -151,7 +165,7 @@ class XSafeClawHook(AgentHook):
             "platform": "nanobot",
             "instance_id": self.instance_id,
             "guard_mode": self.mode,
-            "session_key": self.session_key,
+            "session_key": self._encoded_session_key(),
             "tool_name": str(getattr(tool_call, "name", "tool")),
             "params": getattr(tool_call, "arguments", {}) or {},
             "messages": list(getattr(context, "messages", []) or []),
@@ -182,12 +196,21 @@ class XSafeClawHook(AgentHook):
         messages = getattr(context, "messages", None)
         if not isinstance(messages, list):
             return
+        tool_name = str(getattr(tool_call, "name", "tool"))
+        block_message = (
+            f"Error: {GUARD_REJECTION_MARKER}. "
+            f"Tool `{tool_name}` was blocked by the XSafeClaw safety system. "
+            f"Reason: {reason}. "
+            "You MUST inform the user that this action was blocked for safety reasons, "
+            "explain the risk briefly, and ask how they want to proceed. "
+            "Do NOT retry this tool call."
+        )
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "name": str(getattr(tool_call, "name", "tool")),
-                "content": f"Error: XSafeClaw blocked this tool call. {reason}",
+                "name": tool_name,
+                "content": block_message,
             }
         )
 

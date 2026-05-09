@@ -2743,10 +2743,39 @@ async def send_message_stream(request: SendMessageRequest):
                         )
                         + "\n\n"
                     )
-                async for chunk in client.stream_chat(request.message, timeout_s=120.0):
-                    if isinstance(chunk, dict) and chunk.get("text"):
-                        final_text = str(chunk["text"])
-                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                # Retry once on websocket failure (handles zombie connections)
+                for _attempt in range(2):
+                    try:
+                        async for chunk in client.stream_chat(request.message, timeout_s=360.0):
+                            if isinstance(chunk, dict) and chunk.get("text"):
+                                final_text = str(chunk["text"])
+                            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                        break
+                    except RuntimeError as ws_err:
+                        if _attempt == 0 and "not connected" in str(ws_err).lower():
+                            # Websocket died — force reconnect
+                            _nanobot_gateway_sessions.pop(stream_public_session_key, None)
+                            client, stream_local_session_key, stream_public_session_key, relinked = (
+                                await _get_nanobot_gateway_session(
+                                    public_session_key,
+                                    local_session_key,
+                                    instance,
+                                )
+                            )
+                            if relinked:
+                                yield (
+                                    "data: "
+                                    + json.dumps(
+                                        {
+                                            "type": "session_relinked",
+                                            "session_key": stream_public_session_key,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                    + "\n\n"
+                                )
+                            continue
+                        raise
             else:
                 client = await _get_or_create_client(instance, public_session_key)
                 stream_kwargs: dict = {
@@ -2834,35 +2863,35 @@ async def send_message_stream(request: SendMessageRequest):
             )
             for evt in tool_events:
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
-            if instance.platform == "hermes":
-                rejection = _extract_guard_rejection_from_tool_events(tool_events)
-                should_emit_rejection_fallback = (
-                    rejection is not None
-                    and (last_terminal_type in {"error", "timeout"} or last_terminal_type is None)
+            rejection = _extract_guard_rejection_from_tool_events(tool_events)
+            should_emit_rejection_fallback = (
+                rejection is not None
+                and (last_terminal_type in {"error", "timeout"} or last_terminal_type is None)
+            )
+            if should_emit_rejection_fallback:
+                tool_name = str(rejection.get("tool_name") or "tool")
+                reason = str(rejection.get("reason") or "This tool call was rejected by safety review.")
+                fallback_text = (
+                    f"⚠️ 安全审核拦截\n\n"
+                    f"工具 `{tool_name}` 的调用已被安全系统拒绝。\n"
+                    f"原因：{reason}\n"
+                    f"请根据安全提示调整您的请求后再继续。"
                 )
-                if should_emit_rejection_fallback:
-                    tool_name = str(rejection.get("tool_name") or "tool")
-                    reason = str(rejection.get("reason") or "This tool call was rejected by safety review.")
-                    fallback_text = (
-                        f"工具调用 `{tool_name}` 已被安全审核拒绝。\n"
-                        f"原因：{reason}\n"
-                        "请根据风险提示调整请求后再继续。"
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "tool_blocked",
+                            "tool_name": tool_name,
+                            "reason": reason,
+                            "text": fallback_text,
+                        },
+                        ensure_ascii=False,
                     )
-                    yield (
-                        "data: "
-                        + json.dumps(
-                            {
-                                "type": "tool_blocked",
-                                "tool_name": tool_name,
-                                "reason": reason,
-                                "text": fallback_text,
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n\n"
-                    )
-                    yield f"data: {json.dumps({'type': 'final', 'text': fallback_text}, ensure_ascii=False)}\n\n"
-                    stream_error_text = None
+                    + "\n\n"
+                )
+                yield f"data: {json.dumps({'type': 'final', 'text': fallback_text}, ensure_ascii=False)}\n\n"
+                stream_error_text = None
         except Exception:
             pass  # non-fatal
 

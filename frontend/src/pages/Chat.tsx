@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useCallback } from 'react';
+﻿import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
@@ -9,6 +9,7 @@ import { chatAPI, guardAPI, systemAPI, voiceAPI } from '../services/api';
 import type { RuntimeInstance } from '../services/api';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { useI18n } from '../i18n';
+import { chatStreamStore } from '../stores/chatStreamStore';
 
 declare global {
   interface Window {
@@ -300,10 +301,24 @@ function Bubble({ msg }: { msg: ChatMessage }) {
 export default function Chat() {
   const [sessions, setSessions] = useState<StoredSession[]>(loadStoredSessions);
   const [activeKey, setActiveKey] = useState<string | null>(() => loadStoredSessions()[0]?.key ?? null);
-  const [messageMap, setMessageMap] = useState<Record<string, ChatMessage[]>>({});
+
+  // Message map backed by persistent store (survives component unmount)
+  const subscribeFn = useCallback((cb: () => void) => chatStreamStore.subscribe(cb), []);
+  const messageMap = useSyncExternalStore(subscribeFn, () => chatStreamStore.getSnapshot());
+  const sendingMap = useSyncExternalStore(subscribeFn, () => chatStreamStore.getSendingSnapshot());
+  const sending = activeKey ? (sendingMap[activeKey] ?? false) : false;
+
+  const setMessageMap = useCallback((updaterOrValue: Record<string, ChatMessage[]> | ((prev: Record<string, ChatMessage[]>) => Record<string, ChatMessage[]>)) => {
+    if (typeof updaterOrValue === 'function') {
+      const next = updaterOrValue(chatStreamStore.getSnapshot());
+      chatStreamStore.replaceAll(next);
+    } else {
+      chatStreamStore.replaceAll(updaterOrValue);
+    }
+  }, []);
+
   const [input, setInput] = useState('');
   const [connecting, setConnecting] = useState(false);
-  const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null); // key being loaded
   const [isComposing, setIsComposing] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
@@ -363,7 +378,7 @@ export default function Chat() {
   const voiceModelRef = useRef<string | null>(null);
   const voiceThinkingLevelRef = useRef<string | null>(null);
   const voiceLangTriedRef = useRef<'zh-CN' | 'zh' | 'en-US' | null>(null);
-  const inFlightRef = useRef(false);
+  const inFlightKeysRef = useRef<Set<string>>(new Set());
   const composingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
 
@@ -606,42 +621,46 @@ export default function Chat() {
     return () => { cancelled = true; };
   }, [selectedInstanceId]);
 
-  // Poll guard pending items for the active session
+  // Poll guard pending items for the active session (1.5s for responsiveness)
   useEffect(() => {
     if (!activeKey) { setGuardPending([]); return; }
     let cancelled = false;
 
-    // §B2: only the hermes plugin produces tool-check requests with an
-    // unstable session_key (task_id-based or 'default' fallback when
-    // Hermes's _invoke_tool path doesn't pass session_id). For those
-    // we widen the match to "same platform + instance and not claimed
-    // by any other stored session". OpenClaw / Nanobot keep the strict
-    // exact/suffix match.
     const activeKeyParts = activeKey.split('::');
     const activeKeyPlatform = activeKeyParts.length >= 3 ? activeKeyParts[0] : null;
     const activeKeyInstanceId = activeKeyParts.length >= 3 ? activeKeyParts[1] : null;
     const isHermesActive = activeSession?.platform === 'hermes' || activeKeyPlatform === 'hermes';
+    const isNanobotActive = activeSession?.platform === 'nanobot' || activeKeyPlatform === 'nanobot';
     const activeInstanceId = activeSession?.instanceId ?? activeKeyInstanceId ?? null;
-    const otherHermesKeys = isHermesActive
-      ? sessions
-          .filter(s => (s.platform === 'hermes' || s.key.startsWith('hermes::')) && s.key !== activeKey)
-          .map(s => s.key)
-      : [];
+    const otherSessionKeys = sessions
+      .filter(s => s.key !== activeKey)
+      .map(s => s.key);
 
     const matches = (p: any): boolean => {
       const pk = String(p?.session_key || '');
       if (!pk) return false;
       if (pk === activeKey) return true;
       if (pk.endsWith(activeKey)) return true;
+      if (activeKey.endsWith(pk)) return true;
 
-      if (!isHermesActive) return false;
-      const pendingKeyParts = pk.split('::');
-      const pendingPlatform = p?.platform || (pendingKeyParts.length >= 3 ? pendingKeyParts[0] : null);
-      const pendingInstanceId = p?.instance_id || (pendingKeyParts.length >= 3 ? pendingKeyParts[1] : null);
-      if (pendingPlatform !== 'hermes') return false;
-      if (activeInstanceId && pendingInstanceId && pendingInstanceId !== activeInstanceId) return false;
-      const claimedByOther = otherHermesKeys.some(k => pk === k || pk.endsWith(k));
-      return !claimedByOther;
+      const pendingPlatform = p?.platform || (pk.split('::').length >= 3 ? pk.split('::')[0] : null);
+      const pendingInstanceId = p?.instance_id || (pk.split('::').length >= 3 ? pk.split('::')[1] : null);
+
+      if (isNanobotActive) {
+        if (pendingPlatform !== 'nanobot') return false;
+        if (activeInstanceId && pendingInstanceId && pendingInstanceId !== activeInstanceId) return false;
+        const claimedByOther = otherSessionKeys.some(k => pk === k || pk.endsWith(k));
+        return !claimedByOther;
+      }
+
+      if (isHermesActive) {
+        if (pendingPlatform !== 'hermes') return false;
+        if (activeInstanceId && pendingInstanceId && pendingInstanceId !== activeInstanceId) return false;
+        const claimedByOther = otherSessionKeys.some(k => pk === k || pk.endsWith(k));
+        return !claimedByOther;
+      }
+
+      return false;
     };
 
     const poll = async () => {
@@ -663,7 +682,7 @@ export default function Chat() {
       } catch { /* ignore */ }
     };
     poll();
-    const timer = setInterval(poll, 3000);
+    const timer = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(timer); };
   }, [activeKey, activeSession?.platform, activeSession?.instanceId, sessions]);
 
@@ -868,7 +887,7 @@ export default function Chat() {
   const handleSend = async () => {
     const text = input.trim();
     const hasImages = pendingImages.length > 0;
-    if ((!text && !hasImages) || !activeKey || inFlightRef.current) return;
+    if ((!text && !hasImages) || !activeKey || inFlightKeysRef.current.has(activeKey) || chatStreamStore.isSending(activeKey)) return;
     if (activeRuntimeUnavailable) {
       setMessageMap(prev => ({
         ...prev,
@@ -889,13 +908,13 @@ export default function Chat() {
     const textToSend = modelCommand ?? text;
 
     let key = activeKey;
-    inFlightRef.current = true;
+    inFlightKeysRef.current.add(key);
 
     const imagesToSend = [...pendingImages];
     setInput('');
     setPendingImages([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
-    setSending(true);
+    chatStreamStore.setSending(key, true);
 
     const userMsg: ChatMessage = {
       id: uuidv4(), role: 'user', content: text, timestamp: new Date(),
@@ -960,15 +979,10 @@ export default function Chat() {
               const nextKey = chunk.session_key;
               if (nextKey && nextKey !== previousKey) {
                 key = nextKey;
+                chatStreamStore.renameSession(previousKey, nextKey);
                 setSessions(prev => prev.map(session => (
                   session.key === previousKey ? { ...session, key: nextKey } : session
                 )));
-                setMessageMap(prev => {
-                  const next = { ...prev };
-                  next[nextKey] = next[previousKey] ?? next[nextKey] ?? [];
-                  delete next[previousKey];
-                  return next;
-                });
                 setActiveKey(current => (current === previousKey ? nextKey : current));
               }
             } else if (chunk.type === 'delta' && chunk.text) {
@@ -1016,18 +1030,20 @@ export default function Chat() {
                 ),
               }));
             } else if (chunk.type === 'tool_blocked') {
-              const blockedText =
-                chunk.text ||
-                (chunk.reason
-                  ? `工具调用已被安全审核拒绝。\n原因：${chunk.reason}`
-                  : '工具调用已被安全审核拒绝。');
+              const toolName = chunk.tool_name || 'tool';
+              const reason = chunk.reason || '';
+              const blockedText = chunk.text || (
+                locale === 'zh'
+                  ? `⚠️ 安全审核拦截\n\n工具 \`${toolName}\` 的调用已被安全系统拒绝。\n${reason ? `原因：${reason}\n` : ''}请根据安全提示调整您的请求后再继续。`
+                  : `⚠️ Safety Review Blocked\n\nThe call to \`${toolName}\` was rejected by the safety system.\n${reason ? `Reason: ${reason}\n` : ''}Please adjust your request according to the safety guidance.`
+              );
               setMessageMap(prev => ({
                 ...prev,
                 [key]: (prev[key] ?? []).map(m => {
                   if (m.id === pendingId) {
                     return {
                       ...m,
-                      role: 'assistant' as const,
+                      role: 'error' as const,
                       content: blockedText,
                       pending: false,
                     };
@@ -1040,7 +1056,7 @@ export default function Chat() {
                   ) {
                     return {
                       ...m,
-                      result: chunk.reason || blockedText,
+                      result: reason || blockedText,
                       is_error: true,
                       result_pending: false,
                     };
@@ -1097,8 +1113,8 @@ export default function Chat() {
         ),
       }));
     } finally {
-      setSending(false);
-      inFlightRef.current = false;
+      chatStreamStore.setSending(key, false);
+      inFlightKeysRef.current.delete(key);
     }
   };
 
@@ -1727,51 +1743,12 @@ export default function Chat() {
                 )}
               </div>
 
-              {/* Guard inline approval panel */}
+              {/* Guard approval notification bar (small indicator when modal is present) */}
               {guardPending.length > 0 && (
-                <div className="flex-shrink-0 mx-6 mt-3 space-y-2">
-                  {guardPending.map(gp => (
-                    <div key={gp.id} className="bg-surface-1 border-l-4 border-l-red-500 border border-border rounded-xl overflow-hidden">
-                      <div className="px-5 py-4 flex items-start justify-between gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1.5">
-                            <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                            <span className="font-mono text-sm font-semibold text-text-primary">{gp.tool_name}</span>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-semibold uppercase">{gp.guard_verdict}</span>
-                          </div>
-                          <p className="text-[12px] text-text-muted">{t.chat.guardPaused}</p>
-                          {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
-                            <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
-                              {gp.risk_source && <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 font-medium">{gp.risk_source}</span>}
-                              {gp.failure_mode && <span className="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 font-medium">{gp.failure_mode}</span>}
-                              {gp.real_world_harm && <span className="px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 font-medium">{gp.real_world_harm}</span>}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <button onClick={() => handleGpResolve(gp.id, 'approved')} disabled={gpResolving === gp.id}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/25 transition-colors disabled:opacity-50">
-                            {gpResolving === gp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />} {t.common.approve}
-                          </button>
-                          <button onClick={() => handleGpResolve(gp.id, 'rejected')} disabled={gpResolving === gp.id}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 text-red-400 text-xs font-semibold hover:bg-red-500/25 transition-colors disabled:opacity-50">
-                            <X className="w-3.5 h-3.5" /> {t.common.reject}
-                          </button>
-                        </div>
-                      </div>
-                      <div className="px-5 pb-4">
-                        <button onClick={() => setGpExpandedId(gpExpandedId === gp.id ? null : gp.id)}
-                          className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary mb-2 transition-colors">
-                          {gpExpandedId === gp.id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />} {t.common.parameters}
-                        </button>
-                        {gpExpandedId === gp.id && (
-                          <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-text-dim overflow-x-auto max-h-48">
-                            {JSON.stringify(gp.params, null, 2)}
-                          </pre>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                <div className="flex-shrink-0 border-b border-red-500/20 bg-red-500/10 px-6 py-2.5 text-[12px] text-red-200 flex items-center gap-2 animate-pulse">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0 text-red-400" />
+                  <span className="flex-1 font-medium">{t.chat.guardPaused}</span>
+                  <span className="px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 text-[11px] font-bold">{guardPending.length}</span>
                 </div>
               )}
 
@@ -1959,6 +1936,72 @@ export default function Chat() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Guard Approval Popup — compact inline card at bottom-center (Cursor-style) */}
+      {guardPending.length > 0 && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-[60] w-[min(420px,calc(100%-2rem))] animate-[slideUp_0.2s_ease-out]">
+          {guardPending.map(gp => (
+            <div key={gp.id} className="mb-2 bg-surface-1 border border-red-500/30 rounded-xl shadow-xl shadow-black/30 overflow-hidden">
+              {/* Compact header */}
+              <div className="px-4 py-2.5 flex items-center gap-2.5 border-b border-border/50 bg-red-500/5">
+                <Shield className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <span className="font-mono text-[12px] font-semibold text-text-primary truncate">{gp.tool_name}</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-bold uppercase ml-auto flex-shrink-0">{gp.guard_verdict}</span>
+              </div>
+
+              {/* Risk info (compact) */}
+              {(gp.risk_source || gp.failure_mode || gp.real_world_harm) && (
+                <div className="px-4 py-2 flex flex-wrap gap-1.5 border-b border-border/30">
+                  {gp.risk_source && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 text-[10px] font-medium border border-amber-500/20">{gp.risk_source}</span>
+                  )}
+                  {gp.failure_mode && (
+                    <span className="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 text-[10px] font-medium border border-orange-500/20">{gp.failure_mode}</span>
+                  )}
+                  {gp.real_world_harm && (
+                    <span className="px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 text-[10px] font-medium border border-red-500/20">{gp.real_world_harm}</span>
+                  )}
+                </div>
+              )}
+
+              {/* Expandable params */}
+              <div className="px-4 py-1.5 border-b border-border/30">
+                <button onClick={() => setGpExpandedId(gpExpandedId === gp.id ? null : gp.id)}
+                  className="flex items-center gap-1 text-[10px] text-text-muted hover:text-text-primary transition-colors">
+                  {gpExpandedId === gp.id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                  <span className="font-medium">{t.common.parameters}</span>
+                </button>
+                {gpExpandedId === gp.id && (
+                  <pre className="mt-1.5 mb-1 bg-surface-0 border border-border rounded-md p-2 text-[10px] font-mono text-text-secondary overflow-x-auto max-h-28 whitespace-pre-wrap break-all">
+                    {JSON.stringify(gp.params, null, 2)}
+                  </pre>
+                )}
+              </div>
+
+              {/* Action buttons — side by side, compact */}
+              <div className="px-4 py-2.5 flex items-center gap-2">
+                <button
+                  onClick={() => handleGpResolve(gp.id, 'approved')}
+                  disabled={gpResolving === gp.id}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500 text-white text-[12px] font-semibold hover:bg-emerald-600 disabled:opacity-50 transition-all"
+                >
+                  {gpResolving === gp.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  {t.chat.approvalModalApprove}
+                </button>
+                <button
+                  onClick={() => handleGpResolve(gp.id, 'rejected')}
+                  disabled={gpResolving === gp.id}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/80 text-white text-[12px] font-semibold hover:bg-red-600 disabled:opacity-50 transition-all"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  {t.chat.approvalModalReject}
+                </button>
+                <span className="text-[9px] text-text-muted flex-shrink-0 ml-1">5min</span>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

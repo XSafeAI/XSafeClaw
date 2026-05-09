@@ -45,8 +45,9 @@ from ..risk_rules import build_risk_rule_block_reason, load_risk_rules, match_ri
 logger = logging.getLogger(__name__)
 _GUARD_BLOCK_REASON = (
     "Tool call blocked: this action was rejected by the safety reviewer due to potential security risks. "
-    "Inform the user that the action was blocked, briefly explain the risk, do not retry this tool call, "
-    "and ask how they want to proceed."
+    "You MUST inform the user clearly that this tool call was blocked by XSafeClaw's safety system. "
+    "Briefly explain why this action may be risky (e.g. accessing protected paths, executing dangerous commands). "
+    "Do NOT retry this tool call or attempt workarounds. Ask the user how they want to proceed."
 )
 
 # ---------------------------------------------------------------------------
