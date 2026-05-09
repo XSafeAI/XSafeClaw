@@ -44,6 +44,39 @@ def _clean_json(value: Any) -> Any:
     return value
 
 
+_PLACEHOLDER_PROVIDERS = {"hermes", "nanobot"}
+_PLACEHOLDER_MODELS = {"hermes-agent", "nanobot"}
+
+
+def _normalize_model_field(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_placeholder_provider(value: str | None) -> bool:
+    return _normalize_model_field(value) in _PLACEHOLDER_PROVIDERS
+
+
+def _is_placeholder_model(value: str | None) -> bool:
+    return _normalize_model_field(value) in _PLACEHOLDER_MODELS
+
+
+def _resolve_session_model_defaults(
+    session_provider: str | None,
+    session_model_name: str | None,
+    instance_provider: str | None,
+    instance_model_name: str | None,
+) -> tuple[str | None, str | None]:
+    provider = session_provider
+    model_name = session_model_name
+    if not provider or _is_placeholder_provider(provider):
+        provider = instance_provider
+    if not model_name or _is_placeholder_model(model_name):
+        model_name = instance_model_name
+    provider = str(provider or "").strip() or None
+    model_name = str(model_name or "").strip() or None
+    return provider, model_name
+
+
 class RuntimeSyncWorker:
     """Instance-scoped watcher and sync worker."""
 
@@ -264,12 +297,20 @@ class RuntimeSyncWorker:
 
         async with get_db_context() as db:
             internal_session_id = await self._ensure_session(db, batch.session)
+            session_model_provider, session_model_name = _resolve_session_model_defaults(
+                batch.session.current_model_provider,
+                batch.session.current_model_name,
+                str(self.instance.meta.get("provider") or ""),
+                str(self.instance.meta.get("model") or ""),
+            )
             for message in batch.messages:
                 await self._sync_message(
                     db,
                     batch.session.source_session_id,
                     internal_session_id,
                     message,
+                    session_model_provider=session_model_provider or None,
+                    session_model_name=session_model_name or None,
                 )
 
         self._sync_positions[str(file_path)] = batch.total_lines
@@ -294,8 +335,12 @@ class RuntimeSyncWorker:
             select(Session).where(Session.session_id == internal_session_id)
         )
         existing = result.scalar_one_or_none()
-        provider = session.current_model_provider or str(self.instance.meta.get("provider") or "")
-        model_name = session.current_model_name or str(self.instance.meta.get("model") or "")
+        provider, model_name = _resolve_session_model_defaults(
+            session.current_model_provider,
+            session.current_model_name,
+            str(self.instance.meta.get("provider") or ""),
+            str(self.instance.meta.get("model") or ""),
+        )
         if existing:
             existing.platform = self.instance.platform
             existing.instance_id = self.instance.instance_id
@@ -333,6 +378,9 @@ class RuntimeSyncWorker:
         source_session_id: str,
         session_id: str,
         parsed: ParsedMessage,
+        *,
+        session_model_provider: str | None = None,
+        session_model_name: str | None = None,
     ) -> None:
         internal_message_id = namespace_message_id(
             self.instance.platform,
@@ -341,9 +389,23 @@ class RuntimeSyncWorker:
             parsed.source_message_id,
         )
         existing = await db.execute(
-            select(Message.id).where(Message.message_id == internal_message_id)
+            select(Message).where(Message.message_id == internal_message_id)
         )
-        if existing.scalar_one_or_none():
+        effective_provider = parsed.provider
+        effective_model_id = parsed.model_id
+        if (effective_provider is None or _is_placeholder_provider(effective_provider)) and session_model_provider:
+            effective_provider = session_model_provider
+        if (effective_model_id is None or _is_placeholder_model(effective_model_id)) and session_model_name:
+            effective_model_id = session_model_name
+
+        existing_message = existing.scalar_one_or_none()
+        if existing_message is not None:
+            self._patch_existing_message(
+                existing_message,
+                parsed,
+                session_model_provider=effective_provider,
+                session_model_name=effective_model_id,
+            )
             return
 
         parent_message_id = None
@@ -367,8 +429,8 @@ class RuntimeSyncWorker:
             timestamp=parsed.timestamp,
             content_text=_clean_null_bytes(parsed.content_text),
             content_json=_clean_json(parsed.content_json),
-            provider=parsed.provider,
-            model_id=parsed.model_id,
+            provider=effective_provider,
+            model_id=effective_model_id,
             model_api=parsed.model_api,
             input_tokens=parsed.input_tokens,
             output_tokens=parsed.output_tokens,
@@ -402,6 +464,63 @@ class RuntimeSyncWorker:
                 tool_result=parsed.tool_result,
                 timestamp=parsed.timestamp,
             )
+
+    @staticmethod
+    def _patch_existing_message(
+        existing: Message,
+        parsed: ParsedMessage,
+        *,
+        session_model_provider: str | None = None,
+        session_model_name: str | None = None,
+    ) -> None:
+        """Backfill missing model/usage metadata without mutating core content fields."""
+        provider_value = parsed.provider
+        model_value = parsed.model_id
+        if (provider_value is None or _is_placeholder_provider(provider_value)) and session_model_provider:
+            provider_value = session_model_provider
+        if (model_value is None or _is_placeholder_model(model_value)) and session_model_name:
+            model_value = session_model_name
+
+        def fill_if_missing(attr: str, value: Any) -> None:
+            if getattr(existing, attr) is None and value is not None:
+                setattr(existing, attr, value)
+
+        def fill_if_missing_or_placeholder(attr: str, value: Any, *, is_placeholder) -> None:
+            current = getattr(existing, attr)
+            if value is None:
+                return
+            if current is None or is_placeholder(current):
+                setattr(existing, attr, value)
+
+        fill_if_missing_or_placeholder(
+            "provider",
+            provider_value,
+            is_placeholder=_is_placeholder_provider,
+        )
+        fill_if_missing_or_placeholder(
+            "model_id",
+            model_value,
+            is_placeholder=_is_placeholder_model,
+        )
+        fill_if_missing("model_api", parsed.model_api)
+        fill_if_missing("input_tokens", parsed.input_tokens)
+        fill_if_missing("output_tokens", parsed.output_tokens)
+        fill_if_missing("total_tokens", parsed.total_tokens)
+        fill_if_missing("cache_read_tokens", parsed.cache_read_tokens)
+        fill_if_missing("cache_write_tokens", parsed.cache_write_tokens)
+        fill_if_missing("stop_reason", parsed.stop_reason)
+        fill_if_missing("error_message", parsed.error_message)
+        fill_if_missing("source_message_id", parsed.source_message_id)
+
+        incoming_raw = _clean_json(parsed.raw_entry)
+        if not isinstance(incoming_raw, dict):
+            return
+        existing_raw = existing.raw_entry if isinstance(existing.raw_entry, dict) else {}
+        usage_meta = incoming_raw.get("_xsafeclaw_usage")
+        if isinstance(usage_meta, dict) and not isinstance(existing_raw.get("_xsafeclaw_usage"), dict):
+            merged = dict(existing_raw)
+            merged["_xsafeclaw_usage"] = usage_meta
+            existing.raw_entry = merged
 
     async def _create_tool_call(
         self,
