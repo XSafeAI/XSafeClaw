@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
 from ...models import Message, Session, ToolCall
+from ...runtime.pricing import get_builtin_catalog, lookup_price
 from ..runtime_helpers import apply_runtime_filters, list_instances, serialize_instance
 
 logger = logging.getLogger(__name__)
@@ -293,6 +294,9 @@ def _get_model_info(config: dict) -> dict:
         if cost_cfg:
             break
 
+    if not cost_cfg:
+        cost_cfg = lookup_price(provider, model_id) or {}
+
     return {
         "primary": primary,
         "provider": provider,
@@ -340,9 +344,14 @@ def _normalize_model_key(value: str | None) -> str:
 
 
 def _build_price_catalog(config: dict) -> dict:
-    providers_cfg = config.get("models", {}).get("providers", {})
-    by_provider_model: dict[tuple[str, str], dict] = {}
+    builtin = get_builtin_catalog()
+    by_provider_model: dict[tuple[str, str], dict] = dict(builtin["by_provider_model"])
     by_model: dict[str, list[dict]] = defaultdict(list)
+    for k, v in builtin["by_model"].items():
+        by_model[k].extend(v)
+
+    # User-provided OpenClaw config overrides built-in prices.
+    providers_cfg = config.get("models", {}).get("providers", {})
     for provider_name, provider_data in providers_cfg.items():
         provider_key = _normalize_model_key(provider_name)
         for model in provider_data.get("models", []):
@@ -350,12 +359,14 @@ def _build_price_catalog(config: dict) -> dict:
             if not model_id:
                 continue
             cost_cfg = model.get("cost") if isinstance(model.get("cost"), dict) else {}
+            if not cost_cfg:
+                continue
             by_provider_model[(provider_key, model_id)] = cost_cfg
-            by_model[model_id].append(cost_cfg)
+            by_model[model_id] = [cost_cfg]
             if "/" in model_id:
                 split_provider, bare_model = model_id.split("/", 1)
                 by_provider_model[(split_provider, bare_model)] = cost_cfg
-                by_model[bare_model].append(cost_cfg)
+                by_model[bare_model] = [cost_cfg]
     return {"by_provider_model": by_provider_model, "by_model": by_model}
 
 
@@ -379,6 +390,14 @@ def _resolve_cost_config(catalog: dict, provider: str | None, model_id: str | No
     candidates = [entry for entry in by_model.get(model_key, []) if isinstance(entry, dict)]
     if len(candidates) == 1:
         return candidates[0]
+
+    # Final fallback: fuzzy match via the built-in pricing module.
+    # This covers models whose DB-recorded name doesn't exactly match
+    # any catalog key but can be resolved by prefix/alias matching
+    # (e.g. "gpt-4o-2024-11-20" → "gpt-4o").
+    fuzzy = lookup_price(provider, model_id)
+    if fuzzy:
+        return fuzzy
     return {}
 
 
@@ -488,11 +507,19 @@ async def get_dashboard(
     }
 
     if selected_instance and selected_instance.platform != "openclaw":
+        _non_oc_provider = str(selected_instance.meta.get("provider") or "")
+        _non_oc_model = str(selected_instance.meta.get("model") or "")
+        _non_oc_model_id = _non_oc_model.split("/", 1)[-1] if _non_oc_model else ""
+        _non_oc_cost = (
+            lookup_price(_non_oc_provider, _non_oc_model)
+            or lookup_price(_non_oc_provider, _non_oc_model_id)
+            or {}
+        )
         model_info = {
-            "primary": str(selected_instance.meta.get("model") or ""),
-            "provider": str(selected_instance.meta.get("provider") or ""),
-            "modelId": str(selected_instance.meta.get("model") or "").split("/", 1)[-1],
-            "cost": {},
+            "primary": _non_oc_model,
+            "provider": _non_oc_provider,
+            "modelId": _non_oc_model_id,
+            "cost": _non_oc_cost,
         }
     else:
         model_info = _get_model_info(config)
