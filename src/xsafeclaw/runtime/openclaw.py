@@ -16,6 +16,7 @@ from .parsing import (
     ParsedToolCall,
     ParsedToolResult,
 )
+from .usage import attach_usage_metadata, has_usage, normalize_usage
 
 OPENCLAW_HOME = Path.home() / ".openclaw"
 OPENCLAW_CONFIG_PATH = OPENCLAW_HOME / "openclaw.json"
@@ -170,6 +171,8 @@ async def parse_openclaw_session_file(
             )
 
         usage = msg_data.get("usage", {}) if isinstance(msg_data.get("usage"), dict) else {}
+        usage_norm = normalize_usage(usage)
+        usage_source = "runtime_log" if has_usage(usage) else "unknown"
         normalized_role = "toolResult" if role == "toolResult" else role
         parsed = ParsedMessage(
             source_message_id=str(message_id),
@@ -181,13 +184,17 @@ async def parse_openclaw_session_file(
             provider=msg_data.get("provider"),
             model_id=msg_data.get("model"),
             model_api=msg_data.get("api"),
-            input_tokens=usage.get("input"),
-            output_tokens=usage.get("output"),
-            total_tokens=usage.get("totalTokens"),
-            cache_read_tokens=usage.get("cacheRead"),
-            cache_write_tokens=usage.get("cacheWrite"),
+            input_tokens=usage_norm["input_tokens"],
+            output_tokens=usage_norm["output_tokens"],
+            total_tokens=usage_norm["total_tokens"],
+            cache_read_tokens=usage_norm["cache_read_tokens"],
+            cache_write_tokens=usage_norm["cache_write_tokens"],
             stop_reason=msg_data.get("stopReason"),
-            raw_entry=entry.raw_data,
+            raw_entry=attach_usage_metadata(
+                entry.raw_data,
+                usage_source=usage_source,
+                usage_estimated=False,
+            ),
             tool_calls=tool_calls,
             tool_result=tool_result,
         )

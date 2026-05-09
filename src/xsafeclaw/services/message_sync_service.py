@@ -341,9 +341,11 @@ class RuntimeSyncWorker:
             parsed.source_message_id,
         )
         existing = await db.execute(
-            select(Message.id).where(Message.message_id == internal_message_id)
+            select(Message).where(Message.message_id == internal_message_id)
         )
-        if existing.scalar_one_or_none():
+        existing_message = existing.scalar_one_or_none()
+        if existing_message is not None:
+            self._patch_existing_message(existing_message, parsed)
             return
 
         parent_message_id = None
@@ -402,6 +404,36 @@ class RuntimeSyncWorker:
                 tool_result=parsed.tool_result,
                 timestamp=parsed.timestamp,
             )
+
+    @staticmethod
+    def _patch_existing_message(existing: Message, parsed: ParsedMessage) -> None:
+        """Backfill missing model/usage metadata without mutating core content fields."""
+
+        def fill_if_missing(attr: str, value: Any) -> None:
+            if getattr(existing, attr) is None and value is not None:
+                setattr(existing, attr, value)
+
+        fill_if_missing("provider", parsed.provider)
+        fill_if_missing("model_id", parsed.model_id)
+        fill_if_missing("model_api", parsed.model_api)
+        fill_if_missing("input_tokens", parsed.input_tokens)
+        fill_if_missing("output_tokens", parsed.output_tokens)
+        fill_if_missing("total_tokens", parsed.total_tokens)
+        fill_if_missing("cache_read_tokens", parsed.cache_read_tokens)
+        fill_if_missing("cache_write_tokens", parsed.cache_write_tokens)
+        fill_if_missing("stop_reason", parsed.stop_reason)
+        fill_if_missing("error_message", parsed.error_message)
+        fill_if_missing("source_message_id", parsed.source_message_id)
+
+        incoming_raw = _clean_json(parsed.raw_entry)
+        if not isinstance(incoming_raw, dict):
+            return
+        existing_raw = existing.raw_entry if isinstance(existing.raw_entry, dict) else {}
+        usage_meta = incoming_raw.get("_xsafeclaw_usage")
+        if isinstance(usage_meta, dict) and not isinstance(existing_raw.get("_xsafeclaw_usage"), dict):
+            merged = dict(existing_raw)
+            merged["_xsafeclaw_usage"] = usage_meta
+            existing.raw_entry = merged
 
     async def _create_tool_call(
         self,

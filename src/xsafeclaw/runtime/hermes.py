@@ -19,6 +19,7 @@ from .parsing import (
     ParsedToolCall,
     ParsedToolResult,
 )
+from .usage import attach_usage_metadata, has_usage, normalize_usage
 
 
 def discover_hermes_instance() -> dict[str, Any] | None:
@@ -161,6 +162,13 @@ async def parse_hermes_session_file(
         content = msg_data.get("content")
         content_text, content_json, tool_calls, tool_result = _normalize_content(content)
         source_message_id = _message_id(raw, line_number)
+        usage_raw = (
+            msg_data.get("usage")
+            if isinstance(msg_data.get("usage"), dict)
+            else raw.get("usage")
+        )
+        usage_norm = normalize_usage(usage_raw if isinstance(usage_raw, dict) else None)
+        usage_source = "runtime_log" if has_usage(usage_raw if isinstance(usage_raw, dict) else None) else "unknown"
 
         if role == "tool":
             tool_call_id = (
@@ -186,7 +194,16 @@ async def parse_hermes_session_file(
             content_json=content_json if isinstance(content_json, (dict, list)) else None,
             provider=msg_data.get("provider") or "hermes",
             model_id=msg_data.get("model") or "hermes-agent",
-            raw_entry=raw,
+            input_tokens=usage_norm["input_tokens"],
+            output_tokens=usage_norm["output_tokens"],
+            total_tokens=usage_norm["total_tokens"],
+            cache_read_tokens=usage_norm["cache_read_tokens"],
+            cache_write_tokens=usage_norm["cache_write_tokens"],
+            raw_entry=attach_usage_metadata(
+                raw,
+                usage_source=usage_source,
+                usage_estimated=False,
+            ),
             tool_calls=tool_calls,
             tool_result=tool_result,
         )

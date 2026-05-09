@@ -18,6 +18,7 @@ from .parsing import (
     ParsedToolCall,
     ParsedToolResult,
 )
+from .usage import attach_usage_metadata, estimate_tokens_from_text, has_usage, normalize_usage
 
 NANOBOT_DEFAULT_CONFIG = Path.home() / ".nanobot" / "config.json"
 _UNSAFE_ID_CHARS = re.compile(r"[^a-z0-9]+")
@@ -550,6 +551,7 @@ async def parse_nanobot_session_file(
         lines = handle.readlines()
 
     total_lines = len(lines)
+    last_user_tokens_estimate = 0
     for line_index, raw_line in enumerate(lines):
         line = raw_line.strip()
         if not line:
@@ -588,7 +590,50 @@ async def parse_nanobot_session_file(
             blocks = [{"type": "text", "text": result_text}] if result_text else None
             text = result_text
 
-        raw_entry = data if isinstance(data, dict) else {"value": data}
+        usage_raw = None
+        if isinstance(data.get("usage"), dict):
+            usage_raw = data.get("usage")
+        elif isinstance(data.get("context"), dict) and isinstance(data["context"].get("usage"), dict):
+            usage_raw = data["context"]["usage"]
+        elif isinstance(data.get("result"), dict) and isinstance(data["result"].get("usage"), dict):
+            usage_raw = data["result"]["usage"]
+
+        usage_norm = normalize_usage(usage_raw)
+        usage_source = "runtime_log" if has_usage(usage_raw) else "unknown"
+        usage_estimated = False
+        if normalized_role == "assistant" and not has_usage(usage_raw):
+            estimated_output = estimate_tokens_from_text(text)
+            estimated_input = last_user_tokens_estimate or None
+            estimated_total = estimated_output + (estimated_input or 0)
+            usage_norm = {
+                "input_tokens": estimated_input,
+                "output_tokens": estimated_output,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
+                "total_tokens": estimated_total,
+            }
+            usage_source = "estimated"
+            usage_estimated = True
+
+        if normalized_role == "user":
+            last_user_tokens_estimate = estimate_tokens_from_text(text)
+
+        raw_entry = attach_usage_metadata(
+            data if isinstance(data, dict) else {"value": data},
+            usage_source=usage_source,
+            usage_estimated=usage_estimated,
+        )
+        metadata_block = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else {}
+        provider = (
+            str(data.get("provider") or metadata.get("provider") or metadata_block.get("provider") or "nanobot")
+            if isinstance(data, dict)
+            else "nanobot"
+        )
+        model_id = (
+            str(data.get("model") or metadata.get("model") or metadata_block.get("model") or "nanobot")
+            if isinstance(data, dict)
+            else "nanobot"
+        )
         messages.append(
             ParsedMessage(
                 source_message_id=source_message_id,
@@ -597,6 +642,13 @@ async def parse_nanobot_session_file(
                 timestamp=timestamp,
                 content_text=text,
                 content_json=blocks,
+                provider=provider,
+                model_id=model_id,
+                input_tokens=usage_norm["input_tokens"],
+                output_tokens=usage_norm["output_tokens"],
+                total_tokens=usage_norm["total_tokens"],
+                cache_read_tokens=usage_norm["cache_read_tokens"],
+                cache_write_tokens=usage_norm["cache_write_tokens"],
                 raw_entry=raw_entry,
                 tool_calls=tool_calls,
                 tool_result=tool_result,
@@ -615,6 +667,24 @@ async def parse_nanobot_session_file(
         session_key=source_session_id,
         first_seen_at=first_seen,
         last_activity_at=last_seen or (messages[-1].timestamp if messages else first_seen),
+        current_model_provider=str(
+            metadata.get("provider")
+            or (
+                metadata.get("metadata", {}).get("provider")
+                if isinstance(metadata.get("metadata"), dict)
+                else ""
+            )
+            or "nanobot"
+        ),
+        current_model_name=str(
+            metadata.get("model")
+            or (
+                metadata.get("metadata", {}).get("model")
+                if isinstance(metadata.get("metadata"), dict)
+                else ""
+            )
+            or "nanobot"
+        ),
         jsonl_file_path=str(file_path),
     )
     return ParsedSessionBatch(session=session, messages=messages, total_lines=total_lines)

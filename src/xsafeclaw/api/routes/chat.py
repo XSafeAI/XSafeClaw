@@ -21,6 +21,7 @@ from ...hermes_client import HermesClient
 from ...models import Message, Session
 from ...nanobot_gateway_client import NanobotGatewayClient
 from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_session_key
+from ...runtime.usage import attach_usage_metadata, normalize_usage
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
 from ...services.guard_service import GUARD_REJECTION_MARKER
@@ -2245,22 +2246,12 @@ async def _persist_hermes_chat_turn(
 
     model_info = _hermes_session_model_info.get(session_key, {})
 
-    def _usage_int(*keys: str) -> int | None:
-        for key in keys:
-            value = (usage or {}).get(key)
-            if value is None:
-                continue
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                continue
-        return None
-
-    input_tokens = _usage_int("prompt_tokens", "input_tokens")
-    output_tokens = _usage_int("completion_tokens", "output_tokens")
-    total_tokens = _usage_int("total_tokens")
-    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
-        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    usage_norm = normalize_usage(usage if isinstance(usage, dict) else None)
+    input_tokens = usage_norm["input_tokens"]
+    output_tokens = usage_norm["output_tokens"]
+    total_tokens = usage_norm["total_tokens"]
+    cache_read_tokens = usage_norm["cache_read_tokens"]
+    cache_write_tokens = usage_norm["cache_write_tokens"]
 
     async with get_db_context() as db:
         result = await db.execute(
@@ -2308,6 +2299,7 @@ async def _persist_hermes_chat_turn(
             role="user",
             timestamp=now,
             content_text=user_text,
+            raw_entry=attach_usage_metadata({}, usage_source="none", usage_estimated=False),
         )
         db.add(user_msg)
 
@@ -2322,11 +2314,18 @@ async def _persist_hermes_chat_turn(
             timestamp=now,
             content_text=assistant_text,
             provider=model_info.get("provider"),
-            model_id=model_info.get("model"),
+            model_id=model_info.get("model_id") or model_info.get("model"),
             stop_reason=stop_reason or "stop",
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            raw_entry=attach_usage_metadata(
+                {"usage": usage} if isinstance(usage, dict) else {},
+                usage_source="provider" if isinstance(usage, dict) else "unknown",
+                usage_estimated=False,
+            ),
         )
         db.add(asst_msg)
 

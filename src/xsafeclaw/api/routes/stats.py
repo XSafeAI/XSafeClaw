@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -310,6 +311,53 @@ def _compute_cost(tokens: dict, cost_cfg: dict) -> float:
     return (inp + out + cr + cw) / 1_000_000
 
 
+def _normalize_model_key(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _build_price_catalog(config: dict) -> dict:
+    providers_cfg = config.get("models", {}).get("providers", {})
+    by_provider_model: dict[tuple[str, str], dict] = {}
+    by_model: dict[str, list[dict]] = defaultdict(list)
+    for provider_name, provider_data in providers_cfg.items():
+        provider_key = _normalize_model_key(provider_name)
+        for model in provider_data.get("models", []):
+            model_id = _normalize_model_key(model.get("id"))
+            if not model_id:
+                continue
+            cost_cfg = model.get("cost") if isinstance(model.get("cost"), dict) else {}
+            by_provider_model[(provider_key, model_id)] = cost_cfg
+            by_model[model_id].append(cost_cfg)
+            if "/" in model_id:
+                split_provider, bare_model = model_id.split("/", 1)
+                by_provider_model[(split_provider, bare_model)] = cost_cfg
+                by_model[bare_model].append(cost_cfg)
+    return {"by_provider_model": by_provider_model, "by_model": by_model}
+
+
+def _resolve_cost_config(catalog: dict, provider: str | None, model_id: str | None) -> dict:
+    provider_key = _normalize_model_key(provider)
+    model_key = _normalize_model_key(model_id)
+    if not model_key:
+        return {}
+    by_provider_model = catalog.get("by_provider_model", {})
+    by_model = catalog.get("by_model", {})
+    direct = by_provider_model.get((provider_key, model_key))
+    if isinstance(direct, dict):
+        return direct
+
+    if "/" in model_key:
+        split_provider, bare_model = model_key.split("/", 1)
+        direct = by_provider_model.get((split_provider, bare_model))
+        if isinstance(direct, dict):
+            return direct
+
+    candidates = [entry for entry in by_model.get(model_key, []) if isinstance(entry, dict)]
+    if len(candidates) == 1:
+        return candidates[0]
+    return {}
+
+
 @router.get("/dashboard")
 async def get_dashboard(
     platform: str | None = Query(None, description="Filter by runtime platform"),
@@ -328,7 +376,8 @@ async def get_dashboard(
         ),
         next((instance for instance in instances if instance.is_default and instance.enabled), None),
     )
-    config = _read_openclaw_config() if selected_instance and selected_instance.platform == "openclaw" else {}
+    config = _read_openclaw_config()
+    price_catalog = _build_price_catalog(config)
 
     session_count = (
         await db.execute(
@@ -387,6 +436,8 @@ async def get_dashboard(
                 func.sum(Message.total_tokens).label("total"),
                 func.sum(Message.input_tokens).label("input"),
                 func.sum(Message.output_tokens).label("output"),
+                func.sum(Message.cache_read_tokens).label("cache_read"),
+                func.sum(Message.cache_write_tokens).label("cache_write"),
             ).where(Message.role == "assistant"),
             Message,
             platform=platform,
@@ -408,6 +459,8 @@ async def get_dashboard(
         "total": token_row.total or 0,
         "input": token_row.input or 0,
         "output": token_row.output or 0,
+        "cacheRead": token_row.cache_read or 0,
+        "cacheWrite": token_row.cache_write or 0,
     }
 
     if selected_instance and selected_instance.platform != "openclaw":
@@ -419,7 +472,69 @@ async def get_dashboard(
         }
     else:
         model_info = _get_model_info(config)
-    cost = _compute_cost(tokens, model_info.get("cost", {}))
+    grouped_stmt = (
+        select(
+            Message.provider,
+            Message.model_id,
+            func.count(Message.id).label("count"),
+            func.sum(Message.total_tokens).label("total_tokens"),
+            func.sum(Message.input_tokens).label("input_tokens"),
+            func.sum(Message.output_tokens).label("output_tokens"),
+            func.sum(Message.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(Message.cache_write_tokens).label("cache_write_tokens"),
+        )
+        .where(Message.role == "assistant")
+        .group_by(Message.provider, Message.model_id)
+    )
+    grouped_stmt = apply_runtime_filters(
+        grouped_stmt,
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
+    grouped_rows = (await db.execute(grouped_stmt)).all()
+
+    estimated_tokens = 0
+    estimated_stmt = apply_runtime_filters(
+        select(Message.total_tokens, Message.raw_entry).where(Message.role == "assistant"),
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
+    for row in (await db.execute(estimated_stmt)).all():
+        meta = row.raw_entry.get("_xsafeclaw_usage") if isinstance(row.raw_entry, dict) else None
+        if isinstance(meta, dict) and bool(meta.get("estimated")):
+            estimated_tokens += int(row.total_tokens or 0)
+
+    cost_breakdown = []
+    unknown_cost_tokens = 0
+    unknown_cost_models = 0
+    total_cost = 0.0
+    for row in grouped_rows:
+        row_tokens = {
+            "total": row.total_tokens or 0,
+            "input": row.input_tokens or 0,
+            "output": row.output_tokens or 0,
+            "cacheRead": row.cache_read_tokens or 0,
+            "cacheWrite": row.cache_write_tokens or 0,
+        }
+        resolved_cost_cfg = _resolve_cost_config(price_catalog, row.provider, row.model_id)
+        row_cost = _compute_cost(row_tokens, resolved_cost_cfg)
+        priced = bool(resolved_cost_cfg)
+        if not priced:
+            unknown_cost_tokens += int(row_tokens["total"] or 0)
+            unknown_cost_models += 1
+        total_cost += row_cost
+        cost_breakdown.append(
+            {
+                "provider": row.provider or "unknown",
+                "modelId": row.model_id or "unknown",
+                "messages": row.count or 0,
+                "tokens": row_tokens,
+                "priced": priced,
+                "estimated_cost": round(row_cost, 6),
+            }
+        )
 
     channels = _get_channels_info(config) if selected_instance and selected_instance.platform == "openclaw" else []
 
@@ -464,7 +579,11 @@ async def get_dashboard(
         },
         "toolCalls": tool_call_count,
         "tokens": tokens,
-        "cost": round(cost, 6),
+        "cost": round(total_cost, 6),
+        "estimatedTokens": estimated_tokens,
+        "costUnknownTokens": unknown_cost_tokens,
+        "costUnknownModels": unknown_cost_models,
+        "costBreakdown": cost_breakdown,
         "channels": channels,
         "model": model_info,
         "models": models,
