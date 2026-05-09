@@ -60,6 +60,23 @@ def _is_placeholder_model(value: str | None) -> bool:
     return _normalize_model_field(value) in _PLACEHOLDER_MODELS
 
 
+def _resolve_session_model_defaults(
+    session_provider: str | None,
+    session_model_name: str | None,
+    instance_provider: str | None,
+    instance_model_name: str | None,
+) -> tuple[str | None, str | None]:
+    provider = session_provider
+    model_name = session_model_name
+    if not provider or _is_placeholder_provider(provider):
+        provider = instance_provider
+    if not model_name or _is_placeholder_model(model_name):
+        model_name = instance_model_name
+    provider = str(provider or "").strip() or None
+    model_name = str(model_name or "").strip() or None
+    return provider, model_name
+
+
 class RuntimeSyncWorker:
     """Instance-scoped watcher and sync worker."""
 
@@ -280,11 +297,11 @@ class RuntimeSyncWorker:
 
         async with get_db_context() as db:
             internal_session_id = await self._ensure_session(db, batch.session)
-            session_model_provider = batch.session.current_model_provider or str(
-                self.instance.meta.get("provider") or ""
-            )
-            session_model_name = batch.session.current_model_name or str(
-                self.instance.meta.get("model") or ""
+            session_model_provider, session_model_name = _resolve_session_model_defaults(
+                batch.session.current_model_provider,
+                batch.session.current_model_name,
+                str(self.instance.meta.get("provider") or ""),
+                str(self.instance.meta.get("model") or ""),
             )
             for message in batch.messages:
                 await self._sync_message(
@@ -318,8 +335,12 @@ class RuntimeSyncWorker:
             select(Session).where(Session.session_id == internal_session_id)
         )
         existing = result.scalar_one_or_none()
-        provider = session.current_model_provider or str(self.instance.meta.get("provider") or "")
-        model_name = session.current_model_name or str(self.instance.meta.get("model") or "")
+        provider, model_name = _resolve_session_model_defaults(
+            session.current_model_provider,
+            session.current_model_name,
+            str(self.instance.meta.get("provider") or ""),
+            str(self.instance.meta.get("model") or ""),
+        )
         if existing:
             existing.platform = self.instance.platform
             existing.instance_id = self.instance.instance_id

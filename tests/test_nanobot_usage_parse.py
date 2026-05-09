@@ -62,3 +62,26 @@ async def test_nanobot_parser_estimates_tokens_when_usage_missing(tmp_path):
     assert asst.total_tokens == 4
     assert asst.raw_entry["_xsafeclaw_usage"]["source"] == "estimated"
     assert asst.raw_entry["_xsafeclaw_usage"]["estimated"] is True
+
+
+@pytest.mark.asyncio
+async def test_nanobot_parser_leaves_model_empty_when_metadata_missing(tmp_path):
+    file_path = tmp_path / "websocket_chat-3.jsonl"
+    file_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"_type": "metadata", "key": "websocket:chat-3", "metadata": {}}),
+                json.dumps({"role": "user", "content": "hello"}),
+                json.dumps({"role": "assistant", "content": "world"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    batch = await parse_nanobot_session_file(file_path)
+    asst = next(msg for msg in batch.messages if msg.role == "assistant")
+    assert asst.provider is None
+    assert asst.model_id is None
+    assert batch.session.current_model_provider is None
+    assert batch.session.current_model_name is None

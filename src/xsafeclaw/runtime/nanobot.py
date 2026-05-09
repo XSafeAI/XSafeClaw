@@ -624,16 +624,18 @@ async def parse_nanobot_session_file(
             usage_estimated=usage_estimated,
         )
         metadata_block = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else {}
-        provider = (
-            str(data.get("provider") or metadata.get("provider") or metadata_block.get("provider") or "nanobot")
+        provider_raw = (
+            data.get("provider") or metadata.get("provider") or metadata_block.get("provider")
             if isinstance(data, dict)
-            else "nanobot"
+            else None
         )
-        model_id = (
-            str(data.get("model") or metadata.get("model") or metadata_block.get("model") or "nanobot")
+        model_raw = (
+            data.get("model") or metadata.get("model") or metadata_block.get("model")
             if isinstance(data, dict)
-            else "nanobot"
+            else None
         )
+        provider = str(provider_raw).strip() if provider_raw is not None else ""
+        model_id = str(model_raw).strip() if model_raw is not None else ""
         messages.append(
             ParsedMessage(
                 source_message_id=source_message_id,
@@ -642,8 +644,8 @@ async def parse_nanobot_session_file(
                 timestamp=timestamp,
                 content_text=text,
                 content_json=blocks,
-                provider=provider,
-                model_id=model_id,
+                provider=provider or None,
+                model_id=model_id or None,
                 input_tokens=usage_norm["input_tokens"],
                 output_tokens=usage_norm["output_tokens"],
                 total_tokens=usage_norm["total_tokens"],
@@ -662,29 +664,29 @@ async def parse_nanobot_session_file(
         if metadata.get("updated_at")
         else None
     )
+    session_provider_raw = (
+        metadata.get("provider")
+        or (
+            metadata.get("metadata", {}).get("provider")
+            if isinstance(metadata.get("metadata"), dict)
+            else None
+        )
+    )
+    session_model_raw = (
+        metadata.get("model")
+        or (
+            metadata.get("metadata", {}).get("model")
+            if isinstance(metadata.get("metadata"), dict)
+            else None
+        )
+    )
     session = ParsedSessionInfo(
         source_session_id=source_session_id,
         session_key=source_session_id,
         first_seen_at=first_seen,
         last_activity_at=last_seen or (messages[-1].timestamp if messages else first_seen),
-        current_model_provider=str(
-            metadata.get("provider")
-            or (
-                metadata.get("metadata", {}).get("provider")
-                if isinstance(metadata.get("metadata"), dict)
-                else ""
-            )
-            or "nanobot"
-        ),
-        current_model_name=str(
-            metadata.get("model")
-            or (
-                metadata.get("metadata", {}).get("model")
-                if isinstance(metadata.get("metadata"), dict)
-                else ""
-            )
-            or "nanobot"
-        ),
+        current_model_provider=(str(session_provider_raw).strip() if session_provider_raw is not None else None) or None,
+        current_model_name=(str(session_model_raw).strip() if session_model_raw is not None else None) or None,
         jsonl_file_path=str(file_path),
     )
     return ParsedSessionBatch(session=session, messages=messages, total_lines=total_lines)
