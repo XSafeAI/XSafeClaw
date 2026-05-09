@@ -1958,6 +1958,43 @@ class TranscribeCleanResponse(BaseModel):
 _hermes_session_model_info: dict[str, dict[str, str]] = {}
 _hermes_event_sync = EventSyncService()
 
+_HERMES_PLACEHOLDER_PROVIDERS = {"", "hermes"}
+_HERMES_PLACEHOLDER_MODELS = {"", "hermes-agent"}
+
+
+def _build_hermes_model_info(
+    provider: str | None,
+    model_name: str | None,
+    model_id: str | None = None,
+) -> dict[str, str]:
+    provider_value = str(provider or "").strip()
+    model_value = str(model_name or "").strip()
+    model_id_value = str(model_id or "").strip()
+    if not model_id_value and provider_value and model_value:
+        model_id_value = (
+            model_value
+            if model_value.startswith(f"{provider_value}/")
+            else f"{provider_value}/{model_value}"
+        )
+    return {
+        "provider": provider_value,
+        "model": model_value,
+        "model_id": model_id_value,
+    }
+
+
+def _hermes_model_info_is_placeholder(info: dict[str, str] | None) -> bool:
+    if not isinstance(info, dict):
+        return True
+    provider = str(info.get("provider") or "").strip().lower()
+    model = str(info.get("model") or "").strip().lower()
+    model_id = str(info.get("model_id") or "").strip().lower()
+    if provider not in _HERMES_PLACEHOLDER_PROVIDERS:
+        return False
+    if model not in _HERMES_PLACEHOLDER_MODELS:
+        return False
+    return model_id in {"", "hermes-agent", "hermes/hermes-agent"}
+
 
 # ══ §43i: Hermes per-session real model routing ═══════════════════════════════
 #
@@ -2091,8 +2128,13 @@ def _refresh_hermes_active_yaml_cache_from_disk() -> None:
     """
     global _hermes_active_yaml_model
     try:
-        from .system import _read_hermes_config_yaml
-        cfg = _read_hermes_config_yaml() or {}
+        import yaml
+
+        config_path = Path(settings.hermes_config_path).expanduser()
+        if not config_path.exists():
+            _hermes_active_yaml_model = None
+            return
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         model_section = cfg.get("model") or {}
         bare = str(model_section.get("default") or "").strip()
         slug = str(model_section.get("provider") or "").strip()
@@ -2117,6 +2159,45 @@ def _refresh_hermes_active_yaml_cache_from_disk() -> None:
             _hermes_active_yaml_model = None
     except Exception:
         _hermes_active_yaml_model = None
+
+
+def _current_hermes_model_info_from_yaml() -> dict[str, str]:
+    _refresh_hermes_active_yaml_cache_from_disk()
+    full_and_slug = _hermes_active_yaml_model
+    if not full_and_slug:
+        return {}
+    full_id, slug = full_and_slug
+    full_id = str(full_id or "").strip()
+    slug = str(slug or "").strip()
+    if not full_id or not slug:
+        return {}
+    model_name = full_id[len(f"{slug}/") :] if full_id.startswith(f"{slug}/") else full_id
+    return _build_hermes_model_info(slug, model_name, full_id)
+
+
+async def _resolve_hermes_session_model_info(session_key: str) -> dict[str, str]:
+    info = dict(_hermes_session_model_info.get(session_key) or {})
+    if not _hermes_model_info_is_placeholder(info):
+        return info
+
+    async with get_db_context() as db:
+        session = (
+            await db.execute(select(Session).where(Session.session_id == session_key))
+        ).scalar_one_or_none()
+        if session:
+            recovered = _build_hermes_model_info(
+                session.current_model_provider,
+                session.current_model_name,
+            )
+            if not _hermes_model_info_is_placeholder(recovered):
+                _hermes_session_model_info[session_key] = recovered
+                return recovered
+
+    recovered = _current_hermes_model_info_from_yaml()
+    if recovered:
+        _hermes_session_model_info[session_key] = recovered
+        return recovered
+    return info
 
 
 async def _ensure_hermes_yaml_pinned_to(full_id: str, slug: str) -> None:
@@ -2244,7 +2325,7 @@ async def _persist_hermes_chat_turn(
     _, _, local_session_key = decode_chat_session_key(session_key)
     source_sid = source_session_id or session_id or local_session_key
 
-    model_info = _hermes_session_model_info.get(session_key, {})
+    model_info = await _resolve_hermes_session_model_info(session_key)
 
     usage_norm = normalize_usage(usage if isinstance(usage, dict) else None)
     input_tokens = usage_norm["input_tokens"]
@@ -2258,22 +2339,6 @@ async def _persist_hermes_chat_turn(
             select(Session).where(Session.session_id == sid)
         )
         session = result.scalar_one_or_none()
-        # Cache can be empty after API restart. Recover Hermes model binding
-        # from the persisted Session row so provider/model_id do not degrade to
-        # NULL on direct-persist turns.
-        if not model_info.get("provider") and session and session.current_model_provider:
-            provider = str(session.current_model_provider or "").strip()
-            model_name = str(session.current_model_name or "").strip()
-            model_id = model_name
-            if provider and model_name and not model_name.startswith(f"{provider}/"):
-                model_id = f"{provider}/{model_name}"
-            model_info = {
-                "provider": provider,
-                "model": model_name,
-                "model_id": model_id,
-            }
-            _hermes_session_model_info[session_key] = model_info
-
         if not session:
             session = Session(
                 session_id=sid,
@@ -2293,9 +2358,15 @@ async def _persist_hermes_chat_turn(
             session.platform = "hermes"
             session.instance_id = instance_id
             session.source_session_id = source_sid or session.source_session_id
-            if model_info.get("provider") and not session.current_model_provider:
+            if model_info.get("provider") and (
+                not session.current_model_provider
+                or str(session.current_model_provider).strip().lower() in _HERMES_PLACEHOLDER_PROVIDERS
+            ):
                 session.current_model_provider = model_info.get("provider")
-            if model_info.get("model") and not session.current_model_name:
+            if model_info.get("model") and (
+                not session.current_model_name
+                or str(session.current_model_name).strip().lower() in _HERMES_PLACEHOLDER_MODELS
+            ):
                 session.current_model_name = model_info.get("model")
 
         count_result = await db.execute(
@@ -2433,13 +2504,19 @@ async def start_session(request: StartSessionRequest | None = None):
         # path in ``_persist_hermes_chat_turn`` (which only reads
         # ``provider`` / ``model`` keys).
         raw_model_id = (initial_model or "").strip()
+        if not raw_model_id:
+            active_model = _current_hermes_model_info_from_yaml()
+            if active_model:
+                model_provider = active_model.get("provider") or model_provider
+                model_name = active_model.get("model") or model_name
+                raw_model_id = active_model.get("model_id") or raw_model_id
         if not raw_model_id and model_provider and model_name:
             raw_model_id = f"{model_provider}/{model_name}"
-        _hermes_session_model_info[public_session_key] = {
-            "provider": model_provider or "hermes",
-            "model": model_name or "hermes-agent",
-            "model_id": raw_model_id,
-        }
+        _hermes_session_model_info[public_session_key] = _build_hermes_model_info(
+            model_provider,
+            model_name,
+            raw_model_id,
+        )
         # §43i: eagerly pin yaml to this session's bound model at create time.
         # This is a *latency optimisation*, not a correctness requirement —
         # send_message would still pin on first turn — but doing it here means
@@ -2453,8 +2530,8 @@ async def start_session(request: StartSessionRequest | None = None):
             await _persist_hermes_session(
                 public_session_key,
                 None,
-                model_provider=model_provider or "hermes",
-                model_name=model_name or "hermes-agent",
+                model_provider=model_provider,
+                model_name=model_name,
                 instance_id=instance.instance_id,
                 source_session_id=local_session_key,
             )
@@ -2517,7 +2594,7 @@ async def send_message(request: SendMessageRequest):
                 # Real fix: pin yaml to this session's bound model under the
                 # write lock if cache misses, then send under the read lock so
                 # other sessions on the SAME model can chat in parallel.
-                info = _hermes_session_model_info.get(public_session_key) or {}
+                info = await _resolve_hermes_session_model_info(public_session_key)
                 target_full = (info.get("model_id") or "").strip()
                 target_slug = (info.get("provider") or "").strip()
                 # ``model`` kwarg to send_chat is kept (cosmetic — Hermes echoes
@@ -2684,7 +2761,7 @@ async def send_message_stream(request: SendMessageRequest):
                     # the call setup — otherwise a concurrent send_message
                     # could rewrite ``model.default`` mid-stream and Hermes's
                     # next agent step would route to the wrong provider.
-                    info = _hermes_session_model_info.get(public_session_key) or {}
+                    info = await _resolve_hermes_session_model_info(public_session_key)
                     target_full = (info.get("model_id") or "").strip()
                     target_slug = (info.get("provider") or "").strip()
                     if target_full:
