@@ -122,6 +122,44 @@ def _normalize_content(content: Any) -> tuple[str, Any, list[ParsedToolCall], Pa
     return " ".join(part.strip() for part in text_parts if part).strip(), content, tool_calls, tool_result
 
 
+def _read_hermes_active_model() -> tuple[str | None, str | None]:
+    """Read provider/model from Hermes config.yaml model.default."""
+    config_path = settings.hermes_config_path
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml
+
+        raw = config_path.read_text(encoding="utf-8", errors="replace")
+        config = yaml.safe_load(raw) or {}
+    except Exception:
+        return None, None
+
+    model_cfg = config.get("model", "")
+    if isinstance(model_cfg, dict):
+        default_model_raw = str(
+            model_cfg.get("default", "") or model_cfg.get("model", "")
+        ).strip()
+        cfg_provider = str(model_cfg.get("provider", "")).strip()
+    else:
+        default_model_raw = str(model_cfg).strip()
+        cfg_provider = ""
+    if not default_model_raw:
+        return None, None
+
+    if cfg_provider and cfg_provider != "auto":
+        provider = cfg_provider
+    elif "/" in default_model_raw:
+        provider = default_model_raw.split("/", 1)[0]
+    else:
+        provider = "hermes"
+
+    model_id = default_model_raw
+    if provider and not model_id.startswith(f"{provider}/") and provider != "hermes":
+        model_id = f"{provider}/{default_model_raw}"
+    return provider, model_id
+
+
 async def parse_hermes_session_file(
     file_path: Path,
     *,
@@ -132,13 +170,14 @@ async def parse_hermes_session_file(
     total_lines = len(lines)
     source_session_id = file_path.stem
     fallback_ts = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+    default_provider, default_model_id = _read_hermes_active_model()
     session = ParsedSessionInfo(
         source_session_id=source_session_id,
         session_key=source_session_id,
         first_seen_at=fallback_ts,
         last_activity_at=fallback_ts,
-        current_model_provider="hermes",
-        current_model_name="hermes-agent",
+        current_model_provider=default_provider or "hermes",
+        current_model_name=default_model_id or "hermes-agent",
         jsonl_file_path=str(file_path),
     )
 
@@ -192,8 +231,8 @@ async def parse_hermes_session_file(
             timestamp=timestamp,
             content_text=content_text,
             content_json=content_json if isinstance(content_json, (dict, list)) else None,
-            provider=msg_data.get("provider") or "hermes",
-            model_id=msg_data.get("model") or "hermes-agent",
+            provider=msg_data.get("provider") or default_provider or "hermes",
+            model_id=msg_data.get("model") or default_model_id or "hermes-agent",
             input_tokens=usage_norm["input_tokens"],
             output_tokens=usage_norm["output_tokens"],
             total_tokens=usage_norm["total_tokens"],

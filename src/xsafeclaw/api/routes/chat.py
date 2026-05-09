@@ -2258,6 +2258,22 @@ async def _persist_hermes_chat_turn(
             select(Session).where(Session.session_id == sid)
         )
         session = result.scalar_one_or_none()
+        # Cache can be empty after API restart. Recover Hermes model binding
+        # from the persisted Session row so provider/model_id do not degrade to
+        # NULL on direct-persist turns.
+        if not model_info.get("provider") and session and session.current_model_provider:
+            provider = str(session.current_model_provider or "").strip()
+            model_name = str(session.current_model_name or "").strip()
+            model_id = model_name
+            if provider and model_name and not model_name.startswith(f"{provider}/"):
+                model_id = f"{provider}/{model_name}"
+            model_info = {
+                "provider": provider,
+                "model": model_name,
+                "model_id": model_id,
+            }
+            _hermes_session_model_info[session_key] = model_info
+
         if not session:
             session = Session(
                 session_id=sid,
@@ -2277,6 +2293,10 @@ async def _persist_hermes_chat_turn(
             session.platform = "hermes"
             session.instance_id = instance_id
             session.source_session_id = source_sid or session.source_session_id
+            if model_info.get("provider") and not session.current_model_provider:
+                session.current_model_provider = model_info.get("provider")
+            if model_info.get("model") and not session.current_model_name:
+                session.current_model_name = model_info.get("model")
 
         count_result = await db.execute(
             select(func.count()).select_from(Message).where(Message.session_id == sid)

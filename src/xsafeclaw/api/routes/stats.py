@@ -302,13 +302,37 @@ def _get_model_info(config: dict) -> dict:
 
 
 def _compute_cost(tokens: dict, cost_cfg: dict) -> float:
+    cost, _ = _compute_cost_with_method(tokens, cost_cfg)
+    return cost
+
+
+def _compute_cost_with_method(tokens: dict, cost_cfg: dict) -> tuple[float, str]:
     if not cost_cfg:
-        return 0.0
-    inp = (tokens.get("input", 0) or 0) * (cost_cfg.get("input", 0) or 0)
-    out = (tokens.get("output", 0) or 0) * (cost_cfg.get("output", 0) or 0)
-    cr = (tokens.get("cacheRead", 0) or 0) * (cost_cfg.get("cacheRead", 0) or 0)
-    cw = (tokens.get("cacheWrite", 0) or 0) * (cost_cfg.get("cacheWrite", 0) or 0)
-    return (inp + out + cr + cw) / 1_000_000
+        return 0.0, "unpriced"
+    input_tokens = int(tokens.get("input", 0) or 0)
+    output_tokens = int(tokens.get("output", 0) or 0)
+    cache_read_tokens = int(tokens.get("cacheRead", 0) or 0)
+    cache_write_tokens = int(tokens.get("cacheWrite", 0) or 0)
+    total_tokens = int(tokens.get("total", 0) or 0)
+
+    inp = input_tokens * (cost_cfg.get("input", 0) or 0)
+    out = output_tokens * (cost_cfg.get("output", 0) or 0)
+    cr = cache_read_tokens * (cost_cfg.get("cacheRead", 0) or 0)
+    cw = cache_write_tokens * (cost_cfg.get("cacheWrite", 0) or 0)
+    direct_cost = (inp + out + cr + cw) / 1_000_000
+    if direct_cost > 0:
+        return direct_cost, "direct"
+
+    # Some runtimes only persist total_tokens. Keep cost non-zero when a
+    # concrete price exists by applying a blended input/output rate.
+    if total_tokens > 0:
+        in_price = float(cost_cfg.get("input", 0) or 0)
+        out_price = float(cost_cfg.get("output", 0) or 0)
+        blended_price = (in_price + out_price) / 2.0
+        if blended_price > 0:
+            return (total_tokens * blended_price) / 1_000_000, "estimated_from_total"
+
+    return 0.0, "direct"
 
 
 def _normalize_model_key(value: str | None) -> str:
@@ -476,6 +500,8 @@ async def get_dashboard(
         select(
             Message.provider,
             Message.model_id,
+            Session.current_model_provider,
+            Session.current_model_name,
             func.count(Message.id).label("count"),
             func.sum(Message.total_tokens).label("total_tokens"),
             func.sum(Message.input_tokens).label("input_tokens"),
@@ -483,8 +509,14 @@ async def get_dashboard(
             func.sum(Message.cache_read_tokens).label("cache_read_tokens"),
             func.sum(Message.cache_write_tokens).label("cache_write_tokens"),
         )
+        .join(Session, Message.session_id == Session.session_id, isouter=True)
         .where(Message.role == "assistant")
-        .group_by(Message.provider, Message.model_id)
+        .group_by(
+            Message.provider,
+            Message.model_id,
+            Session.current_model_provider,
+            Session.current_model_name,
+        )
     )
     grouped_stmt = apply_runtime_filters(
         grouped_stmt,
@@ -519,7 +551,17 @@ async def get_dashboard(
             "cacheWrite": row.cache_write_tokens or 0,
         }
         resolved_cost_cfg = _resolve_cost_config(price_catalog, row.provider, row.model_id)
-        row_cost = _compute_cost(row_tokens, resolved_cost_cfg)
+        resolved_provider = row.provider
+        resolved_model_id = row.model_id
+        if not resolved_cost_cfg:
+            fallback_provider = row.current_model_provider
+            fallback_model = row.current_model_name
+            resolved_cost_cfg = _resolve_cost_config(price_catalog, fallback_provider, fallback_model)
+            if resolved_cost_cfg:
+                resolved_provider = fallback_provider or resolved_provider
+                resolved_model_id = fallback_model or resolved_model_id
+
+        row_cost, cost_method = _compute_cost_with_method(row_tokens, resolved_cost_cfg)
         priced = bool(resolved_cost_cfg)
         if not priced:
             unknown_cost_tokens += int(row_tokens["total"] or 0)
@@ -532,6 +574,9 @@ async def get_dashboard(
                 "messages": row.count or 0,
                 "tokens": row_tokens,
                 "priced": priced,
+                "costMethod": cost_method,
+                "resolvedProvider": resolved_provider or "unknown",
+                "resolvedModelId": resolved_model_id or "unknown",
                 "estimated_cost": round(row_cost, 6),
             }
         )
