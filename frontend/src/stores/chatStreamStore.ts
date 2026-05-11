@@ -11,7 +11,7 @@
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'error' | 'tool_call';
+  role: 'user' | 'assistant' | 'error' | 'tool_call' | 'trace';
   content: string;
   timestamp: Date;
   pending?: boolean;
@@ -22,6 +22,10 @@ export interface ChatMessage {
   result?: any;
   is_error?: boolean;
   result_pending?: boolean;
+  trace_type?: string;
+  trace_phase?: string;
+  trace_step?: number;
+  trace_summary?: string;
 }
 
 type Listener = () => void;

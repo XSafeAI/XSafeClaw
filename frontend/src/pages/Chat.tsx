@@ -9,7 +9,7 @@ import { chatAPI, guardAPI, systemAPI, voiceAPI } from '../services/api';
 import type { RuntimeInstance } from '../services/api';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { useI18n } from '../i18n';
-import { chatStreamStore } from '../stores/chatStreamStore';
+import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
 
 declare global {
   interface Window {
@@ -25,26 +25,6 @@ interface PendingImage {
   dataUrl: string;   // for preview
   base64: string;    // raw base64 (no prefix)
   mimeType: string;
-}
-
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant' | 'error' | 'tool_call' | 'trace';
-  content: string;
-  timestamp: Date;
-  pending?: boolean;
-  images?: { dataUrl: string }[];
-  // tool call fields
-  tool_id?: string;
-  tool_name?: string;
-  args?: any;
-  result?: any;
-  is_error?: boolean;
-  result_pending?: boolean;
-  trace_type?: string;
-  trace_phase?: string;
-  trace_step?: number;
-  trace_summary?: string;
 }
 
 interface StoredSession {
