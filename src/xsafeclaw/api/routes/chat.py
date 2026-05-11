@@ -3031,7 +3031,9 @@ async def send_message_stream(request: SendMessageRequest):
                         async for chunk in client.stream_chat(request.message, timeout_s=360.0):
                             if isinstance(chunk, dict) and chunk.get("text"):
                                 final_text = str(chunk["text"])
-                            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                            payload = _emit_chunk(chunk)
+                            if payload:
+                                yield payload
                         break
                     except RuntimeError as ws_err:
                         if _attempt == 0 and "not connected" in str(ws_err).lower():
