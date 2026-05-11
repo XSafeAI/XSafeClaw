@@ -27,6 +27,7 @@ from ...services.event_sync_service import EventSyncService
 from ...services.guard_service import GUARD_REJECTION_MARKER
 from ...services.hermes_event_bridge import hermes_event_bridge
 from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
+from ...services.nanobot_trace_tailer import NanobotJsonlTraceTailer
 from ..runtime_helpers import resolve_instance, serialize_instance
 
 # ── Per-instance path helpers (was: module-level platform switch) ─────────
@@ -1548,6 +1549,57 @@ async def _iter_hermes_stream_with_bridge(
                 pass
 
 
+async def _iter_nanobot_stream_with_tailer(
+    stream,
+    *,
+    tailer: NanobotJsonlTraceTailer | None,
+    poll_interval_s: float = 0.3,
+):
+    queue: asyncio.Queue = asyncio.Queue()
+    done_marker = object()
+
+    async def _fetcher():
+        try:
+            async for chunk in stream:
+                await queue.put(("chunk", chunk))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", done_marker))
+
+    task = asyncio.create_task(_fetcher())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=poll_interval_s)
+            except asyncio.TimeoutError:
+                if tailer is not None:
+                    for event in tailer.poll(max_events=32):
+                        yield event
+                continue
+
+            if tailer is not None:
+                for event in tailer.poll(max_events=32):
+                    yield event
+            if kind == "done":
+                break
+            if kind == "error":
+                raise payload
+            yield payload
+    finally:
+        if tailer is not None:
+            for event in tailer.poll(max_events=64):
+                yield event
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 def _tool_result_contains_guard_rejection(result_text: str) -> bool:
     return GUARD_REJECTION_MARKER.lower() in str(result_text or "").lower()
 
@@ -3025,10 +3077,22 @@ async def send_message_stream(request: SendMessageRequest):
                         )
                         + "\n\n"
                     )
+                nanobot_session_file = _find_nanobot_session_file(
+                    instance,
+                    stream_local_session_key,
+                )
+                nanobot_tailer = (
+                    NanobotJsonlTraceTailer(nanobot_session_file)
+                    if nanobot_session_file is not None
+                    else None
+                )
                 # Retry once on websocket failure (handles zombie connections)
                 for _attempt in range(2):
                     try:
-                        async for chunk in client.stream_chat(request.message, timeout_s=360.0):
+                        async for chunk in _iter_nanobot_stream_with_tailer(
+                            client.stream_chat(request.message, timeout_s=360.0),
+                            tailer=nanobot_tailer,
+                        ):
                             if isinstance(chunk, dict) and chunk.get("text"):
                                 final_text = str(chunk["text"])
                             payload = _emit_chunk(chunk)
@@ -3058,6 +3122,15 @@ async def send_message_stream(request: SendMessageRequest):
                                     )
                                     + "\n\n"
                                 )
+                            nanobot_session_file = _find_nanobot_session_file(
+                                instance,
+                                stream_local_session_key,
+                            )
+                            nanobot_tailer = (
+                                NanobotJsonlTraceTailer(nanobot_session_file)
+                                if nanobot_session_file is not None
+                                else None
+                            )
                             continue
                         raise
             else:

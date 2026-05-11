@@ -67,110 +67,24 @@ def _nanobot_event_text(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _parse_json_obj(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str):
-        return None
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+def _progress_trace_chunk(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize nanobot websocket progress hints into UI-safe trace chunks.
 
-
-def _tool_identity(payload: dict[str, Any]) -> tuple[str, str]:
-    tool_id = str(
-        payload.get("tool_call_id")
-        or payload.get("tool_id")
-        or payload.get("toolCallId")
-        or payload.get("id")
-        or ""
-    ).strip()
-    tool_name = str(
-        payload.get("tool_name")
-        or payload.get("tool")
-        or payload.get("name")
-        or payload.get("toolName")
-        or ""
-    ).strip()
-    return tool_id, tool_name
-
-
-def _tool_args(payload: dict[str, Any]) -> Any:
-    for key in ("arguments", "args", "params", "input"):
-        value = payload.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            parsed = _parse_json_obj(value)
-            return parsed if parsed is not None else value
-        return value
-    function = payload.get("function")
-    if isinstance(function, dict):
-        args = function.get("arguments")
-        if isinstance(args, str):
-            parsed = _parse_json_obj(args)
-            return parsed if parsed is not None else args
-        if args is not None:
-            return args
-    return None
-
-
-def _tool_result(payload: dict[str, Any]) -> Any:
-    for key in ("result", "output", "tool_result"):
-        if key in payload:
-            return payload.get(key)
-    text = _nanobot_event_text(payload)
-    if text:
-        return text
-    return None
-
-
-def _intermediate_chunks(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    Official websocket messages can carry ``kind=tool_hint`` / ``kind=progress``
+    on ``event=message`` frames. These are intermediate breadcrumbs, not final
+    assistant answers.
+    """
     event = str(payload.get("event") or "").strip().lower()
-    stream_id = str(payload.get("stream_id") or "").strip().lower()
-    tool_id, tool_name = _tool_identity(payload)
-    args = _tool_args(payload)
-    result = _tool_result(payload)
-    text = _nanobot_event_text(payload)
-    chunks: list[dict[str, Any]] = []
-
-    is_tool_start = event in {"tool_start", "tool_call"} or stream_id == "tool-boundary"
-    if is_tool_start and (tool_id or tool_name or args is not None):
-        chunks.append(
-            {
-                "type": "tool_start",
-                "tool_id": tool_id or None,
-                "tool_name": tool_name or "tool",
-                "args": args if args is not None else {},
-            }
-        )
-        return chunks
-
-    is_tool_result = event in {"tool_result", "tool_complete", "tool_end"} or stream_id == "tool-result"
-    if is_tool_result and (tool_id or tool_name or result is not None):
-        is_error = bool(payload.get("is_error") or payload.get("error"))
-        chunks.append(
-            {
-                "type": "tool_result",
-                "tool_id": tool_id or None,
-                "tool_name": tool_name or "tool",
-                "result": result,
-                "is_error": is_error,
-            }
-        )
-        return chunks
-
-    is_thinking = event in {"thinking", "status"} or stream_id == "thinking"
-    if is_thinking and text:
-        chunks.append({"type": "trace_step", "text": text, "phase": "thinking"})
-        return chunks
-
-    return chunks
+    if event != "message":
+        return None
+    kind = str(payload.get("kind") or "").strip().lower()
+    if kind not in {"tool_hint", "progress"}:
+        return None
+    text = _nanobot_event_text(payload).strip()
+    if not text:
+        return None
+    phase = "tool_hint" if kind == "tool_hint" else "progress"
+    return {"type": "trace_step", "text": text, "phase": phase}
 
 
 class NanobotGatewayClient:
@@ -262,30 +176,40 @@ class NanobotGatewayClient:
         await self._ws.send(json.dumps({"content": message}, ensure_ascii=False))
         deadline = timeout_s or self.message_timeout_s
         accumulated = ""
-        got_any_delta = False
         while True:
             payload = await asyncio.wait_for(self._recv_json(), timeout=deadline)
             event = str(payload.get("event") or "").strip()
             text = _nanobot_event_text(payload)
-            for synthetic in _intermediate_chunks(payload):
-                yield synthetic
+
+            progress_chunk = _progress_trace_chunk(payload)
+            if progress_chunk is not None:
+                yield progress_chunk
+                continue
 
             if event == "delta":
                 if not text:
                     continue
-                got_any_delta = True
                 accumulated += text
                 yield {"type": "delta", "text": accumulated}
                 continue
             if event == "stream_end":
                 stream_id = str(payload.get("stream_id") or "").strip()
-                # nanobot websocket emits segment boundaries mid-turn.
-                # Known non-terminal stream_ids must not close the stream.
-                _NON_TERMINAL_IDS = {"tool-boundary", "tool-result", "thinking"}
-                if stream_id in _NON_TERMINAL_IDS:
+                # ``stream_end`` marks a segment boundary. Newer nanobot
+                # websocket flows also emit ``turn_end`` for hard completion.
+                # Keep ``stream_id=final`` as a backwards-compatible terminal
+                # signal for older gateways.
+                if stream_id.lower() != "final":
                     continue
                 if not accumulated:
                     continue
+                yield {
+                    "type": "final",
+                    "text": accumulated,
+                    "run_id": self.chat_id or "",
+                    "stop_reason": "stop",
+                }
+                return
+            if event == "turn_end":
                 yield {
                     "type": "final",
                     "text": accumulated,
