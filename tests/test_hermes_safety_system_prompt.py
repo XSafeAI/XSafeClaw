@@ -218,7 +218,7 @@ def test_hermes_plugin_default_register_skips_pre_llm_call(monkeypatch):
 
     ctx = _RecordingCtx()
     plugin.register(ctx)
-    assert ctx.hooks == ["pre_tool_call", "post_tool_call"]
+    assert ctx.hooks == ["pre_tool_call", "post_tool_call", "pre_llm_call", "post_llm_call"]
 
 
 def test_hermes_plugin_env_switch_re_enables_pre_llm_call(monkeypatch):
@@ -228,7 +228,7 @@ def test_hermes_plugin_env_switch_re_enables_pre_llm_call(monkeypatch):
 
     ctx = _RecordingCtx()
     plugin.register(ctx)
-    assert ctx.hooks == ["pre_tool_call", "post_tool_call", "pre_llm_call"]
+    assert ctx.hooks == ["pre_tool_call", "post_tool_call", "pre_llm_call", "post_llm_call", "pre_llm_call"]
 
 
 class _FakeResp:
@@ -261,8 +261,12 @@ def test_hermes_plugin_pre_tool_allow_publishes_tool_start(monkeypatch):
         tool_call_id="call-1",
     )
     assert result is None
-    assert recorded_events[0]["event_type"] == "tool_start"
-    assert recorded_events[0]["tool_call_id"] == "call-1"
+    event_types = [evt["event_type"] for evt in recorded_events]
+    assert "tool_start" in event_types
+    assert any(
+        evt.get("event_type") == "tool_start" and evt.get("tool_call_id") == "call-1"
+        for evt in recorded_events
+    )
 
 
 def test_hermes_plugin_pre_tool_block_keeps_guard_semantics(monkeypatch):
@@ -285,8 +289,12 @@ def test_hermes_plugin_pre_tool_block_keeps_guard_semantics(monkeypatch):
         tool_call_id="call-2",
     )
     assert result == {"action": "block", "message": "blocked by policy"}
-    assert recorded_events[0]["event_type"] == "tool_blocked"
-    assert recorded_events[0]["tool_call_id"] == "call-2"
+    event_types = [evt["event_type"] for evt in recorded_events]
+    assert "tool_blocked" in event_types
+    assert any(
+        evt.get("event_type") == "tool_blocked" and evt.get("tool_call_id") == "call-2"
+        for evt in recorded_events
+    )
 
 
 def test_hermes_plugin_post_tool_call_publishes_tool_result(monkeypatch):
@@ -311,3 +319,31 @@ def test_hermes_plugin_post_tool_call_publishes_tool_result(monkeypatch):
     assert out is None
     assert recorded_events[0]["event_type"] == "tool_result"
     assert recorded_events[0]["is_error"] is True
+
+
+def test_hermes_plugin_pre_post_llm_publish_trace_events(monkeypatch):
+    plugin = _load_hermes_guard_plugin()
+    recorded_events: list[dict] = []
+
+    def _fake_post_json(url: str, payload: dict, timeout_s: float):
+        if url.endswith("/api/chat/hermes-events"):
+            recorded_events.append(payload)
+            return _FakeResp(ok=True, payload={"ok": True})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(plugin, "_post_json", _fake_post_json)
+    pre_out = plugin._pre_llm_trace_handler(session_id="sess-3", is_first_turn=False)
+    post_out = plugin._post_llm_trace_handler(
+        session_id="sess-3",
+        assistant_response="final answer",
+        conversation_history=[
+            {"role": "assistant", "content": "ok", "reasoning_content": "thought chain summary"},
+        ],
+    )
+    assert pre_out is None
+    assert post_out is None
+    event_types = [evt["event_type"] for evt in recorded_events]
+    assert "trace_start" in event_types
+    assert "trace_status" in event_types
+    assert "reasoning_summary" in event_types
+    assert "trace_end" in event_types

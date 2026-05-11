@@ -1,13 +1,17 @@
 """
 XSafeClaw Guard Plugin for Hermes Agent.
 
-This plugin registers two hooks by default:
+This plugin registers four hooks by default:
 
 * ``pre_tool_call`` — sends every tool call to XSafeClaw for safety
   evaluation; unsafe calls are blocked with a reason message and may be
   long-polled for human approval (see XSafeClaw §55).
 * ``post_tool_call`` — best-effort publishes tool-result telemetry so
   XSafeClaw can render Hermes tool traces in real time.
+* ``pre_llm_call`` — emits a trace-start/status telemetry event for
+  each turn (observer only; does not inject user context).
+* ``post_llm_call`` — emits trace-end/reasoning-summary telemetry events
+  after a successful turn.
 
 A second hook is available but **disabled by default** as of §57:
 
@@ -195,6 +199,10 @@ def _publish_event(
     duration_ms: int | None = None,
     reason: str = "",
     text: str = "",
+    summary: str = "",
+    phase: str = "",
+    step: int | None = None,
+    reasoning_chars: int | None = None,
 ) -> None:
     if not session_key:
         return
@@ -212,6 +220,10 @@ def _publish_event(
                 "duration_ms": duration_ms,
                 "reason": reason or None,
                 "text": text or None,
+                "summary": summary or None,
+                "phase": phase or None,
+                "step": step,
+                "reasoning_chars": reasoning_chars,
             },
             timeout_s=EVENT_TIMEOUT_SECONDS,
         )
@@ -221,6 +233,59 @@ def _publish_event(
             event_type,
             exc,
         )
+
+
+def _trace_step(
+    *,
+    session_key: str,
+    text: str,
+    phase: str,
+    tool_name: str = "",
+    tool_call_id: str = "",
+) -> None:
+    _publish_event(
+        event_type="trace_step",
+        session_key=session_key,
+        text=text,
+        phase=phase,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+    )
+
+
+def _extract_reasoning_summary(conversation_history: Any) -> tuple[str, int]:
+    if not isinstance(conversation_history, list):
+        return "", 0
+    assistant_msg = None
+    for item in reversed(conversation_history):
+        if isinstance(item, dict) and str(item.get("role") or "") == "assistant":
+            assistant_msg = item
+            break
+    if not isinstance(assistant_msg, dict):
+        return "", 0
+    candidates: list[str] = []
+    for key in ("reasoning", "reasoning_content"):
+        value = assistant_msg.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+    details = assistant_msg.get("reasoning_details")
+    if isinstance(details, list):
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            for key in ("summary", "text"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip())
+    if not candidates:
+        return "", 0
+    merged = "\n".join(candidates).strip()
+    if not merged:
+        return "", 0
+    reasoning_chars = len(merged)
+    # 只保留可审计摘要，不透出完整隐藏思维链。
+    summary = merged.replace("\n", " ")[:320]
+    return summary, reasoning_chars
 
 
 def _pre_tool_call_handler(
@@ -303,6 +368,13 @@ def _pre_tool_call_handler(
                 "This tool call poses a security risk. "
                 "You MUST inform the user about the risk and reconsider before proceeding."
             )
+            _trace_step(
+                session_key=encoded_session_key,
+                text=f"Tool call blocked by guard: {tool_name}",
+                phase="guard_blocked",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+            )
             _publish_event(
                 event_type="tool_blocked",
                 session_key=encoded_session_key,
@@ -320,6 +392,13 @@ def _pre_tool_call_handler(
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             args=args if isinstance(args, dict) else {},
+        )
+        _trace_step(
+            session_key=encoded_session_key,
+            text=f"Calling tool: {tool_name}",
+            phase="tool_start",
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
         )
     except Exception as exc:
         message = (
@@ -339,6 +418,13 @@ def _pre_tool_call_handler(
             args=args,
             reason=message,
             text=message,
+        )
+        _trace_step(
+            session_key=encoded_session_key,
+            text=f"Tool call blocked due to guard error: {tool_name}",
+            phase="guard_error_blocked",
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
         )
         return {"action": "block", "message": message}
 
@@ -373,6 +459,71 @@ def _post_tool_call_handler(
         is_error=is_error,
         duration_ms=duration_ms,
     )
+    _trace_step(
+        session_key=encoded_session_key,
+        text=f"Tool finished: {tool_name} ({'error' if is_error else 'ok'})",
+        phase="tool_result",
+        tool_name=tool_name,
+        tool_call_id=tool_call_id or str(kwargs.get("tool_call_id") or ""),
+    )
+    return None
+
+
+def _pre_llm_trace_handler(
+    session_id: str = "",
+    is_first_turn: bool = False,
+    **kwargs: Any,
+) -> None:
+    _, encoded_session_key = _encode_session_key(session_id=session_id)
+    if not encoded_session_key:
+        return None
+    _publish_event(
+        event_type="trace_start",
+        session_key=encoded_session_key,
+        text="Hermes started processing this turn.",
+        phase="llm_start",
+    )
+    _publish_event(
+        event_type="trace_status",
+        session_key=encoded_session_key,
+        text=(
+            "Hermes is analyzing user intent..."
+            if is_first_turn
+            else "Hermes is analyzing context and planning next actions..."
+        ),
+        phase="analyzing",
+    )
+    return None
+
+
+def _post_llm_trace_handler(
+    session_id: str = "",
+    assistant_response: str = "",
+    conversation_history: Any = None,
+    **kwargs: Any,
+) -> None:
+    _, encoded_session_key = _encode_session_key(session_id=session_id)
+    if not encoded_session_key:
+        return None
+    reasoning_summary, reasoning_chars = _extract_reasoning_summary(conversation_history)
+    if reasoning_summary:
+        _publish_event(
+            event_type="reasoning_summary",
+            session_key=encoded_session_key,
+            summary=reasoning_summary,
+            text=f"Reasoning summary: {reasoning_summary}",
+            phase="reasoning",
+            reasoning_chars=reasoning_chars,
+        )
+    final_text = str(assistant_response or "").strip()
+    if final_text:
+        _publish_event(
+            event_type="trace_end",
+            session_key=encoded_session_key,
+            summary=final_text[:240],
+            text="Hermes completed the turn and produced a final response.",
+            phase="completed",
+        )
     return None
 
 
@@ -432,10 +583,17 @@ def register(ctx: Any) -> None:
     """
     ctx.register_hook("pre_tool_call", _pre_tool_call_handler)
     ctx.register_hook("post_tool_call", _post_tool_call_handler)
-    hooks_registered = ["pre_tool_call", "post_tool_call"]
+    ctx.register_hook("pre_llm_call", _pre_llm_trace_handler)
+    ctx.register_hook("post_llm_call", _post_llm_trace_handler)
+    hooks_registered = [
+        "pre_tool_call",
+        "post_tool_call",
+        "pre_llm_call",
+        "post_llm_call",
+    ]
     if _pre_llm_call_fallback_enabled():
         ctx.register_hook("pre_llm_call", _pre_llm_call_handler)
-        hooks_registered.append("pre_llm_call")
+        hooks_registered.append("pre_llm_call(fallback-context)")
     logger.info(
         "safeclaw-guard: registered hooks=%s backend=%s workspace=%s",
         hooks_registered,

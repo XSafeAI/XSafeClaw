@@ -25,14 +25,23 @@ def test_hermes_event_bridge_isolates_session_and_bounds_result():
         "hermes::hermes-default::s2",
         {"type": "tool_start", "tool_name": "read", "tool_call_id": "call-2", "args": {"path": "a.txt"}},
     )
+    bridge.publish(
+        "hermes::hermes-default::s1",
+        {"type": "trace_step", "text": "Hermes planning", "phase": "planning", "step": 1},
+    )
+    bridge.publish(
+        "hermes::hermes-default::s1",
+        {"type": "unknown", "text": "ignored"},
+    )
 
     s1 = bridge.drain("hermes::hermes-default::s1")
     s2 = bridge.drain("hermes::hermes-default::s2")
 
-    assert [item["type"] for item in s1] == ["tool_start", "tool_result"]
+    assert [item["type"] for item in s1] == ["tool_start", "tool_result", "trace_step"]
     assert s1[1]["tool_id"] == "call-1"
     assert isinstance(s1[1]["result"], str)
     assert "truncated" in s1[1]["result"]
+    assert s1[2]["phase"] == "planning"
     assert [item["tool_name"] for item in s2] == ["read"]
 
 
@@ -75,6 +84,14 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
             self.last_session_id = "sess-local"
 
         async def stream_chat(self, **_kwargs):
+            chat_routes.hermes_event_bridge.publish(
+                "hermes::hermes-default::sess-local",
+                {
+                    "type": "trace_start",
+                    "text": "start",
+                    "phase": "start",
+                },
+            )
             chat_routes.hermes_event_bridge.publish(
                 "hermes::hermes-default::sess-local",
                 {
@@ -136,7 +153,9 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
     ]
     tool_starts = [event for event in events if event.get("type") == "tool_start"]
     tool_results = [event for event in events if event.get("type") == "tool_result"]
+    trace_starts = [event for event in events if event.get("type") == "trace_start"]
     assert len(tool_starts) == 1
     assert len(tool_results) == 1
+    assert len(trace_starts) == 1
     assert tool_starts[0]["tool_id"] == "call-1"
     assert events[-1]["type"] == "final"

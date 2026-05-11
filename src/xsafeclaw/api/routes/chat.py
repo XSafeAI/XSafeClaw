@@ -6,7 +6,7 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -1471,6 +1471,26 @@ def _tool_event_dedupe_key(event: dict) -> str | None:
     return f"{event_type}:{tool_name}:{json.dumps(event.get('result'), ensure_ascii=False, default=str)}"
 
 
+_TRACE_EVENT_TYPES = {
+    "trace_start",
+    "trace_step",
+    "trace_status",
+    "reasoning_summary",
+    "approval_pending",
+    "approval_resolved",
+    "trace_end",
+}
+
+_TRACE_PERSIST_EVENT_TYPES = {
+    "trace_start",
+    "trace_step",
+    "reasoning_summary",
+    "approval_pending",
+    "approval_resolved",
+    "trace_end",
+}
+
+
 async def _iter_hermes_stream_with_bridge(
     stream,
     *,
@@ -1610,7 +1630,25 @@ async def _read_history_from_db_fallback(
 
     messages: list[dict] = []
     for msg in rows:
-        if msg.role not in {"user", "assistant"}:
+        if msg.role not in {"user", "assistant", "trace"}:
+            continue
+        if msg.role == "trace":
+            raw = msg.raw_entry if isinstance(msg.raw_entry, dict) else {}
+            trace_event = raw.get("trace_event") if isinstance(raw, dict) else None
+            if not isinstance(trace_event, dict):
+                text = (msg.content_text or "").strip()
+                if not text:
+                    continue
+                trace_event = {"type": "trace_step", "text": text}
+            messages.append(
+                {
+                    "role": "trace",
+                    "content": str(msg.content_text or "").strip(),
+                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                    "id": msg.message_id,
+                    "trace_event": trace_event,
+                }
+            )
             continue
         text = (msg.content_text or "").strip()
         if not text:
@@ -2024,7 +2062,14 @@ class SendMessageResponse(BaseModel):
 
 class HermesEventIngestRequest(BaseModel):
     session_key: str = Field(..., description="Hermes chat session key")
-    event_type: str = Field(..., description="tool_start|tool_result|tool_blocked|status")
+    event_type: str = Field(
+        ...,
+        description=(
+            "tool_start|tool_result|tool_blocked|status|"
+            "trace_start|trace_step|trace_status|reasoning_summary|"
+            "approval_pending|approval_resolved|trace_end"
+        ),
+    )
     tool_name: str | None = None
     tool_call_id: str | None = None
     args: dict | list | str | None = None
@@ -2033,6 +2078,10 @@ class HermesEventIngestRequest(BaseModel):
     duration_ms: int | None = None
     reason: str | None = None
     text: str | None = None
+    summary: str | None = None
+    phase: str | None = None
+    step: int | None = None
+    reasoning_chars: int | None = None
 
 
 # --------------- Voice transcript post-processing ---------------
@@ -2530,6 +2579,95 @@ async def _persist_hermes_chat_turn(
         print(f"[hermes-persist] event sync error for {sid[:8]}: {exc}")
 
 
+async def _persist_hermes_trace_events(
+    session_key: str,
+    trace_events: list[dict],
+    *,
+    instance_id: str = "hermes-default",
+    source_session_id: str | None = None,
+) -> None:
+    """Persist Hermes trace events for history fallback/audit replay."""
+    if not trace_events:
+        return
+    sid = session_key
+    now = datetime.now(timezone.utc)
+    _, _, local_session_key = decode_chat_session_key(session_key)
+    source_sid = source_session_id or local_session_key
+    async with get_db_context() as db:
+        result = await db.execute(select(Session).where(Session.session_id == sid))
+        session = result.scalar_one_or_none()
+        if not session:
+            session = Session(
+                session_id=sid,
+                platform="hermes",
+                instance_id=instance_id,
+                source_session_id=source_sid,
+                session_key=session_key,
+                channel="webchat",
+                first_seen_at=now,
+                last_activity_at=now,
+            )
+            db.add(session)
+            await db.flush()
+        else:
+            session.platform = "hermes"
+            session.instance_id = instance_id
+            if source_sid:
+                session.source_session_id = source_sid
+            session.last_activity_at = now
+
+        count_result = await db.execute(
+            select(func.count()).select_from(Message).where(Message.session_id == sid)
+        )
+        seq_base = count_result.scalar() or 0
+        for offset, event in enumerate(trace_events):
+            event_type = str(event.get("type") or "").strip()
+            if event_type not in _TRACE_PERSIST_EVENT_TYPES:
+                continue
+            text = (
+                str(event.get("text") or "").strip()
+                or str(event.get("summary") or "").strip()
+                or event_type
+            )
+            message_id = _deterministic_message_id(
+                session_key,
+                "trace",
+                f"{event_type}:{text}",
+                seq_base + offset,
+            )
+            exists = await db.execute(
+                select(Message.id).where(Message.message_id == message_id)
+            )
+            if exists.scalar_one_or_none() is not None:
+                continue
+            entry_ts = event.get("timestamp")
+            try:
+                timestamp = (
+                    datetime.fromisoformat(str(entry_ts))
+                    if entry_ts
+                    else now + timedelta(milliseconds=offset)
+                )
+            except Exception:
+                timestamp = now + timedelta(milliseconds=offset)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            db.add(
+                Message(
+                    session_id=sid,
+                    message_id=message_id,
+                    platform="hermes",
+                    instance_id=instance_id,
+                    source_session_id=source_sid,
+                    role="trace",
+                    timestamp=timestamp,
+                    content_text=text,
+                    content_json=event,
+                    raw_entry={"trace_event": event},
+                )
+            )
+        await db.commit()
+
+
 # --------------- Endpoints ---------------
 
 @router.post("/start-session", response_model=StartSessionResponse)
@@ -2783,6 +2921,10 @@ async def ingest_hermes_event(request: HermesEventIngestRequest):
         "is_error": request.is_error,
         "reason": request.reason,
         "text": request.text,
+        "summary": request.summary,
+        "phase": request.phase,
+        "step": request.step,
+        "reasoning_chars": request.reasoning_chars,
     }
     hermes_event_bridge.publish(session_key, event)
     return {"ok": True}
@@ -2839,6 +2981,7 @@ async def send_message_stream(request: SendMessageRequest):
         last_terminal_type: str | None = None
         stream_error_text: str | None = None
         emitted_tool_event_keys: set[str] = set()
+        emitted_trace_events: list[dict] = []
 
         def _emit_chunk(chunk: dict) -> str | None:
             dedupe_key = _tool_event_dedupe_key(chunk)
@@ -2846,6 +2989,14 @@ async def send_message_stream(request: SendMessageRequest):
                 if dedupe_key in emitted_tool_event_keys:
                     return None
                 emitted_tool_event_keys.add(dedupe_key)
+            chunk_type = str(chunk.get("type") or "")
+            if chunk_type in _TRACE_PERSIST_EVENT_TYPES:
+                emitted_trace_events.append(
+                    {
+                        **chunk,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
         try:
@@ -2989,6 +3140,16 @@ async def send_message_stream(request: SendMessageRequest):
                 )
             except Exception as exc:
                 print(f"[hermes-persist] stream warning: {exc}")
+        if instance.platform == "hermes" and emitted_trace_events:
+            try:
+                await _persist_hermes_trace_events(
+                    stream_public_session_key,
+                    emitted_trace_events,
+                    instance_id=instance.instance_id,
+                    source_session_id=stream_local_session_key,
+                )
+            except Exception as exc:
+                print(f"[hermes-persist] trace warning: {exc}")
 
         # After the final response, read tool calls from the JSONL file.
         try:

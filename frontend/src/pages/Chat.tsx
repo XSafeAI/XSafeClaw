@@ -29,7 +29,7 @@ interface PendingImage {
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'error' | 'tool_call';
+  role: 'user' | 'assistant' | 'error' | 'tool_call' | 'trace';
   content: string;
   timestamp: Date;
   pending?: boolean;
@@ -41,6 +41,10 @@ interface ChatMessage {
   result?: any;
   is_error?: boolean;
   result_pending?: boolean;
+  trace_type?: string;
+  trace_phase?: string;
+  trace_step?: number;
+  trace_summary?: string;
 }
 
 interface StoredSession {
@@ -233,10 +237,36 @@ function ToolCallBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
+function TraceBubble({ msg }: { msg: ChatMessage }) {
+  const phase = msg.trace_phase ? ` · ${msg.trace_phase}` : '';
+  const step = typeof msg.trace_step === 'number' ? `#${msg.trace_step}` : '';
+  const label = [msg.trace_type || 'trace', step].filter(Boolean).join(' ');
+  return (
+    <div className="max-w-[800px] mx-auto w-full pl-10">
+      <div className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2.5">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-300">
+          {label}{phase}
+        </p>
+        {msg.trace_summary && (
+          <p className="text-[11px] text-violet-100 mt-1 whitespace-pre-wrap break-words">
+            {msg.trace_summary}
+          </p>
+        )}
+        {msg.content && (
+          <p className="text-[12px] text-violet-200 mt-1 whitespace-pre-wrap break-words">
+            {msg.content}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ==================== Message Bubble ==================== */
 function Bubble({ msg }: { msg: ChatMessage }) {
   const { t } = useI18n();
   if (msg.role === 'tool_call') return <ToolCallBubble msg={msg} />;
+  if (msg.role === 'trace') return <TraceBubble msg={msg} />;
 
   const isUser = msg.role === 'user';
   const isError = msg.role === 'error';
@@ -486,6 +516,20 @@ export default function Chat() {
               role: m.role as 'user' | 'assistant',
               content: text,
               timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
+            };
+          }
+          if (m.role === 'trace') {
+            const evt = (m.trace_event && typeof m.trace_event === 'object') ? m.trace_event : {};
+            const text = typeof m.content === 'string' ? m.content : '';
+            return {
+              id: m.id || uuidv4(),
+              role: 'trace',
+              content: text,
+              timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
+              trace_type: typeof evt.type === 'string' ? evt.type : 'trace_step',
+              trace_phase: typeof evt.phase === 'string' ? evt.phase : '',
+              trace_step: typeof evt.step === 'number' ? evt.step : undefined,
+              trace_summary: typeof evt.summary === 'string' ? evt.summary : '',
             };
           }
           return null;
@@ -972,6 +1016,28 @@ export default function Chat() {
               session_key?: string;
               tool_id?: string; tool_name?: string; args?: any; result?: any; is_error?: boolean;
               reason?: string;
+              phase?: string;
+              step?: number;
+              summary?: string;
+            };
+            const appendTraceChunk = () => {
+              const traceMsg: ChatMessage = {
+                id: `trace-${uuidv4()}`,
+                role: 'trace',
+                content: chunk.text || '',
+                timestamp: new Date(),
+                trace_type: chunk.type,
+                trace_phase: chunk.phase || '',
+                trace_step: typeof chunk.step === 'number' ? chunk.step : undefined,
+                trace_summary: chunk.summary || '',
+              };
+              setMessageMap(prev => {
+                const msgs = [...(prev[key] ?? [])];
+                const assistantIdx = msgs.findIndex(m => m.id === pendingId);
+                const insertAt = assistantIdx >= 0 ? assistantIdx : msgs.length;
+                msgs.splice(insertAt, 0, traceMsg);
+                return { ...prev, [key]: msgs };
+              });
             };
 
             if (chunk.type === 'session_relinked' && chunk.session_key) {
@@ -1056,6 +1122,16 @@ export default function Chat() {
                     : m
                 )),
               }));
+            } else if (
+              chunk.type === 'trace_start'
+              || chunk.type === 'trace_step'
+              || chunk.type === 'trace_status'
+              || chunk.type === 'reasoning_summary'
+              || chunk.type === 'approval_pending'
+              || chunk.type === 'approval_resolved'
+              || chunk.type === 'trace_end'
+            ) {
+              appendTraceChunk();
             } else if (chunk.type === 'tool_blocked') {
               const toolName = chunk.tool_name || 'tool';
               const reason = chunk.reason || '';

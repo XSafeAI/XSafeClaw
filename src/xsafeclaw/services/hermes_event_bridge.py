@@ -14,7 +14,19 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-_ALLOWED_TYPES = {"tool_start", "tool_result", "tool_blocked", "status"}
+_ALLOWED_TYPES = {
+    "tool_start",
+    "tool_result",
+    "tool_blocked",
+    "status",
+    "trace_start",
+    "trace_step",
+    "trace_status",
+    "reasoning_summary",
+    "approval_pending",
+    "approval_resolved",
+    "trace_end",
+}
 
 
 def _bounded_text(value: Any, *, max_chars: int) -> Any:
@@ -42,10 +54,12 @@ class HermesEventBridge:
         session_ttl_s: float = 15 * 60.0,
         max_events_per_session: int = 200,
         max_result_chars: int = 20_000,
+        max_text_chars: int = 4_000,
     ) -> None:
         self._session_ttl_s = float(session_ttl_s)
         self._max_events_per_session = int(max(1, max_events_per_session))
         self._max_result_chars = int(max(128, max_result_chars))
+        self._max_text_chars = int(max(128, max_text_chars))
         self._events: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
         self._last_seen_at: dict[str, float] = {}
         self._sequence_by_session: dict[str, int] = defaultdict(int)
@@ -85,7 +99,43 @@ class HermesEventBridge:
             text = str(event.get("text") or "").strip()
             if not text:
                 return None
-            normalized["text"] = text
+            normalized["text"] = _bounded_text(text, max_chars=self._max_text_chars)
+            return normalized
+
+        if event_type in {
+            "trace_start",
+            "trace_step",
+            "trace_status",
+            "reasoning_summary",
+            "approval_pending",
+            "approval_resolved",
+            "trace_end",
+        }:
+            text = str(event.get("text") or "").strip()
+            summary = str(event.get("summary") or "").strip()
+            phase = str(event.get("phase") or "").strip()
+            if text:
+                normalized["text"] = _bounded_text(text, max_chars=self._max_text_chars)
+            if summary:
+                normalized["summary"] = _bounded_text(
+                    summary,
+                    max_chars=self._max_text_chars,
+                )
+            if phase:
+                normalized["phase"] = phase
+            step = event.get("step")
+            if isinstance(step, int):
+                normalized["step"] = step
+            tool_name = str(event.get("tool_name") or "").strip()
+            if tool_name:
+                normalized["tool_name"] = tool_name
+            tool_id = str(event.get("tool_id") or event.get("tool_call_id") or "").strip()
+            if tool_id:
+                normalized["tool_id"] = tool_id
+            if event_type == "reasoning_summary":
+                normalized["reasoning_chars"] = int(
+                    max(0, int(event.get("reasoning_chars") or 0))
+                )
             return normalized
 
         tool_name = str(event.get("tool_name") or "tool").strip() or "tool"
