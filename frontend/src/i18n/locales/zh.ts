@@ -55,7 +55,7 @@ export const zh: Translations = {
     budgetModalTitle: '成本上限设置',
     budgetModalDesc: '设置每 24 小时预算周期的最大成本上限。',
     budgetMaxLabel: '最大成本上限',
-    budgetCycleHint: '达到上限后当前仅做前端提示，不会自动阻断任何操作。',
+    budgetCycleHint: '达到上限后将阻断安全对话发送。',
     budgetClear: '清除成本上限',
   },
 
@@ -236,6 +236,10 @@ export const zh: Translations = {
     nanobotGatewayOffline: 'nanobot 的 Chat 页面需要 nanobot gateway 和 websocket channel。请在另一个终端运行：nanobot gateway --port 18790 --verbose；启动后页面会自动刷新状态。',
     connectFailed: '无法连接到 OpenClaw 网关，请检查是否正在运行',
     hermes401Reconfigure: '请回到setup界面，重新配置Hermes。',
+    budgetBlockedTitle: '今日使用已达到限额',
+    budgetBlockedDesc: '今日使用已达到限额，距离刷新还有{time}。您可以等待限额刷新或手动调整使用上限来继续使用。',
+    budgetBlockedHint: '可在左下角“成本控制”中调整上限。',
+    budgetBlockedAcknowledge: '我知道了',
     // Install modal
     installModalOpenclawTitle: 'OpenClaw 未安装',
     installModalOpenclawDesc: '需要先安装 OpenClaw 才能创建会话。前往安装向导完成设置。',

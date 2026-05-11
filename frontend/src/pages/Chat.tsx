@@ -5,11 +5,17 @@ import {
   Wrench, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, ImagePlus, X,
   Settings2, Brain, Cpu, Shield, Check, AlertTriangle, Mic, MicOff, Zap, Pencil,
 } from 'lucide-react';
-import { chatAPI, guardAPI, systemAPI, voiceAPI } from '../services/api';
+import { chatAPI, guardAPI, statsAPI, systemAPI, voiceAPI } from '../services/api';
 import type { RuntimeInstance } from '../services/api';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { useI18n } from '../i18n';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
+import {
+  formatResetCountdown,
+  getBudgetStatus,
+  loadBudgetSettings,
+  saveBudgetSettings,
+} from '../utils/budgetControl';
 
 declare global {
   interface Window {
@@ -91,6 +97,15 @@ function fmtDate(iso: string, todayLabel = 'Today', yesterdayLabel = 'Yesterday'
   if (diffDays === 0) return todayLabel;
   if (diffDays === 1) return yesterdayLabel;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function formatResetCountdownForNotice(remainingMs: number, locale: string): string {
+  const clamped = Math.max(0, remainingMs);
+  const totalMinutes = Math.floor(clamped / 60_000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (locale === 'zh') return `${hours}小时${minutes}分钟`;
+  return `${hours}h ${minutes}m`;
 }
 
 function titleFromUserMessage(input: string): string {
@@ -377,6 +392,8 @@ export default function Chat() {
 
   const [installModalOpen, setInstallModalOpen] = useState(false);
   const [installModalPlatform, setInstallModalPlatform] = useState<'openclaw' | 'hermes' | 'nanobot'>('openclaw');
+  const [budgetBlockModalOpen, setBudgetBlockModalOpen] = useState(false);
+  const [budgetBlockRemainingMs, setBudgetBlockRemainingMs] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -926,6 +943,26 @@ export default function Chat() {
         ],
       }));
       return;
+    }
+    const budgetSettings = loadBudgetSettings();
+    if (budgetSettings.maxCost) {
+      try {
+        const { data } = await statsAPI.dashboard();
+        const dashboardCost = Number(data?.cost);
+        if (Number.isFinite(dashboardCost) && dashboardCost >= 0) {
+          const budgetStatus = getBudgetStatus(budgetSettings, dashboardCost, Date.now());
+          if (budgetStatus.settingsRolled) {
+            saveBudgetSettings(budgetStatus.settings);
+          }
+          if (budgetStatus.budgetOverLimit) {
+            setBudgetBlockRemainingMs(budgetStatus.budgetRemainingMs);
+            setBudgetBlockModalOpen(true);
+            return;
+          }
+        }
+      } catch {
+        // Do not block chat when stats service is temporarily unavailable.
+      }
     }
 
     const modelCommand = parsePromptModelSwitch(text);
@@ -2018,6 +2055,46 @@ export default function Chat() {
                 {t.chat.installModalGo}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Budget blocked modal */}
+      {budgetBlockModalOpen && (
+        <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-surface-1 border border-border rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-warning/15 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-5 h-5 text-warning" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-base font-bold text-text-primary mb-1">
+                  {t.chat.budgetBlockedTitle}
+                </h3>
+                <p className="text-[13px] text-text-secondary leading-relaxed">
+                  {t.chat.budgetBlockedDesc
+                    .replace('{time}', formatResetCountdownForNotice(budgetBlockRemainingMs, locale))
+                    .replace('{shortTime}', formatResetCountdown(budgetBlockRemainingMs))}
+                </p>
+                <p className="text-[12px] text-text-muted mt-2">
+                  {t.chat.budgetBlockedHint}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBudgetBlockModalOpen(false)}
+                className="text-text-muted hover:text-text-primary"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setBudgetBlockModalOpen(false)}
+              className="w-full py-2.5 rounded-xl bg-accent text-white text-[13px] font-semibold hover:bg-accent-dim transition-all"
+            >
+              {t.chat.budgetBlockedAcknowledge}
+            </button>
           </div>
         </div>
       )}

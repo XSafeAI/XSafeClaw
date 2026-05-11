@@ -3,70 +3,18 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical, Wallet, X, type LucideIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { statsAPI, systemAPI } from '../services/api';
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-const BUDGET_STORAGE_KEY = 'xsafeclaw:budget:settings';
-
-type BudgetSettings = {
-  maxCost: number | null;
-  periodStartAt: number;
-  baselineCost: number;
-  updatedAt: number;
-};
-
-function loadBudgetSettings(): BudgetSettings {
-  const now = Date.now();
-  try {
-    const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
-    if (!raw) {
-      return {
-        maxCost: null,
-        periodStartAt: now,
-        baselineCost: 0,
-        updatedAt: now,
-      };
-    }
-    const parsed = JSON.parse(raw) as Partial<BudgetSettings>;
-    const maxCost = Number(parsed.maxCost);
-    const periodStartAt = Number(parsed.periodStartAt);
-    const baselineCost = Number(parsed.baselineCost);
-    const updatedAt = Number(parsed.updatedAt);
-    return {
-      maxCost: Number.isFinite(maxCost) && maxCost > 0 ? maxCost : null,
-      periodStartAt: Number.isFinite(periodStartAt) && periodStartAt > 0 ? periodStartAt : now,
-      baselineCost: Number.isFinite(baselineCost) && baselineCost >= 0 ? baselineCost : 0,
-      updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : now,
-    };
-  } catch {
-    return {
-      maxCost: null,
-      periodStartAt: now,
-      baselineCost: 0,
-      updatedAt: now,
-    };
-  }
-}
-
-function saveBudgetSettings(next: BudgetSettings) {
-  try {
-    localStorage.setItem(BUDGET_STORAGE_KEY, JSON.stringify(next));
-  } catch {
-    // ignore quota/storage errors
-  }
-}
+import {
+  loadBudgetSettings,
+  saveBudgetSettings,
+  getBudgetStatus,
+  formatResetCountdown,
+  type BudgetSettings,
+} from '../utils/budgetControl';
 
 function formatMoney(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '$0.00';
   if (value < 0.01) return `$${value.toFixed(4)}`;
   return `$${value.toFixed(2)}`;
-}
-
-function formatResetCountdown(remainingMs: number): string {
-  const clamped = Math.max(0, remainingMs);
-  const totalMinutes = Math.floor(clamped / 60_000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `${hours}h ${minutes}m`;
 }
 
 function useTheme() {
@@ -135,31 +83,23 @@ export default function Layout() {
     return () => clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    const periodEnd = budgetSettings.periodStartAt + DAY_MS;
-    if (nowTs < periodEnd) return;
-    const next: BudgetSettings = {
-      ...budgetSettings,
-      periodStartAt: nowTs,
-      baselineCost: dashboardCost,
-      updatedAt: nowTs,
-    };
-    setBudgetSettings(next);
-    saveBudgetSettings(next);
-  }, [nowTs, dashboardCost, budgetSettings]);
-
-  const budgetUsed = useMemo(
-    () => Math.max(0, dashboardCost - budgetSettings.baselineCost),
-    [dashboardCost, budgetSettings.baselineCost],
+  const budgetStatus = useMemo(
+    () => getBudgetStatus(budgetSettings, dashboardCost, nowTs),
+    [budgetSettings, dashboardCost, nowTs],
   );
+  const {
+    budgetUsed,
+    budgetLimit,
+    budgetPercent,
+    budgetOverLimit,
+    budgetRemainingMs,
+  } = budgetStatus;
 
-  const budgetLimit = budgetSettings.maxCost;
-  const budgetPercent = useMemo(() => {
-    if (!budgetLimit || budgetLimit <= 0) return 0;
-    return Math.min(100, (budgetUsed / budgetLimit) * 100);
-  }, [budgetUsed, budgetLimit]);
-  const budgetOverLimit = Boolean(budgetLimit && budgetUsed >= budgetLimit);
-  const budgetRemainingMs = Math.max(0, budgetSettings.periodStartAt + DAY_MS - nowTs);
+  useEffect(() => {
+    if (!budgetStatus.settingsRolled) return;
+    setBudgetSettings(budgetStatus.settings);
+    saveBudgetSettings(budgetStatus.settings);
+  }, [budgetStatus]);
 
   const navigation: Array<{
     name: string;

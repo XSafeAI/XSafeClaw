@@ -61,7 +61,7 @@ export const en = {
     budgetModalTitle: 'Budget Control',
     budgetModalDesc: 'Set your maximum cost limit for each 24-hour cycle.',
     budgetMaxLabel: 'Maximum cost limit',
-    budgetCycleHint: 'Reaches the limit only changes UI state for now; no actions will be blocked.',
+    budgetCycleHint: 'When limit is reached, safe chat sending will be blocked.',
     budgetClear: 'Clear budget limit',
   },
 
@@ -242,6 +242,10 @@ export const en = {
     nanobotGatewayOffline: 'The nanobot Chat page requires nanobot gateway and the websocket channel. Run this in another terminal: nanobot gateway --port 18790 --verbose. The page will refresh status automatically after it starts.',
     connectFailed: 'Failed to connect to OpenClaw gateway, is it running?',
     hermes401Reconfigure: 'Please return to Setup and reconfigure Hermes.',
+    budgetBlockedTitle: 'Daily usage limit reached',
+    budgetBlockedDesc: 'Today\'s usage has reached the limit. Time until reset: {time}. You can wait for the reset or manually increase the budget limit to continue.',
+    budgetBlockedHint: 'You can adjust the limit from the Budget card at bottom-left.',
+    budgetBlockedAcknowledge: 'OK',
     // Install modal
     installModalOpenclawTitle: 'OpenClaw Not Installed',
     installModalOpenclawDesc: 'OpenClaw must be installed before creating a session. Go to the setup wizard to complete the installation.',
