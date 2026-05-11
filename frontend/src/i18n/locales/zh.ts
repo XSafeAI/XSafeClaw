@@ -47,6 +47,16 @@ export const zh: Translations = {
     langToggle: 'EN',
     agentTown: '智能体小镇',
     agentTownDesc: '在一个地方管理和观察所有智能体',
+    budgetTitle: '成本控制',
+    budgetNotSet: '未设置',
+    budgetNoLimitHint: '点击设置上限',
+    budgetUsagePercent: '已用 {percent}%',
+    budgetResetsIn: '{time} 后重置',
+    budgetModalTitle: '成本上限设置',
+    budgetModalDesc: '设置每 24 小时预算周期的最大成本上限。',
+    budgetMaxLabel: '最大成本上限',
+    budgetCycleHint: '达到上限后当前仅做前端提示，不会自动阻断任何操作。',
+    budgetClear: '清除成本上限',
   },
 
   home: {

@@ -53,6 +53,16 @@ export const en = {
     langToggle: 'Chinese',
     agentTown: 'Agent Valley',
     agentTownDesc: 'Manage and observe all your AI agents in one place',
+    budgetTitle: 'Budget',
+    budgetNotSet: 'Not set',
+    budgetNoLimitHint: 'Click to set limit',
+    budgetUsagePercent: '{percent}% used',
+    budgetResetsIn: 'Resets in {time}',
+    budgetModalTitle: 'Budget Control',
+    budgetModalDesc: 'Set your maximum cost limit for each 24-hour cycle.',
+    budgetMaxLabel: 'Maximum cost limit',
+    budgetCycleHint: 'Reaches the limit only changes UI state for now; no actions will be blocked.',
+    budgetClear: 'Clear budget limit',
   },
 
   home: {
