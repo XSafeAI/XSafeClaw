@@ -1020,14 +1020,41 @@ export default function Chat() {
               });
 
             } else if (chunk.type === 'tool_result') {
-              // Update the corresponding tool_call bubble with result
+              // Update by tool_id first; if missing/unmatched, fallback to nearest pending same-name tool bubble.
+              setMessageMap(prev => {
+                const msgs = [...(prev[key] ?? [])];
+                let updated = false;
+                if (chunk.tool_id) {
+                  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+                    const m = msgs[i];
+                    if (m.role === 'tool_call' && m.tool_id === chunk.tool_id) {
+                      msgs[i] = { ...m, result: chunk.result, is_error: chunk.is_error, result_pending: false };
+                      updated = true;
+                      break;
+                    }
+                  }
+                }
+                if (!updated && chunk.tool_name) {
+                  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+                    const m = msgs[i];
+                    if (m.role === 'tool_call' && m.result_pending && m.tool_name === chunk.tool_name) {
+                      msgs[i] = { ...m, result: chunk.result, is_error: chunk.is_error, result_pending: false };
+                      updated = true;
+                      break;
+                    }
+                  }
+                }
+                return { ...prev, [key]: msgs };
+              });
+            } else if (chunk.type === 'status') {
+              // Keep users informed during long Hermes steps without overriding real streamed content.
               setMessageMap(prev => ({
                 ...prev,
-                [key]: (prev[key] ?? []).map(m =>
-                  m.role === 'tool_call' && m.tool_id === chunk.tool_id
-                    ? { ...m, result: chunk.result, is_error: chunk.is_error, result_pending: false }
+                [key]: (prev[key] ?? []).map(m => (
+                  m.id === pendingId && m.pending && !m.content
+                    ? { ...m, content: chunk.text || m.content, pending: false }
                     : m
-                ),
+                )),
               }));
             } else if (chunk.type === 'tool_blocked') {
               const toolName = chunk.tool_name || 'tool';

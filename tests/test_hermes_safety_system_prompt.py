@@ -218,7 +218,7 @@ def test_hermes_plugin_default_register_skips_pre_llm_call(monkeypatch):
 
     ctx = _RecordingCtx()
     plugin.register(ctx)
-    assert ctx.hooks == ["pre_tool_call"]
+    assert ctx.hooks == ["pre_tool_call", "post_tool_call"]
 
 
 def test_hermes_plugin_env_switch_re_enables_pre_llm_call(monkeypatch):
@@ -228,4 +228,86 @@ def test_hermes_plugin_env_switch_re_enables_pre_llm_call(monkeypatch):
 
     ctx = _RecordingCtx()
     plugin.register(ctx)
-    assert ctx.hooks == ["pre_tool_call", "pre_llm_call"]
+    assert ctx.hooks == ["pre_tool_call", "post_tool_call", "pre_llm_call"]
+
+
+class _FakeResp:
+    def __init__(self, *, ok: bool, status_code: int = 200, payload: dict | None = None):
+        self.ok = ok
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def test_hermes_plugin_pre_tool_allow_publishes_tool_start(monkeypatch):
+    plugin = _load_hermes_guard_plugin()
+    recorded_events: list[dict] = []
+
+    def _fake_post_json(url: str, payload: dict, timeout_s: float):
+        if url.endswith("/api/guard/tool-check"):
+            return _FakeResp(ok=True, payload={"action": "allow"})
+        if url.endswith("/api/chat/hermes-events"):
+            recorded_events.append(payload)
+            return _FakeResp(ok=True, payload={"ok": True})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(plugin, "_post_json", _fake_post_json)
+    result = plugin._pre_tool_call_handler(
+        tool_name="exec",
+        args={"command": "echo hi"},
+        session_id="sess-1",
+        tool_call_id="call-1",
+    )
+    assert result is None
+    assert recorded_events[0]["event_type"] == "tool_start"
+    assert recorded_events[0]["tool_call_id"] == "call-1"
+
+
+def test_hermes_plugin_pre_tool_block_keeps_guard_semantics(monkeypatch):
+    plugin = _load_hermes_guard_plugin()
+    recorded_events: list[dict] = []
+
+    def _fake_post_json(url: str, payload: dict, timeout_s: float):
+        if url.endswith("/api/guard/tool-check"):
+            return _FakeResp(ok=True, payload={"action": "block", "reason": "blocked by policy"})
+        if url.endswith("/api/chat/hermes-events"):
+            recorded_events.append(payload)
+            return _FakeResp(ok=True, payload={"ok": True})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(plugin, "_post_json", _fake_post_json)
+    result = plugin._pre_tool_call_handler(
+        tool_name="exec",
+        args={"command": "rm -rf /"},
+        task_id="task-1",
+        tool_call_id="call-2",
+    )
+    assert result == {"action": "block", "message": "blocked by policy"}
+    assert recorded_events[0]["event_type"] == "tool_blocked"
+    assert recorded_events[0]["tool_call_id"] == "call-2"
+
+
+def test_hermes_plugin_post_tool_call_publishes_tool_result(monkeypatch):
+    plugin = _load_hermes_guard_plugin()
+    recorded_events: list[dict] = []
+
+    def _fake_post_json(url: str, payload: dict, timeout_s: float):
+        if url.endswith("/api/chat/hermes-events"):
+            recorded_events.append(payload)
+            return _FakeResp(ok=True, payload={"ok": True})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(plugin, "_post_json", _fake_post_json)
+    out = plugin._post_tool_call_handler(
+        tool_name="exec",
+        args={"command": "test"},
+        result={"error": "boom"},
+        session_id="sess-2",
+        tool_call_id="call-3",
+        duration_ms=42,
+    )
+    assert out is None
+    assert recorded_events[0]["event_type"] == "tool_result"
+    assert recorded_events[0]["is_error"] is True

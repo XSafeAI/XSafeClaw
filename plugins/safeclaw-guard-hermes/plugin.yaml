@@ -4,4 +4,5 @@ description: "XSafeClaw safety guard — intercepts tool calls for risk evaluati
 author: XSafeClaw
 provides_hooks:
   - pre_tool_call
+  - post_tool_call
   - pre_llm_call

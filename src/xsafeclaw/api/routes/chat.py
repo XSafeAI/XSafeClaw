@@ -25,6 +25,7 @@ from ...runtime.usage import attach_usage_metadata, normalize_usage
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
 from ...services.guard_service import GUARD_REJECTION_MARKER
+from ...services.hermes_event_bridge import hermes_event_bridge
 from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
 from ..runtime_helpers import resolve_instance, serialize_instance
 
@@ -1440,6 +1441,93 @@ async def _iter_stream_with_keepalive(stream, interval_s: float):
                 pass
 
 
+def _normalize_hermes_session_key(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    platform, instance_id, local_session_key = decode_chat_session_key(raw)
+    if platform and platform != "hermes":
+        return ""
+    if platform == "hermes":
+        instance = instance_id or "hermes-default"
+        if not local_session_key:
+            return ""
+        return f"hermes::{instance}::{local_session_key}"
+    return f"hermes::hermes-default::{raw}"
+
+
+def _tool_event_dedupe_key(event: dict) -> str | None:
+    event_type = str(event.get("type") or "")
+    if event_type not in {"tool_start", "tool_result"}:
+        return None
+    tool_id = str(event.get("tool_id") or "").strip()
+    tool_name = str(event.get("tool_name") or "").strip()
+    if tool_id:
+        return f"{event_type}:{tool_id}"
+    if not tool_name:
+        return None
+    if event_type == "tool_start":
+        return f"{event_type}:{tool_name}:{json.dumps(event.get('args'), ensure_ascii=False, sort_keys=True, default=str)}"
+    return f"{event_type}:{tool_name}:{json.dumps(event.get('result'), ensure_ascii=False, default=str)}"
+
+
+async def _iter_hermes_stream_with_bridge(
+    stream,
+    *,
+    session_key: str,
+    keepalive_interval_s: float,
+    bridge_poll_interval_s: float = 0.4,
+):
+    queue: asyncio.Queue = asyncio.Queue()
+    done_marker = object()
+    last_keepalive_at = time.monotonic()
+
+    async def _fetcher():
+        try:
+            async for chunk in stream:
+                await queue.put(("chunk", chunk))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", done_marker))
+
+    task = asyncio.create_task(_fetcher())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=bridge_poll_interval_s,
+                )
+            except asyncio.TimeoutError:
+                for event in hermes_event_bridge.drain(session_key, max_items=32):
+                    yield event
+                now = time.monotonic()
+                if now - last_keepalive_at >= keepalive_interval_s:
+                    last_keepalive_at = now
+                    yield {"type": "status", "text": "Waiting for Hermes response..."}
+                continue
+
+            for event in hermes_event_bridge.drain(session_key, max_items=32):
+                yield event
+            if kind == "done":
+                break
+            if kind == "error":
+                raise payload
+            yield payload
+    finally:
+        for event in hermes_event_bridge.drain(session_key, max_items=64):
+            yield event
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 def _tool_result_contains_guard_rejection(result_text: str) -> bool:
     return GUARD_REJECTION_MARKER.lower() in str(result_text or "").lower()
 
@@ -1932,6 +2020,19 @@ class SendMessageResponse(BaseModel):
     response_text: str
     usage: dict | None = None
     stop_reason: str | None = None
+
+
+class HermesEventIngestRequest(BaseModel):
+    session_key: str = Field(..., description="Hermes chat session key")
+    event_type: str = Field(..., description="tool_start|tool_result|tool_blocked|status")
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    args: dict | list | str | None = None
+    result: dict | list | str | None = None
+    is_error: bool = False
+    duration_ms: int | None = None
+    reason: str | None = None
+    text: str | None = None
 
 
 # --------------- Voice transcript post-processing ---------------
@@ -2667,6 +2768,26 @@ async def send_message(request: SendMessageRequest):
         )
 
 
+@router.post("/hermes-events")
+async def ingest_hermes_event(request: HermesEventIngestRequest):
+    """Hermes plugin event ingress endpoint (best-effort)."""
+    session_key = _normalize_hermes_session_key(request.session_key)
+    if not session_key:
+        raise HTTPException(status_code=400, detail="Invalid Hermes session_key")
+    event = {
+        "type": request.event_type,
+        "tool_name": request.tool_name,
+        "tool_call_id": request.tool_call_id,
+        "args": request.args,
+        "result": request.result,
+        "is_error": request.is_error,
+        "reason": request.reason,
+        "text": request.text,
+    }
+    hermes_event_bridge.publish(session_key, event)
+    return {"ok": True}
+
+
 @router.post("/send-message-stream")
 async def send_message_stream(request: SendMessageRequest):
     """
@@ -2717,6 +2838,16 @@ async def send_message_stream(request: SendMessageRequest):
         stream_public_session_key = public_session_key
         last_terminal_type: str | None = None
         stream_error_text: str | None = None
+        emitted_tool_event_keys: set[str] = set()
+
+        def _emit_chunk(chunk: dict) -> str | None:
+            dedupe_key = _tool_event_dedupe_key(chunk)
+            if dedupe_key:
+                if dedupe_key in emitted_tool_event_keys:
+                    return None
+                emitted_tool_event_keys.add(dedupe_key)
+            return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
         try:
             if instance.platform == "nanobot":
                 if request.images:
@@ -2807,9 +2938,10 @@ async def send_message_stream(request: SendMessageRequest):
                                 not target_full
                                 or _hermes_active_yaml_model == (target_full, target_slug)
                             ):
-                                async for chunk in _iter_stream_with_keepalive(
+                                async for chunk in _iter_hermes_stream_with_bridge(
                                     client.stream_chat(**stream_kwargs),
-                                    _HERMES_STREAM_KEEPALIVE_INTERVAL_S,
+                                    session_key=stream_public_session_key,
+                                    keepalive_interval_s=_HERMES_STREAM_KEEPALIVE_INTERVAL_S,
                                 ):
                                     if isinstance(chunk, dict):
                                         chunk_type = str(chunk.get("type") or "")
@@ -2819,7 +2951,9 @@ async def send_message_stream(request: SendMessageRequest):
                                             final_usage = chunk.get("usage")
                                         if chunk_type in {"final", "error", "timeout", "aborted"}:
                                             last_terminal_type = chunk_type
-                                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                                    payload = _emit_chunk(chunk)
+                                    if payload:
+                                        yield payload
                                 break
                         async with _hermes_yaml_lock.write():
                             await _ensure_hermes_yaml_pinned_to(target_full, target_slug)
@@ -2831,7 +2965,9 @@ async def send_message_stream(request: SendMessageRequest):
                                 final_text = str(chunk["text"])
                             if chunk_type in {"final", "error", "timeout", "aborted"}:
                                 last_terminal_type = chunk_type
-                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                        payload = _emit_chunk(chunk)
+                        if payload:
+                            yield payload
         except Exception as e:
             stream_error_text = str(e)
             if instance.platform != "hermes":
@@ -2862,7 +2998,9 @@ async def send_message_stream(request: SendMessageRequest):
                 else _read_tool_calls_from_jsonl(instance, local_session_key)
             )
             for evt in tool_events:
-                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                payload = _emit_chunk(evt)
+                if payload:
+                    yield payload
             rejection = _extract_guard_rejection_from_tool_events(tool_events)
             should_emit_rejection_fallback = (
                 rejection is not None
