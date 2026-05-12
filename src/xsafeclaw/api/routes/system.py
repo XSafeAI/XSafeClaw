@@ -8129,6 +8129,45 @@ def _hermes_provider_has_key(provider_or_method: str) -> bool:
     return False
 
 
+def _append_openclaw_auth_args(
+    args: list[str],
+    *,
+    provider: str,
+    api_key: str,
+    method_cli_flags: dict[str, str],
+    patch_only_providers: set[str] | None = None,
+) -> None:
+    """Append OpenClaw non-interactive auth args in one place.
+
+    OpenClaw 2026.5.x requires ``--auth-choice`` for non-interactive onboarding.
+    Provider-specific key flags remain optional and are only appended when both
+    a flag mapping and API key are available.
+    """
+    provider = (provider or "").strip()
+    api_key = (api_key or "").strip()
+    patch_only = patch_only_providers or set()
+    if not provider or provider == "skip" or provider in patch_only:
+        return
+    args += ["--auth-choice", provider]
+    cli_flag = method_cli_flags.get(provider)
+    if cli_flag and api_key:
+        args += [cli_flag, api_key]
+
+
+def _assert_openclaw_config_created(*, output: str, context: str) -> None:
+    """Fail fast when OpenClaw CLI exits 0 but does not create config."""
+    if _CONFIG_PATH.exists():
+        return
+    detail = (
+        f"OpenClaw {context} completed but did not create {_CONFIG_PATH}. "
+        "This usually means the installed OpenClaw CLI changed its "
+        "non-interactive onboarding contract."
+    )
+    if output:
+        detail += f"\n\nOpenClaw output:\n{output}"
+    raise HTTPException(status_code=500, detail=detail)
+
+
 class QuickModelConfigRequest(BaseModel):
     provider: str
     api_key: str = ""
@@ -8220,48 +8259,52 @@ async def quick_model_config(body: QuickModelConfigRequest):
     env = _build_env()
 
     cli_output = ""
-    if body.api_key:
+    if body.api_key and body.provider and body.provider != "skip":
         _, method_cli_flags = _get_auth_providers_and_flags()
-        cli_flag = method_cli_flags.get(body.provider)
-        if cli_flag:
-            current: dict = {}
-            if _CONFIG_PATH.exists():
-                try:
-                    current = json.loads(_CONFIG_PATH.read_text("utf-8"))
-                except Exception:
-                    pass
-            gw = current.get("gateway", {})
-            args: list[str] = [
-                openclaw_path, "onboard", "--non-interactive", "--accept-risk",
-                cli_flag, body.api_key,
-                "--gateway-port", str(gw.get("port", 18789)),
-                "--gateway-bind", gw.get("bind", "loopback"),
-                "--gateway-auth", gw.get("auth", {}).get("mode", "token"),
-                "--no-install-daemon",
-                "--skip-channels", "--skip-skills",
-                "--skip-search", "--skip-health", "--skip-ui",
-            ]
-            gw_token = gw.get("auth", {}).get("token", "")
-            if gw_token:
-                args += ["--gateway-token", gw_token]
-
+        current: dict = {}
+        if _CONFIG_PATH.exists():
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    env=env,
+                current = json.loads(_CONFIG_PATH.read_text("utf-8"))
+            except Exception:
+                pass
+        gw = current.get("gateway", {})
+        args: list[str] = [
+            openclaw_path, "onboard", "--non-interactive", "--accept-risk",
+            "--gateway-port", str(gw.get("port", 18789)),
+            "--gateway-bind", gw.get("bind", "loopback"),
+            "--gateway-auth", gw.get("auth", {}).get("mode", "token"),
+            "--no-install-daemon",
+            "--skip-channels", "--skip-skills",
+            "--skip-search", "--skip-health", "--skip-ui",
+        ]
+        _append_openclaw_auth_args(
+            args,
+            provider=body.provider,
+            api_key=body.api_key,
+            method_cli_flags=method_cli_flags,
+        )
+        gw_token = gw.get("auth", {}).get("token", "")
+        if gw_token:
+            args += ["--gateway-token", gw_token]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+            stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+            cli_output = stdout_bytes.decode("utf-8", errors="replace").strip()
+            if proc.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"openclaw key setup failed (exit {proc.returncode}):\n{cli_output}",
                 )
-                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
-                cli_output = stdout_bytes.decode("utf-8", errors="replace").strip()
-                if proc.returncode != 0:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"openclaw key setup failed (exit {proc.returncode}):\n{cli_output}",
-                    )
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=500, detail="openclaw key setup timed out")
+            _assert_openclaw_config_created(output=cli_output, context="key setup")
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=500, detail="openclaw key setup timed out")
 
     # §43g: forward Custom Endpoint payload into ``_patch_config_extras``.
     # ``_patch_config_extras`` (system.py L5921) reads ``body.custom_base_url``
@@ -8767,10 +8810,13 @@ async def onboard_config(body: OnboardConfigRequest):
     # vLLM and custom are handled entirely by _patch_config_extras (vLLM rejects non-interactive)
     _PATCH_ONLY_PROVIDERS = {"vllm", "custom-api-key"}
     _, method_cli_flags = _get_auth_providers_and_flags()
-    if body.provider and body.provider != "skip" and body.provider not in _PATCH_ONLY_PROVIDERS and body.api_key:
-        cli_flag = method_cli_flags.get(body.provider)
-        if cli_flag:
-            args += [cli_flag, body.api_key]
+    _append_openclaw_auth_args(
+        args,
+        provider=body.provider,
+        api_key=body.api_key,
+        method_cli_flags=method_cli_flags,
+        patch_only_providers=_PATCH_ONLY_PROVIDERS,
+    )
 
     # Gateway
     args += ["--gateway-port", str(body.gateway_port)]
@@ -8821,6 +8867,7 @@ async def onboard_config(body: OnboardConfigRequest):
                 status_code=500,
                 detail=f"openclaw onboard failed (exit {proc.returncode}):\n{output}",
             )
+        _assert_openclaw_config_created(output=output, context="onboard")
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=500,
