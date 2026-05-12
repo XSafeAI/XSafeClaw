@@ -15,7 +15,7 @@ export default function RuntimeGuard() {
           <div className="mt-4">
             <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">AGENTS</p>
             <div className="mt-2 space-y-2">
-              {['Claude Code', 'Codex', 'OpenClaw', 'Hermes'].map((name) => (
+              {['OpenClaw', 'Hermes', 'Nanobot'].map((name) => (
                 <div key={name} className="rounded-lg border border-border bg-surface-0 px-3 py-2.5">
                   <p className="text-[12px] font-medium text-text-primary">{name}</p>
                   <p className="mt-0.5 text-[10px] text-text-muted">占位卡片 · 后续接入实时状态</p>
@@ -27,7 +27,7 @@ export default function RuntimeGuard() {
           <div className="mt-4">
             <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">TOOLS</p>
             <div className="mt-2 space-y-2">
-              {['Shell', 'File System', 'Browser', 'MCP Servers'].map((name) => (
+              {['Shell', 'File System', 'MCP Servers'].map((name) => (
                 <div key={name} className="rounded-lg border border-border bg-surface-0 px-3 py-2.5">
                   <p className="text-[12px] font-medium text-text-primary">{name}</p>
                   <p className="mt-0.5 text-[10px] text-text-muted">占位卡片 · 后续接入权限与统计</p>
