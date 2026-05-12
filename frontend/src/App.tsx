@@ -127,6 +127,7 @@ function AppRoutes() {
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />
       <Route path="/world" element={<World />} />
+      <Route path="/runtime-guard" element={<RuntimeGuard />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/monitor" element={<Monitor />} />
@@ -135,7 +136,6 @@ function AppRoutes() {
         <Route path="/risk-test" element={<RiskTest />} />
         <Route path="/safety-rehearsal" element={<RiskScanner />} />
         <Route path="/chat" element={<Chat />} />
-        <Route path="/runtime-guard" element={<RuntimeGuard />} />
       </Route>
     </Routes>
   );
