@@ -101,10 +101,14 @@ export default function Layout() {
           })}
         </nav>
 
+        {/* Budget: pinned above the account/control area like the runtime guard reference */}
+        <div className="px-4 pb-4 flex-shrink-0">
+          <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">{t.layout.budgetTitle}</p>
+          <BudgetControlCard showHeader={false} />
+        </div>
+
         {/* Bottom: theme toggle + lang toggle + status */}
         <div className="p-4 border-t border-border space-y-2 flex-shrink-0">
-          <BudgetControlCard />
-
           {/* Language toggle */}
           <button
             onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}

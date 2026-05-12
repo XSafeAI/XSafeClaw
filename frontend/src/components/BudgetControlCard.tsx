@@ -18,9 +18,10 @@ function formatMoney(value: number): string {
 
 type BudgetControlCardProps = {
   className?: string;
+  showHeader?: boolean;
 };
 
-export default function BudgetControlCard({ className = '' }: BudgetControlCardProps) {
+export default function BudgetControlCard({ className = '', showHeader = true }: BudgetControlCardProps) {
   const { t } = useI18n();
   const [budgetSettings, setBudgetSettings] = useState<BudgetSettings>(() => loadBudgetSettings());
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
@@ -82,10 +83,12 @@ export default function BudgetControlCard({ className = '' }: BudgetControlCardP
         }}
         className={`w-full text-left p-3 rounded-lg bg-surface-2 border border-border hover:border-accent/50 transition-all ${className}`}
       >
-        <div className="flex items-center justify-between gap-2 mb-1.5">
-          <span className="text-[10px] uppercase tracking-[0.08em] text-text-muted">{t.layout.budgetTitle}</span>
-          <Wallet className={`w-4 h-4 ${budgetOverLimit ? 'text-warning' : 'text-accent'}`} />
-        </div>
+        {showHeader && (
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[10px] uppercase tracking-[0.08em] text-text-muted">{t.layout.budgetTitle}</span>
+            <Wallet className={`w-4 h-4 ${budgetOverLimit ? 'text-warning' : 'text-accent'}`} />
+          </div>
+        )}
         <div className="text-[18px] leading-none font-bold text-text-primary">
           {formatMoney(budgetUsed)}
           <span className="text-[12px] font-medium text-text-muted">
