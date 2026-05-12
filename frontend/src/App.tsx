@@ -8,6 +8,7 @@ import Assets from './pages/Assets';
 import RiskScanner from './pages/RiskScanner';
 import RiskTest from './pages/RiskTest';
 import Chat from './pages/Chat';
+import RuntimeGuard from './pages/RuntimeGuard';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
 import ConfigureSelector from './pages/ConfigureSelector';
@@ -126,6 +127,7 @@ function AppRoutes() {
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />
       <Route path="/world" element={<World />} />
+      <Route path="/runtime-guard" element={<RuntimeGuard />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/monitor" element={<Monitor />} />

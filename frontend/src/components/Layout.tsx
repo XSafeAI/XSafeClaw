@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical, Wallet, X, type LucideIcon } from 'lucide-react';
+import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical, Wallet, X, Columns3, type LucideIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { statsAPI, systemAPI } from '../services/api';
 import {
@@ -110,6 +110,7 @@ export default function Layout() {
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,      desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
+    { name: t.layout.runtimeGuard,    href: '/runtime-guard',    icon: Columns3,       desc: t.layout.descRuntimeGuard },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
     { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },
   ];
