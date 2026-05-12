@@ -433,14 +433,16 @@ export default function Chat() {
     ? availableInstances.find(instance => instance.instance_id === activeSession.instanceId) ?? null
     : null;
   const selectedRuntimeUnavailable =
-    selectedInstance?.platform === 'nanobot' && selectedInstance.health_status !== 'healthy';
+    (selectedInstance?.platform === 'nanobot' && selectedInstance.health_status !== 'healthy')
+    || (selectedInstance?.platform === 'openclaw' && selectedInstance.health_status === 'unreachable');
   const activeRuntimeUnavailable =
-    activeInstance?.platform === 'nanobot' && activeInstance.health_status !== 'healthy';
+    (activeInstance?.platform === 'nanobot' && activeInstance.health_status !== 'healthy')
+    || (activeInstance?.platform === 'openclaw' && activeInstance.health_status === 'unreachable');
   const selectedRuntimeUnavailableMessage = selectedRuntimeUnavailable
-    ? t.chat.nanobotGatewayOffline
+    ? (selectedInstance?.platform === 'openclaw' ? t.chat.openclawNotConfigured : t.chat.nanobotGatewayOffline)
     : '';
   const activeRuntimeUnavailableMessage = activeRuntimeUnavailable
-    ? t.chat.nanobotGatewayOffline
+    ? (activeInstance?.platform === 'openclaw' ? t.chat.openclawNotConfigured : t.chat.nanobotGatewayOffline)
     : '';
 
   // Persist sessions to localStorage whenever they change

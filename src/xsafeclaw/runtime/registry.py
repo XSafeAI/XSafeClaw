@@ -92,7 +92,11 @@ class RuntimeRegistry:
                 else:
                     attach_state = "readonly"
             elif instance.platform == "openclaw":
-                attach_state = "guard_blocking_ready"
+                if instance.meta.get("config_exists") is False:
+                    attach_state = "readonly"
+                    health_status = "unreachable"
+                else:
+                    attach_state = "guard_blocking_ready"
             elif instance.platform == "hermes":
                 health_status, healthy = await check_hermes_health()
                 attach_state = "chat_ready" if healthy else "readonly"
