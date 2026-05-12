@@ -8,6 +8,7 @@ import Assets from './pages/Assets';
 import RiskScanner from './pages/RiskScanner';
 import RiskTest from './pages/RiskTest';
 import Chat from './pages/Chat';
+import RuntimeGuard from './pages/RuntimeGuard';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
 import ConfigureSelector from './pages/ConfigureSelector';
@@ -134,6 +135,7 @@ function AppRoutes() {
         <Route path="/risk-test" element={<RiskTest />} />
         <Route path="/safety-rehearsal" element={<RiskScanner />} />
         <Route path="/chat" element={<Chat />} />
+        <Route path="/runtime-guard" element={<RuntimeGuard />} />
       </Route>
     </Routes>
   );

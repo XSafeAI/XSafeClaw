@@ -47,6 +47,8 @@ export const zh: Translations = {
     langToggle: 'EN',
     agentTown: '智能体小镇',
     agentTownDesc: '在一个地方管理和观察所有智能体',
+    runtimeGuard: '运行时防护',
+    descRuntimeGuard: '三栏工作区',
     budgetTitle: '成本控制',
     budgetNotSet: '未设置',
     budgetNoLimitHint: '点击设置上限',
