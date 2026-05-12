@@ -1454,10 +1454,13 @@ export default function TownConsole({
     && (
       (selectedRuntime.platform === 'nanobot' && selectedRuntime.health_status !== 'healthy')
       || (selectedRuntime.platform === 'hermes' && selectedRuntime.health_status === 'unreachable')
+      || (selectedRuntime.platform === 'openclaw' && selectedRuntime.health_status === 'unreachable')
     ),
   );
   const runtimeUnavailableMessage = selectedRuntimeUnavailable
-    ? townText.create.nanobotGatewayOffline
+    ? (selectedRuntime?.platform === 'openclaw'
+      ? townText.create.openclawNotConfigured
+      : townText.create.nanobotGatewayOffline)
     : '';
 
   // Detect nanobot installation status

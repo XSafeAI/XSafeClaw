@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,24 @@ def discover_openclaw_instance() -> dict[str, Any] | None:
     port = int(gateway.get("port") or 18789)
 
     if not OPENCLAW_CONFIG_PATH.exists() and not sessions_path.exists():
-        return None
+        # Fallback for setup-complete but onboard-not-run-yet: binary exists
+        # but ~/.openclaw metadata has not been created.
+        if not shutil.which("openclaw"):
+            return None
+        return {
+            "instance_id": "openclaw-default",
+            "platform": "openclaw",
+            "display_name": "OpenClaw",
+            "config_path": str(OPENCLAW_CONFIG_PATH),
+            "workspace_path": None,
+            "sessions_path": str(sessions_path),
+            "gateway_base_url": f"ws://{host}:{port}",
+            "serve_base_url": None,
+            "meta": {
+                "workspace": None,
+                "config_exists": False,
+            },
+        }
 
     return {
         "instance_id": "openclaw-default",

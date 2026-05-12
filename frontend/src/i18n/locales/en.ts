@@ -242,6 +242,7 @@ export const en = {
     hermesSwitchBanner: 'Switched to a Hermes session bound to {model}. Hermes activates only one model at a time, so switching between sessions of different models rewrites the local config (~10 ms). Frequent toggling may add slight latency.',
     hermesSwitchBannerDismiss: 'Dismiss',
     nanobotGatewayOffline: 'The nanobot Chat page requires nanobot gateway and the websocket channel. Run this in another terminal: nanobot gateway --port 18790 --verbose. The page will refresh status automatically after it starts.',
+    openclawNotConfigured: 'OpenClaw is installed but not yet configured. Please complete the setup wizard before using it.',
     connectFailed: 'Failed to connect to OpenClaw gateway, is it running?',
     hermes401Reconfigure: 'Please return to Setup and reconfigure Hermes.',
     budgetBlockedTitle: 'Daily usage limit reached',

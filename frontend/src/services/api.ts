@@ -746,6 +746,7 @@ export const systemAPI = {
 
   /** Submit onboard config form. */
   onboardConfig: (data: {
+    platform?: 'openclaw' | 'hermes';
     mode?: string;
     provider?: string;
     api_key?: string;

@@ -2591,6 +2591,7 @@ export default function Configure() {
     try {
       const effectiveProvider = form.authMethod || (authProviders.find(p => p.id === form.authProvider)?.methods?.[0]?.id) || form.authProvider;
       await systemAPI.onboardConfig({
+        platform: 'openclaw',
         mode: form.mode, provider: effectiveProvider, api_key: form.apiKey, model_id: form.modelId,
         gateway_port: form.gatewayPort, gateway_bind: form.gatewayBind, gateway_auth_mode: form.gatewayAuthMode,
         gateway_token: form.gatewayToken, channels: form.channels, hooks: form.hooks,

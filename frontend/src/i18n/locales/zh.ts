@@ -236,6 +236,7 @@ export const zh: Translations = {
     hermesSwitchBanner: '已切换到使用模型 {model} 的 Hermes 会话。Hermes 同一时刻只激活一个模型，不同模型会话之间切换会触发本地配置重写（约 10 ms）。频繁交替可能略有延迟。',
     hermesSwitchBannerDismiss: '收起',
     nanobotGatewayOffline: 'nanobot 的 Chat 页面需要 nanobot gateway 和 websocket channel。请在另一个终端运行：nanobot gateway --port 18790 --verbose；启动后页面会自动刷新状态。',
+    openclawNotConfigured: 'OpenClaw 已安装但尚未配置。请前往安装向导完成配置后再使用。',
     connectFailed: '无法连接到 OpenClaw 网关，请检查是否正在运行',
     hermes401Reconfigure: '请回到setup界面，重新配置Hermes。',
     budgetBlockedTitle: '今日使用已达到限额',
