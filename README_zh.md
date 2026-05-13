@@ -212,7 +212,12 @@ cp -r plugins/safeclaw-guard ~/.openclaw/extensions/safeclaw-guard
   "plugins": {
     "entries": {
       "safeclaw-guard": {
-        "path": "~/.openclaw/extensions/safeclaw-guard"
+        "path": "~/.openclaw/extensions/safeclaw-guard",
+        "enabled": true,
+        "config": {
+          "safeclawUrl": "http://localhost:6874",
+          "failOpenOnGuardError": false
+        }
       }
     }
   }

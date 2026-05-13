@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "bundler",
+    "outDir": ".",
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "declaration": false,
+    "types": ["node"],
+    "paths": {
+      "openclaw/plugin-sdk/safeclaw-guard": ["./openclaw-plugin-sdk.d.ts"]
+    }
+  },
+  "include": ["index.ts"],
+  "exclude": ["node_modules"]
+}

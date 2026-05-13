@@ -2,6 +2,13 @@
   "name": "safeclaw-guard",
   "version": "1.0.0",
   "description": "XSafeClaw before_tool_call guard plugin for OpenClaw",
-  "main": "index.ts",
-  "type": "module"
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "typescript": "^5.8.3"
+  }
 }

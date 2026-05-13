@@ -212,7 +212,12 @@ Then add to `~/.openclaw/openclaw.json`:
   "plugins": {
     "entries": {
       "safeclaw-guard": {
-        "path": "~/.openclaw/extensions/safeclaw-guard"
+        "path": "~/.openclaw/extensions/safeclaw-guard",
+        "enabled": true,
+        "config": {
+          "safeclawUrl": "http://localhost:6874",
+          "failOpenOnGuardError": false
+        }
       }
     }
   }
