@@ -696,8 +696,8 @@ class GatewayClient:
         device_family: str | None = None
 
         params: dict[str, Any] = {
-            "minProtocol": 3,
-            "maxProtocol": 3,
+            "minProtocol": 4,
+            "maxProtocol": 4,
             "client": {
                 "id":          client_id,
                 "displayName": "XSafeClaw",

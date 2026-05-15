@@ -238,8 +238,15 @@ def _load_session_store_index() -> dict[str, dict[str, Any]]:
 
             delivery = entry.get("deliveryContext") or {}
             origin = entry.get("origin") or {}
+
+            encoded_session_key = session_key
+            if platform == "openclaw":
+                oc_parts = session_key.split(":", 2)
+                if len(oc_parts) == 3 and oc_parts[0] == "agent":
+                    encoded_session_key = f"{platform}::{instance_id}::{oc_parts[2]}"
+
             index[namespaced_sid] = {
-                "session_key": session_key,
+                "session_key": encoded_session_key,
                 "model_provider": entry.get("modelProvider"),
                 "model": entry.get("model"),
                 "channel": delivery.get("channel") or entry.get("lastChannel") or origin.get("provider"),
