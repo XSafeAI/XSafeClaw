@@ -10,6 +10,7 @@ import type { RuntimeInstance } from '../services/api';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { useI18n } from '../i18n';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
+import MarkdownMessage from '../components/MarkdownMessage';
 import {
   formatResetCountdown,
   getBudgetStatus,
@@ -310,9 +311,10 @@ function Bubble({ msg }: { msg: ChatMessage }) {
                 </div>
               )}
               {msg.content && (
-                <p className="text-[13px] text-text-primary whitespace-pre-wrap leading-relaxed break-words">
-                  {msg.content}
-                </p>
+                <MarkdownMessage
+                  content={msg.content}
+                  className="text-[13px] text-text-primary leading-relaxed"
+                />
               )}
             </>
           )}

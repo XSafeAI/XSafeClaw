@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import MarkdownMessage from '../../../../components/MarkdownMessage';
 import { CHAR_BASE, CHAR_NAMES, formatAgentDisplayName } from '../config/constants';
 import { getAgentTownText } from '../i18n';
 
@@ -476,7 +477,7 @@ function ChatBubble({ msg, helpers }) {
             <span />
           </div>
         ) : (
-          msg.content
+          <MarkdownMessage content={msg.content || ''} />
         )}
       </div>
     </div>

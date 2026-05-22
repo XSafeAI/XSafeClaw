@@ -1,0 +1,149 @@
+.markdown-message {
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.markdown-message > :first-child {
+  margin-top: 0;
+}
+
+.markdown-message > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-message p,
+.markdown-message ul,
+.markdown-message ol,
+.markdown-message blockquote,
+.markdown-message pre,
+.markdown-message table {
+  margin: 0.65em 0;
+}
+
+.markdown-message h1,
+.markdown-message h2,
+.markdown-message h3,
+.markdown-message h4,
+.markdown-message h5,
+.markdown-message h6 {
+  margin: 0.9em 0 0.45em;
+  color: inherit;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.markdown-message h1 {
+  font-size: 1.35em;
+}
+
+.markdown-message h2 {
+  font-size: 1.22em;
+}
+
+.markdown-message h3 {
+  font-size: 1.12em;
+}
+
+.markdown-message h4,
+.markdown-message h5,
+.markdown-message h6 {
+  font-size: 1em;
+}
+
+.markdown-message ul,
+.markdown-message ol {
+  padding-left: 1.45em;
+}
+
+.markdown-message li {
+  margin: 0.25em 0;
+}
+
+.markdown-message p,
+.markdown-message li,
+.markdown-message blockquote,
+.markdown-message th,
+.markdown-message td {
+  white-space: pre-wrap;
+}
+
+.markdown-message li > p {
+  margin: 0.25em 0;
+}
+
+.markdown-message blockquote {
+  border-left: 3px solid color-mix(in srgb, currentColor 35%, transparent);
+  padding-left: 0.9em;
+  color: color-mix(in srgb, currentColor 78%, transparent);
+}
+
+.markdown-message hr {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.markdown-message a {
+  color: #7aa7ff;
+  text-decoration: none;
+}
+
+.markdown-message a:hover {
+  text-decoration: underline;
+}
+
+.markdown-message code {
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 0.35em;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  padding: 0.08em 0.32em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
+.markdown-message pre {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 0.7em;
+  background: rgba(0, 0, 0, 0.22);
+  padding: 0.8em 0.95em;
+}
+
+.markdown-message pre code {
+  display: block;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  white-space: pre;
+}
+
+.markdown-message table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdown-message th,
+.markdown-message td {
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  padding: 0.42em 0.62em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-message th {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-weight: 700;
+}
+
+.markdown-message img {
+  max-width: 100%;
+  border-radius: 0.55em;
+}
