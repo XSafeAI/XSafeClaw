@@ -53,6 +53,7 @@
 
 |      | 日期       | 更新                                                         |
 | :--: | :--------- | :----------------------------------------------------------- |
+|  🔥  | 2026-05-22 | v1.0.9 发布 — 安全对话与 Agent Valley 的聊天回复现已正常渲染 Markdown，OpenClaw、Hermes、Nanobot 的标题、列表、表格、代码块与分隔线都会按可读格式展示。 |
 |  🔥  | 2026-05-09 | v1.0.8 发布 — 跨 OpenClaw、Hermes、Nanobot 三运行时的逐模型 Token 用量与成本核算现已统一；支持并发多会话消息；各运行时的 Memory 扫描类型已对齐。 |
 |  🔥  | 2026-04-29 | v1.0.7 发布 — Nanobot 连接功能正式集成：XSafeClaw 现可主动连接运行中的 Nanobot 实例，建立受 Guard 保护的对话会话，并将 Nanobot 活动与 OpenClaw、Hermes 统一呈现在同一视图中。 |
 |  🔥  | 2026-04-26 | v1.0.5 发布 — nanobot 引导安装现在遵循官方跨平台安装流程，未配置 API key 时 Setup 不会误判失败，Agent Valley 独立页面也补上了 React Query Provider。 |

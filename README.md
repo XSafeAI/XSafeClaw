@@ -53,6 +53,7 @@
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
+|  🔥  | 2026-05-22 | v1.0.9 released — Chat responses in Safe Chat and Agent Valley now render Markdown normally, including headings, lists, tables, code blocks, and separators across OpenClaw, Hermes, and Nanobot. |
 |  🔥  | 2026-05-09 | v1.0.8 released — Per-model token usage and cost accounting now works uniformly across OpenClaw, Hermes, and Nanobot; concurrent multi-session messaging is supported; memory scan types are aligned across all runtimes. |
 |  🔥  | 2026-04-29 | v1.0.7 released — Nanobot connectivity is now fully integrated: XSafeClaw can connect to running Nanobot instances, establish guarded sessions, and surface Nanobot activity alongside OpenClaw and Hermes in a unified view. |
 |  🔥  | 2026-04-26 | v1.0.5 released — Nanobot onboarding now follows the official install flow across platforms, setup no longer fails before API-key configuration, and Agent Valley's standalone page is wired up with the required React Query provider. |
