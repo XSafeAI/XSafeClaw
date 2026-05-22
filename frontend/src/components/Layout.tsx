@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical, Columns3, type LucideIcon } from 'lucide-react';
+import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Activity, FlaskConical, type LucideIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { systemAPI } from '../services/api';
 import BudgetControlCard from './BudgetControlCard';
@@ -49,7 +49,6 @@ export default function Layout() {
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,      desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
-    { name: t.layout.runtimeGuard,    href: '/runtime-guard',    icon: Columns3,       desc: t.layout.descRuntimeGuard },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
     { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },
   ];
@@ -101,12 +100,10 @@ export default function Layout() {
           })}
         </nav>
 
-        {location.pathname !== '/runtime-guard' && (
-          <div className="px-4 pb-4 flex-shrink-0">
-            <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">{t.layout.budgetTitle}</p>
-            <BudgetControlCard showHeader={false} />
-          </div>
-        )}
+        <div className="px-4 pb-4 flex-shrink-0">
+          <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">{t.layout.budgetTitle}</p>
+          <BudgetControlCard showHeader={false} />
+        </div>
 
         {/* Bottom: theme toggle + lang toggle + status */}
         <div className="p-4 border-t border-border space-y-2 flex-shrink-0">
