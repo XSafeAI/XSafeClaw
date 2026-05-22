@@ -53,8 +53,6 @@ export const en = {
     langToggle: 'Chinese',
     agentTown: 'Agent Valley',
     agentTownDesc: 'Manage and observe all your AI agents in one place',
-    runtimeGuard: 'Runtime Guard',
-    descRuntimeGuard: 'Three-column runtime workspace',
     budgetTitle: 'Budget',
     budgetNotSet: 'Not set',
     budgetNoLimitHint: 'Click to set limit',
