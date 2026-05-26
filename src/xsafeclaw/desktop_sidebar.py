@@ -152,15 +152,16 @@ def run(parent_pid: int | None = None) -> None:
     import tkinter.font as tkfont
 
     class SidebarWindow:
-        collapsed_width = 56
-        expanded_width = 340
-        expanded_gap = 8
-        height = 304
+        collapsed_width = 86
+        expanded_width = 720
+        expanded_gap = 12
+        height = 620
 
         viewport_height_ratio = 0.50
         min_window_height = 420
         max_window_height = 720
         top_offset_ratio = 0.12
+        font_scale_ratio = 0.92
 
         transparent = "#FF00FF"
         bg = "#071018"
@@ -296,6 +297,10 @@ def run(parent_pid: int | None = None) -> None:
             return self.window_height / self.height
 
         @property
+        def _font_scale(self) -> float:
+            return max(0.75, self._scale_y * self.font_scale_ratio)
+
+        @property
         def _expanded_origin(self) -> int:
             return self.collapsed_width + self.expanded_gap
 
@@ -343,7 +348,7 @@ def run(parent_pid: int | None = None) -> None:
                     continue
                 font = tkfont.Font(root=self.root, font=font_value)
                 actual = font.actual()
-                size = max(1, int(round(abs(actual["size"]) * self._scale_y)))
+                size = max(1, int(round(abs(actual["size"]) * self._font_scale)))
                 style: list[str] = []
                 if actual["weight"] != "normal":
                     style.append(actual["weight"])
@@ -370,15 +375,15 @@ def run(parent_pid: int | None = None) -> None:
                 0,
                 self.collapsed_width,
                 self.height,
-                13,
+                16,
                 fill=self.bg,
                 outline=self.border,
                 width=1,
             )
-            self._draw_shield(28, 36)
-            self._draw_pet(28, 118)
-            self._draw_risk_badge(28, 198)
-            self._draw_settings(28, 268)
+            self._draw_shield(43, 62)
+            self._draw_pet(43, 192)
+            self._draw_risk_badge(43, 334)
+            self._draw_settings(43, 508)
 
         def _rounded_rect(
             self,
@@ -492,125 +497,125 @@ def run(parent_pid: int | None = None) -> None:
 
         def _draw_shield(self, cx: int, cy: int) -> None:
             self._rounded_rect(
-                cx - 17, cy - 17, cx + 17, cy + 17, 7, fill="#101923", outline="#182637"
+                cx - 25, cy - 25, cx + 25, cy + 25, 10, fill="#101923", outline="#182637"
             )
             points = [
                 cx,
-                cy - 12,
-                cx + 10,
-                cy - 7,
-                cx + 8,
-                cy + 7,
+                cy - 18,
+                cx + 16,
+                cy - 10,
+                cx + 13,
+                cy + 10,
                 cx,
-                cy + 13,
-                cx - 8,
-                cy + 7,
-                cx - 10,
-                cy - 7,
+                cy + 20,
+                cx - 13,
+                cy + 10,
+                cx - 16,
+                cy - 10,
             ]
-            self.canvas.create_line(*points, fill=self.text, width=2, smooth=True)
-            self.canvas.create_line(cx, cy - 7, cx, cy + 7, fill=self.text, width=1)
+            self.canvas.create_line(*points, fill=self.text, width=3, smooth=True)
+            self.canvas.create_line(cx, cy - 10, cx, cy + 10, fill=self.text, width=2)
 
         def _draw_pet(self, cx: int, cy: int) -> None:
             self._rounded_rect(
-                cx - 23,
-                cy - 33,
-                cx + 23,
-                cy + 33,
-                7,
+                cx - 34,
+                cy - 50,
+                cx + 34,
+                cy + 50,
+                10,
                 fill="#101923",
                 outline=self.risk_hot,
                 width=1,
             )
             self._rounded_rect(
-                cx - 21, cy - 31, cx + 21, cy + 31, 6, fill="#111923", outline="#36141A", width=1
+                cx - 31, cy - 47, cx + 31, cy + 47, 9, fill="#111923", outline="#36141A", width=1
             )
             body = "#D9534F" if self.pet_state == "typing" else "#B84C4A"
             claw = "#FF6A32" if self.pet_state == "typing" else "#D85A33"
             self.canvas.create_oval(
-                cx - 12, cy - 11, cx + 12, cy + 13, fill=body, outline="#7C231C", width=1
+                cx - 18, cy - 16, cx + 18, cy + 20, fill=body, outline="#7C231C", width=1
             )
-            self.canvas.create_oval(cx - 5, cy - 5, cx - 1, cy - 1, fill="#1B0D0E", outline="")
-            self.canvas.create_oval(cx + 1, cy - 5, cx + 5, cy - 1, fill="#1B0D0E", outline="")
+            self.canvas.create_oval(cx - 8, cy - 8, cx - 2, cy - 2, fill="#1B0D0E", outline="")
+            self.canvas.create_oval(cx + 2, cy - 8, cx + 8, cy - 2, fill="#1B0D0E", outline="")
             self.canvas.create_arc(
-                cx - 7,
-                cy - 1,
-                cx + 7,
-                cy + 9,
+                cx - 10,
+                cy,
+                cx + 10,
+                cy + 15,
                 start=200,
                 extent=140,
                 style="arc",
                 outline="#FFB076",
                 width=1,
             )
-            self.canvas.create_line(cx - 11, cy - 6, cx - 21, cy - 24, fill=claw, width=3)
-            self.canvas.create_line(cx + 11, cy - 6, cx + 21, cy - 24, fill=claw, width=3)
+            self.canvas.create_line(cx - 17, cy - 8, cx - 31, cy - 35, fill=claw, width=4)
+            self.canvas.create_line(cx + 17, cy - 8, cx + 31, cy - 35, fill=claw, width=4)
             self.canvas.create_arc(
-                cx - 28,
-                cy - 33,
-                cx - 12,
-                cy - 15,
+                cx - 42,
+                cy - 50,
+                cx - 18,
+                cy - 23,
                 start=275,
                 extent=235,
                 style="arc",
                 outline=claw,
-                width=5,
+                width=7,
             )
             self.canvas.create_arc(
-                cx + 12,
-                cy - 33,
-                cx + 28,
-                cy - 15,
+                cx + 18,
+                cy - 50,
+                cx + 42,
+                cy - 23,
                 start=30,
                 extent=235,
                 style="arc",
                 outline=claw,
-                width=5,
+                width=7,
             )
             if self.pet_state == "typing":
                 self._rounded_rect(
-                    cx - 18, cy + 12, cx + 18, cy + 25, 2, fill="#12161D", outline="#47505B"
+                    cx - 27, cy + 20, cx + 27, cy + 38, 3, fill="#12161D", outline="#47505B"
                 )
                 for row in range(2):
                     for col in range(6):
-                        x = cx - 14 + col * 5
-                        y = cy + 15 + row * 4
-                        self.canvas.create_rectangle(x, y, x + 3, y + 2, fill="#5D6570", outline="")
+                        x = cx - 21 + col * 8
+                        y = cy + 25 + row * 6
+                        self.canvas.create_rectangle(x, y, x + 5, y + 3, fill="#5D6570", outline="")
             else:
                 self.canvas.create_text(
-                    cx + 13, cy - 15, text="Z", fill=self.muted, font=("Segoe UI", 8, "bold")
+                    cx + 20, cy - 24, text="Z", fill=self.muted, font=("Segoe UI", 12, "bold")
                 )
 
         def _draw_risk_badge(self, cx: int, cy: int) -> None:
             text = get_risk_badge_text(self.pending_risk_count)
             if not text:
                 return
-            self.canvas.create_oval(cx - 21, cy - 21, cx + 21, cy + 21, fill="#240B12", outline="")
+            self.canvas.create_oval(cx - 32, cy - 32, cx + 32, cy + 32, fill="#240B12", outline="")
             self.canvas.create_oval(
-                cx - 18, cy - 18, cx + 18, cy + 18, fill="#FF2531", outline="#111822", width=2
+                cx - 27, cy - 27, cx + 27, cy + 27, fill="#FF2531", outline="#111822", width=3
             )
             self.canvas.create_arc(
-                cx - 18,
-                cy - 18,
-                cx + 18,
-                cy + 18,
+                cx - 27,
+                cy - 27,
+                cx + 27,
+                cy + 27,
                 start=40,
                 extent=160,
                 style="arc",
                 outline="#FF6E6E",
-                width=3,
+                width=4,
             )
             self.canvas.create_text(
-                cx, cy + 1, text=text, fill="#FFFFFF", font=("Segoe UI", 17, "bold")
+                cx, cy + 1, text=text, fill="#FFFFFF", font=("Segoe UI", 26, "bold")
             )
 
         def _draw_settings(self, cx: int, cy: int) -> None:
-            self.canvas.create_oval(cx - 12, cy - 12, cx + 12, cy + 12, outline="#C5CAD1", width=2)
-            self.canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, outline="#C5CAD1", width=2)
-            for dx, dy in ((0, -15), (0, 15), (-15, 0), (15, 0)):
+            self.canvas.create_oval(cx - 18, cy - 18, cx + 18, cy + 18, outline="#C5CAD1", width=3)
+            self.canvas.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, outline="#C5CAD1", width=3)
+            for dx, dy in ((0, -23), (0, 23), (-23, 0), (23, 0)):
+                self.canvas.create_line(cx, cy, cx + dx, cy + dy, fill="#C5CAD1", width=4)
+            for dx, dy in ((17, -17), (-17, -17), (17, 17), (-17, 17)):
                 self.canvas.create_line(cx, cy, cx + dx, cy + dy, fill="#C5CAD1", width=3)
-            for dx, dy in ((11, -11), (-11, -11), (11, 11), (-11, 11)):
-                self.canvas.create_line(cx, cy, cx + dx, cy + dy, fill="#C5CAD1", width=2)
 
         def _draw_expanded_panel(self) -> None:
             x = self.collapsed_width + self.expanded_gap
@@ -675,79 +680,79 @@ def run(parent_pid: int | None = None) -> None:
                 0,
                 x + self.expanded_width,
                 self.height,
-                14,
+                18,
                 fill=self.panel_bg,
                 outline=self.border,
                 width=1,
             )
 
-            self._draw_page_icon(x + 12, 10)
+            self._draw_page_icon(x + 32, 28)
             self.canvas.create_text(
-                x + 58,
-                12,
+                x + 112,
+                34,
                 anchor="nw",
                 text="智能体",
                 fill=self.text,
-                font=("Microsoft YaHei UI", 20, "bold"),
+                font=("Microsoft YaHei UI", 32, "bold"),
             )
             self._draw_text_line(
-                x + 58,
-                36,
+                x + 112,
+                82,
                 text="3 个应用 · 6 个 Agent 运行中",
                 fill=self.muted,
-                font=("Microsoft YaHei UI", 12),
-                max_width=210,
+                font=("Microsoft YaHei UI", 20),
+                max_width=420,
             )
-            self._draw_collapse_button(x + 304, 12)
+            self._draw_collapse_button(x + 648, 38)
 
-            card_y = 50
+            card_y = 136
             for app in MOCK_AGENT_APPS:
-                self._draw_agent_app_card(x + 12, card_y, app)
-                card_y += 50
+                self._draw_agent_app_card(x + 32, card_y, app)
+                card_y += 112
 
-            self._draw_current_active_card(x + 12, 204)
-            self._draw_risk_summary_card(x + 173, 204)
+            self._draw_current_active_card(x + 32, 464)
+            self._draw_risk_summary_card(x + 376, 464)
 
         def _draw_page_icon(self, x: int, y: int) -> None:
             self._rounded_rect(
                 x,
                 y,
-                x + 34,
-                y + 34,
-                8,
+                x + 56,
+                y + 56,
+                12,
                 fill="#121A23",
                 outline=self.card_border,
                 width=1,
             )
-            cx = x + 17
-            cy = y + 17
+            cx = x + 28
+            cy = y + 28
             points = [
                 cx,
-                cy - 11,
-                cx + 10,
-                cy - 6,
-                cx + 8,
-                cy + 7,
+                cy - 18,
+                cx + 17,
+                cy - 10,
+                cx + 14,
+                cy + 12,
                 cx,
-                cy + 13,
-                cx - 8,
-                cy + 7,
-                cx - 10,
-                cy - 6,
+                cy + 21,
+                cx - 14,
+                cy + 12,
+                cx - 17,
+                cy - 10,
             ]
-            self.canvas.create_line(*points, fill=self.text, width=2, smooth=True)
+            self.canvas.create_line(*points, fill=self.text, width=3, smooth=True)
 
         def _draw_collapse_button(self, x: int, y: int) -> None:
             if self._focused_key == "collapse":
-                self._rounded_rect(x, y, x + 24, y + 24, 6, fill="#172231", outline=self.focus)
+                self._rounded_rect(x, y, x + 40, y + 40, 8, fill="#172231", outline=self.focus)
             self.canvas.create_text(
-                x + 12,
-                y + 12,
+                x + 20,
+                y + 20,
                 text="<<",
                 fill="#C5CBD2",
-                font=("Segoe UI", 14, "bold"),
+                font=("Segoe UI", 24, "bold"),
             )
-            self._add_hitbox("collapse", x, y, x + 24, y + 24)
+            self._add_hitbox("collapse", x, y, x + 40, y + 40)
 
         def _draw_agent_app_card(self, x: int, y: int, app: AgentAppStatus) -> None:
             is_pending = app.risk_state == "pending"
@@ -756,71 +761,71 @@ def run(parent_pid: int | None = None) -> None:
             if self._focused_key == app.id:
                 outline = self.focus
 
-            self._rounded_rect(x, y, x + 316, y + 44, 10, fill=fill, outline=outline, width=1)
+            self._rounded_rect(x, y, x + 656, y + 86, 14, fill=fill, outline=outline, width=1)
             if is_pending:
-                self.canvas.create_line(x + 8, y, x + 308, y, fill="#FF9F0A", width=1)
+                self.canvas.create_line(x + 14, y, x + 642, y, fill="#FF9F0A", width=1)
 
             self.canvas.create_oval(
-                x + 10, y + 6, x + 42, y + 38, fill="#080D13", outline="#1F2A34"
+                x + 24, y + 14, x + 82, y + 72, fill="#080D13", outline="#1F2A34"
             )
-            self._draw_app_icon(app.icon_type, x + 26, y + 22)
+            self._draw_app_icon(app.icon_type, x + 53, y + 43)
 
             self._draw_text_line(
-                x + 54,
-                y + 8,
+                x + 112,
+                y + 20,
                 text=app.app_name,
                 fill=self.text,
-                font=("Microsoft YaHei UI", 15, "bold"),
-                max_width=120,
+                font=("Microsoft YaHei UI", 24, "bold"),
+                max_width=260,
             )
             if app.id == "app_nanobot":
                 self._draw_text_line(
-                    x + 54,
-                    y + 27,
+                    x + 112,
+                    y + 56,
                     text="3 个 Agent 运行中 ·",
                     fill=self.muted,
-                    font=("Microsoft YaHei UI", 12),
-                    max_width=108,
+                    font=("Microsoft YaHei UI", 19),
+                    max_width=230,
                 )
                 self._draw_text_line(
-                    x + 166,
-                    y + 27,
+                    x + 340,
+                    y + 56,
                     text="1 个待确认",
                     fill=self.pending_text,
-                    font=("Microsoft YaHei UI", 12, "bold"),
-                    max_width=86,
+                    font=("Microsoft YaHei UI", 19, "bold"),
+                    max_width=160,
                 )
             else:
                 self._draw_text_line(
-                    x + 54,
-                    y + 27,
+                    x + 112,
+                    y + 56,
                     text=app.status_text,
                     fill=self.muted,
-                    font=("Microsoft YaHei UI", 12),
-                    max_width=170,
+                    font=("Microsoft YaHei UI", 19),
+                    max_width=360,
                 )
 
             dot = self.pending if is_pending else self.ok
-            self.canvas.create_oval(x + 280, y + 17, x + 290, y + 27, fill=dot, outline="")
+            self.canvas.create_oval(x + 574, y + 38, x + 594, y + 58, fill=dot, outline="")
             self.canvas.create_text(
-                x + 306,
-                y + 22,
+                x + 628,
+                y + 43,
                 text="›",
                 fill=self.muted,
-                font=("Segoe UI", 22, "bold"),
+                font=("Segoe UI", 34, "bold"),
             )
-            self._add_hitbox(app.id, x, y, x + 316, y + 44)
+            self._add_hitbox(app.id, x, y, x + 656, y + 86)
 
         def _draw_app_icon(self, icon_type: IconType, cx: int, cy: int) -> None:
             if icon_type == "openclaw":
-                for offset in (-8, 0, 8):
+                for offset in (-15, 0, 15):
                     self.canvas.create_line(
-                        cx + offset - 4,
-                        cy + 8,
-                        cx + offset + 5,
-                        cy - 8,
+                        cx + offset - 7,
+                        cy + 16,
+                        cx + offset + 8,
+                        cy - 16,
                         fill=self.text,
-                        width=4,
+                        width=8,
                         capstyle="round",
                     )
                 return
@@ -829,109 +834,109 @@ def run(parent_pid: int | None = None) -> None:
                 light = "#F2C56B"
                 self.canvas.create_polygon(
                     cx,
-                    cy + 10,
-                    cx - 12,
-                    cy - 9,
-                    cx - 2,
-                    cy - 2,
+                    cy + 21,
+                    cx - 23,
+                    cy - 19,
+                    cx - 4,
+                    cy - 4,
                     fill=gold,
                     outline=light,
                 )
                 self.canvas.create_polygon(
                     cx,
-                    cy + 10,
-                    cx + 12,
-                    cy - 9,
-                    cx + 2,
-                    cy - 2,
+                    cy + 21,
+                    cx + 23,
+                    cy - 19,
+                    cx + 4,
+                    cy - 4,
                     fill=gold,
                     outline=light,
                 )
                 self.canvas.create_rectangle(
-                    cx - 3, cy - 4, cx + 3, cy + 12, fill=gold, outline=light
+                    cx - 6, cy - 8, cx + 6, cy + 24, fill=gold, outline=light
                 )
                 return
 
             self.canvas.create_oval(
-                cx - 12, cy - 11, cx + 12, cy + 11, fill="#253543", outline="#79D8FF"
+                cx - 22, cy - 20, cx + 22, cy + 20, fill="#253543", outline="#79D8FF"
             )
             self.canvas.create_rectangle(
-                cx - 11, cy - 2, cx + 11, cy + 10, fill="#182331", outline="#253543"
+                cx - 20, cy - 4, cx + 20, cy + 18, fill="#182331", outline="#253543"
             )
-            self.canvas.create_oval(cx - 6, cy - 2, cx - 2, cy + 2, fill="#37CFFF", outline="")
-            self.canvas.create_oval(cx + 2, cy - 2, cx + 6, cy + 2, fill="#37CFFF", outline="")
-            self.canvas.create_line(cx, cy - 11, cx, cy - 17, fill="#79D8FF", width=2)
-            self.canvas.create_oval(cx - 2, cy - 20, cx + 2, cy - 16, fill="#37CFFF", outline="")
+            self.canvas.create_oval(cx - 11, cy - 4, cx - 4, cy + 3, fill="#37CFFF", outline="")
+            self.canvas.create_oval(cx + 4, cy - 4, cx + 11, cy + 3, fill="#37CFFF", outline="")
+            self.canvas.create_line(cx, cy - 20, cx, cy - 31, fill="#79D8FF", width=3)
+            self.canvas.create_oval(cx - 4, cy - 36, cx + 4, cy - 28, fill="#37CFFF", outline="")
 
         def _draw_current_active_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 155, y + 88, 10, fill=self.card_bg, outline=self.card_border
+                x, y, x + 320, y + 136, 14, fill=self.card_bg, outline=self.card_border
             )
-            self.canvas.create_oval(x + 10, y + 13, x + 18, y + 21, fill=self.ok, outline="")
-            self.canvas.create_oval(x + 8, y + 11, x + 20, y + 23, outline="#0F5F31", width=2)
+            self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.ok, outline="")
+            self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
             self.canvas.create_text(
-                x + 26,
-                y + 8,
+                x + 64,
+                y + 17,
                 anchor="nw",
                 text="当前活跃",
                 fill=self.text,
-                font=("Microsoft YaHei UI", 14, "bold"),
+                font=("Microsoft YaHei UI", 22, "bold"),
             )
             self._draw_text_line(
-                x + 10,
-                y + 36,
+                x + 26,
+                y + 60,
                 text=f"{MOCK_CURRENT_ACTIVE.app_name} / {MOCK_CURRENT_ACTIVE.agent_name}",
                 fill="#B6BEC8",
-                font=("Microsoft YaHei UI", 12),
-                max_width=135,
+                font=("Microsoft YaHei UI", 18),
+                max_width=260,
             )
             self._draw_text_line(
-                x + 10,
-                y + 54,
+                x + 26,
+                y + 86,
                 text=MOCK_CURRENT_ACTIVE.task,
                 fill="#B6BEC8",
-                font=("Microsoft YaHei UI", 12),
-                max_width=135,
+                font=("Microsoft YaHei UI", 18),
+                max_width=260,
             )
             self._draw_text_line(
-                x + 10,
-                y + 72,
+                x + 26,
+                y + 112,
                 text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
                 fill=self.weak,
-                font=("Microsoft YaHei UI", 9),
-                max_width=135,
+                font=("Microsoft YaHei UI", 15),
+                max_width=260,
             )
 
         def _draw_risk_summary_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 155, y + 88, 10, fill=self.card_bg, outline=self.card_border
+                x, y, x + 312, y + 136, 14, fill=self.card_bg, outline=self.card_border
             )
-            self._draw_shield_watermark(x + 100, y + 44)
-            self.canvas.create_oval(x + 10, y + 13, x + 18, y + 21, fill=self.pending, outline="")
-            self.canvas.create_oval(x + 8, y + 11, x + 20, y + 23, outline="#704C0A", width=2)
+            self._draw_shield_watermark(x + 235, y + 74)
+            self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.pending, outline="")
+            self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
-                x + 26,
-                y + 8,
+                x + 64,
+                y + 17,
                 anchor="nw",
                 text="风险状态",
                 fill=self.text,
-                font=("Microsoft YaHei UI", 14, "bold"),
+                font=("Microsoft YaHei UI", 22, "bold"),
             )
             self._draw_text_line(
-                x + 10,
-                y + 36,
+                x + 26,
+                y + 60,
                 text=MOCK_RISK_SUMMARY.text,
                 fill=self.pending_text,
-                font=("Microsoft YaHei UI", 13, "bold"),
-                max_width=135,
+                font=("Microsoft YaHei UI", 20, "bold"),
+                max_width=230,
             )
             self._draw_text_line(
-                x + 10,
-                y + 58,
+                x + 26,
+                y + 88,
                 text=MOCK_RISK_SUMMARY.hint,
                 fill=self.muted,
-                font=("Microsoft YaHei UI", 12),
-                max_width=135,
+                font=("Microsoft YaHei UI", 18),
+                max_width=230,
             )
 
         def _draw_shield_watermark(self, cx: int, cy: int) -> None:
@@ -1062,13 +1067,13 @@ def run(parent_pid: int | None = None) -> None:
 
         def _panel_for_y(self, y: int) -> ActivePanel | None:
             design_y = self._design_y(y)
-            if 0 <= design_y < 72:
+            if 0 <= design_y < 125:
                 return "overview"
-            if 72 <= design_y < 164:
+            if 125 <= design_y < 275:
                 return "agents"
-            if 164 <= design_y < 232:
+            if 275 <= design_y < 420:
                 return "riskApproval"
-            if 232 <= design_y < 304:
+            if 420 <= design_y < self.height:
                 return "settings"
             return None
 
