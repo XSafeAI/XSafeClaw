@@ -153,9 +153,9 @@ def run(parent_pid: int | None = None) -> None:
 
     class SidebarWindow:
         collapsed_width = 86
-        expanded_width = 720
+        expanded_width = 670
         expanded_gap = 12
-        height = 620
+        height = 680
 
         viewport_height_ratio = 0.50
         min_window_height = 420
@@ -380,10 +380,10 @@ def run(parent_pid: int | None = None) -> None:
                 outline=self.border,
                 width=1,
             )
-            self._draw_shield(43, 62)
-            self._draw_pet(43, 192)
-            self._draw_risk_badge(43, 334)
-            self._draw_settings(43, 508)
+            self._draw_shield(43, 66)
+            self._draw_pet(43, 210)
+            self._draw_risk_badge(43, 366)
+            self._draw_settings(43, 558)
 
         def _rounded_rect(
             self,
@@ -703,15 +703,15 @@ def run(parent_pid: int | None = None) -> None:
                 font=("Microsoft YaHei UI", 20),
                 max_width=420,
             )
-            self._draw_collapse_button(x + 648, 38)
+            self._draw_collapse_button(x + 598, 38)
 
-            card_y = 136
+            card_y = 146
             for app in MOCK_AGENT_APPS:
                 self._draw_agent_app_card(x + 32, card_y, app)
-                card_y += 112
+                card_y += 118
 
-            self._draw_current_active_card(x + 32, 464)
-            self._draw_risk_summary_card(x + 376, 464)
+            self._draw_current_active_card(x + 32, 522)
+            self._draw_risk_summary_card(x + 356, 522)
 
         def _draw_page_icon(self, x: int, y: int) -> None:
             self._rounded_rect(
@@ -761,14 +761,14 @@ def run(parent_pid: int | None = None) -> None:
             if self._focused_key == app.id:
                 outline = self.focus
 
-            self._rounded_rect(x, y, x + 656, y + 86, 14, fill=fill, outline=outline, width=1)
+            self._rounded_rect(x, y, x + 606, y + 90, 14, fill=fill, outline=outline, width=1)
             if is_pending:
-                self.canvas.create_line(x + 14, y, x + 642, y, fill="#FF9F0A", width=1)
+                self.canvas.create_line(x + 14, y, x + 592, y, fill="#FF9F0A", width=1)
 
             self.canvas.create_oval(
-                x + 24, y + 14, x + 82, y + 72, fill="#080D13", outline="#1F2A34"
+                x + 24, y + 16, x + 82, y + 74, fill="#080D13", outline="#1F2A34"
             )
-            self._draw_app_icon(app.icon_type, x + 53, y + 43)
+            self._draw_app_icon(app.icon_type, x + 53, y + 45)
 
             self._draw_text_line(
                 x + 112,
@@ -806,15 +806,15 @@ def run(parent_pid: int | None = None) -> None:
                 )
 
             dot = self.pending if is_pending else self.ok
-            self.canvas.create_oval(x + 574, y + 38, x + 594, y + 58, fill=dot, outline="")
+            self.canvas.create_oval(x + 524, y + 40, x + 544, y + 60, fill=dot, outline="")
             self.canvas.create_text(
-                x + 628,
-                y + 43,
+                x + 578,
+                y + 45,
                 text="›",
                 fill=self.muted,
                 font=("Segoe UI", 34, "bold"),
             )
-            self._add_hitbox(app.id, x, y, x + 656, y + 86)
+            self._add_hitbox(app.id, x, y, x + 606, y + 90)
 
         def _draw_app_icon(self, icon_type: IconType, cx: int, cy: int) -> None:
             if icon_type == "openclaw":
@@ -870,7 +870,7 @@ def run(parent_pid: int | None = None) -> None:
 
         def _draw_current_active_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 320, y + 136, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + 300, y + 136, 14, fill=self.card_bg, outline=self.card_border
             )
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.ok, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
@@ -888,7 +888,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"{MOCK_CURRENT_ACTIVE.app_name} / {MOCK_CURRENT_ACTIVE.agent_name}",
                 fill="#B6BEC8",
                 font=("Microsoft YaHei UI", 18),
-                max_width=260,
+                max_width=240,
             )
             self._draw_text_line(
                 x + 26,
@@ -896,7 +896,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=MOCK_CURRENT_ACTIVE.task,
                 fill="#B6BEC8",
                 font=("Microsoft YaHei UI", 18),
-                max_width=260,
+                max_width=240,
             )
             self._draw_text_line(
                 x + 26,
@@ -904,14 +904,14 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
                 fill=self.weak,
                 font=("Microsoft YaHei UI", 15),
-                max_width=260,
+                max_width=240,
             )
 
         def _draw_risk_summary_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 312, y + 136, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + 282, y + 136, 14, fill=self.card_bg, outline=self.card_border
             )
-            self._draw_shield_watermark(x + 235, y + 74)
+            self._draw_shield_watermark(x + 215, y + 74)
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.pending, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
@@ -928,7 +928,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=MOCK_RISK_SUMMARY.text,
                 fill=self.pending_text,
                 font=("Microsoft YaHei UI", 20, "bold"),
-                max_width=230,
+                max_width=210,
             )
             self._draw_text_line(
                 x + 26,
@@ -936,7 +936,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=MOCK_RISK_SUMMARY.hint,
                 fill=self.muted,
                 font=("Microsoft YaHei UI", 18),
-                max_width=230,
+                max_width=210,
             )
 
         def _draw_shield_watermark(self, cx: int, cy: int) -> None:
@@ -1067,13 +1067,13 @@ def run(parent_pid: int | None = None) -> None:
 
         def _panel_for_y(self, y: int) -> ActivePanel | None:
             design_y = self._design_y(y)
-            if 0 <= design_y < 125:
+            if 0 <= design_y < 140:
                 return "overview"
-            if 125 <= design_y < 275:
+            if 140 <= design_y < 300:
                 return "agents"
-            if 275 <= design_y < 420:
+            if 300 <= design_y < 470:
                 return "riskApproval"
-            if 420 <= design_y < self.height:
+            if 470 <= design_y < self.height:
                 return "settings"
             return None
 
