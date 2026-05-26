@@ -152,16 +152,15 @@ def run(parent_pid: int | None = None) -> None:
     import tkinter.font as tkfont
 
     class SidebarWindow:
-        window_collapsed_width = 110
-        window_expanded_width = 1032
-        window_expanded_gap = 20
-        window_height = 920
-
         collapsed_width = 56
         expanded_width = 340
         expanded_gap = 8
         height = 304
-        default_top = 120
+
+        viewport_height_ratio = 0.70
+        min_window_height = 420
+        max_window_height = 720
+        top_offset_ratio = 0.12
 
         transparent = "#FF00FF"
         bg = "#071018"
@@ -193,6 +192,7 @@ def run(parent_pid: int | None = None) -> None:
                 self.root.attributes("-transparentcolor", self.transparent)
             except tk.TclError:
                 pass
+            self._configure_window_metrics()
 
             self.active_panel: ActivePanel = "overview"
             self.expanded = False
@@ -241,6 +241,19 @@ def run(parent_pid: int | None = None) -> None:
             self._draw()
             if self.parent_pid is not None:
                 self._watch_parent_process()
+
+        def _configure_window_metrics(self) -> None:
+            screen_height = self.root.winfo_screenheight()
+            target_height = round(screen_height * self.viewport_height_ratio)
+            self.window_height = min(
+                self.max_window_height,
+                max(self.min_window_height, target_height),
+            )
+            scale = self.window_height / self.height
+            self.window_collapsed_width = round(self.collapsed_width * scale)
+            self.window_expanded_width = round(self.expanded_width * scale)
+            self.window_expanded_gap = round(self.expanded_gap * scale)
+            self.default_top = round(screen_height * self.top_offset_ratio)
 
         def _watch_parent_process(self) -> None:
             if self.parent_pid is not None and not _process_is_alive(self.parent_pid):
