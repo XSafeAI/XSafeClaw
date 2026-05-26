@@ -152,6 +152,11 @@ def run(parent_pid: int | None = None) -> None:
     import tkinter.font as tkfont
 
     class SidebarWindow:
+        window_collapsed_width = 110
+        window_expanded_width = 1032
+        window_expanded_gap = 20
+        window_height = 920
+
         collapsed_width = 56
         expanded_width = 340
         expanded_gap = 8
@@ -209,8 +214,8 @@ def run(parent_pid: int | None = None) -> None:
             self.root.configure(bg=self.transparent)
             self.canvas = tk.Canvas(
                 self.root,
-                width=self.collapsed_width,
-                height=self.height,
+                width=self.window_collapsed_width,
+                height=self.window_height,
                 bg=self.transparent,
                 highlightthickness=0,
                 bd=0,
@@ -245,20 +250,106 @@ def run(parent_pid: int | None = None) -> None:
 
         def _set_geometry(self) -> None:
             width = (
-                self.collapsed_width + self.expanded_gap + self.expanded_width
+                self.window_collapsed_width + self.window_expanded_gap + self.window_expanded_width
                 if self.expanded
-                else self.collapsed_width
+                else self.window_collapsed_width
             )
-            self.root.geometry(f"{width}x{self.height}+{self.left}+{self.top}")
-            self.canvas.configure(width=width, height=self.height)
+            self.root.geometry(f"{width}x{self.window_height}+{self.left}+{self.top}")
+            self.canvas.configure(width=width, height=self.window_height)
 
         def _draw(self) -> None:
             self.canvas.delete("all")
             self._hitboxes = []
             self._focus_order = []
             self._draw_collapsed_sidebar()
+            self.canvas.addtag_all("collapsed")
             if self.expanded:
+                before_items = set(self.canvas.find_all())
                 self._draw_expanded_panel()
+                for item in set(self.canvas.find_all()) - before_items:
+                    self.canvas.addtag_withtag("expanded", item)
+            self._scale_scene()
+
+        @property
+        def _collapsed_scale_x(self) -> float:
+            return self.window_collapsed_width / self.collapsed_width
+
+        @property
+        def _expanded_scale_x(self) -> float:
+            return self.window_expanded_width / self.expanded_width
+
+        @property
+        def _scale_y(self) -> float:
+            return self.window_height / self.height
+
+        @property
+        def _expanded_origin(self) -> int:
+            return self.collapsed_width + self.expanded_gap
+
+        @property
+        def _window_expanded_origin(self) -> int:
+            return self.window_collapsed_width + self.window_expanded_gap
+
+        def _scale_scene(self) -> None:
+            self.canvas.scale("collapsed", 0, 0, self._collapsed_scale_x, self._scale_y)
+            self._scale_item_styles("collapsed", min(self._collapsed_scale_x, self._scale_y))
+            if not self.expanded:
+                return
+            self.canvas.scale(
+                "expanded",
+                self._expanded_origin,
+                0,
+                self._expanded_scale_x,
+                self._scale_y,
+            )
+            self.canvas.move(
+                "expanded",
+                self._window_expanded_origin - self._expanded_origin,
+                0,
+            )
+            self._scale_item_styles("expanded", min(self._expanded_scale_x, self._scale_y))
+
+        def _scale_item_styles(self, tag: str, scale: float) -> None:
+            for item in self.canvas.find_withtag(tag):
+                item_type = self.canvas.type(item)
+                width = self.canvas.itemcget(item, "width")
+                if item_type != "text" and width:
+                    try:
+                        current_width = float(width)
+                    except ValueError:
+                        pass
+                    else:
+                        if current_width > 0:
+                            scaled_width = max(1, int(round(current_width * scale)))
+                            self.canvas.itemconfigure(item, width=scaled_width)
+
+                if item_type != "text":
+                    continue
+                font_value = self.canvas.itemcget(item, "font")
+                if not font_value:
+                    continue
+                font = tkfont.Font(root=self.root, font=font_value)
+                actual = font.actual()
+                size = max(1, int(round(abs(actual["size"]) * self._scale_y)))
+                style: list[str] = []
+                if actual["weight"] != "normal":
+                    style.append(actual["weight"])
+                if actual["slant"] != "roman":
+                    style.append(actual["slant"])
+                self.canvas.itemconfigure(item, font=(actual["family"], size, *style))
+
+        def _window_x(self, x: int) -> int:
+            if x <= self.collapsed_width:
+                return round(x * self._collapsed_scale_x)
+            return round(
+                self._window_expanded_origin + (x - self._expanded_origin) * self._expanded_scale_x
+            )
+
+        def _window_y(self, y: int) -> int:
+            return round(y * self._scale_y)
+
+        def _design_y(self, y: int) -> float:
+            return y / self._scale_y
 
         def _draw_collapsed_sidebar(self) -> None:
             self._rounded_rect(
@@ -848,7 +939,15 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_line(*points, fill="#17202A", width=5, smooth=True)
 
         def _add_hitbox(self, key: str, x1: int, y1: int, x2: int, y2: int) -> None:
-            self._hitboxes.append((key, x1, y1, x2, y2))
+            self._hitboxes.append(
+                (
+                    key,
+                    self._window_x(x1),
+                    self._window_y(y1),
+                    self._window_x(x2),
+                    self._window_y(y2),
+                )
+            )
             self._focus_order.append(key)
 
         def _start_drag(self, event: tk.Event) -> None:
@@ -876,7 +975,7 @@ def run(parent_pid: int | None = None) -> None:
             self._handle_click(event)
 
         def _handle_click(self, event: tk.Event) -> None:
-            if event.x > self.collapsed_width:
+            if event.x > self.window_collapsed_width:
                 self._handle_expanded_click(event.x, event.y)
                 return
 
@@ -932,7 +1031,7 @@ def run(parent_pid: int | None = None) -> None:
                 self.canvas.configure(cursor="fleur")
                 self._hide_tooltip()
                 return
-            if event.x > self.collapsed_width:
+            if event.x > self.window_collapsed_width:
                 clickable = any(
                     x1 <= event.x <= x2 and y1 <= event.y <= y2
                     for _, x1, y1, x2, y2 in self._hitboxes
@@ -949,13 +1048,14 @@ def run(parent_pid: int | None = None) -> None:
             self._show_tooltip(self._tooltip_for_panel(panel), event.y)
 
         def _panel_for_y(self, y: int) -> ActivePanel | None:
-            if 0 <= y < 72:
+            design_y = self._design_y(y)
+            if 0 <= design_y < 72:
                 return "overview"
-            if 72 <= y < 164:
+            if 72 <= design_y < 164:
                 return "agents"
-            if 164 <= y < 232:
+            if 164 <= design_y < 232:
                 return "riskApproval"
-            if 232 <= y < 304:
+            if 232 <= design_y < 304:
                 return "settings"
             return None
 
@@ -988,7 +1088,9 @@ def run(parent_pid: int | None = None) -> None:
                 font=("Segoe UI", 9),
             )
             label.pack()
-            self.tooltip.geometry(f"+{self.left + 64}+{self.top + max(0, y - 16)}")
+            self.tooltip.geometry(
+                f"+{self.left + self.window_collapsed_width + 8}" f"+{self.top + max(0, y - 48)}"
+            )
 
         def _hide_tooltip(self) -> None:
             if self.tooltip is not None:
