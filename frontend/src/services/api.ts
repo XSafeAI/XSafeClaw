@@ -634,6 +634,12 @@ export const systemAPI = {
   /** Fast install/config probe used by setup and route guards. */
   installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
 
+  openDesktopSidebar: () =>
+    api.post<{ ok: boolean; already_running: boolean; pid: number }>('/system/desktop-sidebar/open'),
+
+  desktopSidebarStatus: () =>
+    api.get<{ running: boolean; pid: number | null }>('/system/desktop-sidebar/status'),
+
   instances: () =>
     api.get<{ instances: RuntimeInstance[]; total: number }>('/system/instances'),
 

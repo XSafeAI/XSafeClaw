@@ -4,7 +4,6 @@ import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Act
 import { useI18n } from '../i18n';
 import { systemAPI } from '../services/api';
 import BudgetControlCard from './BudgetControlCard';
-import XSafeClawSidebar from './XSafeClawSidebar';
 
 function useTheme() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -25,7 +24,7 @@ export default function Layout() {
   const { theme, toggle } = useTheme();
   const { locale, setLocale, t } = useI18n();
   const [packageVersion, setPackageVersion] = useState<string | null>(null);
-  const [showXSafeClawSidebar, setShowXSafeClawSidebar] = useState(false);
+  const [desktopSidebarState, setDesktopSidebarState] = useState<'idle' | 'starting' | 'running' | 'error'>('idle');
   const isMonitorPage = location.pathname === '/monitor';
 
   useEffect(() => {
@@ -42,6 +41,16 @@ export default function Layout() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  const openDesktopSidebar = async () => {
+    setDesktopSidebarState('starting');
+    try {
+      await systemAPI.openDesktopSidebar();
+      setDesktopSidebarState('running');
+    } catch {
+      setDesktopSidebarState('error');
+    }
+  };
 
   const navigation: Array<{
     name: string;
@@ -107,12 +116,19 @@ export default function Layout() {
           {isMonitorPage && (
             <button
               type="button"
-              onClick={() => setShowXSafeClawSidebar(show => !show)}
+              onClick={openDesktopSidebar}
+              disabled={desktopSidebarState === 'starting'}
               className="mb-3 w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-border text-[12px] font-semibold text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-all"
-              aria-label={showXSafeClawSidebar ? '关闭 XSafeClaw Sidebar' : '开启 XSafeClaw Sidebar'}
+              aria-label="开启 XSafeClaw 桌面 Sidebar"
             >
               <PanelLeftOpen className="w-4 h-4 text-accent flex-shrink-0" />
-              {showXSafeClawSidebar ? '关闭 Sidebar' : '开启 Sidebar'}
+              {desktopSidebarState === 'starting'
+                ? '启动中...'
+                : desktopSidebarState === 'running'
+                  ? 'Sidebar 已开启'
+                  : desktopSidebarState === 'error'
+                    ? '启动失败，重试'
+                    : '开启 Sidebar'}
             </button>
           )}
           <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">{t.layout.budgetTitle}</p>
@@ -163,7 +179,6 @@ export default function Layout() {
       <main className="flex-1 bg-surface-0 overflow-auto relative">
         <Outlet />
       </main>
-      {isMonitorPage && showXSafeClawSidebar && <XSafeClawSidebar />}
     </div>
   );
 }
