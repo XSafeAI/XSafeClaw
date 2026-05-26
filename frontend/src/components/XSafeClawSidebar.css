@@ -21,6 +21,7 @@
 }
 
 .expandedSidebar {
+  left: 64px;
   width: 340px;
   height: 304px;
 }

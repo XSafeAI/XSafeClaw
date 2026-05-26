@@ -260,21 +260,20 @@ export default function XSafeClawSidebar() {
     setActivePanel(panel);
   }
 
-  if (sidebarState === 'expanded') {
-    return (
-      <ExpandedPanel
-        activePanel={activePanel}
-        pendingRiskCount={pendingRiskCount}
-        petState={agentPetState}
-      />
-    );
-  }
-
   return (
-    <CollapsedSidebar
-      petState={agentPetState}
-      pendingRiskCount={pendingRiskCount}
-      onOpenPanel={openPanel}
-    />
+    <>
+      <CollapsedSidebar
+        petState={agentPetState}
+        pendingRiskCount={pendingRiskCount}
+        onOpenPanel={openPanel}
+      />
+      {sidebarState === 'expanded' && (
+        <ExpandedPanel
+          activePanel={activePanel}
+          pendingRiskCount={pendingRiskCount}
+          petState={agentPetState}
+        />
+      )}
+    </>
   );
 }
