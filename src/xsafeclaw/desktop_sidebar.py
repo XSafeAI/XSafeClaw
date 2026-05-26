@@ -157,7 +157,7 @@ def run(parent_pid: int | None = None) -> None:
         expanded_gap = 8
         height = 304
 
-        viewport_height_ratio = 0.70
+        viewport_height_ratio = 0.50
         min_window_height = 420
         max_window_height = 720
         top_offset_ratio = 0.12
