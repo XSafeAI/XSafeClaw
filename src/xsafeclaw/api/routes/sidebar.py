@@ -26,7 +26,13 @@ def _start_sidebar_process() -> subprocess.Popen[bytes]:
         start_new_session = True
 
     return subprocess.Popen(
-        [sys.executable, "-m", "xsafeclaw.desktop_sidebar"],
+        [
+            sys.executable,
+            "-m",
+            "xsafeclaw.desktop_sidebar",
+            "--parent-pid",
+            str(os.getpid()),
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

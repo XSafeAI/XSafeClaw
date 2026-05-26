@@ -2,11 +2,14 @@
 
 This module intentionally does not depend on the browser frontend.  It is
 launched as a separate local process by the backend, so the floating Sidebar
-keeps running after the browser tab/window is closed.
+keeps running after the browser tab/window is closed.  When launched by the
+backend, it receives the backend PID and exits when that parent process exits.
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 from dataclasses import dataclass
 from typing import Literal
 
@@ -118,7 +121,33 @@ def get_risk_badge_text(count: int) -> str:
     return str(count)
 
 
-def run() -> None:
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run(parent_pid: int | None = None) -> None:
     import tkinter as tk
     import tkinter.font as tkfont
 
@@ -146,7 +175,7 @@ def run() -> None:
         pending_text = "#FFB020"
         focus = "#36C275"
 
-        def __init__(self) -> None:
+        def __init__(self, parent_pid: int | None) -> None:
             self.root = tk.Tk()
             self.root.title("XSafeClaw Sidebar")
             self.root.overrideredirect(True)
@@ -175,6 +204,7 @@ def run() -> None:
             self._hitboxes: list[tuple[str, int, int, int, int]] = []
             self._focus_order: list[str] = []
             self._focused_key: str | None = None
+            self.parent_pid = parent_pid
 
             self.root.configure(bg=self.transparent)
             self.canvas = tk.Canvas(
@@ -204,6 +234,14 @@ def run() -> None:
 
             self._set_geometry()
             self._draw()
+            if self.parent_pid is not None:
+                self._watch_parent_process()
+
+        def _watch_parent_process(self) -> None:
+            if self.parent_pid is not None and not _process_is_alive(self.parent_pid):
+                self.root.destroy()
+                return
+            self.root.after(1000, self._watch_parent_process)
 
         def _set_geometry(self) -> None:
             width = (
@@ -960,8 +998,15 @@ def run() -> None:
         def mainloop(self) -> None:
             self.root.mainloop()
 
-    SidebarWindow().mainloop()
+    SidebarWindow(parent_pid).mainloop()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--parent-pid", type=int, default=None)
+    args = parser.parse_args()
+    run(args.parent_pid)
 
 
 if __name__ == "__main__":
-    run()
+    main()
