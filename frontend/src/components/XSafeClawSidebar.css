@@ -1,0 +1,223 @@
+.collapsedSidebar,
+.expandedSidebar {
+  box-sizing: border-box;
+  position: fixed;
+  left: 0;
+  top: 120px;
+  border-radius: 12px;
+  background: #0F141B;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.30);
+  overflow: hidden;
+  z-index: 1000;
+}
+
+.collapsedSidebar {
+  width: 56px;
+  height: 304px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.expandedSidebar {
+  width: 340px;
+  height: 304px;
+}
+
+.collapsedButton {
+  box-sizing: border-box;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 80ms ease, transform 80ms ease;
+}
+
+.collapsedButton:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.collapsedButton:active {
+  transform: scale(0.96);
+}
+
+.collapsedButton:focus-visible {
+  outline: 2px solid rgba(54, 194, 117, 0.60);
+  outline-offset: 2px;
+}
+
+.collapsedLogo {
+  width: 56px;
+  height: 72px;
+}
+
+.collapsedLogoBox {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.collapsedLogoIcon {
+  width: 20px;
+  height: 20px;
+  color: #E7ECF3;
+}
+
+.agentPetIndicator {
+  width: 56px;
+  height: 92px;
+}
+
+.agentPetBox {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agentPetImage {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  display: block;
+}
+
+.collapsedRiskBadge {
+  width: 56px;
+  height: 68px;
+}
+
+.riskBadge {
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  background: #F16B6B;
+  color: #FFFFFF;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 32px;
+  text-align: center;
+  box-shadow: 0 0 16px rgba(241, 107, 107, 0.28);
+}
+
+.collapsedSettings {
+  width: 56px;
+  height: 72px;
+}
+
+.collapsedSettingsButton {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: transparent;
+  color: #8B95A5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.collapsedSettings:hover .collapsedSettingsButton {
+  background: rgba(255, 255, 255, 0.06);
+  color: #E7ECF3;
+}
+
+.collapsedSettingsIcon {
+  width: 22px;
+  height: 22px;
+}
+
+.xsafeclawTooltipAnchor {
+  position: relative;
+  width: 56px;
+  display: block;
+}
+
+.xsafeclawTooltip {
+  position: fixed;
+  left: 64px;
+  min-height: 32px;
+  max-width: 220px;
+  border-radius: 6px;
+  background: #1A2029;
+  color: #E7ECF3;
+  font-size: 12px;
+  line-height: 16px;
+  padding: 8px 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  transform: translateY(-50%);
+  transition: opacity 0ms linear;
+  transition-delay: 0ms;
+}
+
+.xsafeclawTooltipAnchor:nth-child(1) .xsafeclawTooltip {
+  top: 156px;
+}
+
+.xsafeclawTooltipAnchor:nth-child(2) .xsafeclawTooltip {
+  top: 238px;
+}
+
+.xsafeclawTooltipAnchor:nth-child(3) .xsafeclawTooltip {
+  top: 318px;
+}
+
+.xsafeclawTooltipAnchor:nth-child(4) .xsafeclawTooltip {
+  top: 388px;
+}
+
+.xsafeclawTooltipAnchor:hover .xsafeclawTooltip,
+.xsafeclawTooltipAnchor:focus-within .xsafeclawTooltip {
+  opacity: 1;
+  transition-delay: 300ms;
+}
+
+.expandedPanel {
+  box-sizing: border-box;
+  width: 340px;
+  height: 304px;
+  padding: 20px;
+  color: #E7ECF3;
+}
+
+.expandedPanelKicker {
+  margin: 0 0 8px;
+  color: #8B95A5;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.expandedPanelTitle {
+  margin: 0;
+  color: #E7ECF3;
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 700;
+}
+
+.expandedPanelBody {
+  margin-top: 18px;
+  display: grid;
+  gap: 8px;
+  color: #B8C0CC;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.expandedPanelBody p {
+  margin: 0;
+}
