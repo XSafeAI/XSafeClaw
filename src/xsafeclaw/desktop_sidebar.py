@@ -266,6 +266,15 @@ def is_scalable_canvas_width_item(item_type: str) -> bool:
     return item_type in {"arc", "line", "oval", "polygon", "rectangle"}
 
 
+def get_collapsed_logo_crop_box(width: int, height: int) -> tuple[int, int, int, int]:
+    side = min(width, height)
+    return 0, 0, side, side
+
+
+def get_collapsed_logo_subsample_factor(source_size: int, target_size: int = 52) -> int:
+    return max(1, round(source_size / target_size))
+
+
 def get_collapsed_panel_for_design_y(design_y: float) -> ActivePanel | None:
     if 140 <= design_y < 300:
         return "agents"
@@ -784,22 +793,28 @@ def run(parent_pid: int | None = None) -> None:
                 return None
             try:
                 source = tk.PhotoImage(file=str(logo_path))
-                cropped = tk.PhotoImage(width=256, height=256)
+                crop_left, crop_top, crop_right, crop_bottom = get_collapsed_logo_crop_box(
+                    source.width(),
+                    source.height(),
+                )
+                crop_size = crop_right - crop_left
+                cropped = tk.PhotoImage(width=crop_size, height=crop_size)
                 cropped.tk.call(
                     cropped,
                     "copy",
                     source,
                     "-from",
-                    0,
-                    0,
-                    256,
-                    256,
+                    crop_left,
+                    crop_top,
+                    crop_right,
+                    crop_bottom,
                     "-to",
                     0,
                     0,
                 )
                 self._collapsed_logo_source = source
-                self._collapsed_logo_image = cropped.subsample(5, 5)
+                subsample_factor = get_collapsed_logo_subsample_factor(crop_size)
+                self._collapsed_logo_image = cropped.subsample(subsample_factor, subsample_factor)
             except tk.TclError:
                 self._collapsed_logo_source = None
                 self._collapsed_logo_image = None

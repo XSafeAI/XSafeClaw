@@ -1,6 +1,8 @@
 from xsafeclaw.desktop_sidebar import (
     MOCK_RISK_APPROVAL_CARDS,
     apply_risk_approval_action,
+    get_collapsed_logo_crop_box,
+    get_collapsed_logo_subsample_factor,
     get_collapsed_panel_for_design_y,
     get_pending_risk_count_from_cards,
     get_risk_footer_layout,
@@ -64,6 +66,11 @@ def test_xsafeclaw_logo_path_uses_project_logo_asset() -> None:
     assert logo_path is not None
     assert logo_path.name == "logo.png"
     assert logo_path.parent.name == "assets"
+
+
+def test_collapsed_logo_crop_uses_left_square_icon_region() -> None:
+    assert get_collapsed_logo_crop_box(1920, 600) == (0, 0, 600, 600)
+    assert get_collapsed_logo_subsample_factor(600, target_size=52) == 12
 
 
 def test_canvas_image_items_do_not_participate_in_width_scaling() -> None:
