@@ -21,6 +21,16 @@ def test_sort_risk_cards_orders_by_risk_level_desc() -> None:
     assert [card.risk_level for card in sorted_cards] == ["high", "medium", "low"]
 
 
+def test_sort_risk_cards_orders_by_time_ascending() -> None:
+    shuffled = [
+        MOCK_RISK_APPROVAL_CARDS[2],
+        MOCK_RISK_APPROVAL_CARDS[0],
+        MOCK_RISK_APPROVAL_CARDS[1],
+    ]
+    sorted_cards = sort_risk_approval_cards(shuffled, mode="time")
+    assert [card.occurred_text for card in sorted_cards] == ["2 分钟前", "5 分钟前", "12 分钟前"]
+
+
 def test_pending_count_from_cards_matches_length() -> None:
     assert get_pending_risk_count_from_cards(MOCK_RISK_APPROVAL_CARDS) == 3
     next_cards = apply_risk_approval_action(

@@ -21,6 +21,7 @@ IconType = Literal["openclaw", "hermes", "nanobot", "document", "cleaner"]
 AgentInstanceRuntime = Literal["running", "waiting", "idle"]
 RiskLevel = Literal["high", "medium", "low"]
 ApprovalAction = Literal["allow_once", "always_allow_session", "block"]
+RiskSortMode = Literal["risk", "time"]
 
 
 @dataclass(frozen=True)
@@ -252,7 +253,10 @@ def get_pending_risk_count_from_cards(
 
 def sort_risk_approval_cards(
     cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
+    mode: RiskSortMode = "risk",
 ) -> list[RiskApprovalCard]:
+    if mode == "time":
+        return sorted(cards, key=lambda card: int(card.occurred_text.split(" ", 1)[0]))
     rank: dict[RiskLevel, int] = {"high": 0, "medium": 1, "low": 2}
     return sorted(cards, key=lambda card: rank[card.risk_level])
 
@@ -359,7 +363,12 @@ def run(parent_pid: int | None = None) -> None:
             self.expanded = False
             self.tooltip: tk.Toplevel | None = None
             self.pet_state = get_agent_pet_state(AGENTS)
-            self.risk_approval_cards = sort_risk_approval_cards(list(MOCK_RISK_APPROVAL_CARDS))
+            self.risk_sort_mode: RiskSortMode = "risk"
+            self.risk_sort_dropdown_open = False
+            self.risk_approval_cards = sort_risk_approval_cards(
+                list(MOCK_RISK_APPROVAL_CARDS),
+                mode=self.risk_sort_mode,
+            )
             self.pending_risk_count = get_pending_risk_count_from_cards(self.risk_approval_cards)
             self.left = 0
             self.top = self.default_top
@@ -876,31 +885,98 @@ def run(parent_pid: int | None = None) -> None:
 
             self._draw_risk_toolbar(x)
             self._draw_risk_cards(x)
+            if self.risk_sort_dropdown_open:
+                self._draw_risk_sort_dropdown(x)
             self._draw_risk_footer(x)
 
         def _draw_risk_toolbar(self, x: int) -> None:
-            self._rounded_rect(x + 32, 118, x + 728, 170, 10, fill="", outline="", width=0)
+            self._rounded_rect(x + 32, 106, x + 728, 158, 10, fill="", outline="", width=0)
+            selector_left = x + 550
+            selector_top = 112
+            selector_right = x + 728
+            selector_bottom = 152
             self._rounded_rect(
-                x + 625,
-                126,
-                x + 748,
-                166,
+                selector_left,
+                selector_top,
+                selector_right,
+                selector_bottom,
                 9,
                 fill="#121A23",
                 outline=self.card_border,
                 width=1,
             )
+            sort_label = "按时间顺序" if self.risk_sort_mode == "time" else "按风险级别"
             self._draw_text_line(
-                x + 639,
-                138,
-                text="按风险级别",
+                x + 566,
+                124,
+                text=sort_label,
                 fill="#C5CBD2",
                 font=(self.ui_font, 16),
-                max_width=88,
+                max_width=124,
             )
-            self.canvas.create_line(x + 731, 142, x + 739, 150, fill="#8F98A3", width=2)
-            self.canvas.create_line(x + 739, 150, x + 747, 142, fill="#8F98A3", width=2)
-            self._add_hitbox("risk_sort_selector", x + 625, 126, x + 748, 166)
+            arrow_top = 127 if not self.risk_sort_dropdown_open else 137
+            arrow_bottom = 135 if not self.risk_sort_dropdown_open else 129
+            self.canvas.create_line(
+                x + 706, arrow_top, x + 714, arrow_bottom, fill="#8F98A3", width=2
+            )
+            self.canvas.create_line(
+                x + 714, arrow_bottom, x + 722, arrow_top, fill="#8F98A3", width=2
+            )
+            self._add_hitbox(
+                "risk_sort_selector",
+                selector_left,
+                selector_top,
+                selector_right,
+                selector_bottom,
+            )
+
+        def _draw_risk_sort_dropdown(self, x: int) -> None:
+            dropdown_left = x + 550
+            dropdown_top = 156
+            dropdown_right = x + 728
+            option_height = 36
+            options: list[tuple[RiskSortMode, str]] = [
+                ("risk", "按风险级别"),
+                ("time", "按时间顺序"),
+            ]
+            self._rounded_rect(
+                dropdown_left,
+                dropdown_top,
+                dropdown_right,
+                dropdown_top + option_height * len(options),
+                9,
+                fill="#121A23",
+                outline=self.card_border,
+                width=1,
+            )
+            for index, (mode, label) in enumerate(options):
+                option_top = dropdown_top + option_height * index
+                if mode == self.risk_sort_mode:
+                    self._rounded_rect(
+                        dropdown_left + 4,
+                        option_top + 4,
+                        dropdown_right - 4,
+                        option_top + option_height - 4,
+                        7,
+                        fill="#172532",
+                        outline="",
+                        width=0,
+                    )
+                self._draw_text_line(
+                    dropdown_left + 16,
+                    option_top + 10,
+                    text=label,
+                    fill="#C5CBD2",
+                    font=(self.ui_font, 15),
+                    max_width=130,
+                )
+                self._add_hitbox(
+                    f"risk_sort_option:{mode}",
+                    dropdown_left,
+                    option_top,
+                    dropdown_right,
+                    option_top + option_height,
+                )
 
         def _draw_risk_footer(self, x: int) -> None:
             self._rounded_rect(
@@ -914,10 +990,15 @@ def run(parent_pid: int | None = None) -> None:
                 width=1,
             )
             self._draw_hint_icon(x + 48, 708)
+            hint_text = (
+                "按时间顺序展示，优先处理最近发生的请求"
+                if self.risk_sort_mode == "time"
+                else "按风险级别从高到低展示，优先处理高风险请求"
+            )
             self._draw_text_line(
                 x + 72,
                 704,
-                text="按风险级别从高到低展示，优先处理高风险请求",
+                text=hint_text,
                 fill=self.muted,
                 font=(self.ui_font, 15),
                 max_width=460,
@@ -990,15 +1071,15 @@ def run(parent_pid: int | None = None) -> None:
 
             self._draw_text_line(
                 x + 126,
-                y + 26,
+                y + 20,
                 text=card.title,
                 fill=self.text,
-                font=(self.ui_font, 19, "bold"),
+                font=(self.ui_font, 17),
                 max_width=300,
             )
             self._draw_text_line(
                 x + 126,
-                y + 58,
+                y + 60,
                 text=card.description,
                 fill="#B6BEC8",
                 font=(self.ui_font, 14),
@@ -1741,6 +1822,7 @@ def run(parent_pid: int | None = None) -> None:
                 return
             self.active_panel = panel
             self.expanded = True
+            self.risk_sort_dropdown_open = False
             if panel == "agents":
                 self.agent_detail_app = None
             self._focused_key = None
@@ -1748,10 +1830,13 @@ def run(parent_pid: int | None = None) -> None:
             self._draw()
 
         def _handle_expanded_click(self, x: int, y: int) -> None:
-            for key, x1, y1, x2, y2 in self._hitboxes:
+            for key, x1, y1, x2, y2 in reversed(self._hitboxes):
                 if x1 <= x <= x2 and y1 <= y <= y2:
                     self._activate_key(key)
                     return
+            if self.risk_sort_dropdown_open:
+                self.risk_sort_dropdown_open = False
+                self._draw()
 
         def _activate_key(self, key: str) -> None:
             parsed_approval = parse_approval_hitbox_key(key)
@@ -1770,7 +1855,22 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw()
                 return
             if key == "risk_sort_selector":
-                print("[XSafeClaw Mock] sort selector clicked")
+                self.risk_sort_dropdown_open = not self.risk_sort_dropdown_open
+                print("[XSafeClaw Mock] sort selector toggled")
+                self._draw()
+                return
+            if key.startswith("risk_sort_option:"):
+                sort_mode = key.split(":", 1)[1]
+                if sort_mode in {"risk", "time"}:
+                    self.risk_sort_mode = sort_mode
+                    self.risk_approval_cards = sort_risk_approval_cards(
+                        self.risk_approval_cards,
+                        mode=self.risk_sort_mode,
+                    )
+                    self.risk_sort_dropdown_open = False
+                    self._focused_key = None
+                    print(f"[XSafeClaw Mock] sort risk approvals by {sort_mode}")
+                    self._draw()
                 return
             if key == "risk_view_history":
                 print("[XSafeClaw Mock] view handled approvals")
