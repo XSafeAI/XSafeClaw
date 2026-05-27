@@ -170,8 +170,9 @@ def run(parent_pid: int | None = None) -> None:
         border = "#2A3440"
         card_border = "#24303A"
         text = "#F2F5F7"
-        muted = "#9DA7B2"
-        weak = "#8F98A3"
+        muted = "#A0A6AF"
+        body_text = "#A9B0BA"
+        weak = "#8B929C"
         soft = "#1A2029"
         risk = "#F16B6B"
         risk_hot = "#FF1717"
@@ -179,6 +180,7 @@ def run(parent_pid: int | None = None) -> None:
         pending = "#FF9F0A"
         pending_text = "#FFB020"
         focus = "#36C275"
+        ui_font = "Segoe UI"
 
         def __init__(self, parent_pid: int | None) -> None:
             self.root = tk.Tk()
@@ -693,14 +695,14 @@ def run(parent_pid: int | None = None) -> None:
                 anchor="nw",
                 text="智能体",
                 fill=self.text,
-                font=("Microsoft YaHei UI", 32, "bold"),
+                font=(self.ui_font, 30, "bold"),
             )
             self._draw_text_line(
                 x + 112,
-                82,
+                80,
                 text="3 个应用 · 6 个 Agent 运行中",
                 fill=self.muted,
-                font=("Microsoft YaHei UI", 20),
+                font=(self.ui_font, 17),
                 max_width=420,
             )
             self._draw_collapse_button(x + 598, 38)
@@ -750,7 +752,7 @@ def run(parent_pid: int | None = None) -> None:
                 y + 20,
                 text="<<",
                 fill="#C5CBD2",
-                font=("Segoe UI", 24, "bold"),
+                font=(self.ui_font, 22, "bold"),
             )
             self._add_hitbox("collapse", x, y, x + 40, y + 40)
 
@@ -772,36 +774,36 @@ def run(parent_pid: int | None = None) -> None:
 
             self._draw_text_line(
                 x + 112,
-                y + 20,
+                y + 18,
                 text=app.app_name,
                 fill=self.text,
-                font=("Microsoft YaHei UI", 24, "bold"),
+                font=(self.ui_font, 21, "bold"),
                 max_width=260,
             )
             if app.id == "app_nanobot":
                 self._draw_text_line(
                     x + 112,
-                    y + 56,
+                    y + 53,
                     text="3 个 Agent 运行中 ·",
                     fill=self.muted,
-                    font=("Microsoft YaHei UI", 19),
+                    font=(self.ui_font, 16),
                     max_width=230,
                 )
                 self._draw_text_line(
                     x + 340,
-                    y + 56,
+                    y + 53,
                     text="1 个待确认",
                     fill=self.pending_text,
-                    font=("Microsoft YaHei UI", 19, "bold"),
+                    font=(self.ui_font, 16, "bold"),
                     max_width=160,
                 )
             else:
                 self._draw_text_line(
                     x + 112,
-                    y + 56,
+                    y + 53,
                     text=app.status_text,
                     fill=self.muted,
-                    font=("Microsoft YaHei UI", 19),
+                    font=(self.ui_font, 16),
                     max_width=360,
                 )
 
@@ -812,7 +814,7 @@ def run(parent_pid: int | None = None) -> None:
                 y + 45,
                 text="›",
                 fill=self.muted,
-                font=("Segoe UI", 34, "bold"),
+                font=(self.ui_font, 28, "bold"),
             )
             self._add_hitbox(app.id, x, y, x + 606, y + 90)
 
@@ -876,45 +878,45 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
             self.canvas.create_text(
                 x + 64,
-                y + 17,
+                y + 20,
                 anchor="nw",
                 text="当前活跃",
                 fill=self.text,
-                font=("Microsoft YaHei UI", 22, "bold"),
+                font=(self.ui_font, 19, "bold"),
             )
             self._draw_text_line(
                 x + 26,
-                y + 60,
+                y + 68,
                 text=f"{MOCK_CURRENT_ACTIVE.app_name} / {MOCK_CURRENT_ACTIVE.agent_name}",
-                fill="#B6BEC8",
-                font=("Microsoft YaHei UI", 18),
+                fill=self.body_text,
+                font=(self.ui_font, 15),
                 max_width=240,
             )
             self._draw_text_line(
                 x + 26,
-                y + 86,
+                y + 96,
                 text=MOCK_CURRENT_ACTIVE.task,
-                fill="#B6BEC8",
-                font=("Microsoft YaHei UI", 18),
+                fill=self.body_text,
+                font=(self.ui_font, 15),
                 max_width=240,
             )
             self._draw_text_line(
                 x + 26,
-                y + 126,
+                y + 124,
                 text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
                 fill=self.weak,
-                font=("Microsoft YaHei UI", 15),
+                font=(self.ui_font, 13),
                 max_width=240,
             )
             self.canvas.create_line(x + 26, y + 178, x + 274, y + 178, fill="#303946", width=1)
             self._draw_hint_icon(x + 30, y + 213)
             self.canvas.create_text(
                 x + 72,
-                y + 202,
+                y + 204,
                 anchor="nw",
                 text="点击应用卡片查看详情",
                 fill=self.weak,
-                font=("Microsoft YaHei UI", 16),
+                font=(self.ui_font, 14),
             )
 
         def _draw_risk_summary_card(self, x: int, y: int) -> None:
@@ -926,26 +928,26 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
                 x + 64,
-                y + 17,
+                y + 20,
                 anchor="nw",
                 text="风险状态",
                 fill=self.text,
-                font=("Microsoft YaHei UI", 22, "bold"),
+                font=(self.ui_font, 19, "bold"),
             )
             self._draw_text_line(
                 x + 26,
-                y + 60,
+                y + 68,
                 text=MOCK_RISK_SUMMARY.text,
                 fill=self.pending_text,
-                font=("Microsoft YaHei UI", 20, "bold"),
+                font=(self.ui_font, 17, "bold"),
                 max_width=210,
             )
             self._draw_text_line(
                 x + 26,
-                y + 96,
+                y + 98,
                 text=MOCK_RISK_SUMMARY.hint,
                 fill=self.muted,
-                font=("Microsoft YaHei UI", 18),
+                font=(self.ui_font, 15),
                 max_width=210,
             )
 
@@ -953,16 +955,16 @@ def run(parent_pid: int | None = None) -> None:
             self._rounded_rect(
                 x,
                 y,
-                x + 26,
-                y + 20,
+                x + 22,
+                y + 17,
                 4,
                 fill="",
                 outline=self.weak,
                 width=2,
             )
-            self.canvas.create_line(x + 8, y + 20, x + 5, y + 27, fill=self.weak, width=2)
-            for dot_x in (x + 8, x + 13, x + 18):
-                self.canvas.create_oval(dot_x, y + 9, dot_x + 2, y + 11, fill=self.weak, outline="")
+            self.canvas.create_line(x + 7, y + 17, x + 4, y + 23, fill=self.weak, width=2)
+            for dot_x in (x + 7, x + 11, x + 15):
+                self.canvas.create_oval(dot_x, y + 7, dot_x + 2, y + 9, fill=self.weak, outline="")
 
         def _draw_shield_watermark(self, cx: int, cy: int) -> None:
             points = [
