@@ -708,10 +708,10 @@ def run(parent_pid: int | None = None) -> None:
             card_y = 146
             for app in MOCK_AGENT_APPS:
                 self._draw_agent_app_card(x + 32, card_y, app)
-                card_y += 118
+                card_y += 108
 
-            self._draw_current_active_card(x + 32, 522)
-            self._draw_risk_summary_card(x + 356, 522)
+            self._draw_current_active_card(x + 32, 494)
+            self._draw_risk_summary_card(x + 356, 494)
 
         def _draw_page_icon(self, x: int, y: int) -> None:
             self._rounded_rect(
@@ -870,7 +870,7 @@ def run(parent_pid: int | None = None) -> None:
 
         def _draw_current_active_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 300, y + 136, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + 300, y + 166, 14, fill=self.card_bg, outline=self.card_border
             )
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.ok, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
@@ -900,18 +900,27 @@ def run(parent_pid: int | None = None) -> None:
             )
             self._draw_text_line(
                 x + 26,
-                y + 112,
+                y + 116,
                 text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
                 fill=self.weak,
                 font=("Microsoft YaHei UI", 15),
                 max_width=240,
             )
+            self.canvas.create_line(x + 26, y + 138, x + 274, y + 138, fill="#303946", width=1)
+            self.canvas.create_text(
+                x + 64,
+                y + 145,
+                anchor="nw",
+                text="点击应用卡片查看详情",
+                fill=self.weak,
+                font=("Microsoft YaHei UI", 14),
+            )
 
         def _draw_risk_summary_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 282, y + 136, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + 282, y + 166, 14, fill=self.card_bg, outline=self.card_border
             )
-            self._draw_shield_watermark(x + 215, y + 74)
+            self._draw_shield_watermark(x + 215, y + 98)
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.pending, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
