@@ -155,7 +155,7 @@ def run(parent_pid: int | None = None) -> None:
         collapsed_width = 86
         expanded_width = 670
         expanded_gap = 12
-        height = 860
+        height = 770
 
         viewport_height_ratio = 0.50
         min_window_height = 420
@@ -380,10 +380,10 @@ def run(parent_pid: int | None = None) -> None:
                 outline=self.border,
                 width=1,
             )
-            self._draw_shield(43, 78)
-            self._draw_pet(43, 254)
-            self._draw_risk_badge(43, 446)
-            self._draw_settings(43, 708)
+            self._draw_shield(43, 70)
+            self._draw_pet(43, 228)
+            self._draw_risk_badge(43, 400)
+            self._draw_settings(43, 634)
 
         def _rounded_rect(
             self,
@@ -710,8 +710,8 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw_agent_app_card(x + 32, card_y, app)
                 card_y += 108
 
-            self._draw_current_active_card(x + 32, 570)
-            self._draw_risk_summary_card(x + 356, 570)
+            self._draw_current_active_card(x + 32, 470)
+            self._draw_risk_summary_card(x + 356, 470)
 
         def _draw_page_icon(self, x: int, y: int) -> None:
             self._rounded_rect(
