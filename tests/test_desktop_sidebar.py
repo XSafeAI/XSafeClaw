@@ -2,6 +2,7 @@ from xsafeclaw.desktop_sidebar import (
     MOCK_RISK_APPROVAL_CARDS,
     apply_risk_approval_action,
     get_pending_risk_count_from_cards,
+    get_risk_sort_selector_layout,
     parse_approval_hitbox_key,
     sort_risk_approval_cards,
 )
@@ -29,6 +30,14 @@ def test_sort_risk_cards_orders_by_time_ascending() -> None:
     ]
     sorted_cards = sort_risk_approval_cards(shuffled, mode="time")
     assert [card.occurred_text for card in sorted_cards] == ["2 分钟前", "5 分钟前", "12 分钟前"]
+
+
+def test_risk_sort_selector_layout_centers_label_and_keeps_arrow_inside() -> None:
+    layout = get_risk_sort_selector_layout(panel_x=0, is_open=False)
+    assert layout["label_anchor"] == "center"
+    assert layout["label_center_x"] == (layout["label_left"] + layout["label_right"]) // 2
+    assert layout["arrow_left"] >= layout["right"] - 28
+    assert layout["arrow_right"] <= layout["right"] - 10
 
 
 def test_pending_count_from_cards_matches_length() -> None:

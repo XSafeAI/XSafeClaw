@@ -261,6 +261,39 @@ def sort_risk_approval_cards(
     return sorted(cards, key=lambda card: rank[card.risk_level])
 
 
+def get_risk_sort_selector_layout(panel_x: int, is_open: bool) -> dict[str, int | str]:
+    left = panel_x + 550
+    top = 112
+    right = panel_x + 728
+    bottom = 152
+    arrow_center_x = right - 18
+    arrow_center_y = (top + bottom) // 2
+    arrow_left = arrow_center_x - 8
+    arrow_right = arrow_center_x + 8
+    arrow_top = arrow_center_y - 4
+    arrow_bottom = arrow_center_y + 4
+    label_left = left + 18
+    label_right = arrow_left - 12
+    return {
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "label_left": label_left,
+        "label_right": label_right,
+        "label_center_x": (label_left + label_right) // 2,
+        "label_center_y": arrow_center_y,
+        "label_max_width": label_right - label_left,
+        "label_anchor": "center",
+        "arrow_left": arrow_left,
+        "arrow_right": arrow_right,
+        "arrow_center_x": arrow_center_x,
+        "arrow_center_y": arrow_center_y,
+        "arrow_top": arrow_bottom if is_open else arrow_top,
+        "arrow_bottom": arrow_top if is_open else arrow_bottom,
+    }
+
+
 def parse_approval_hitbox_key(key: str) -> tuple[str, ApprovalAction] | None:
     parts = key.split(":")
     if len(parts) != 3 or parts[0] != "approval":
@@ -875,7 +908,7 @@ def run(parent_pid: int | None = None) -> None:
             )
             self._draw_text_line(
                 x + 112,
-                76,
+                84,
                 text=f"待处理 {self.pending_risk_count} 个审批请求",
                 fill=self.muted,
                 font=(self.ui_font, 16),
@@ -891,43 +924,52 @@ def run(parent_pid: int | None = None) -> None:
 
         def _draw_risk_toolbar(self, x: int) -> None:
             self._rounded_rect(x + 32, 106, x + 728, 158, 10, fill="", outline="", width=0)
-            selector_left = x + 550
-            selector_top = 112
-            selector_right = x + 728
-            selector_bottom = 152
+            selector_layout = get_risk_sort_selector_layout(x, self.risk_sort_dropdown_open)
             self._rounded_rect(
-                selector_left,
-                selector_top,
-                selector_right,
-                selector_bottom,
+                int(selector_layout["left"]),
+                int(selector_layout["top"]),
+                int(selector_layout["right"]),
+                int(selector_layout["bottom"]),
                 9,
                 fill="#121A23",
                 outline=self.card_border,
                 width=1,
             )
             sort_label = "按时间顺序" if self.risk_sort_mode == "time" else "按风险级别"
-            self._draw_text_line(
-                x + 566,
-                124,
-                text=sort_label,
+            self.canvas.create_text(
+                int(selector_layout["label_center_x"]),
+                int(selector_layout["label_center_y"]),
+                anchor=str(selector_layout["label_anchor"]),
+                text=self._ellipsize(
+                    sort_label,
+                    (self.ui_font, 16),
+                    int(selector_layout["label_max_width"]),
+                ),
                 fill="#C5CBD2",
                 font=(self.ui_font, 16),
-                max_width=124,
-            )
-            arrow_top = 127 if not self.risk_sort_dropdown_open else 137
-            arrow_bottom = 135 if not self.risk_sort_dropdown_open else 129
-            self.canvas.create_line(
-                x + 706, arrow_top, x + 714, arrow_bottom, fill="#8F98A3", width=2
             )
             self.canvas.create_line(
-                x + 714, arrow_bottom, x + 722, arrow_top, fill="#8F98A3", width=2
+                int(selector_layout["arrow_left"]),
+                int(selector_layout["arrow_top"]),
+                int(selector_layout["arrow_center_x"]),
+                int(selector_layout["arrow_bottom"]),
+                fill="#8F98A3",
+                width=2,
+            )
+            self.canvas.create_line(
+                int(selector_layout["arrow_center_x"]),
+                int(selector_layout["arrow_bottom"]),
+                int(selector_layout["arrow_right"]),
+                int(selector_layout["arrow_top"]),
+                fill="#8F98A3",
+                width=2,
             )
             self._add_hitbox(
                 "risk_sort_selector",
-                selector_left,
-                selector_top,
-                selector_right,
-                selector_bottom,
+                int(selector_layout["left"]),
+                int(selector_layout["top"]),
+                int(selector_layout["right"]),
+                int(selector_layout["bottom"]),
             )
 
         def _draw_risk_sort_dropdown(self, x: int) -> None:
@@ -979,16 +1021,6 @@ def run(parent_pid: int | None = None) -> None:
                 )
 
         def _draw_risk_footer(self, x: int) -> None:
-            self._rounded_rect(
-                x + 32,
-                690,
-                x + 728,
-                738,
-                10,
-                fill="#10161D",
-                outline=self.card_border,
-                width=1,
-            )
             self._draw_hint_icon(x + 48, 708)
             hint_text = (
                 "按时间顺序展示，优先处理最近发生的请求"
