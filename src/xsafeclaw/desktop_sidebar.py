@@ -294,6 +294,24 @@ def get_risk_sort_selector_layout(panel_x: int, is_open: bool) -> dict[str, int 
     }
 
 
+def get_risk_footer_layout(panel_x: int) -> dict[str, int | str]:
+    return {
+        "icon_style": "alert_circle",
+        "icon_x": panel_x + 46,
+        "icon_y": 703,
+        "hint_text_x": panel_x + 72,
+        "hint_text_y": 704,
+        "history_text_x": panel_x + 566,
+        "history_text_y": 704,
+        "history_arrow_x": panel_x + 694,
+        "history_arrow_y": 716,
+        "history_hitbox_left": panel_x + 566,
+        "history_hitbox_top": 704,
+        "history_hitbox_right": panel_x + 704,
+        "history_hitbox_bottom": 726,
+    }
+
+
 def parse_approval_hitbox_key(key: str) -> tuple[str, ApprovalAction] | None:
     parts = key.split(":")
     if len(parts) != 3 or parts[0] != "approval":
@@ -1021,36 +1039,46 @@ def run(parent_pid: int | None = None) -> None:
                 )
 
         def _draw_risk_footer(self, x: int) -> None:
-            self._draw_hint_icon(x + 48, 708)
+            footer_layout = get_risk_footer_layout(x)
+            self._draw_alert_circle_icon(
+                int(footer_layout["icon_x"]),
+                int(footer_layout["icon_y"]),
+            )
             hint_text = (
                 "按时间顺序展示，优先处理最近发生的请求"
                 if self.risk_sort_mode == "time"
                 else "按风险级别从高到低展示，优先处理高风险请求"
             )
             self._draw_text_line(
-                x + 72,
-                704,
+                int(footer_layout["hint_text_x"]),
+                int(footer_layout["hint_text_y"]),
                 text=hint_text,
                 fill=self.muted,
                 font=(self.ui_font, 15),
                 max_width=460,
             )
             self._draw_text_line(
-                x + 600,
-                704,
+                int(footer_layout["history_text_x"]),
+                int(footer_layout["history_text_y"]),
                 text="查看已处理记录",
                 fill="#C5CBD2",
                 font=(self.ui_font, 15),
                 max_width=110,
             )
             self.canvas.create_text(
-                x + 718,
-                716,
+                int(footer_layout["history_arrow_x"]),
+                int(footer_layout["history_arrow_y"]),
                 text="›",
                 fill="#8F98A3",
                 font=(self.ui_font, 18, "bold"),
             )
-            self._add_hitbox("risk_view_history", x + 600, 704, x + 728, 726)
+            self._add_hitbox(
+                "risk_view_history",
+                int(footer_layout["history_hitbox_left"]),
+                int(footer_layout["history_hitbox_top"]),
+                int(footer_layout["history_hitbox_right"]),
+                int(footer_layout["history_hitbox_bottom"]),
+            )
 
         def _draw_risk_cards(self, x: int) -> None:
             if not self.risk_approval_cards:
@@ -1790,6 +1818,24 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_line(x + 7, y + 17, x + 4, y + 23, fill=self.weak, width=2)
             for dot_x in (x + 7, x + 11, x + 15):
                 self.canvas.create_oval(dot_x, y + 7, dot_x + 2, y + 9, fill=self.weak, outline="")
+
+        def _draw_alert_circle_icon(self, x: int, y: int) -> None:
+            self.canvas.create_oval(
+                x,
+                y,
+                x + 18,
+                y + 18,
+                fill="",
+                outline="#8F98A3",
+                width=1,
+            )
+            self.canvas.create_text(
+                x + 9,
+                y + 9,
+                text="!",
+                fill="#AEB8C3",
+                font=(self.ui_font, 11, "bold"),
+            )
 
         def _draw_shield_watermark(self, cx: int, cy: int) -> None:
             points = [

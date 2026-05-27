@@ -2,6 +2,7 @@ from xsafeclaw.desktop_sidebar import (
     MOCK_RISK_APPROVAL_CARDS,
     apply_risk_approval_action,
     get_pending_risk_count_from_cards,
+    get_risk_footer_layout,
     get_risk_sort_selector_layout,
     parse_approval_hitbox_key,
     sort_risk_approval_cards,
@@ -38,6 +39,15 @@ def test_risk_sort_selector_layout_centers_label_and_keeps_arrow_inside() -> Non
     assert layout["label_center_x"] == (layout["label_left"] + layout["label_right"]) // 2
     assert layout["arrow_left"] >= layout["right"] - 28
     assert layout["arrow_right"] <= layout["right"] - 10
+
+
+def test_risk_footer_layout_uses_alert_icon_and_shifts_history_left() -> None:
+    layout = get_risk_footer_layout(panel_x=0)
+    assert layout["icon_style"] == "alert_circle"
+    assert layout["history_text_x"] == 566
+    assert layout["history_arrow_x"] == 694
+    assert layout["history_hitbox_left"] == 566
+    assert layout["history_hitbox_right"] == 704
 
 
 def test_pending_count_from_cards_matches_length() -> None:
