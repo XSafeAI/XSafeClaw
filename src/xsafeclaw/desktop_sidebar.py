@@ -311,7 +311,7 @@ def run(parent_pid: int | None = None) -> None:
 
     class SidebarWindow:
         collapsed_width = 86
-        expanded_width = 670
+        expanded_width = 760
         expanded_gap = 12
         height = 770
 
@@ -862,76 +862,28 @@ def run(parent_pid: int | None = None) -> None:
                 anchor="nw",
                 text="风险审批",
                 fill=self.text,
-                font=(self.ui_font, 30, "bold"),
+                font=(self.ui_font, 28, "bold"),
             )
             self._draw_text_line(
                 x + 112,
                 76,
                 text=f"待处理 {self.pending_risk_count} 个审批请求",
                 fill=self.muted,
-                font=(self.ui_font, 17),
-                max_width=300,
+                font=(self.ui_font, 16),
+                max_width=360,
             )
-            self._draw_risk_header_toggle(x + 508, 28)
-            self._draw_collapse_button(x + 620, 38)
+            self._draw_collapse_button(x + 710, 38)
 
             self._draw_risk_toolbar(x)
             self._draw_risk_cards(x)
             self._draw_risk_footer(x)
 
-        def _draw_risk_header_toggle(self, x: int, y: int) -> None:
-            self._rounded_rect(
-                x,
-                y,
-                x + 90,
-                y + 56,
-                12,
-                fill="#111922",
-                outline=self.card_border,
-                width=1,
-            )
-            # Left: list view selected
-            self.canvas.create_rectangle(x + 8, y + 8, x + 43, y + 48, fill="#0E2234", outline="")
-            self.canvas.create_line(x + 15, y + 18, x + 35, y + 18, fill="#58C7FF", width=2)
-            self.canvas.create_line(x + 15, y + 28, x + 35, y + 28, fill="#58C7FF", width=2)
-            self.canvas.create_line(x + 15, y + 38, x + 35, y + 38, fill="#58C7FF", width=2)
-            # Right: compact view idle
-            self.canvas.create_rectangle(x + 47, y + 8, x + 82, y + 48, fill="#10161D", outline="")
-            for row in range(2):
-                for col in range(2):
-                    cell_x = x + 54 + col * 12
-                    cell_y = y + 16 + row * 12
-                    self.canvas.create_rectangle(
-                        cell_x, cell_y, cell_x + 8, cell_y + 8, fill="#8F98A3", outline=""
-                    )
-
         def _draw_risk_toolbar(self, x: int) -> None:
-            self._rounded_rect(x + 32, 118, x + 638, 170, 10, fill="", outline="", width=0)
+            self._rounded_rect(x + 32, 118, x + 728, 170, 10, fill="", outline="", width=0)
             self._rounded_rect(
-                x + 32, 126, x + 122, 166, 9, fill="#0E2234", outline="#245A79", width=1
-            )
-            self.canvas.create_text(
-                x + 77,
-                146,
-                text="列表视图",
-                fill="#58C7FF",
-                font=(self.ui_font, 18),
-            )
-            self.canvas.create_line(x + 40, 164, x + 114, 164, fill="#58C7FF", width=2)
-
-            self._rounded_rect(x + 138, 126, x + 228, 166, 9, fill="", outline="", width=0)
-            self.canvas.create_text(
-                x + 183,
-                146,
-                text="紧凑视图",
-                fill="#8F98A3",
-                font=(self.ui_font, 18),
-            )
-
-            self._rounded_rect(
-                x + 515,
+                x + 625,
                 126,
-                x + 638,
+                x + 748,
                 166,
                 9,
                 fill="#121A23",
@@ -939,22 +891,22 @@ def run(parent_pid: int | None = None) -> None:
                 width=1,
             )
             self._draw_text_line(
-                x + 529,
+                x + 639,
                 138,
                 text="按风险级别",
                 fill="#C5CBD2",
                 font=(self.ui_font, 16),
                 max_width=88,
             )
-            self.canvas.create_line(x + 621, 142, x + 629, 150, fill="#8F98A3", width=2)
-            self.canvas.create_line(x + 629, 150, x + 637, 142, fill="#8F98A3", width=2)
-            self._add_hitbox("risk_sort_selector", x + 515, 126, x + 638, 166)
+            self.canvas.create_line(x + 731, 142, x + 739, 150, fill="#8F98A3", width=2)
+            self.canvas.create_line(x + 739, 150, x + 747, 142, fill="#8F98A3", width=2)
+            self._add_hitbox("risk_sort_selector", x + 625, 126, x + 748, 166)
 
         def _draw_risk_footer(self, x: int) -> None:
             self._rounded_rect(
                 x + 32,
                 690,
-                x + 638,
+                x + 728,
                 738,
                 10,
                 fill="#10161D",
@@ -968,10 +920,10 @@ def run(parent_pid: int | None = None) -> None:
                 text="按风险级别从高到低展示，优先处理高风险请求",
                 fill=self.muted,
                 font=(self.ui_font, 15),
-                max_width=360,
+                max_width=460,
             )
             self._draw_text_line(
-                x + 500,
+                x + 600,
                 704,
                 text="查看已处理记录",
                 fill="#C5CBD2",
@@ -979,13 +931,13 @@ def run(parent_pid: int | None = None) -> None:
                 max_width=110,
             )
             self.canvas.create_text(
-                x + 628,
+                x + 718,
                 716,
                 text="›",
                 fill="#8F98A3",
                 font=(self.ui_font, 18, "bold"),
             )
-            self._add_hitbox("risk_view_history", x + 500, 704, x + 638, 726)
+            self._add_hitbox("risk_view_history", x + 600, 704, x + 728, 726)
 
         def _draw_risk_cards(self, x: int) -> None:
             if not self.risk_approval_cards:
@@ -1003,14 +955,14 @@ def run(parent_pid: int | None = None) -> None:
                 outline = self.focus
 
             self._rounded_rect(
-                x, y, x + 606, y + 134, 14, fill=palette["fill"], outline=outline, width=1
+                x, y, x + 696, y + 134, 14, fill=palette["fill"], outline=outline, width=1
             )
-            self.canvas.create_line(x + 14, y, x + 592, y, fill=palette["accent"], width=1)
+            self.canvas.create_line(x + 14, y, x + 682, y, fill=palette["accent"], width=1)
 
             self.canvas.create_oval(
-                x + 16,
+                x + 18,
                 y + 20,
-                x + 38,
+                x + 40,
                 y + 42,
                 fill=palette["accent"],
                 outline="",
@@ -1019,7 +971,7 @@ def run(parent_pid: int | None = None) -> None:
             if card.risk_level == "low":
                 marker_text = "i"
             self.canvas.create_text(
-                x + 27,
+                x + 29,
                 y + 31,
                 text=marker_text,
                 fill="#FFFFFF",
@@ -1027,66 +979,66 @@ def run(parent_pid: int | None = None) -> None:
             )
 
             self.canvas.create_oval(
-                x + 38,
-                y + 32,
-                x + 96,
-                y + 90,
+                x + 42,
+                y + 34,
+                x + 100,
+                y + 92,
                 fill="#080D13",
                 outline="#1F2A34",
             )
-            self._draw_app_icon(card.icon_type, x + 67, y + 61)
+            self._draw_app_icon(card.icon_type, x + 71, y + 63)
 
             self._draw_text_line(
-                x + 112,
+                x + 126,
                 y + 26,
                 text=card.title,
                 fill=self.text,
-                font=(self.ui_font, 20, "bold"),
-                max_width=290,
+                font=(self.ui_font, 19, "bold"),
+                max_width=300,
             )
             self._draw_text_line(
-                x + 112,
-                y + 60,
+                x + 126,
+                y + 58,
                 text=card.description,
                 fill="#B6BEC8",
-                font=(self.ui_font, 15),
-                max_width=290,
+                font=(self.ui_font, 14),
+                max_width=300,
             )
 
-            self._draw_risk_card_tags(x + 112, y + 92, card)
+            self._draw_risk_card_tags(x + 126, y + 90, card)
             self._draw_text_line(
-                x + 280,
-                y + 95,
+                x + 290,
+                y + 93,
                 text=card.occurred_text,
                 fill="#8F98A3",
-                font=(self.ui_font, 15),
-                max_width=110,
+                font=(self.ui_font, 14),
+                max_width=130,
             )
 
-            self._draw_risk_card_actions(x + 420, y + 49, card.id)
+            self._draw_risk_card_actions(x + 442, y + 49, card.id)
             self.canvas.create_text(
-                x + 580,
+                x + 672,
                 y + 67,
                 text="›",
                 fill=self.muted,
                 font=(self.ui_font, 28, "bold"),
             )
-            self._add_hitbox(f"risk_detail:{card.id}", x + 560, y + 45, x + 604, y + 89)
+            self._add_hitbox(f"risk_detail:{card.id}", x + 650, y + 45, x + 694, y + 89)
 
         def _draw_risk_card_actions(self, x: int, y: int, card_id: str) -> None:
-            buttons: list[tuple[str, str, str, str]] = [
-                ("allow_once", "允许", "#0D2D45", "#58C7FF"),
-                ("always_allow_session", "总允", "#3A2B13", "#FFB020"),
-                ("block", "阻止", "#3A1416", "#FF4A4A"),
+            buttons: list[tuple[str, str, int, str, str]] = [
+                ("allow_once", "允许一次", 72, "#0D2D45", "#58C7FF"),
+                ("always_allow_session", "总是允许", 78, "#3A2B13", "#FFB020"),
+                ("block", "阻止", 58, "#3A1416", "#FF4A4A"),
             ]
             button_x = x
-            for action, label, fill, outline in buttons:
+            for action, label, width, fill, outline in buttons:
                 key = f"approval:{card_id}:{action}"
                 focused = self._focused_key == key
                 self._rounded_rect(
                     button_x,
                     y,
-                    button_x + 52,
+                    button_x + width,
                     y + 36,
                     8,
                     fill=fill,
@@ -1094,19 +1046,19 @@ def run(parent_pid: int | None = None) -> None:
                     width=1,
                 )
                 self.canvas.create_text(
-                    button_x + 26,
+                    button_x + width // 2,
                     y + 18,
                     text=label,
                     fill=outline,
-                    font=(self.ui_font, 15, "bold"),
+                    font=(self.ui_font, 14, "bold"),
                 )
-                self._add_hitbox(key, button_x, y, button_x + 52, y + 36)
-                button_x += 60
+                self._add_hitbox(key, button_x, y, button_x + width, y + 36)
+                button_x += width + 8
 
         def _draw_risk_card_tags(self, x: int, y: int, card: RiskApprovalCard) -> None:
             risk_palette = self._risk_palette(card.risk_level)
             risk_tag_width = 58
-            op_tag_width = 68
+            op_tag_width = 74
             self._rounded_rect(
                 x,
                 y,
@@ -1122,7 +1074,7 @@ def run(parent_pid: int | None = None) -> None:
                 y + 13,
                 text=card.risk_label,
                 fill=risk_palette["tag_text"],
-                font=(self.ui_font, 14, "bold"),
+                font=(self.ui_font, 13, "bold"),
             )
 
             op_x = x + risk_tag_width + 10
@@ -1141,7 +1093,7 @@ def run(parent_pid: int | None = None) -> None:
                 y + 5,
                 text=card.operation_type,
                 fill="#AAB2BC",
-                font=(self.ui_font, 13),
+                font=(self.ui_font, 12),
                 max_width=op_tag_width - 16,
             )
 
@@ -1174,7 +1126,7 @@ def run(parent_pid: int | None = None) -> None:
             self._rounded_rect(
                 x,
                 y,
-                x + 606,
+                x + 696,
                 y + 520,
                 14,
                 fill="#10161D",
@@ -1182,14 +1134,14 @@ def run(parent_pid: int | None = None) -> None:
                 width=1,
             )
             self.canvas.create_text(
-                x + 303,
+                x + 348,
                 y + 232,
                 text="暂无待审批请求",
                 fill=self.text,
                 font=(self.ui_font, 22, "bold"),
             )
             self.canvas.create_text(
-                x + 303,
+                x + 348,
                 y + 274,
                 text="当前智能体操作均在安全范围内",
                 fill=self.muted,
