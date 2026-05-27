@@ -19,6 +19,8 @@ AgentPetState = Literal["typing", "sleeping"]
 RiskState = Literal["safe", "pending", "blocked"]
 IconType = Literal["openclaw", "hermes", "nanobot", "document", "cleaner"]
 AgentInstanceRuntime = Literal["running", "waiting", "idle"]
+RiskLevel = Literal["high", "medium", "low"]
+ApprovalAction = Literal["allow_once", "always_allow_session", "block"]
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,22 @@ class RiskSummaryMock:
     pending_risk_count: int
     text: str
     hint: str
+
+
+@dataclass(frozen=True)
+class RiskApprovalCard:
+    id: str
+    app_name: Literal["OpenClaw", "Hermes", "Nanobot"]
+    agent_name: str
+    action_verb: str
+    target_name: str
+    title: str
+    description: str
+    risk_level: RiskLevel
+    risk_label: str
+    operation_type: str
+    occurred_text: str
+    icon_type: IconType
 
 
 @dataclass(frozen=True)
@@ -119,6 +137,51 @@ MOCK_RISK_SUMMARY = RiskSummaryMock(
     hint="前往风险审批处理",
 )
 
+MOCK_RISK_APPROVAL_CARDS: tuple[RiskApprovalCard, ...] = (
+    RiskApprovalCard(
+        id="risk_hermes_upload_env",
+        app_name="Hermes",
+        agent_name="UploadAgent",
+        action_verb="请求上传",
+        target_name=".env",
+        title="Hermes / UploadAgent 请求上传 .env",
+        description="将上传敏感文件到远程服务器，可能导致凭证泄露",
+        risk_level="high",
+        risk_label="高风险",
+        operation_type="网络操作",
+        occurred_text="2 分钟前",
+        icon_type="hermes",
+    ),
+    RiskApprovalCard(
+        id="risk_nanobot_file_documents",
+        app_name="Nanobot",
+        agent_name="FileAgent",
+        action_verb="请求访问",
+        target_name="Documents",
+        title="Nanobot / FileAgent 请求访问 Documents",
+        description="访问受保护目录，可能包含敏感资料",
+        risk_level="medium",
+        risk_label="中风险",
+        operation_type="文件访问",
+        occurred_text="5 分钟前",
+        icon_type="nanobot",
+    ),
+    RiskApprovalCard(
+        id="risk_openclaw_clean_temp",
+        app_name="OpenClaw",
+        agent_name="CleanAgent",
+        action_verb="请求删除",
+        target_name="临时文件",
+        title="OpenClaw / CleanAgent 请求删除临时文件",
+        description="清理临时目录，删除无用文件",
+        risk_level="low",
+        risk_label="低风险",
+        operation_type="文件删除",
+        occurred_text="12 分钟前",
+        icon_type="openclaw",
+    ),
+)
+
 MOCK_AGENT_INSTANCES: tuple[AgentInstanceStatus, ...] = (
     AgentInstanceStatus(
         id="nanobot_file_agent",
@@ -179,6 +242,41 @@ def get_risk_badge_text(count: int) -> str:
     if count > 9:
         return "9+"
     return str(count)
+
+
+def get_pending_risk_count_from_cards(
+    cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
+) -> int:
+    return len(cards)
+
+
+def sort_risk_approval_cards(
+    cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
+) -> list[RiskApprovalCard]:
+    rank: dict[RiskLevel, int] = {"high": 0, "medium": 1, "low": 2}
+    return sorted(cards, key=lambda card: rank[card.risk_level])
+
+
+def parse_approval_hitbox_key(key: str) -> tuple[str, ApprovalAction] | None:
+    parts = key.split(":")
+    if len(parts) != 3 or parts[0] != "approval":
+        return None
+    action = parts[2]
+    if action not in {"allow_once", "always_allow_session", "block"}:
+        return None
+    return parts[1], action
+
+
+def apply_risk_approval_action(
+    cards: list[RiskApprovalCard],
+    *,
+    card_id: str,
+    action: ApprovalAction,
+) -> list[RiskApprovalCard]:
+    # Keep the API explicit even though all actions remove card in mock mode.
+    if action in {"allow_once", "always_allow_session", "block"}:
+        return [card for card in cards if card.id != card_id]
+    return list(cards)
 
 
 def _process_is_alive(pid: int) -> bool:
@@ -261,7 +359,8 @@ def run(parent_pid: int | None = None) -> None:
             self.expanded = False
             self.tooltip: tk.Toplevel | None = None
             self.pet_state = get_agent_pet_state(AGENTS)
-            self.pending_risk_count = get_pending_risk_count(AGENTS)
+            self.risk_approval_cards = sort_risk_approval_cards(list(MOCK_RISK_APPROVAL_CARDS))
+            self.pending_risk_count = get_pending_risk_count_from_cards(self.risk_approval_cards)
             self.left = 0
             self.top = self.default_top
             self._press_root_x = 0
@@ -689,6 +788,9 @@ def run(parent_pid: int | None = None) -> None:
                     return
                 self._draw_agents_app_panel(x)
                 return
+            if self.active_panel == "riskApproval":
+                self._draw_risk_approval_panel(x)
+                return
 
             self._rounded_rect(
                 x,
@@ -740,6 +842,359 @@ def run(parent_pid: int | None = None) -> None:
             if self.active_panel == "riskApproval":
                 return [self._risk_tooltip_text(), "默认展示第一条待处理风险。"]
             return ["设置页前端占位。", "本阶段不接入真实设置功能。"]
+
+        def _draw_risk_approval_panel(self, x: int) -> None:
+            self._rounded_rect(
+                x,
+                0,
+                x + self.expanded_width,
+                self.height,
+                18,
+                fill=self.panel_bg,
+                outline=self.border,
+                width=1,
+            )
+
+            self._draw_page_icon(x + 32, 28)
+            self.canvas.create_text(
+                x + 112,
+                30,
+                anchor="nw",
+                text="风险审批",
+                fill=self.text,
+                font=(self.ui_font, 30, "bold"),
+            )
+            self._draw_text_line(
+                x + 112,
+                76,
+                text=f"待处理 {self.pending_risk_count} 个审批请求",
+                fill=self.muted,
+                font=(self.ui_font, 17),
+                max_width=300,
+            )
+            self._draw_risk_header_toggle(x + 508, 28)
+            self._draw_collapse_button(x + 620, 38)
+
+            self._draw_risk_toolbar(x)
+            self._draw_risk_cards(x)
+            self._draw_risk_footer(x)
+
+        def _draw_risk_header_toggle(self, x: int, y: int) -> None:
+            self._rounded_rect(
+                x,
+                y,
+                x + 90,
+                y + 56,
+                12,
+                fill="#111922",
+                outline=self.card_border,
+                width=1,
+            )
+            # Left: list view selected
+            self.canvas.create_rectangle(x + 8, y + 8, x + 43, y + 48, fill="#0E2234", outline="")
+            self.canvas.create_line(x + 15, y + 18, x + 35, y + 18, fill="#58C7FF", width=2)
+            self.canvas.create_line(x + 15, y + 28, x + 35, y + 28, fill="#58C7FF", width=2)
+            self.canvas.create_line(x + 15, y + 38, x + 35, y + 38, fill="#58C7FF", width=2)
+            # Right: compact view idle
+            self.canvas.create_rectangle(x + 47, y + 8, x + 82, y + 48, fill="#10161D", outline="")
+            for row in range(2):
+                for col in range(2):
+                    cell_x = x + 54 + col * 12
+                    cell_y = y + 16 + row * 12
+                    self.canvas.create_rectangle(
+                        cell_x, cell_y, cell_x + 8, cell_y + 8, fill="#8F98A3", outline=""
+                    )
+
+        def _draw_risk_toolbar(self, x: int) -> None:
+            self._rounded_rect(x + 32, 118, x + 638, 170, 10, fill="", outline="", width=0)
+            self._rounded_rect(
+                x + 32, 126, x + 122, 166, 9, fill="#0E2234", outline="#245A79", width=1
+            )
+            self.canvas.create_text(
+                x + 77,
+                146,
+                text="列表视图",
+                fill="#58C7FF",
+                font=(self.ui_font, 18),
+            )
+            self.canvas.create_line(x + 40, 164, x + 114, 164, fill="#58C7FF", width=2)
+
+            self._rounded_rect(x + 138, 126, x + 228, 166, 9, fill="", outline="", width=0)
+            self.canvas.create_text(
+                x + 183,
+                146,
+                text="紧凑视图",
+                fill="#8F98A3",
+                font=(self.ui_font, 18),
+            )
+
+            self._rounded_rect(
+                x + 515,
+                126,
+                x + 638,
+                166,
+                9,
+                fill="#121A23",
+                outline=self.card_border,
+                width=1,
+            )
+            self._draw_text_line(
+                x + 529,
+                138,
+                text="按风险级别",
+                fill="#C5CBD2",
+                font=(self.ui_font, 16),
+                max_width=88,
+            )
+            self.canvas.create_line(x + 621, 142, x + 629, 150, fill="#8F98A3", width=2)
+            self.canvas.create_line(x + 629, 150, x + 637, 142, fill="#8F98A3", width=2)
+            self._add_hitbox("risk_sort_selector", x + 515, 126, x + 638, 166)
+
+        def _draw_risk_footer(self, x: int) -> None:
+            self._rounded_rect(
+                x + 32,
+                690,
+                x + 638,
+                738,
+                10,
+                fill="#10161D",
+                outline=self.card_border,
+                width=1,
+            )
+            self._draw_hint_icon(x + 48, 708)
+            self._draw_text_line(
+                x + 72,
+                704,
+                text="按风险级别从高到低展示，优先处理高风险请求",
+                fill=self.muted,
+                font=(self.ui_font, 15),
+                max_width=360,
+            )
+            self._draw_text_line(
+                x + 500,
+                704,
+                text="查看已处理记录",
+                fill="#C5CBD2",
+                font=(self.ui_font, 15),
+                max_width=110,
+            )
+            self.canvas.create_text(
+                x + 628,
+                716,
+                text="›",
+                fill="#8F98A3",
+                font=(self.ui_font, 18, "bold"),
+            )
+            self._add_hitbox("risk_view_history", x + 500, 704, x + 638, 726)
+
+        def _draw_risk_cards(self, x: int) -> None:
+            if not self.risk_approval_cards:
+                self._draw_risk_empty_state(x + 32, 170)
+                return
+            card_y = 170
+            for card in self.risk_approval_cards[:3]:
+                self._draw_risk_approval_card(x + 32, card_y, card)
+                card_y += 154
+
+        def _draw_risk_approval_card(self, x: int, y: int, card: RiskApprovalCard) -> None:
+            palette = self._risk_palette(card.risk_level)
+            outline = palette["outline"]
+            if self._focused_key == f"risk_detail:{card.id}":
+                outline = self.focus
+
+            self._rounded_rect(
+                x, y, x + 606, y + 134, 14, fill=palette["fill"], outline=outline, width=1
+            )
+            self.canvas.create_line(x + 14, y, x + 592, y, fill=palette["accent"], width=1)
+
+            self.canvas.create_oval(
+                x + 16,
+                y + 20,
+                x + 38,
+                y + 42,
+                fill=palette["accent"],
+                outline="",
+            )
+            marker_text = "!"
+            if card.risk_level == "low":
+                marker_text = "i"
+            self.canvas.create_text(
+                x + 27,
+                y + 31,
+                text=marker_text,
+                fill="#FFFFFF",
+                font=(self.ui_font, 14, "bold"),
+            )
+
+            self.canvas.create_oval(
+                x + 38,
+                y + 32,
+                x + 96,
+                y + 90,
+                fill="#080D13",
+                outline="#1F2A34",
+            )
+            self._draw_app_icon(card.icon_type, x + 67, y + 61)
+
+            self._draw_text_line(
+                x + 112,
+                y + 26,
+                text=card.title,
+                fill=self.text,
+                font=(self.ui_font, 20, "bold"),
+                max_width=290,
+            )
+            self._draw_text_line(
+                x + 112,
+                y + 60,
+                text=card.description,
+                fill="#B6BEC8",
+                font=(self.ui_font, 15),
+                max_width=290,
+            )
+
+            self._draw_risk_card_tags(x + 112, y + 92, card)
+            self._draw_text_line(
+                x + 280,
+                y + 95,
+                text=card.occurred_text,
+                fill="#8F98A3",
+                font=(self.ui_font, 15),
+                max_width=110,
+            )
+
+            self._draw_risk_card_actions(x + 420, y + 49, card.id)
+            self.canvas.create_text(
+                x + 580,
+                y + 67,
+                text="›",
+                fill=self.muted,
+                font=(self.ui_font, 28, "bold"),
+            )
+            self._add_hitbox(f"risk_detail:{card.id}", x + 560, y + 45, x + 604, y + 89)
+
+        def _draw_risk_card_actions(self, x: int, y: int, card_id: str) -> None:
+            buttons: list[tuple[str, str, str, str]] = [
+                ("allow_once", "允许", "#0D2D45", "#58C7FF"),
+                ("always_allow_session", "总允", "#3A2B13", "#FFB020"),
+                ("block", "阻止", "#3A1416", "#FF4A4A"),
+            ]
+            button_x = x
+            for action, label, fill, outline in buttons:
+                key = f"approval:{card_id}:{action}"
+                focused = self._focused_key == key
+                self._rounded_rect(
+                    button_x,
+                    y,
+                    button_x + 52,
+                    y + 36,
+                    8,
+                    fill=fill,
+                    outline=self.focus if focused else outline,
+                    width=1,
+                )
+                self.canvas.create_text(
+                    button_x + 26,
+                    y + 18,
+                    text=label,
+                    fill=outline,
+                    font=(self.ui_font, 15, "bold"),
+                )
+                self._add_hitbox(key, button_x, y, button_x + 52, y + 36)
+                button_x += 60
+
+        def _draw_risk_card_tags(self, x: int, y: int, card: RiskApprovalCard) -> None:
+            risk_palette = self._risk_palette(card.risk_level)
+            risk_tag_width = 58
+            op_tag_width = 68
+            self._rounded_rect(
+                x,
+                y,
+                x + risk_tag_width,
+                y + 26,
+                6,
+                fill=risk_palette["tag_fill"],
+                outline="",
+                width=0,
+            )
+            self.canvas.create_text(
+                x + risk_tag_width // 2,
+                y + 13,
+                text=card.risk_label,
+                fill=risk_palette["tag_text"],
+                font=(self.ui_font, 14, "bold"),
+            )
+
+            op_x = x + risk_tag_width + 10
+            self._rounded_rect(
+                op_x,
+                y,
+                op_x + op_tag_width,
+                y + 26,
+                6,
+                fill="#18202A",
+                outline=self.card_border,
+                width=1,
+            )
+            self._draw_text_line(
+                op_x + 8,
+                y + 5,
+                text=card.operation_type,
+                fill="#AAB2BC",
+                font=(self.ui_font, 13),
+                max_width=op_tag_width - 16,
+            )
+
+        def _risk_palette(self, level: RiskLevel) -> dict[str, str]:
+            if level == "high":
+                return {
+                    "fill": "#151014",
+                    "outline": "#773234",
+                    "accent": "#FF3030",
+                    "tag_fill": "#3A181A",
+                    "tag_text": "#FF5A5A",
+                }
+            if level == "medium":
+                return {
+                    "fill": "#17130F",
+                    "outline": "#7A5A2B",
+                    "accent": "#FF9F0A",
+                    "tag_fill": "#3F2E12",
+                    "tag_text": "#FFB020",
+                }
+            return {
+                "fill": "#0F1713",
+                "outline": "#2F6A43",
+                "accent": "#18D158",
+                "tag_fill": "#173A24",
+                "tag_text": "#22E36A",
+            }
+
+        def _draw_risk_empty_state(self, x: int, y: int) -> None:
+            self._rounded_rect(
+                x,
+                y,
+                x + 606,
+                y + 520,
+                14,
+                fill="#10161D",
+                outline=self.card_border,
+                width=1,
+            )
+            self.canvas.create_text(
+                x + 303,
+                y + 232,
+                text="暂无待审批请求",
+                fill=self.text,
+                font=(self.ui_font, 22, "bold"),
+            )
+            self.canvas.create_text(
+                x + 303,
+                y + 274,
+                text="当前智能体操作均在安全范围内",
+                fill=self.muted,
+                font=(self.ui_font, 16),
+            )
 
         def _draw_agents_app_panel(self, x: int) -> None:
             self._rounded_rect(
@@ -1347,6 +1802,31 @@ def run(parent_pid: int | None = None) -> None:
                     return
 
         def _activate_key(self, key: str) -> None:
+            parsed_approval = parse_approval_hitbox_key(key)
+            if parsed_approval:
+                card_id, action = parsed_approval
+                print(f"[XSafeClaw Mock] approval action: card={card_id}, action={action}")
+                self.risk_approval_cards = apply_risk_approval_action(
+                    self.risk_approval_cards,
+                    card_id=card_id,
+                    action=action,
+                )
+                self.pending_risk_count = get_pending_risk_count_from_cards(
+                    self.risk_approval_cards
+                )
+                self._focused_key = None
+                self._draw()
+                return
+            if key == "risk_sort_selector":
+                print("[XSafeClaw Mock] sort selector clicked")
+                return
+            if key == "risk_view_history":
+                print("[XSafeClaw Mock] view handled approvals")
+                return
+            if key.startswith("risk_detail:"):
+                card_id = key.split(":", 1)[1]
+                print(f"[XSafeClaw Mock] open risk detail: {card_id}")
+                return
             if key == "collapse":
                 self.expanded = False
                 self._focused_key = None
@@ -1380,7 +1860,7 @@ def run(parent_pid: int | None = None) -> None:
                     return
 
         def _focus_next(self, event: tk.Event) -> str:
-            if not self.expanded or self.active_panel != "agents" or not self._focus_order:
+            if not self.expanded or not self._focus_order:
                 return "break"
             if self._focused_key not in self._focus_order:
                 self._focused_key = self._focus_order[0]
