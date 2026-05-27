@@ -262,6 +262,10 @@ def get_xsafeclaw_logo_path() -> Path | None:
     return next((path for path in candidates if path.exists()), None)
 
 
+def is_scalable_canvas_width_item(item_type: str) -> bool:
+    return item_type in {"arc", "line", "oval", "polygon", "rectangle"}
+
+
 def get_collapsed_panel_for_design_y(design_y: float) -> ActivePanel | None:
     if 140 <= design_y < 300:
         return "agents"
@@ -576,8 +580,11 @@ def run(parent_pid: int | None = None) -> None:
         def _scale_item_styles(self, tag: str, scale: float) -> None:
             for item in self.canvas.find_withtag(tag):
                 item_type = self.canvas.type(item)
-                width = self.canvas.itemcget(item, "width")
-                if item_type != "text" and width:
+                if is_scalable_canvas_width_item(item_type):
+                    width = self.canvas.itemcget(item, "width")
+                else:
+                    width = ""
+                if width:
                     try:
                         current_width = float(width)
                     except ValueError:

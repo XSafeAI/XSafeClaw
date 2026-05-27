@@ -6,6 +6,7 @@ from xsafeclaw.desktop_sidebar import (
     get_risk_footer_layout,
     get_risk_sort_selector_layout,
     get_xsafeclaw_logo_path,
+    is_scalable_canvas_width_item,
     parse_approval_hitbox_key,
     sort_risk_approval_cards,
 )
@@ -63,6 +64,13 @@ def test_xsafeclaw_logo_path_uses_project_logo_asset() -> None:
     assert logo_path is not None
     assert logo_path.name == "logo.png"
     assert logo_path.parent.name == "assets"
+
+
+def test_canvas_image_items_do_not_participate_in_width_scaling() -> None:
+    assert is_scalable_canvas_width_item("rectangle")
+    assert is_scalable_canvas_width_item("line")
+    assert not is_scalable_canvas_width_item("image")
+    assert not is_scalable_canvas_width_item("text")
 
 
 def test_pending_count_from_cards_matches_length() -> None:
