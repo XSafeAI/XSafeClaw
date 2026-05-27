@@ -11,10 +11,11 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 AgentStatus = Literal["ready", "working", "blocked", "offline"]
-ActivePanel = Literal["overview", "agents", "riskApproval", "settings"]
+ActivePanel = Literal["agents", "riskApproval", "settings"]
 AgentPetState = Literal["typing", "sleeping"]
 RiskState = Literal["safe", "pending", "blocked"]
 IconType = Literal["openclaw", "hermes", "nanobot", "document", "cleaner"]
@@ -251,6 +252,26 @@ def get_pending_risk_count_from_cards(
     return len(cards)
 
 
+def get_xsafeclaw_logo_path() -> Path | None:
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        project_root / "assets" / "logo.png",
+        project_root / "assets" / "claw_logo.png",
+        project_root / "claw-logo.png",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def get_collapsed_panel_for_design_y(design_y: float) -> ActivePanel | None:
+    if 140 <= design_y < 300:
+        return "agents"
+    if 300 <= design_y < 470:
+        return "riskApproval"
+    if 470 <= design_y < 770:
+        return "settings"
+    return None
+
+
 def sort_risk_approval_cards(
     cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
     mode: RiskSortMode = "risk",
@@ -410,7 +431,7 @@ def run(parent_pid: int | None = None) -> None:
                 pass
             self._configure_window_metrics()
 
-            self.active_panel: ActivePanel = "overview"
+            self.active_panel: ActivePanel = "agents"
             self.expanded = False
             self.tooltip: tk.Toplevel | None = None
             self.pet_state = get_agent_pet_state(AGENTS)
@@ -433,6 +454,8 @@ def run(parent_pid: int | None = None) -> None:
             self._focused_key: str | None = None
             self.agent_detail_app: Literal["Nanobot", "OpenClaw", "Hermes"] | None = None
             self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
+            self._collapsed_logo_source: tk.PhotoImage | None = None
+            self._collapsed_logo_image: tk.PhotoImage | None = None
             self.parent_pid = parent_pid
 
             self.root.configure(bg=self.transparent)
@@ -603,7 +626,7 @@ def run(parent_pid: int | None = None) -> None:
                 outline=self.border,
                 width=1,
             )
-            self._draw_shield(43, 70)
+            self._draw_collapsed_logo(43, 70)
             self._draw_pet(43, 228)
             self._draw_risk_badge(43, 400)
             self._draw_settings(43, 634)
@@ -739,6 +762,42 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_line(*points, fill=self.text, width=3, smooth=True)
             self.canvas.create_line(cx, cy - 10, cx, cy + 10, fill=self.text, width=2)
 
+        def _draw_collapsed_logo(self, cx: int, cy: int) -> None:
+            logo_image = self._get_collapsed_logo_image()
+            if logo_image is None:
+                self._draw_shield(cx, cy)
+                return
+            self.canvas.create_image(cx, cy, image=logo_image, anchor="center")
+
+        def _get_collapsed_logo_image(self) -> tk.PhotoImage | None:
+            if self._collapsed_logo_image is not None:
+                return self._collapsed_logo_image
+            logo_path = get_xsafeclaw_logo_path()
+            if logo_path is None:
+                return None
+            try:
+                source = tk.PhotoImage(file=str(logo_path))
+                cropped = tk.PhotoImage(width=256, height=256)
+                cropped.tk.call(
+                    cropped,
+                    "copy",
+                    source,
+                    "-from",
+                    0,
+                    0,
+                    256,
+                    256,
+                    "-to",
+                    0,
+                    0,
+                )
+                self._collapsed_logo_source = source
+                self._collapsed_logo_image = cropped.subsample(5, 5)
+            except tk.TclError:
+                self._collapsed_logo_source = None
+                self._collapsed_logo_image = None
+            return self._collapsed_logo_image
+
         def _draw_pet(self, cx: int, cy: int) -> None:
             self._rounded_rect(
                 cx - 34,
@@ -862,7 +921,6 @@ def run(parent_pid: int | None = None) -> None:
                 outline=self.border,
             )
             title_by_panel = {
-                "overview": "总览页",
                 "agents": "智能体页",
                 "riskApproval": "风险审批页",
                 "settings": "设置页",
@@ -889,8 +947,6 @@ def run(parent_pid: int | None = None) -> None:
                 )
 
         def _panel_lines(self) -> list[str]:
-            if self.active_panel == "overview":
-                return ["当前为前端 Mock 展示。", f"待处理风险审批：{self.pending_risk_count}"]
             if self.active_panel == "agents":
                 pet = "打字" if self.pet_state == "typing" else "睡觉"
                 return [
@@ -2027,20 +2083,9 @@ def run(parent_pid: int | None = None) -> None:
             self._show_tooltip(self._tooltip_for_panel(panel), event.y)
 
         def _panel_for_y(self, y: int) -> ActivePanel | None:
-            design_y = self._design_y(y)
-            if 0 <= design_y < 140:
-                return "overview"
-            if 140 <= design_y < 300:
-                return "agents"
-            if 300 <= design_y < 470:
-                return "riskApproval"
-            if 470 <= design_y < self.height:
-                return "settings"
-            return None
+            return get_collapsed_panel_for_design_y(self._design_y(y))
 
         def _tooltip_for_panel(self, panel: ActivePanel) -> str:
-            if panel == "overview":
-                return "XSafeClaw"
             if panel == "agents":
                 return "智能体正在工作" if self.pet_state == "typing" else "暂无智能体工作"
             if panel == "riskApproval":
