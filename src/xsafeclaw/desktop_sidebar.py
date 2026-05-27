@@ -155,7 +155,7 @@ def run(parent_pid: int | None = None) -> None:
         collapsed_width = 86
         expanded_width = 670
         expanded_gap = 12
-        height = 680
+        height = 860
 
         viewport_height_ratio = 0.50
         min_window_height = 420
@@ -380,10 +380,10 @@ def run(parent_pid: int | None = None) -> None:
                 outline=self.border,
                 width=1,
             )
-            self._draw_shield(43, 66)
-            self._draw_pet(43, 210)
-            self._draw_risk_badge(43, 366)
-            self._draw_settings(43, 558)
+            self._draw_shield(43, 78)
+            self._draw_pet(43, 254)
+            self._draw_risk_badge(43, 446)
+            self._draw_settings(43, 708)
 
         def _rounded_rect(
             self,
@@ -710,8 +710,8 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw_agent_app_card(x + 32, card_y, app)
                 card_y += 108
 
-            self._draw_current_active_card(x + 32, 494)
-            self._draw_risk_summary_card(x + 356, 494)
+            self._draw_current_active_card(x + 32, 570)
+            self._draw_risk_summary_card(x + 356, 570)
 
         def _draw_page_icon(self, x: int, y: int) -> None:
             self._rounded_rect(
@@ -870,7 +870,7 @@ def run(parent_pid: int | None = None) -> None:
 
         def _draw_current_active_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 300, y + 166, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + 300, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.ok, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
@@ -900,27 +900,28 @@ def run(parent_pid: int | None = None) -> None:
             )
             self._draw_text_line(
                 x + 26,
-                y + 116,
+                y + 126,
                 text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
                 fill=self.weak,
                 font=("Microsoft YaHei UI", 15),
                 max_width=240,
             )
-            self.canvas.create_line(x + 26, y + 138, x + 274, y + 138, fill="#303946", width=1)
+            self.canvas.create_line(x + 26, y + 178, x + 274, y + 178, fill="#303946", width=1)
+            self._draw_hint_icon(x + 30, y + 213)
             self.canvas.create_text(
-                x + 64,
-                y + 145,
+                x + 72,
+                y + 202,
                 anchor="nw",
                 text="点击应用卡片查看详情",
                 fill=self.weak,
-                font=("Microsoft YaHei UI", 14),
+                font=("Microsoft YaHei UI", 16),
             )
 
         def _draw_risk_summary_card(self, x: int, y: int) -> None:
             self._rounded_rect(
-                x, y, x + 282, y + 166, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + 282, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
-            self._draw_shield_watermark(x + 215, y + 98)
+            self._draw_shield_watermark(x + 215, y + 154)
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.pending, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
@@ -941,12 +942,27 @@ def run(parent_pid: int | None = None) -> None:
             )
             self._draw_text_line(
                 x + 26,
-                y + 88,
+                y + 96,
                 text=MOCK_RISK_SUMMARY.hint,
                 fill=self.muted,
                 font=("Microsoft YaHei UI", 18),
                 max_width=210,
             )
+
+        def _draw_hint_icon(self, x: int, y: int) -> None:
+            self._rounded_rect(
+                x,
+                y,
+                x + 26,
+                y + 20,
+                4,
+                fill="",
+                outline=self.weak,
+                width=2,
+            )
+            self.canvas.create_line(x + 8, y + 20, x + 5, y + 27, fill=self.weak, width=2)
+            for dot_x in (x + 8, x + 13, x + 18):
+                self.canvas.create_oval(dot_x, y + 9, dot_x + 2, y + 11, fill=self.weak, outline="")
 
         def _draw_shield_watermark(self, cx: int, cy: int) -> None:
             points = [
