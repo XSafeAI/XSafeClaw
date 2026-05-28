@@ -268,7 +268,8 @@ def is_scalable_canvas_width_item(item_type: str) -> bool:
 
 def get_collapsed_logo_crop_box(width: int, height: int) -> tuple[int, int, int, int]:
     side = min(width, height)
-    return 0, 0, side, side
+    left = min(max(0, width - side), side // 6)
+    return left, 0, left + side, side
 
 
 def get_collapsed_logo_subsample_factor(source_size: int, target_size: int = 52) -> int:
