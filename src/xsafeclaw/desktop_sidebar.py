@@ -939,7 +939,7 @@ def run(parent_pid: int | None = None) -> None:
                 self._agent_icon_sources[self.pet_state] = source
                 subsample_factor = get_collapsed_logo_subsample_factor(
                     max(source.width(), source.height()),
-                    target_size=100,
+                    target_size=68,
                 )
                 image = source.subsample(subsample_factor, subsample_factor)
                 self._agent_icon_images[self.pet_state] = image
