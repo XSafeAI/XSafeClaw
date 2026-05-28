@@ -82,6 +82,9 @@ artifacts = [
     "src/xsafeclaw/static/index.html",
     "src/xsafeclaw/static/agent-town.html",
     "src/xsafeclaw/static/agent-valley.html",
+    "src/xsafeclaw/static/sidebar_agent_working.png",
+    "src/xsafeclaw/static/sidebar_agent_sleeping.png",
+    "src/xsafeclaw/static/sidebar_setting.png",
     "src/xsafeclaw/static/assets/**",
 ]
 
@@ -94,6 +97,9 @@ artifacts = [
     "src/xsafeclaw/static/index.html",
     "src/xsafeclaw/static/agent-town.html",
     "src/xsafeclaw/static/agent-valley.html",
+    "src/xsafeclaw/static/sidebar_agent_working.png",
+    "src/xsafeclaw/static/sidebar_agent_sleeping.png",
+    "src/xsafeclaw/static/sidebar_setting.png",
     "src/xsafeclaw/static/assets/**",
 ]
 

@@ -265,6 +265,32 @@ def get_xsafeclaw_logo_path() -> Path | None:
     return next((path for path in candidates if path.exists()), None)
 
 
+def get_sidebar_setting_icon_path() -> Path | None:
+    package_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        package_root / "static" / "sidebar_setting.png",
+        project_root / "src" / "xsafeclaw" / "static" / "sidebar_setting.png",
+        project_root / "src" / "xsafeclaw" / "static" / "assets" / "sidebar" / "setting.png",
+        project_root / "assets" / "sidebar" / "setting.png",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def get_sidebar_agent_icon_path(pet_state: AgentPetState) -> Path | None:
+    filename = (
+        "sidebar_agent_working.png" if pet_state == "typing" else "sidebar_agent_sleeping.png"
+    )
+    package_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        package_root / "static" / filename,
+        project_root / "src" / "xsafeclaw" / "static" / filename,
+        project_root / "assets" / "sidebar" / filename,
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
 def is_scalable_canvas_width_item(item_type: str) -> bool:
     return item_type in {"arc", "line", "oval", "polygon", "rectangle"}
 
@@ -484,6 +510,10 @@ def run(parent_pid: int | None = None) -> None:
             self._collapsed_logo_image: tk.PhotoImage | None = None
             self._page_logo_source: tk.PhotoImage | None = None
             self._page_logo_image: tk.PhotoImage | None = None
+            self._settings_icon_source: tk.PhotoImage | None = None
+            self._settings_icon_image: tk.PhotoImage | None = None
+            self._agent_icon_sources: dict[AgentPetState, tk.PhotoImage] = {}
+            self._agent_icon_images: dict[AgentPetState, tk.PhotoImage] = {}
             self.parent_pid = parent_pid
 
             self.root.configure(bg=self.transparent)
@@ -879,7 +909,54 @@ def run(parent_pid: int | None = None) -> None:
                 self._page_logo_image = None
             return self._page_logo_image
 
+        def _get_settings_icon_image(self) -> tk.PhotoImage | None:
+            if self._settings_icon_image is not None:
+                return self._settings_icon_image
+            icon_path = get_sidebar_setting_icon_path()
+            if icon_path is None:
+                return None
+            try:
+                source = tk.PhotoImage(file=str(icon_path))
+                self._settings_icon_source = source
+                subsample_factor = get_collapsed_logo_subsample_factor(
+                    max(source.width(), source.height()),
+                    target_size=62,
+                )
+                self._settings_icon_image = source.subsample(subsample_factor, subsample_factor)
+            except tk.TclError:
+                self._settings_icon_source = None
+                self._settings_icon_image = None
+            return self._settings_icon_image
+
+        def _get_agent_icon_image(self) -> tk.PhotoImage | None:
+            if self.pet_state in self._agent_icon_images:
+                return self._agent_icon_images[self.pet_state]
+            icon_path = get_sidebar_agent_icon_path(self.pet_state)
+            if icon_path is None:
+                return None
+            try:
+                source = tk.PhotoImage(file=str(icon_path))
+                self._agent_icon_sources[self.pet_state] = source
+                subsample_factor = get_collapsed_logo_subsample_factor(
+                    max(source.width(), source.height()),
+                    target_size=100,
+                )
+                image = source.subsample(subsample_factor, subsample_factor)
+                self._agent_icon_images[self.pet_state] = image
+            except tk.TclError:
+                self._agent_icon_sources.pop(self.pet_state, None)
+                self._agent_icon_images.pop(self.pet_state, None)
+                return None
+            return self._agent_icon_images[self.pet_state]
+
         def _draw_pet(self, cx: int, cy: int) -> None:
+            agent_icon = self._get_agent_icon_image()
+            if agent_icon is not None:
+                self.canvas.create_image(cx, cy, image=agent_icon, anchor="center")
+                return
+            self._draw_pet_fallback(cx, cy)
+
+        def _draw_pet_fallback(self, cx: int, cy: int) -> None:
             self._rounded_rect(
                 cx - 34,
                 cy - 50,
@@ -984,6 +1061,13 @@ def run(parent_pid: int | None = None) -> None:
                     outline="#0A84FF",
                     width=1,
                 )
+            settings_icon = self._get_settings_icon_image()
+            if settings_icon is not None:
+                self.canvas.create_image(cx, cy, image=settings_icon, anchor="center")
+                return
+            self._draw_settings_fallback(cx, cy)
+
+        def _draw_settings_fallback(self, cx: int, cy: int) -> None:
             self.canvas.create_oval(cx - 18, cy - 18, cx + 18, cy + 18, outline="#C5CAD1", width=3)
             self.canvas.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, outline="#C5CAD1", width=3)
             for dx, dy in ((0, -23), (0, 23), (-23, 0), (23, 0)):
