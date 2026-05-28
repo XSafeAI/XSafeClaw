@@ -65,12 +65,14 @@ def test_xsafeclaw_logo_path_uses_project_logo_asset() -> None:
     logo_path = get_xsafeclaw_logo_path()
     assert logo_path is not None
     assert logo_path.name == "logo.png"
-    assert logo_path.parent.name == "assets"
+    assert logo_path.parent.name == "public"
+    assert logo_path.parent.parent.name == "frontend"
 
 
 def test_collapsed_logo_crop_uses_left_square_icon_region() -> None:
     assert get_collapsed_logo_crop_box(1920, 600) == (100, 0, 700, 600)
-    assert get_collapsed_logo_subsample_factor(600, target_size=52) == 12
+    assert get_collapsed_logo_crop_box(821, 1032) == (0, 0, 821, 1032)
+    assert get_collapsed_logo_subsample_factor(1032, target_size=52) == 20
 
 
 def test_canvas_image_items_do_not_participate_in_width_scaling() -> None:

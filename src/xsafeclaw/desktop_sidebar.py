@@ -255,6 +255,8 @@ def get_pending_risk_count_from_cards(
 def get_xsafeclaw_logo_path() -> Path | None:
     project_root = Path(__file__).resolve().parents[2]
     candidates = (
+        project_root / "frontend" / "public" / "logo.png",
+        project_root / "src" / "xsafeclaw" / "static" / "logo.png",
         project_root / "assets" / "logo.png",
         project_root / "assets" / "claw_logo.png",
         project_root / "claw-logo.png",
@@ -267,6 +269,8 @@ def is_scalable_canvas_width_item(item_type: str) -> bool:
 
 
 def get_collapsed_logo_crop_box(width: int, height: int) -> tuple[int, int, int, int]:
+    if height > width:
+        return 0, 0, width, height
     side = min(width, height)
     left = min(max(0, width - side), side // 6)
     return left, 0, left + side, side
@@ -798,8 +802,9 @@ def run(parent_pid: int | None = None) -> None:
                     source.width(),
                     source.height(),
                 )
-                crop_size = crop_right - crop_left
-                cropped = tk.PhotoImage(width=crop_size, height=crop_size)
+                crop_width = crop_right - crop_left
+                crop_height = crop_bottom - crop_top
+                cropped = tk.PhotoImage(width=crop_width, height=crop_height)
                 cropped.tk.call(
                     cropped,
                     "copy",
@@ -814,7 +819,7 @@ def run(parent_pid: int | None = None) -> None:
                     0,
                 )
                 self._collapsed_logo_source = source
-                subsample_factor = get_collapsed_logo_subsample_factor(crop_size)
+                subsample_factor = get_collapsed_logo_subsample_factor(max(crop_width, crop_height))
                 self._collapsed_logo_image = cropped.subsample(subsample_factor, subsample_factor)
             except tk.TclError:
                 self._collapsed_logo_source = None
