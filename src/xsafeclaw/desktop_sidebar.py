@@ -1415,6 +1415,12 @@ def run(parent_pid: int | None = None) -> None:
             )
 
         def _draw_agents_app_panel(self, x: int) -> None:
+            content_x = x + 32
+            content_width = self.expanded_width - 64
+            bottom_gap = 24
+            bottom_width = (content_width - bottom_gap) // 2
+            bottom_right_x = content_x + bottom_width + bottom_gap
+
             self._rounded_rect(
                 x,
                 0,
@@ -1443,15 +1449,15 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 17),
                 max_width=420,
             )
-            self._draw_collapse_button(x + 598, 38)
+            self._draw_collapse_button(x + self.expanded_width - 72, 38)
 
             card_y = 146
             for app in MOCK_AGENT_APPS:
-                self._draw_agent_app_card(x + 32, card_y, app)
+                self._draw_agent_app_card(content_x, card_y, app, content_width)
                 card_y += 108
 
-            self._draw_current_active_card(x + 32, 470)
-            self._draw_risk_summary_card(x + 356, 470)
+            self._draw_current_active_card(content_x, 470, bottom_width)
+            self._draw_risk_summary_card(bottom_right_x, 470, bottom_width)
 
         def _draw_page_icon(self, x: int, y: int) -> None:
             self._rounded_rect(
@@ -1468,7 +1474,6 @@ def run(parent_pid: int | None = None) -> None:
             if logo_image is not None:
                 self.canvas.create_image(x + 28, y + 28, image=logo_image, anchor="center")
 
-
         def _draw_collapse_button(self, x: int, y: int, key: str = "collapse") -> None:
             if self._focused_key == key:
                 self._rounded_rect(x, y, x + 40, y + 40, 8, fill="#172231", outline=self.focus)
@@ -1481,16 +1486,16 @@ def run(parent_pid: int | None = None) -> None:
             )
             self._add_hitbox(key, x, y, x + 40, y + 40)
 
-        def _draw_agent_app_card(self, x: int, y: int, app: AgentAppStatus) -> None:
+        def _draw_agent_app_card(self, x: int, y: int, app: AgentAppStatus, width: int) -> None:
             is_pending = app.risk_state == "pending"
             fill = "#151B20" if is_pending else self.card_bg
             outline = "#A15D14" if is_pending else self.card_border
             if self._focused_key == app.id:
                 outline = self.focus
 
-            self._rounded_rect(x, y, x + 606, y + 90, 14, fill=fill, outline=outline, width=1)
+            self._rounded_rect(x, y, x + width, y + 90, 14, fill=fill, outline=outline, width=1)
             if is_pending:
-                self.canvas.create_line(x + 14, y, x + 592, y, fill="#FF9F0A", width=1)
+                self.canvas.create_line(x + 14, y, x + width - 14, y, fill="#FF9F0A", width=1)
 
             self.canvas.create_oval(
                 x + 24, y + 16, x + 82, y + 74, fill="#080D13", outline="#1F2A34"
@@ -1499,11 +1504,11 @@ def run(parent_pid: int | None = None) -> None:
 
             self._draw_text_line(
                 x + 112,
-                y + 18,
+                y + 12,
                 text=app.app_name,
                 fill=self.text,
-                font=(self.ui_font, 21, "bold"),
-                max_width=260,
+                font=(self.ui_font, 21),
+                max_width=width - 250,
             )
             if app.id == "app_nanobot":
                 self._draw_text_line(
@@ -1512,7 +1517,7 @@ def run(parent_pid: int | None = None) -> None:
                     text="3 个 Agent 运行中 ·",
                     fill=self.muted,
                     font=(self.ui_font, 16),
-                    max_width=230,
+                    max_width=width - 360,
                 )
                 self._draw_text_line(
                     x + 340,
@@ -1520,7 +1525,7 @@ def run(parent_pid: int | None = None) -> None:
                     text="1 个待确认",
                     fill=self.pending_text,
                     font=(self.ui_font, 16, "bold"),
-                    max_width=160,
+                    max_width=width - 450,
                 )
             else:
                 self._draw_text_line(
@@ -1529,22 +1534,30 @@ def run(parent_pid: int | None = None) -> None:
                     text=app.status_text,
                     fill=self.muted,
                     font=(self.ui_font, 16),
-                    max_width=360,
+                    max_width=width - 230,
                 )
 
             dot = self.pending if is_pending else self.ok
-            self.canvas.create_oval(x + 524, y + 40, x + 544, y + 60, fill=dot, outline="")
+            self.canvas.create_oval(
+                x + width - 82, y + 40, x + width - 62, y + 60, fill=dot, outline=""
+            )
             self.canvas.create_text(
-                x + 578,
+                x + width - 28,
                 y + 45,
                 text="›",
                 fill=self.muted,
                 font=(self.ui_font, 28, "bold"),
             )
-            self._add_hitbox(app.id, x, y, x + 606, y + 90)
+            self._add_hitbox(app.id, x, y, x + width, y + 90)
 
         def _draw_agent_instance_panel(self, x: int) -> None:
             app_name = self.agent_detail_app or "Nanobot"
+            content_x = x + 32
+            content_width = self.expanded_width - 64
+            bottom_gap = 24
+            bottom_width = (content_width - bottom_gap) // 2
+            bottom_right_x = content_x + bottom_width + bottom_gap
+
             self._rounded_rect(
                 x,
                 0,
@@ -1573,16 +1586,16 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 17),
                 max_width=420,
             )
-            self._draw_collapse_button(x + 598, 38, key="back_to_agent_apps")
+            self._draw_collapse_button(x + self.expanded_width - 72, 38, key="back_to_agent_apps")
 
             card_y = 146
             for agent in MOCK_AGENT_INSTANCES:
-                self._draw_agent_instance_card(x + 32, card_y, agent)
+                self._draw_agent_instance_card(content_x, card_y, agent, content_width)
                 card_y += 108
 
             selected = self._selected_agent()
-            self._draw_selected_agent_card(x + 32, 470, selected)
-            self._draw_agent_model_card(x + 356, 470, selected)
+            self._draw_selected_agent_card(content_x, 470, selected, bottom_width)
+            self._draw_agent_model_card(bottom_right_x, 470, selected, bottom_width)
 
         def _selected_agent(self) -> AgentInstanceStatus:
             for agent in MOCK_AGENT_INSTANCES:
@@ -1595,7 +1608,9 @@ def run(parent_pid: int | None = None) -> None:
                 return f"{agent.task_text} · {agent.pending_risk_count} 个待确认"
             return f"{agent.task_text} · 无风险"
 
-        def _draw_agent_instance_card(self, x: int, y: int, agent: AgentInstanceStatus) -> None:
+        def _draw_agent_instance_card(
+            self, x: int, y: int, agent: AgentInstanceStatus, width: int
+        ) -> None:
             selected = agent.id == self.selected_agent_id
             is_pending = agent.pending_risk_count > 0
             outline = "#A15D14" if selected or is_pending else self.card_border
@@ -1603,9 +1618,9 @@ def run(parent_pid: int | None = None) -> None:
             if self._focused_key == agent.id:
                 outline = self.focus
 
-            self._rounded_rect(x, y, x + 606, y + 90, 14, fill=fill, outline=outline, width=1)
+            self._rounded_rect(x, y, x + width, y + 90, 14, fill=fill, outline=outline, width=1)
             if selected or is_pending:
-                self.canvas.create_line(x + 14, y, x + 592, y, fill="#FF9F0A", width=1)
+                self.canvas.create_line(x + 14, y, x + width - 14, y, fill="#FF9F0A", width=1)
 
             self.canvas.create_oval(
                 x + 24, y + 16, x + 82, y + 74, fill="#080D13", outline="#1F2A34"
@@ -1617,7 +1632,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=agent.agent_name,
                 fill=self.text,
                 font=(self.ui_font, 21, "bold"),
-                max_width=260,
+                max_width=width - 250,
             )
 
             if is_pending:
@@ -1627,7 +1642,7 @@ def run(parent_pid: int | None = None) -> None:
                     text=f"{agent.task_text} ·",
                     fill=self.muted,
                     font=(self.ui_font, 16),
-                    max_width=230,
+                    max_width=width - 360,
                 )
                 self._draw_text_line(
                     x + 340,
@@ -1635,7 +1650,7 @@ def run(parent_pid: int | None = None) -> None:
                     text=f"{agent.pending_risk_count} 个待确认",
                     fill=self.pending_text,
                     font=(self.ui_font, 16, "bold"),
-                    max_width=160,
+                    max_width=width - 450,
                 )
             else:
                 self._draw_text_line(
@@ -1644,25 +1659,29 @@ def run(parent_pid: int | None = None) -> None:
                     text=self._agent_status_text(agent),
                     fill=self.muted,
                     font=(self.ui_font, 16),
-                    max_width=360,
+                    max_width=width - 230,
                 )
 
             dot = self.pending if is_pending else self.ok
             if agent.status in {"waiting", "idle"}:
                 dot = "#8A939E"
-            self.canvas.create_oval(x + 524, y + 40, x + 544, y + 60, fill=dot, outline="")
+            self.canvas.create_oval(
+                x + width - 82, y + 40, x + width - 62, y + 60, fill=dot, outline=""
+            )
             self.canvas.create_text(
-                x + 578,
+                x + width - 28,
                 y + 45,
                 text="›",
                 fill=self.muted,
                 font=(self.ui_font, 28, "bold"),
             )
-            self._add_hitbox(agent.id, x, y, x + 606, y + 90)
+            self._add_hitbox(agent.id, x, y, x + width, y + 90)
 
-        def _draw_selected_agent_card(self, x: int, y: int, agent: AgentInstanceStatus) -> None:
+        def _draw_selected_agent_card(
+            self, x: int, y: int, agent: AgentInstanceStatus, width: int
+        ) -> None:
             self._rounded_rect(
-                x, y, x + 300, y + 266, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + width, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.ok, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
@@ -1680,7 +1699,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=agent.agent_name,
                 fill=self.body_text,
                 font=(self.ui_font, 15),
-                max_width=240,
+                max_width=width - 60,
             )
             self._draw_text_line(
                 x + 26,
@@ -1688,7 +1707,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"任务：{agent.task_text.replace('正在', '')}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
-                max_width=240,
+                max_width=width - 60,
             )
             self._draw_text_line(
                 x + 26,
@@ -1696,12 +1715,14 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"最近动作：{agent.latest_action}",
                 fill=self.weak,
                 font=(self.ui_font, 13),
-                max_width=240,
+                max_width=width - 60,
             )
 
-        def _draw_agent_model_card(self, x: int, y: int, agent: AgentInstanceStatus) -> None:
+        def _draw_agent_model_card(
+            self, x: int, y: int, agent: AgentInstanceStatus, width: int
+        ) -> None:
             self._rounded_rect(
-                x, y, x + 282, y + 266, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + width, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
             dot = self.pending if agent.pending_risk_count else self.ok
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=dot, outline="")
@@ -1720,7 +1741,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"模型：{agent.model_text}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
-                max_width=230,
+                max_width=width - 52,
             )
             self._draw_text_line(
                 x + 26,
@@ -1728,7 +1749,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"权限：{agent.permission_text}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
-                max_width=230,
+                max_width=width - 52,
             )
             self.canvas.create_text(
                 x + 26,
@@ -1747,7 +1768,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=risk_text,
                 fill=self.pending_text if agent.pending_risk_count else self.body_text,
                 font=(self.ui_font, 13, "bold") if agent.pending_risk_count else (self.ui_font, 13),
-                max_width=170,
+                max_width=width - 112,
             )
 
         def _draw_app_icon(self, icon_type: IconType, cx: int, cy: int) -> None:
@@ -1835,9 +1856,9 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_line(cx, cy - 20, cx, cy - 31, fill="#79D8FF", width=3)
             self.canvas.create_oval(cx - 4, cy - 36, cx + 4, cy - 28, fill="#37CFFF", outline="")
 
-        def _draw_current_active_card(self, x: int, y: int) -> None:
+        def _draw_current_active_card(self, x: int, y: int, width: int) -> None:
             self._rounded_rect(
-                x, y, x + 300, y + 266, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + width, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.ok, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#0F5F31", width=3)
@@ -1855,7 +1876,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"{MOCK_CURRENT_ACTIVE.app_name} / {MOCK_CURRENT_ACTIVE.agent_name}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
-                max_width=240,
+                max_width=width - 60,
             )
             self._draw_text_line(
                 x + 26,
@@ -1863,7 +1884,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=MOCK_CURRENT_ACTIVE.task,
                 fill=self.body_text,
                 font=(self.ui_font, 15),
-                max_width=240,
+                max_width=width - 60,
             )
             self._draw_text_line(
                 x + 26,
@@ -1871,9 +1892,11 @@ def run(parent_pid: int | None = None) -> None:
                 text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
                 fill=self.weak,
                 font=(self.ui_font, 13),
-                max_width=240,
+                max_width=width - 60,
             )
-            self.canvas.create_line(x + 26, y + 178, x + 274, y + 178, fill="#303946", width=1)
+            self.canvas.create_line(
+                x + 26, y + 178, x + width - 26, y + 178, fill="#303946", width=1
+            )
             self._draw_hint_icon(x + 30, y + 213)
             self.canvas.create_text(
                 x + 72,
@@ -1884,11 +1907,11 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 14),
             )
 
-        def _draw_risk_summary_card(self, x: int, y: int) -> None:
+        def _draw_risk_summary_card(self, x: int, y: int, width: int) -> None:
             self._rounded_rect(
-                x, y, x + 282, y + 266, 14, fill=self.card_bg, outline=self.card_border
+                x, y, x + width, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
-            self._draw_shield_watermark(x + 215, y + 154)
+            self._draw_shield_watermark(x + width - 67, y + 154)
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=self.pending, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
@@ -1905,7 +1928,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=MOCK_RISK_SUMMARY.text,
                 fill=self.pending_text,
                 font=(self.ui_font, 17, "bold"),
-                max_width=210,
+                max_width=width - 52,
             )
             self._draw_text_line(
                 x + 26,
@@ -1913,7 +1936,7 @@ def run(parent_pid: int | None = None) -> None:
                 text=MOCK_RISK_SUMMARY.hint,
                 fill=self.muted,
                 font=(self.ui_font, 15),
-                max_width=210,
+                max_width=width - 52,
             )
 
         def _draw_hint_icon(self, x: int, y: int) -> None:
