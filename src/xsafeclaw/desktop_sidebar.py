@@ -474,6 +474,8 @@ def run(parent_pid: int | None = None) -> None:
             self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
             self._collapsed_logo_source: tk.PhotoImage | None = None
             self._collapsed_logo_image: tk.PhotoImage | None = None
+            self._page_logo_source: tk.PhotoImage | None = None
+            self._page_logo_image: tk.PhotoImage | None = None
             self.parent_pid = parent_pid
 
             self.root.configure(bg=self.transparent)
@@ -825,6 +827,45 @@ def run(parent_pid: int | None = None) -> None:
                 self._collapsed_logo_source = None
                 self._collapsed_logo_image = None
             return self._collapsed_logo_image
+
+        def _get_page_logo_image(self) -> tk.PhotoImage | None:
+            if self._page_logo_image is not None:
+                return self._page_logo_image
+            logo_path = get_xsafeclaw_logo_path()
+            if logo_path is None:
+                return None
+            try:
+                source = tk.PhotoImage(file=str(logo_path))
+                crop_left, crop_top, crop_right, crop_bottom = get_collapsed_logo_crop_box(
+                    source.width(),
+                    source.height(),
+                )
+                crop_width = crop_right - crop_left
+                crop_height = crop_bottom - crop_top
+                cropped = tk.PhotoImage(width=crop_width, height=crop_height)
+                cropped.tk.call(
+                    cropped,
+                    "copy",
+                    source,
+                    "-from",
+                    crop_left,
+                    crop_top,
+                    crop_right,
+                    crop_bottom,
+                    "-to",
+                    0,
+                    0,
+                )
+                self._page_logo_source = source
+                subsample_factor = get_collapsed_logo_subsample_factor(
+                    max(crop_width, crop_height),
+                    target_size=40,
+                )
+                self._page_logo_image = cropped.subsample(subsample_factor, subsample_factor)
+            except tk.TclError:
+                self._page_logo_source = None
+                self._page_logo_image = None
+            return self._page_logo_image
 
         def _draw_pet(self, cx: int, cy: int) -> None:
             self._rounded_rect(
@@ -1423,23 +1464,10 @@ def run(parent_pid: int | None = None) -> None:
                 outline=self.card_border,
                 width=1,
             )
-            cx = x + 28
-            cy = y + 28
-            points = [
-                cx,
-                cy - 18,
-                cx + 17,
-                cy - 10,
-                cx + 14,
-                cy + 12,
-                cx,
-                cy + 21,
-                cx - 14,
-                cy + 12,
-                cx - 17,
-                cy - 10,
-            ]
-            self.canvas.create_line(*points, fill=self.text, width=3, smooth=True)
+            logo_image = self._get_page_logo_image()
+            if logo_image is not None:
+                self.canvas.create_image(x + 28, y + 28, image=logo_image, anchor="center")
+
 
         def _draw_collapse_button(self, x: int, y: int, key: str = "collapse") -> None:
             if self._focused_key == key:
