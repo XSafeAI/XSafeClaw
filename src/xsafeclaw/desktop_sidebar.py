@@ -475,6 +475,10 @@ def run(parent_pid: int | None = None) -> None:
             self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
             self.cost_limit_enabled = True
             self.daily_cost_limit = "12"
+            self._daily_cost_limit_var = tk.StringVar(value=self.daily_cost_limit)
+            self._daily_cost_limit_var.trace_add("write", self._handle_daily_cost_limit_change)
+            self._cost_limit_entry: tk.Entry | None = None
+            self._cost_limit_entry_geometry: tuple[int, int, int, int] | None = None
             self.approval_mode: ApprovalMode = "smart"
             self._collapsed_logo_source: tk.PhotoImage | None = None
             self._collapsed_logo_image: tk.PhotoImage | None = None
@@ -542,9 +546,11 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.configure(width=width, height=self.window_height)
 
         def _draw(self) -> None:
+            self._destroy_cost_limit_entry()
             self.canvas.delete("all")
             self._hitboxes = []
             self._focus_order = []
+            self._cost_limit_entry_geometry = None
             self._draw_collapsed_sidebar()
             self.canvas.addtag_all("collapsed")
             if self.expanded:
@@ -553,6 +559,8 @@ def run(parent_pid: int | None = None) -> None:
                 for item in set(self.canvas.find_all()) - before_items:
                     self.canvas.addtag_withtag("expanded", item)
             self._scale_scene()
+            if self.expanded and self.active_panel == "settings":
+                self._mount_cost_limit_entry()
 
         @property
         def _collapsed_scale_x(self) -> float:
@@ -1103,15 +1111,22 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 26, "bold"),
             )
 
-            self._draw_text_line(
-                content_x + 50,
-                top + 154,
-                text="启用成本上限",
+            limit_label = "启用成本上限"
+            limit_label_font = (self.ui_font, 20)
+            limit_label_x = content_x + 50
+            limit_row_center_y = top + 169
+            self.canvas.create_text(
+                limit_label_x,
+                limit_row_center_y,
+                anchor="w",
+                text=limit_label,
                 fill=self.text,
-                font=(self.ui_font, 20),
-                max_width=180,
+                font=limit_label_font,
             )
-            self._draw_cost_limit_switch(content_x + 228, top + 150)
+            limit_label_width = tkfont.Font(root=self.root, font=limit_label_font).measure(
+                limit_label
+            )
+            self._draw_cost_limit_switch(limit_label_x + limit_label_width + 24, top + 150)
 
             divider_x = content_x + content_width // 2 - 14
             self.canvas.create_line(
@@ -1152,13 +1167,11 @@ def run(parent_pid: int | None = None) -> None:
                 fill="#3A4654",
                 width=1,
             )
-            self.canvas.create_text(
-                input_x + 22,
-                top + 170,
-                anchor="nw",
-                text=self.daily_cost_limit,
-                fill=self.text,
-                font=(self.ui_font, 24, "bold"),
+            self._cost_limit_entry_geometry = (
+                input_x + 4,
+                top + 155,
+                input_w - unit_w - 8,
+                56,
             )
             self.canvas.create_text(
                 input_x + input_w - unit_w // 2,
@@ -1204,6 +1217,56 @@ def run(parent_pid: int | None = None) -> None:
                 width=1,
             )
             self._add_hitbox(key, x - 6, y - 6, x + 86, y + 46)
+
+        def _validate_daily_cost_limit(self, proposed: str) -> bool:
+            return proposed.isdigit() or proposed == ""
+
+        def _handle_daily_cost_limit_change(self, *_args: object) -> None:
+            self.daily_cost_limit = self._daily_cost_limit_var.get()
+
+        def _handle_daily_cost_limit_focus_out(self, _event: tk.Event) -> None:
+            if not self._daily_cost_limit_var.get():
+                self._daily_cost_limit_var.set("12")
+
+        def _destroy_cost_limit_entry(self) -> None:
+            if self._cost_limit_entry is None:
+                return
+            self._cost_limit_entry.destroy()
+            self._cost_limit_entry = None
+
+        def _mount_cost_limit_entry(self) -> None:
+            if self._cost_limit_entry_geometry is None:
+                return
+            design_x, design_y, design_width, design_height = self._cost_limit_entry_geometry
+            x = self._window_x(design_x)
+            y = self._window_y(design_y)
+            width = self._window_x(design_x + design_width) - x
+            height = self._window_y(design_y + design_height) - y
+            font_size = max(1, int(round(24 * self._font_scale)))
+            validate_command = (self.root.register(self._validate_daily_cost_limit), "%P")
+            self._cost_limit_entry = tk.Entry(
+                self.canvas,
+                textvariable=self._daily_cost_limit_var,
+                justify="center",
+                validate="key",
+                validatecommand=validate_command,
+                bg="#111922",
+                fg=self.text,
+                insertbackground=self.text,
+                disabledbackground="#111922",
+                disabledforeground=self.text,
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+                font=(self.ui_font, font_size, "bold"),
+            )
+            self._cost_limit_entry.bind("<FocusOut>", self._handle_daily_cost_limit_focus_out)
+            self._cost_limit_entry.place(
+                x=x,
+                y=y,
+                width=max(24, width),
+                height=max(18, height),
+            )
 
         def _draw_approval_mode_section(self, x: int) -> None:
             content_x = x + 32
@@ -1289,7 +1352,13 @@ def run(parent_pid: int | None = None) -> None:
             if self._focused_key == key:
                 outline = self.focus
             self._rounded_rect(x, y, x + width, y + height, 12, fill=fill, outline=outline, width=1)
-            circle_x = x + width // 2 - 62
+            dot_size = 24
+            gap = 18
+            font = (self.ui_font, 20, "bold")
+            text_width = tkfont.Font(root=self.root, font=font).measure(label)
+            group_width = dot_size + gap + text_width
+            group_left = x + (width - group_width) // 2
+            circle_x = group_left + dot_size // 2
             circle_y = y + height // 2
             self.canvas.create_oval(
                 circle_x - 12,
@@ -1310,11 +1379,12 @@ def run(parent_pid: int | None = None) -> None:
                     outline="",
                 )
             self.canvas.create_text(
-                circle_x + 56,
+                group_left + dot_size + gap,
                 circle_y,
+                anchor="w",
                 text=label,
                 fill=self.text,
-                font=(self.ui_font, 20, "bold"),
+                font=font,
             )
             self._add_hitbox(key, x, y, x + width, y + height)
 
