@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -499,12 +500,15 @@ def run(parent_pid: int | None = None) -> None:
             self._focused_key: str | None = None
             self.agent_detail_app: Literal["Nanobot", "OpenClaw", "Hermes"] | None = None
             self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
-            self.cost_limit_enabled = True
-            self.daily_cost_limit = "12"
-            self._daily_cost_limit_var = tk.StringVar(value=self.daily_cost_limit)
-            self._daily_cost_limit_var.trace_add("write", self._handle_daily_cost_limit_change)
-            self._cost_limit_entry: tk.Entry | None = None
-            self._cost_limit_entry_geometry: tuple[int, int, int, int] | None = None
+            self.cost_limit_app = "OpenClaw"
+            self.cost_limit_amount = ""
+            self.cost_limit_duration = ""
+            self.cost_limit_unit = "天"
+            self._settings_widgets: list[tk.Widget] = []
+            self._cost_limit_app_select_geometry: tuple[int, int, int, int] | None = None
+            self._cost_limit_amount_entry_geometry: tuple[int, int, int, int] | None = None
+            self._cost_limit_duration_entry_geometry: tuple[int, int, int, int] | None = None
+            self._cost_limit_unit_select_geometry: tuple[int, int, int, int] | None = None
             self.approval_mode: ApprovalMode = "smart"
             self._collapsed_logo_source: tk.PhotoImage | None = None
             self._collapsed_logo_image: tk.PhotoImage | None = None
@@ -576,11 +580,14 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.configure(width=width, height=self.window_height)
 
         def _draw(self) -> None:
-            self._destroy_cost_limit_entry()
+            self._destroy_settings_widgets()
             self.canvas.delete("all")
             self._hitboxes = []
             self._focus_order = []
-            self._cost_limit_entry_geometry = None
+            self._cost_limit_app_select_geometry = None
+            self._cost_limit_amount_entry_geometry = None
+            self._cost_limit_duration_entry_geometry = None
+            self._cost_limit_unit_select_geometry = None
             self._draw_collapsed_sidebar()
             self.canvas.addtag_all("collapsed")
             if self.expanded:
@@ -590,7 +597,7 @@ def run(parent_pid: int | None = None) -> None:
                     self.canvas.addtag_withtag("expanded", item)
             self._scale_scene()
             if self.expanded and self.active_panel == "settings":
-                self._mount_cost_limit_entry()
+                self._mount_cost_limit_controls()
 
         @property
         def _collapsed_scale_x(self) -> float:
@@ -1195,22 +1202,25 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 26, "bold"),
             )
 
-            limit_label = "启用成本上限"
-            limit_label_font = (self.ui_font, 20)
-            limit_label_x = content_x + 50
-            limit_row_center_y = top + 169
-            self.canvas.create_text(
-                limit_label_x,
-                limit_row_center_y,
-                anchor="w",
-                text=limit_label,
-                fill=self.text,
-                font=limit_label_font,
+            self._draw_text_line(
+                content_x + 50,
+                top + 126,
+                text="选择应用",
+                fill=self.muted,
+                font=(self.ui_font, 16),
+                max_width=220,
             )
-            limit_label_width = tkfont.Font(root=self.root, font=limit_label_font).measure(
-                limit_label
+            self._rounded_rect(
+                content_x + 50,
+                top + 156,
+                content_x + 270,
+                top + 214,
+                9,
+                fill="#111922",
+                outline="#46515E",
+                width=1,
             )
-            self._draw_cost_limit_switch(limit_label_x + limit_label_width + 24, top + 150)
+            self._cost_limit_app_select_geometry = (content_x + 54, top + 160, 212, 50)
 
             divider_x = content_x + content_width // 2 - 14
             self.canvas.create_line(
@@ -1223,55 +1233,78 @@ def run(parent_pid: int | None = None) -> None:
             )
 
             input_x = divider_x + 44
-            input_w = content_x + content_width - input_x - 70
-            unit_w = 118
             self._draw_text_line(
                 input_x,
                 top + 108,
-                text="每日成本上限",
+                text="成本限制",
                 fill=self.text,
                 font=(self.ui_font, 18),
-                max_width=input_w,
+                max_width=260,
             )
+            amount_w = 70
+            duration_w = 58
+            unit_w = 82
+            gap = 8
+            row_y = top + 151
             self._rounded_rect(
                 input_x,
-                top + 151,
-                input_x + input_w,
-                top + 215,
+                row_y,
+                input_x + amount_w,
+                row_y + 64,
                 9,
                 fill="#111922",
                 outline="#46515E",
                 width=1,
             )
-            self.canvas.create_line(
-                input_x + input_w - unit_w,
-                top + 151,
-                input_x + input_w - unit_w,
-                top + 215,
-                fill="#3A4654",
-                width=1,
-            )
-            self._cost_limit_entry_geometry = (
+            self._cost_limit_amount_entry_geometry = (
                 input_x + 4,
-                top + 155,
-                input_w - unit_w - 8,
+                row_y + 4,
+                amount_w - 8,
                 56,
             )
+            usd_x = input_x + amount_w + gap + 19
             self.canvas.create_text(
-                input_x + input_w - unit_w // 2,
-                top + 183,
-                text="USD / 天",
+                usd_x,
+                row_y + 32,
+                text="USD",
+                fill=self.muted,
+                font=(self.ui_font, 17),
+            )
+            duration_x = input_x + amount_w + gap + 38 + gap
+            self._rounded_rect(
+                duration_x,
+                row_y,
+                duration_x + duration_w,
+                row_y + 64,
+                9,
+                fill="#111922",
+                outline="#46515E",
+                width=1,
+            )
+            self._cost_limit_duration_entry_geometry = (
+                duration_x + 4,
+                row_y + 4,
+                duration_w - 8,
+                56,
+            )
+            unit_x = duration_x + duration_w + gap
+            self._rounded_rect(
+                unit_x,
+                row_y,
+                unit_x + unit_w,
+                row_y + 64,
+                9,
+                fill="#111922",
+                outline="#46515E",
+                width=1,
+            )
+            self._cost_limit_unit_select_geometry = (unit_x + 4, row_y + 4, unit_w - 8, 56)
+            self.canvas.create_text(
+                unit_x + unit_w - 14,
+                row_y + 32,
+                text="▾",
                 fill=self.muted,
                 font=(self.ui_font, 18),
-            )
-
-            self._draw_text_line(
-                content_x + 50,
-                top + 232,
-                text="开启后，系统以输入框中的数字作为单日成本上限。",
-                fill=self.body_text,
-                font=(self.ui_font, 17),
-                max_width=content_width - 100,
             )
 
         def _draw_cost_icon(self, cx: int, cy: int) -> None:
@@ -1283,74 +1316,181 @@ def run(parent_pid: int | None = None) -> None:
                 cx, cy + 1, text="$", fill="#D8FFE4", font=(self.ui_font, 30, "bold")
             )
 
-        def _draw_cost_limit_switch(self, x: int, y: int) -> None:
-            key = "settings_toggle_cost"
-            if self._focused_key == key:
-                self._rounded_rect(x - 6, y - 6, x + 86, y + 46, 22, fill="", outline=self.focus)
-            fill = "#0A84FF" if self.cost_limit_enabled else "#2A333D"
-            outline = "#2F9DFF" if self.cost_limit_enabled else "#45515D"
-            self._rounded_rect(x, y, x + 74, y + 38, 19, fill=fill, outline=outline, width=1)
-            knob_left = x + 39 if self.cost_limit_enabled else x + 3
-            self.canvas.create_oval(
-                knob_left,
-                y + 3,
-                knob_left + 32,
-                y + 35,
-                fill="#F6F8FB",
-                outline="#D8DEE6",
-                width=1,
-            )
-            self._add_hitbox(key, x - 6, y - 6, x + 86, y + 46)
-
-        def _validate_daily_cost_limit(self, proposed: str) -> bool:
+        def _validate_numeric_settings_input(self, proposed: str) -> bool:
             return proposed.isdigit() or proposed == ""
 
-        def _handle_daily_cost_limit_change(self, *_args: object) -> None:
-            self.daily_cost_limit = self._daily_cost_limit_var.get()
-
-        def _handle_daily_cost_limit_focus_out(self, _event: tk.Event) -> None:
-            if not self._daily_cost_limit_var.get():
-                self._daily_cost_limit_var.set("12")
-
-        def _destroy_cost_limit_entry(self) -> None:
-            if self._cost_limit_entry is None:
-                return
-            self._cost_limit_entry.destroy()
-            self._cost_limit_entry = None
-
-        def _mount_cost_limit_entry(self) -> None:
-            if self._cost_limit_entry_geometry is None:
-                return
-            design_x, design_y, design_width, design_height = self._cost_limit_entry_geometry
+        def _settings_widget_geometry(
+            self, geometry: tuple[int, int, int, int]
+        ) -> tuple[int, int, int, int]:
+            design_x, design_y, design_width, design_height = geometry
             x = self._window_x(design_x)
             y = self._window_y(design_y)
             width = self._window_x(design_x + design_width) - x
             height = self._window_y(design_y + design_height) - y
+            return x, y, max(24, width), max(18, height)
+
+        def _destroy_settings_widgets(self) -> None:
+            for widget in self._settings_widgets:
+                widget.destroy()
+            self._settings_widgets = []
+
+        def _mount_cost_limit_controls(self) -> None:
+            if self._cost_limit_app_select_geometry is not None:
+                self._mount_settings_select(
+                    self._cost_limit_app_select_geometry,
+                    self.cost_limit_app,
+                    ("OpenClaw", "Hermes", "Nanobot"),
+                    self._set_cost_limit_app,
+                )
+            if self._cost_limit_amount_entry_geometry is not None:
+                self._mount_settings_entry(
+                    self._cost_limit_amount_entry_geometry,
+                    self.cost_limit_amount,
+                    "金额",
+                    self._set_cost_limit_amount,
+                )
+            if self._cost_limit_duration_entry_geometry is not None:
+                self._mount_settings_entry(
+                    self._cost_limit_duration_entry_geometry,
+                    self.cost_limit_duration,
+                    "时长",
+                    self._set_cost_limit_duration,
+                )
+            if self._cost_limit_unit_select_geometry is not None:
+                self._mount_settings_select(
+                    self._cost_limit_unit_select_geometry,
+                    self.cost_limit_unit,
+                    ("分钟", "小时", "天"),
+                    self._set_cost_limit_unit,
+                )
+
+        def _mount_settings_entry(
+            self,
+            geometry: tuple[int, int, int, int],
+            value: str,
+            placeholder: str,
+            setter: Callable[[str], None],
+        ) -> None:
+            x, y, width, height = self._settings_widget_geometry(geometry)
             font_size = max(1, int(round(24 * self._font_scale)))
-            validate_command = (self.root.register(self._validate_daily_cost_limit), "%P")
-            self._cost_limit_entry = tk.Entry(
+            placeholder_font_size = max(1, int(round(15 * self._font_scale)))
+            validate_command = (self.root.register(self._validate_numeric_settings_input), "%P")
+            entry = tk.Entry(
                 self.canvas,
-                textvariable=self._daily_cost_limit_var,
                 justify="center",
-                validate="key",
-                validatecommand=validate_command,
                 bg="#111922",
-                fg=self.text,
+                fg=self.text if value else self.weak,
                 insertbackground=self.text,
                 disabledbackground="#111922",
                 disabledforeground=self.text,
                 relief="flat",
                 borderwidth=0,
                 highlightthickness=0,
+                font=(
+                    self.ui_font,
+                    font_size if value else placeholder_font_size,
+                    "bold" if value else "normal",
+                ),
+            )
+            state = {"placeholder": not value}
+            entry.insert(0, value or placeholder)
+            entry.configure(validate="key", validatecommand=validate_command)
+
+            def clear_placeholder() -> None:
+                if not state["placeholder"]:
+                    return
+                entry.configure(fg=self.text, font=(self.ui_font, font_size, "bold"))
+                entry.delete(0, "end")
+                state["placeholder"] = False
+
+            def show_placeholder() -> None:
+                entry.configure(validate="none")
+                entry.configure(fg=self.weak, font=(self.ui_font, placeholder_font_size))
+                entry.delete(0, "end")
+                entry.insert(0, placeholder)
+                entry.configure(validate="key", validatecommand=validate_command)
+                state["placeholder"] = True
+
+            def handle_focus_in(_event: tk.Event) -> None:
+                clear_placeholder()
+
+            def handle_key_release(_event: tk.Event) -> None:
+                if not state["placeholder"]:
+                    setter(entry.get())
+
+            def handle_focus_out(_event: tk.Event) -> None:
+                if entry.get():
+                    setter(entry.get())
+                    return
+                setter("")
+                show_placeholder()
+
+            entry.bind("<FocusIn>", handle_focus_in)
+            entry.bind("<KeyRelease>", handle_key_release)
+            entry.bind("<FocusOut>", handle_focus_out)
+            entry.place(x=x, y=y, width=width, height=height)
+            self._settings_widgets.append(entry)
+
+        def _mount_settings_select(
+            self,
+            geometry: tuple[int, int, int, int],
+            value: str,
+            options: tuple[str, ...],
+            setter: Callable[[str], None],
+        ) -> None:
+            x, y, width, height = self._settings_widget_geometry(geometry)
+            font_size = max(1, int(round(17 * self._font_scale)))
+            button = tk.Menubutton(
+                self.canvas,
+                text=f"{value}  ▾",
+                bg="#111922",
+                fg=self.text,
+                activebackground="#172231",
+                activeforeground=self.text,
+                relief="flat",
+                borderwidth=0,
+                highlightthickness=0,
+                anchor="center",
                 font=(self.ui_font, font_size, "bold"),
             )
-            self._cost_limit_entry.bind("<FocusOut>", self._handle_daily_cost_limit_focus_out)
-            self._cost_limit_entry.place(
-                x=x,
-                y=y,
-                width=max(24, width),
-                height=max(18, height),
+            menu = tk.Menu(
+                button,
+                tearoff=False,
+                bg="#111922",
+                fg=self.text,
+                activebackground="#172231",
+                activeforeground=self.text,
+                borderwidth=0,
+                font=(self.ui_font, font_size),
             )
+            for option in options:
+                menu.add_command(
+                    label=option,
+                    command=lambda selected=option: self._select_settings_option(
+                        button, selected, setter
+                    ),
+                )
+            button.configure(menu=menu)
+            button.place(x=x, y=y, width=width, height=height)
+            self._settings_widgets.append(button)
+
+        def _select_settings_option(
+            self, button: tk.Menubutton, selected: str, setter: Callable[[str], None]
+        ) -> None:
+            setter(selected)
+            button.configure(text=f"{selected}  ▾")
+
+        def _set_cost_limit_app(self, value: str) -> None:
+            self.cost_limit_app = value
+
+        def _set_cost_limit_amount(self, value: str) -> None:
+            self.cost_limit_amount = value
+
+        def _set_cost_limit_duration(self, value: str) -> None:
+            self.cost_limit_duration = value
+
+        def _set_cost_limit_unit(self, value: str) -> None:
+            self.cost_limit_unit = value
 
         def _draw_approval_mode_section(self, x: int) -> None:
             content_x = x + 32
@@ -2535,12 +2675,6 @@ def run(parent_pid: int | None = None) -> None:
             if key.startswith("risk_detail:"):
                 card_id = key.split(":", 1)[1]
                 print(f"[XSafeClaw Mock] open risk detail: {card_id}")
-                return
-            if key == "settings_toggle_cost":
-                self.cost_limit_enabled = not self.cost_limit_enabled
-                self._focused_key = key
-                print(f"[XSafeClaw Mock] cost limit enabled: {self.cost_limit_enabled}")
-                self._draw()
                 return
             if key.startswith("settings_approval:"):
                 mode = key.split(":", 1)[1]
