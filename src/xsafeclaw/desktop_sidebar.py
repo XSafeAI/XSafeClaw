@@ -23,6 +23,7 @@ AgentInstanceRuntime = Literal["running", "waiting", "idle"]
 RiskLevel = Literal["high", "medium", "low"]
 ApprovalAction = Literal["allow_once", "always_allow_session", "block"]
 RiskSortMode = Literal["risk", "time"]
+ApprovalMode = Literal["all", "smart"]
 
 
 @dataclass(frozen=True)
@@ -472,6 +473,9 @@ def run(parent_pid: int | None = None) -> None:
             self._focused_key: str | None = None
             self.agent_detail_app: Literal["Nanobot", "OpenClaw", "Hermes"] | None = None
             self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
+            self.cost_limit_enabled = True
+            self.daily_cost_limit = "12"
+            self.approval_mode: ApprovalMode = "smart"
             self._collapsed_logo_source: tk.PhotoImage | None = None
             self._collapsed_logo_image: tk.PhotoImage | None = None
             self._page_logo_source: tk.PhotoImage | None = None
@@ -961,6 +965,17 @@ def run(parent_pid: int | None = None) -> None:
             )
 
         def _draw_settings(self, cx: int, cy: int) -> None:
+            if self.active_panel == "settings":
+                self._rounded_rect(
+                    cx - 31,
+                    cy - 61,
+                    cx + 31,
+                    cy + 61,
+                    8,
+                    fill="#0D1B2A",
+                    outline="#0A84FF",
+                    width=1,
+                )
             self.canvas.create_oval(cx - 18, cy - 18, cx + 18, cy + 18, outline="#C5CAD1", width=3)
             self.canvas.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, outline="#C5CAD1", width=3)
             for dx, dy in ((0, -23), (0, 23), (-23, 0), (23, 0)):
@@ -978,6 +993,9 @@ def run(parent_pid: int | None = None) -> None:
                 return
             if self.active_panel == "riskApproval":
                 self._draw_risk_approval_panel(x)
+                return
+            if self.active_panel == "settings":
+                self._draw_settings_panel(x)
                 return
 
             self._rounded_rect(
@@ -1027,6 +1045,278 @@ def run(parent_pid: int | None = None) -> None:
             if self.active_panel == "riskApproval":
                 return [self._risk_tooltip_text(), "默认展示第一条待处理风险。"]
             return ["设置页前端占位。", "本阶段不接入真实设置功能。"]
+
+        def _draw_settings_panel(self, x: int) -> None:
+            self._rounded_rect(
+                x,
+                0,
+                x + self.expanded_width,
+                self.height,
+                18,
+                fill=self.panel_bg,
+                outline=self.border,
+                width=1,
+            )
+            self.canvas.create_text(
+                x + 32,
+                34,
+                anchor="nw",
+                text="设置",
+                fill=self.text,
+                font=(self.ui_font, 30, "bold"),
+            )
+            self._draw_text_line(
+                x + 32,
+                88,
+                text="安全策略与成本控制",
+                fill=self.muted,
+                font=(self.ui_font, 17),
+                max_width=420,
+            )
+            self._draw_collapse_button(x + self.expanded_width - 72, 38)
+            self._draw_cost_limit_section(x)
+            self._draw_approval_mode_section(x)
+
+        def _draw_cost_limit_section(self, x: int) -> None:
+            content_x = x + 32
+            content_width = self.expanded_width - 64
+            top = 138
+            bottom = 424
+            self._rounded_rect(
+                content_x,
+                top,
+                content_x + content_width,
+                bottom,
+                14,
+                fill=self.card_bg,
+                outline=self.card_border,
+                width=1,
+            )
+
+            self._draw_cost_icon(content_x + 48, top + 60)
+            self.canvas.create_text(
+                content_x + 108,
+                top + 46,
+                anchor="nw",
+                text="成本上限",
+                fill=self.text,
+                font=(self.ui_font, 26, "bold"),
+            )
+
+            self._draw_text_line(
+                content_x + 50,
+                top + 154,
+                text="启用成本上限",
+                fill=self.text,
+                font=(self.ui_font, 20),
+                max_width=180,
+            )
+            self._draw_cost_limit_switch(content_x + 228, top + 150)
+
+            divider_x = content_x + content_width // 2 - 14
+            self.canvas.create_line(
+                divider_x,
+                top + 106,
+                divider_x,
+                top + 206,
+                fill="#32404C",
+                width=1,
+            )
+
+            input_x = divider_x + 44
+            input_w = content_x + content_width - input_x - 70
+            unit_w = 118
+            self._draw_text_line(
+                input_x,
+                top + 108,
+                text="每日成本上限",
+                fill=self.text,
+                font=(self.ui_font, 18),
+                max_width=input_w,
+            )
+            self._rounded_rect(
+                input_x,
+                top + 151,
+                input_x + input_w,
+                top + 215,
+                9,
+                fill="#111922",
+                outline="#46515E",
+                width=1,
+            )
+            self.canvas.create_line(
+                input_x + input_w - unit_w,
+                top + 151,
+                input_x + input_w - unit_w,
+                top + 215,
+                fill="#3A4654",
+                width=1,
+            )
+            self.canvas.create_text(
+                input_x + 22,
+                top + 170,
+                anchor="nw",
+                text=self.daily_cost_limit,
+                fill=self.text,
+                font=(self.ui_font, 24, "bold"),
+            )
+            self.canvas.create_text(
+                input_x + input_w - unit_w // 2,
+                top + 183,
+                text="USD / 天",
+                fill=self.muted,
+                font=(self.ui_font, 18),
+            )
+
+            self._draw_text_line(
+                content_x + 50,
+                top + 232,
+                text="开启后，系统以输入框中的数字作为单日成本上限。",
+                fill=self.body_text,
+                font=(self.ui_font, 17),
+                max_width=content_width - 100,
+            )
+
+        def _draw_cost_icon(self, cx: int, cy: int) -> None:
+            self.canvas.create_oval(cx - 36, cy - 36, cx + 36, cy + 36, fill="#0D5C36", outline="")
+            self.canvas.create_oval(
+                cx - 24, cy - 24, cx + 24, cy + 24, fill="#20A957", outline="#36C275", width=1
+            )
+            self.canvas.create_text(
+                cx, cy + 1, text="$", fill="#D8FFE4", font=(self.ui_font, 30, "bold")
+            )
+
+        def _draw_cost_limit_switch(self, x: int, y: int) -> None:
+            key = "settings_toggle_cost"
+            if self._focused_key == key:
+                self._rounded_rect(x - 6, y - 6, x + 86, y + 46, 22, fill="", outline=self.focus)
+            fill = "#0A84FF" if self.cost_limit_enabled else "#2A333D"
+            outline = "#2F9DFF" if self.cost_limit_enabled else "#45515D"
+            self._rounded_rect(x, y, x + 74, y + 38, 19, fill=fill, outline=outline, width=1)
+            knob_left = x + 39 if self.cost_limit_enabled else x + 3
+            self.canvas.create_oval(
+                knob_left,
+                y + 3,
+                knob_left + 32,
+                y + 35,
+                fill="#F6F8FB",
+                outline="#D8DEE6",
+                width=1,
+            )
+            self._add_hitbox(key, x - 6, y - 6, x + 86, y + 46)
+
+        def _draw_approval_mode_section(self, x: int) -> None:
+            content_x = x + 32
+            content_width = self.expanded_width - 64
+            top = 452
+            bottom = 740
+            self._rounded_rect(
+                content_x,
+                top,
+                content_x + content_width,
+                bottom,
+                14,
+                fill=self.card_bg,
+                outline=self.card_border,
+                width=1,
+            )
+
+            self._draw_settings_shield_badge(content_x + 48, top + 60)
+            self.canvas.create_text(
+                content_x + 108,
+                top + 46,
+                anchor="nw",
+                text="审批模式",
+                fill=self.text,
+                font=(self.ui_font, 26, "bold"),
+            )
+
+            option_gap = 30
+            option_x = content_x + 32
+            option_y = top + 124
+            option_area_width = content_width - 64
+            option_width = (option_area_width - option_gap) // 2
+            self._draw_approval_mode_option(
+                "settings_approval:all",
+                "全部拦截",
+                option_x,
+                option_y,
+                option_width,
+                116,
+                self.approval_mode == "all",
+            )
+            self._draw_approval_mode_option(
+                "settings_approval:smart",
+                "智能拦截",
+                option_x + option_width + option_gap,
+                option_y,
+                option_width,
+                116,
+                self.approval_mode == "smart",
+            )
+
+        def _draw_settings_shield_badge(self, cx: int, cy: int) -> None:
+            self.canvas.create_oval(cx - 36, cy - 36, cx + 36, cy + 36, fill="#0B3768", outline="")
+            points = [
+                cx,
+                cy - 25,
+                cx + 20,
+                cy - 16,
+                cx + 17,
+                cy + 13,
+                cx,
+                cy + 28,
+                cx - 17,
+                cy + 13,
+                cx - 20,
+                cy - 16,
+            ]
+            self.canvas.create_line(*points, fill="#5FD0FF", width=5, smooth=True)
+            self.canvas.create_line(cx, cy - 16, cx, cy + 15, fill="#6EDBFF", width=2)
+
+        def _draw_approval_mode_option(
+            self,
+            key: str,
+            label: str,
+            x: int,
+            y: int,
+            width: int,
+            height: int,
+            selected: bool,
+        ) -> None:
+            outline = "#0A84FF" if selected else "#46515E"
+            fill = "#102033" if selected else "#111922"
+            if self._focused_key == key:
+                outline = self.focus
+            self._rounded_rect(x, y, x + width, y + height, 12, fill=fill, outline=outline, width=1)
+            circle_x = x + width // 2 - 62
+            circle_y = y + height // 2
+            self.canvas.create_oval(
+                circle_x - 12,
+                circle_y - 12,
+                circle_x + 12,
+                circle_y + 12,
+                fill="",
+                outline="#0A84FF" if selected else "#A8B0BA",
+                width=3,
+            )
+            if selected:
+                self.canvas.create_oval(
+                    circle_x - 5,
+                    circle_y - 5,
+                    circle_x + 5,
+                    circle_y + 5,
+                    fill="#0A84FF",
+                    outline="",
+                )
+            self.canvas.create_text(
+                circle_x + 56,
+                circle_y,
+                text=label,
+                fill=self.text,
+                font=(self.ui_font, 20, "bold"),
+            )
+            self._add_hitbox(key, x, y, x + width, y + height)
 
         def _draw_risk_approval_panel(self, x: int) -> None:
             self._rounded_rect(
@@ -2091,6 +2381,20 @@ def run(parent_pid: int | None = None) -> None:
             if key.startswith("risk_detail:"):
                 card_id = key.split(":", 1)[1]
                 print(f"[XSafeClaw Mock] open risk detail: {card_id}")
+                return
+            if key == "settings_toggle_cost":
+                self.cost_limit_enabled = not self.cost_limit_enabled
+                self._focused_key = key
+                print(f"[XSafeClaw Mock] cost limit enabled: {self.cost_limit_enabled}")
+                self._draw()
+                return
+            if key.startswith("settings_approval:"):
+                mode = key.split(":", 1)[1]
+                if mode in {"all", "smart"}:
+                    self.approval_mode = mode
+                    self._focused_key = key
+                    print(f"[XSafeClaw Mock] approval mode: {mode}")
+                    self._draw()
                 return
             if key == "collapse":
                 self.expanded = False
