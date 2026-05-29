@@ -5,9 +5,11 @@ from xsafeclaw.desktop_sidebar import (
     get_collapsed_logo_crop_box,
     get_collapsed_logo_subsample_factor,
     get_collapsed_panel_for_design_y,
+    get_collapsed_risk_approval_visual_state,
     get_pending_risk_count_from_cards,
     get_risk_footer_layout,
     get_risk_sort_selector_layout,
+    get_sidebar_approval_idle_icon_path,
     get_xsafeclaw_logo_path,
     is_scalable_canvas_width_item,
     normalize_api_base,
@@ -66,6 +68,19 @@ def test_collapsed_top_logo_region_is_static_and_not_a_panel_button() -> None:
     assert get_collapsed_panel_for_design_y(70) is None
     assert get_collapsed_panel_for_design_y(139) is None
     assert get_collapsed_panel_for_design_y(140) == "agents"
+
+
+def test_sidebar_approval_idle_icon_path_uses_project_static_asset() -> None:
+    icon_path = get_sidebar_approval_idle_icon_path()
+    assert icon_path is not None
+    assert icon_path.name == "sidebar_approval_idle.png"
+    assert icon_path.parent.name == "static"
+
+
+def test_collapsed_risk_approval_visual_state_keeps_idle_button_visible() -> None:
+    assert get_collapsed_risk_approval_visual_state(0) == "idle_icon"
+    assert get_collapsed_risk_approval_visual_state(1) == "badge"
+    assert get_collapsed_risk_approval_visual_state(12) == "badge"
 
 
 def test_xsafeclaw_logo_path_uses_project_logo_asset() -> None:

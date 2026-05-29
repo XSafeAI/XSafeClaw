@@ -299,6 +299,10 @@ def get_risk_badge_text(count: int) -> str:
     return str(count)
 
 
+def get_collapsed_risk_approval_visual_state(count: int) -> Literal["idle_icon", "badge"]:
+    return "badge" if get_risk_badge_text(count) else "idle_icon"
+
+
 def get_pending_risk_count_from_cards(
     cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
 ) -> int:
@@ -325,6 +329,17 @@ def get_sidebar_setting_icon_path() -> Path | None:
         project_root / "src" / "xsafeclaw" / "static" / "sidebar_setting.png",
         project_root / "src" / "xsafeclaw" / "static" / "assets" / "sidebar" / "setting.png",
         project_root / "assets" / "sidebar" / "setting.png",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def get_sidebar_approval_idle_icon_path() -> Path | None:
+    package_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parents[2]
+    candidates = (
+        package_root / "static" / "sidebar_approval_idle.png",
+        project_root / "src" / "xsafeclaw" / "static" / "sidebar_approval_idle.png",
+        project_root / "assets" / "sidebar" / "approval.png",
     )
     return next((path for path in candidates if path.exists()), None)
 
@@ -736,6 +751,8 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._page_logo_image: tk.PhotoImage | None = None
             self._settings_icon_source: tk.PhotoImage | None = None
             self._settings_icon_image: tk.PhotoImage | None = None
+            self._approval_idle_icon_source: tk.PhotoImage | None = None
+            self._approval_idle_icon_image: tk.PhotoImage | None = None
             self._agent_icon_sources: dict[AgentPetState, tk.PhotoImage] = {}
             self._agent_icon_images: dict[AgentPetState, tk.PhotoImage] = {}
             self.parent_pid = parent_pid
@@ -1433,6 +1450,28 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 self._settings_icon_image = None
             return self._settings_icon_image
 
+        def _get_approval_idle_icon_image(self) -> tk.PhotoImage | None:
+            if self._approval_idle_icon_image is not None:
+                return self._approval_idle_icon_image
+            icon_path = get_sidebar_approval_idle_icon_path()
+            if icon_path is None:
+                return None
+            try:
+                source = tk.PhotoImage(file=str(icon_path))
+                self._approval_idle_icon_source = source
+                subsample_factor = get_collapsed_logo_subsample_factor(
+                    max(source.width(), source.height()),
+                    target_size=64,
+                )
+                self._approval_idle_icon_image = source.subsample(
+                    subsample_factor,
+                    subsample_factor,
+                )
+            except tk.TclError:
+                self._approval_idle_icon_source = None
+                self._approval_idle_icon_image = None
+            return self._approval_idle_icon_image
+
         def _get_agent_icon_image(self) -> tk.PhotoImage | None:
             if self.pet_state in self._agent_icon_images:
                 return self._agent_icon_images[self.pet_state]
@@ -1532,9 +1571,10 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 )
 
         def _draw_risk_badge(self, cx: int, cy: int) -> None:
-            text = get_risk_badge_text(self.pending_risk_count)
-            if not text:
+            if get_collapsed_risk_approval_visual_state(self.pending_risk_count) == "idle_icon":
+                self._draw_risk_idle_button(cx, cy)
                 return
+            text = get_risk_badge_text(self.pending_risk_count)
             self.canvas.create_oval(cx - 32, cy - 32, cx + 32, cy + 32, fill="#240B12", outline="")
             self.canvas.create_oval(
                 cx - 27, cy - 27, cx + 27, cy + 27, fill="#FF2531", outline="#111822", width=3
@@ -1553,6 +1593,45 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self.canvas.create_text(
                 cx, cy + 1, text=text, fill="#FFFFFF", font=("Segoe UI", 26, "bold")
             )
+
+        def _draw_risk_idle_button(self, cx: int, cy: int) -> None:
+            approval_icon = self._get_approval_idle_icon_image()
+            if approval_icon is not None:
+                self.canvas.create_image(cx, cy, image=approval_icon, anchor="center")
+                return
+            self._draw_risk_idle_fallback(cx, cy)
+
+        def _draw_risk_idle_fallback(self, cx: int, cy: int) -> None:
+            self.canvas.create_oval(cx - 31, cy - 31, cx + 31, cy + 31, fill="#0D1B2A", outline="#2F6FA8")
+            self.canvas.create_arc(
+                cx - 27,
+                cy - 27,
+                cx + 27,
+                cy + 27,
+                start=35,
+                extent=165,
+                style="arc",
+                outline="#58C7FF",
+                width=3,
+            )
+            shield = [
+                cx,
+                cy - 18,
+                cx + 17,
+                cy - 10,
+                cx + 15,
+                cy + 8,
+                cx,
+                cy + 20,
+                cx - 15,
+                cy + 8,
+                cx - 17,
+                cy - 10,
+                cx,
+                cy - 18,
+            ]
+            self.canvas.create_line(*shield, fill="#EAF7E7", width=3, smooth=True)
+            self.canvas.create_line(cx - 9, cy + 1, cx - 2, cy + 8, cx + 12, cy - 8, fill="#EAF7E7", width=4)
 
         def _draw_settings(self, cx: int, cy: int) -> None:
             if self.active_panel == "settings":
