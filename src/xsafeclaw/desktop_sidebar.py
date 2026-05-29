@@ -35,6 +35,7 @@ ApprovalMode = Literal["all", "smart"]
 SetupInstallState = Literal["idle", "checking", "installed", "missing", "installing", "failed"]
 
 DEFAULT_API_BASE = "http://127.0.0.1:6874/api"
+SESSION_REFRESH_INTERVAL_MS = 5000
 
 
 @dataclass(frozen=True)
@@ -237,51 +238,6 @@ MOCK_RISK_APPROVAL_CARDS: tuple[RiskApprovalCard, ...] = (
     ),
 )
 
-MOCK_SIDEBAR_SESSIONS: tuple[SidebarSessionStatus, ...] = (
-    SidebarSessionStatus(
-        id="session_nanobot_documents",
-        app_name="Nanobot",
-        display_session_id="websocket:documents-review",
-        icon_type="nanobot",
-        status="running",
-        activity_text="访问 Documents",
-        latest_message="读取 ~/Documents/XSafeClaw",
-        model_text="GPT-4.1",
-        source_text="~/.nanobot/workspace/sessions",
-        pending_risk_count=1,
-        risk_state="pending",
-    ),
-    SidebarSessionStatus(
-        id="session_nanobot_summary",
-        app_name="Nanobot",
-        display_session_id="api:project-summary",
-        icon_type="document",
-        status="running",
-        activity_text="生成项目摘要",
-        latest_message="读取项目文件索引",
-        model_text="GPT-4.1",
-        source_text="~/.nanobot/workspace/sessions",
-        pending_risk_count=0,
-        risk_state="safe",
-    ),
-    SidebarSessionStatus(
-        id="session_nanobot_cleanup",
-        app_name="Nanobot",
-        display_session_id="websocket:cleanup-check",
-        icon_type="cleaner",
-        status="waiting",
-        activity_text="等待新消息",
-        latest_message="暂无最近消息",
-        model_text="GPT-4.1",
-        source_text="~/.nanobot/workspace/sessions",
-        pending_risk_count=0,
-        risk_state="safe",
-    ),
-)
-
-DEFAULT_SELECTED_SESSION_ID = "session_nanobot_documents"
-
-
 def get_agent_pet_state(agents: tuple[AgentItem, ...]) -> AgentPetState:
     has_active_task = any(agent.status in {"working", "blocked"} for agent in agents)
     return "typing" if has_active_task else "sleeping"
@@ -401,6 +357,83 @@ def parse_sse_data_line(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _platform_for_app_name(app_name: str | None) -> SetupPlatform:
+    normalized = str(app_name or "").strip().lower()
+    if normalized == "hermes":
+        return "hermes"
+    if normalized == "nanobot":
+        return "nanobot"
+    return "openclaw"
+
+
+def _app_name_for_platform(platform: str) -> Literal["OpenClaw", "Hermes", "Nanobot"]:
+    if platform == "hermes":
+        return "Hermes"
+    if platform == "nanobot":
+        return "Nanobot"
+    return "OpenClaw"
+
+
+def _icon_type_for_platform(platform: str) -> IconType:
+    if platform == "hermes":
+        return "hermes"
+    if platform == "nanobot":
+        return "nanobot"
+    return "openclaw"
+
+
+def _coerce_session_runtime(value: str) -> SessionRuntime:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"running", "waiting", "idle"}:
+        return normalized  # type: ignore[return-value]
+    return "idle"
+
+
+def _coerce_risk_state(value: str) -> RiskState:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"safe", "pending", "blocked"}:
+        return normalized  # type: ignore[return-value]
+    return "safe"
+
+
+def sidebar_session_from_payload(
+    payload: dict[str, Any],
+    *,
+    default_app_name: Literal["OpenClaw", "Hermes", "Nanobot"],
+    default_icon_type: IconType,
+) -> SidebarSessionStatus | None:
+    session_id = str(payload.get("id") or "").strip()
+    if not session_id:
+        return None
+    app_name_raw = str(payload.get("app_name") or "").strip()
+    app_name = (
+        app_name_raw
+        if app_name_raw in {"OpenClaw", "Hermes", "Nanobot"}
+        else default_app_name
+    )
+    icon_raw = str(payload.get("icon_type") or "").strip().lower()
+    icon_type: IconType = (
+        icon_raw  # type: ignore[assignment]
+        if icon_raw in {"openclaw", "hermes", "nanobot", "document", "cleaner"}
+        else default_icon_type
+    )
+    pending_count = int(payload.get("pending_risk_count") or 0)
+    pending_count = max(0, pending_count)
+    return SidebarSessionStatus(
+        id=session_id,
+        app_name=app_name,  # type: ignore[arg-type]
+        display_session_id=str(payload.get("display_session_id") or session_id),
+        icon_type=icon_type,
+        status=_coerce_session_runtime(str(payload.get("status") or "idle")),
+        activity_text=str(payload.get("activity_text") or "暂无活动"),
+        latest_message=str(payload.get("latest_message") or "暂无最近消息"),
+        model_text=str(payload.get("model_text") or "未知模型"),
+        source_text=str(payload.get("source_text") or ""),
+        pending_risk_count=pending_count,
+        risk_state=_coerce_risk_state(str(payload.get("risk_state") or ("pending" if pending_count else "safe"))),
+    )
 
 
 def setup_states_from_install_status(data: dict[str, Any]) -> dict[SetupPlatform, SetupRuntimeState]:
@@ -719,7 +752,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._focused_key: str | None = None
             self.agent_detail_app: Literal["Nanobot", "OpenClaw", "Hermes"] | None = None
             self.agent_setup_open = False
-            self.selected_session_id = DEFAULT_SELECTED_SESSION_ID
+            self.selected_session_id = ""
             self.api_base = normalize_api_base(api_base)
             self.setup_states: dict[SetupPlatform, SetupRuntimeState] = {
                 platform.id: SetupRuntimeState() for platform in SETUP_PLATFORMS
@@ -735,6 +768,13 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._risk_fetch_thread_running = False
             self._risk_stream_thread_running = False
             self._risk_resolving_ids: set[str] = set()
+            self.session_statuses: list[SidebarSessionStatus] = []
+            self.sessions_loading = False
+            self.sessions_error = ""
+            self._session_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+            self._session_poll_scheduled = False
+            self._session_fetch_thread_running = False
+            self._session_refresh_timer_id: str | None = None
             self.cost_limit_app = "OpenClaw"
             self.cost_limit_amount = ""
             self.cost_limit_duration = ""
@@ -787,6 +827,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._draw()
             self._schedule_setup_queue_poll()
             self._schedule_risk_queue_poll()
+            self._schedule_session_queue_poll()
             if self.parent_pid is not None:
                 self._watch_parent_process()
 
@@ -946,6 +987,12 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._risk_poll_scheduled = True
             self.root.after(120, self._poll_risk_queue)
 
+        def _schedule_session_queue_poll(self) -> None:
+            if self._session_poll_scheduled:
+                return
+            self._session_poll_scheduled = True
+            self.root.after(120, self._poll_session_queue)
+
         def _poll_risk_queue(self) -> None:
             self._risk_poll_scheduled = False
             changed = False
@@ -994,6 +1041,44 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             if changed and self.expanded and self.active_panel == "riskApproval":
                 self._draw()
             self._schedule_risk_queue_poll()
+
+        def _poll_session_queue(self) -> None:
+            self._session_poll_scheduled = False
+            changed = False
+            while True:
+                try:
+                    event, payload = self._session_queue.get_nowait()
+                except queue.Empty:
+                    break
+                changed = True
+                if event == "sessions_fetch_started":
+                    self.sessions_loading = True
+                    self.sessions_error = ""
+                elif event == "sessions_fetch_done":
+                    self.sessions_loading = False
+                    self.sessions_error = ""
+                    self._session_fetch_thread_running = False
+                    self.session_statuses = payload if isinstance(payload, list) else []
+                    if self.session_statuses:
+                        if not any(s.id == self.selected_session_id for s in self.session_statuses):
+                            self.selected_session_id = self.session_statuses[0].id
+                    else:
+                        self.selected_session_id = ""
+                elif event == "sessions_fetch_error":
+                    self.sessions_loading = False
+                    self._session_fetch_thread_running = False
+                    self.sessions_error = str(payload)
+                    self.session_statuses = []
+                    self.selected_session_id = ""
+            if (
+                changed
+                and self.expanded
+                and self.active_panel == "agents"
+                and self.agent_detail_app
+                and not self.agent_setup_open
+            ):
+                self._draw()
+            self._schedule_session_queue_poll()
 
         def _open_risk_approval_data_source(self) -> None:
             self._start_risk_pending_refresh()
@@ -1082,6 +1167,72 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                     self._risk_queue.put(
                         ("resolve_error", (pending_id, f"{type(exc).__name__}: {exc}"))
                     )
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _cancel_session_refresh_timer(self) -> None:
+            if self._session_refresh_timer_id is None:
+                return
+            try:
+                self.root.after_cancel(self._session_refresh_timer_id)
+            except tk.TclError:
+                pass
+            self._session_refresh_timer_id = None
+
+        def _schedule_session_periodic_refresh(self) -> None:
+            self._cancel_session_refresh_timer()
+            self._session_refresh_timer_id = self.root.after(
+                SESSION_REFRESH_INTERVAL_MS,
+                self._on_session_periodic_refresh,
+            )
+
+        def _on_session_periodic_refresh(self) -> None:
+            self._session_refresh_timer_id = None
+            if (
+                self.expanded
+                and self.active_panel == "agents"
+                and self.agent_detail_app
+                and not self.agent_setup_open
+            ):
+                self._start_session_refresh(force=True)
+                self._schedule_session_periodic_refresh()
+
+        def _start_session_refresh(self, *, force: bool = False) -> None:
+            if self.agent_detail_app is None:
+                return
+            if self._session_fetch_thread_running:
+                return
+            self._session_fetch_thread_running = True
+            platform = _platform_for_app_name(self.agent_detail_app)
+            app_name = _app_name_for_platform(platform)
+            icon_type = _icon_type_for_platform(platform)
+
+            def worker() -> None:
+                self._session_queue.put(("sessions_fetch_started", None))
+                url = f"{self.api_base}/system/desktop-sidebar/sessions?platform={platform}&limit=3"
+                try:
+                    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+                    with urllib.request.urlopen(request, timeout=12) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("desktop-sidebar sessions response was not an object")
+                    raw_sessions = payload.get("sessions")
+                    if not isinstance(raw_sessions, list):
+                        raise ValueError("desktop-sidebar sessions response did not include sessions list")
+                    mapped: list[SidebarSessionStatus] = []
+                    for item in raw_sessions:
+                        if not isinstance(item, dict):
+                            continue
+                        session = sidebar_session_from_payload(
+                            item,
+                            default_app_name=app_name,
+                            default_icon_type=icon_type,
+                        )
+                        if session is not None:
+                            mapped.append(session)
+                    self._session_queue.put(("sessions_fetch_done", mapped))
+                except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError) as exc:
+                    self._session_queue.put(("sessions_fetch_error", f"{type(exc).__name__}: {exc}"))
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -2946,19 +3097,64 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._draw_collapse_button(x + self.expanded_width - 72, 38, key="back_to_agent_apps")
 
             card_y = 146
-            for session in MOCK_SIDEBAR_SESSIONS:
+            for session in self.session_statuses:
                 self._draw_session_card(content_x, card_y, session, content_width)
                 card_y += 108
 
+            if not self.session_statuses:
+                self._draw_session_empty_state(content_x, 146, content_width)
+                return
+
             selected = self._selected_session()
+            if selected is None:
+                self._draw_session_empty_state(content_x, 146, content_width)
+                return
             self._draw_selected_session_card(content_x, 470, selected, bottom_width)
             self._draw_session_model_card(bottom_right_x, 470, selected, bottom_width)
 
-        def _selected_session(self) -> SidebarSessionStatus:
-            for session in MOCK_SIDEBAR_SESSIONS:
+        def _selected_session(self) -> SidebarSessionStatus | None:
+            for session in self.session_statuses:
                 if session.id == self.selected_session_id:
                     return session
-            return MOCK_SIDEBAR_SESSIONS[0]
+            if self.session_statuses:
+                return self.session_statuses[0]
+            return None
+
+        def _draw_session_empty_state(self, x: int, y: int, width: int) -> None:
+            self._rounded_rect(
+                x,
+                y,
+                x + width,
+                y + 520,
+                14,
+                fill="#10161D",
+                outline=self.card_border,
+                width=1,
+            )
+            if self.sessions_loading:
+                title = "正在读取会话数据"
+                subtitle = "连接 XSafeClaw 后端 Session 队列..."
+            elif self.sessions_error:
+                title = "读取会话失败"
+                subtitle = self.sessions_error
+            else:
+                title = "暂无会话"
+                subtitle = "当前框架暂无可展示的会话记录"
+            self.canvas.create_text(
+                x + width // 2,
+                y + 232,
+                text=title,
+                fill=self.text,
+                font=(self.ui_font, 22, "bold"),
+            )
+            self._draw_text_line(
+                x + width // 4,
+                y + 266,
+                text=subtitle,
+                fill="#FFB020" if self.sessions_error else self.muted,
+                font=(self.ui_font, 16),
+                max_width=width // 2,
+            )
 
         def _session_status_text(self, session: SidebarSessionStatus) -> str:
             if session.pending_risk_count:
@@ -3396,6 +3592,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             if panel == "agents":
                 self.agent_detail_app = None
                 self.agent_setup_open = False
+                self._cancel_session_refresh_timer()
             elif panel == "riskApproval":
                 self._open_risk_approval_data_source()
             self._focused_key = None
@@ -3466,6 +3663,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             if key == "back_to_agent_apps":
                 self.agent_detail_app = None
                 self.agent_setup_open = False
+                self._cancel_session_refresh_timer()
                 self._focused_key = None
                 self._draw()
                 return
@@ -3495,13 +3693,17 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 print(f"[XSafeClaw Mock] open app detail: {app_name}")
                 self.agent_detail_app = app_name
                 self.agent_setup_open = False
-                self.selected_session_id = DEFAULT_SELECTED_SESSION_ID
+                self.selected_session_id = ""
+                self.session_statuses = []
+                self.sessions_error = ""
+                self._start_session_refresh(force=True)
+                self._schedule_session_periodic_refresh()
                 self._focused_key = None
                 self._draw()
                 return
-            for session in MOCK_SIDEBAR_SESSIONS:
+            for session in self.session_statuses:
                 if session.id == key:
-                    print(f"[XSafeClaw Mock] select session: {session.display_session_id}")
+                    print(f"[XSafeClaw] select session: {session.display_session_id}")
                     self.selected_session_id = session.id
                     self._focused_key = key
                     self._draw()

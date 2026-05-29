@@ -5,14 +5,104 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import settings
+from ...database import get_db
+from ...models import Message, Session
+from ...services import guard_service
 
 router = APIRouter()
 
 _sidebar_process: subprocess.Popen[bytes] | None = None
+_SIDEBAR_RUNTIME_LABELS: dict[str, str] = {
+    "openclaw": "OpenClaw",
+    "hermes": "Hermes",
+    "nanobot": "Nanobot",
+}
+_SIDEBAR_SOURCE_FALLBACKS: dict[str, str] = {
+    "openclaw": "~/.openclaw/agents/main/sessions",
+    "hermes": "~/.hermes/sessions",
+    "nanobot": "~/.nanobot/workspace/sessions",
+}
+
+
+def _normalize_session_key(key: str | None) -> str:
+    if not key:
+        return ""
+    if "::" in key:
+        key = key.rsplit("::", 1)[-1]
+    if ":" in key:
+        key = key.rsplit(":", 1)[-1]
+    return key
+
+
+def _session_key_matches(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return _normalize_session_key(left) == _normalize_session_key(right)
+
+
+def _elapsed_text(ts: datetime | None) -> str:
+    if ts is None:
+        return "暂无活动"
+    now = datetime.now(timezone.utc)
+    value = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+    delta = now - value
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return "刚刚活跃"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} 分钟前活跃"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前活跃"
+    return f"{hours // 24} 天前活跃"
+
+
+def _session_runtime(ts: datetime | None) -> str:
+    if ts is None:
+        return "idle"
+    now = datetime.now(timezone.utc)
+    value = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+    return "running" if (now - value).total_seconds() <= 24 * 3600 else "idle"
+
+
+def _session_source_text(session: Session) -> str:
+    jsonl_path = str(session.jsonl_file_path or "").strip()
+    if jsonl_path:
+        return str(Path(jsonl_path).expanduser().parent)
+    return _SIDEBAR_SOURCE_FALLBACKS.get(session.platform, "~/.sessions")
+
+
+def _model_text(session: Session) -> str:
+    provider = str(session.current_model_provider or "").strip()
+    model = str(session.current_model_name or "").strip()
+    if provider and model:
+        return f"{provider}/{model}" if "/" not in model else model
+    if model:
+        return model
+    if provider:
+        return provider
+    return "未知模型"
+
+
+def _latest_message_text(message: Message | None) -> str:
+    if message is None:
+        return "暂无最近消息"
+    text = str(message.content_text or "").strip()
+    if not text:
+        return "暂无最近消息"
+    return text if len(text) <= 140 else f"{text[:139]}..."
 
 
 def _is_running(process: subprocess.Popen[bytes] | None) -> bool:
@@ -72,4 +162,60 @@ async def desktop_sidebar_status() -> dict[str, int | bool | None]:
     return {
         "running": _is_running(_sidebar_process),
         "pid": _sidebar_process.pid if _is_running(_sidebar_process) and _sidebar_process else None,
+    }
+
+
+@router.get("/desktop-sidebar/sessions")
+async def desktop_sidebar_sessions(
+    platform: str = Query(..., pattern="^(openclaw|hermes|nanobot)$"),
+    limit: int = Query(3, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return sidebar-ready session cards for one runtime platform."""
+    rows = await db.execute(
+        select(Session)
+        .where(Session.deleted_at.is_(None), Session.platform == platform)
+        .order_by(Session.last_activity_at.desc().nullslast(), Session.updated_at.desc())
+        .limit(limit)
+    )
+    sessions = rows.scalars().all()
+    pending_items = [item for item in guard_service.get_all_pending() if not item.resolved]
+
+    payload_sessions: list[dict[str, Any]] = []
+    for session in sessions:
+        latest_message_result = await db.execute(
+            select(Message)
+            .where(Message.session_id == session.session_id)
+            .order_by(Message.timestamp.desc(), Message.id.desc())
+            .limit(1)
+        )
+        latest_message = latest_message_result.scalars().first()
+
+        pending_count = 0
+        for item in pending_items:
+            if _session_key_matches(getattr(item, "session_key", None), session.session_key):
+                pending_count += 1
+
+        app_name = _SIDEBAR_RUNTIME_LABELS.get(platform, "OpenClaw")
+        payload_sessions.append(
+            {
+                "id": session.session_id,
+                "app_name": app_name,
+                "display_session_id": session.source_session_id or session.session_id,
+                "icon_type": platform,
+                "status": _session_runtime(session.last_activity_at),
+                "activity_text": _elapsed_text(session.last_activity_at),
+                "latest_message": _latest_message_text(latest_message),
+                "model_text": _model_text(session),
+                "source_text": _session_source_text(session),
+                "pending_risk_count": pending_count,
+                "risk_state": "pending" if pending_count > 0 else "safe",
+            }
+        )
+
+    return {
+        "platform": platform,
+        "app_name": _SIDEBAR_RUNTIME_LABELS.get(platform, "OpenClaw"),
+        "sessions": payload_sessions,
+        "total": len(payload_sessions),
     }
