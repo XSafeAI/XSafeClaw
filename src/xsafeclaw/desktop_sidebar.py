@@ -1241,31 +1241,36 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 18),
                 max_width=260,
             )
+            app_select_y = top + 156
+            control_outer_h = 58
+            control_inner_offset = 4
+            control_inner_h = 50
+            control_center_offset = control_outer_h // 2
             amount_w = 70
             duration_w = 58
             unit_w = 82
             gap = 8
-            row_y = top + 151
+            row_y = app_select_y
             self._rounded_rect(
                 input_x,
                 row_y,
                 input_x + amount_w,
-                row_y + 64,
+                row_y + control_outer_h,
                 9,
                 fill="#111922",
                 outline="#46515E",
                 width=1,
             )
             self._cost_limit_amount_entry_geometry = (
-                input_x + 4,
-                row_y + 4,
-                amount_w - 8,
-                56,
+                input_x + control_inner_offset,
+                row_y + control_inner_offset,
+                amount_w - control_inner_offset * 2,
+                control_inner_h,
             )
             usd_x = input_x + amount_w + gap + 19
             self.canvas.create_text(
                 usd_x,
-                row_y + 32,
+                row_y + control_center_offset,
                 text="USD",
                 fill=self.muted,
                 font=(self.ui_font, 17),
@@ -1275,33 +1280,38 @@ def run(parent_pid: int | None = None) -> None:
                 duration_x,
                 row_y,
                 duration_x + duration_w,
-                row_y + 64,
+                row_y + control_outer_h,
                 9,
                 fill="#111922",
                 outline="#46515E",
                 width=1,
             )
             self._cost_limit_duration_entry_geometry = (
-                duration_x + 4,
-                row_y + 4,
-                duration_w - 8,
-                56,
+                duration_x + control_inner_offset,
+                row_y + control_inner_offset,
+                duration_w - control_inner_offset * 2,
+                control_inner_h,
             )
             unit_x = duration_x + duration_w + gap
             self._rounded_rect(
                 unit_x,
                 row_y,
                 unit_x + unit_w,
-                row_y + 64,
+                row_y + control_outer_h,
                 9,
                 fill="#111922",
                 outline="#46515E",
                 width=1,
             )
-            self._cost_limit_unit_select_geometry = (unit_x + 4, row_y + 4, unit_w - 8, 56)
+            self._cost_limit_unit_select_geometry = (
+                unit_x + control_inner_offset,
+                row_y + control_inner_offset,
+                unit_w - control_inner_offset * 2,
+                control_inner_h,
+            )
             self.canvas.create_text(
                 unit_x + unit_w - 14,
-                row_y + 32,
+                row_y + control_center_offset,
                 text="▾",
                 fill=self.muted,
                 font=(self.ui_font, 18),
