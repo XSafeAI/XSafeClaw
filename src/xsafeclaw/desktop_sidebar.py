@@ -20,7 +20,7 @@ ActivePanel = Literal["agents", "riskApproval", "settings"]
 AgentPetState = Literal["typing", "sleeping"]
 RiskState = Literal["safe", "pending", "blocked"]
 IconType = Literal["openclaw", "hermes", "nanobot", "document", "cleaner"]
-AgentInstanceRuntime = Literal["running", "waiting", "idle"]
+SessionRuntime = Literal["running", "waiting", "idle"]
 RiskLevel = Literal["high", "medium", "low"]
 ApprovalAction = Literal["allow_once", "always_allow_session", "block"]
 RiskSortMode = Literal["risk", "time"]
@@ -49,9 +49,9 @@ class AgentAppStatus:
 @dataclass(frozen=True)
 class CurrentActiveMock:
     app_name: str
-    agent_name: str
-    task: str
-    latest_action: str
+    session_display_id: str
+    activity: str
+    latest_message: str
 
 
 @dataclass(frozen=True)
@@ -78,16 +78,16 @@ class RiskApprovalCard:
 
 
 @dataclass(frozen=True)
-class AgentInstanceStatus:
+class SidebarSessionStatus:
     id: str
     app_name: Literal["Nanobot", "OpenClaw", "Hermes"]
-    agent_name: str
+    display_session_id: str
     icon_type: IconType
-    status: AgentInstanceRuntime
-    task_text: str
-    latest_action: str
+    status: SessionRuntime
+    activity_text: str
+    latest_message: str
     model_text: str
-    permission_text: str
+    source_text: str
     pending_risk_count: int
     risk_state: RiskState
 
@@ -106,7 +106,7 @@ MOCK_AGENT_APPS: tuple[AgentAppStatus, ...] = (
         2,
         0,
         "safe",
-        "2 个 Agent 运行中 · 无风险",
+        "2 个会话 · 无风险",
     ),
     AgentAppStatus(
         "app_hermes",
@@ -115,7 +115,7 @@ MOCK_AGENT_APPS: tuple[AgentAppStatus, ...] = (
         1,
         0,
         "safe",
-        "1 个 Agent 运行中 · 无风险",
+        "1 个会话 · 无风险",
     ),
     AgentAppStatus(
         "app_nanobot",
@@ -124,15 +124,15 @@ MOCK_AGENT_APPS: tuple[AgentAppStatus, ...] = (
         3,
         1,
         "pending",
-        "3 个 Agent 运行中 · 1 个待确认",
+        "3 个会话 · 1 个待确认",
     ),
 )
 
 MOCK_CURRENT_ACTIVE = CurrentActiveMock(
     app_name="Nanobot",
-    agent_name="FileAgent",
-    task="正在访问 Documents",
-    latest_action="读取 ~/Documents/XSafeClaw",
+    session_display_id="websocket:documents-review",
+    activity="最近访问 Documents",
+    latest_message="读取 ~/Documents/XSafeClaw",
 )
 
 MOCK_RISK_SUMMARY = RiskSummaryMock(
@@ -186,49 +186,49 @@ MOCK_RISK_APPROVAL_CARDS: tuple[RiskApprovalCard, ...] = (
     ),
 )
 
-MOCK_AGENT_INSTANCES: tuple[AgentInstanceStatus, ...] = (
-    AgentInstanceStatus(
-        id="nanobot_file_agent",
+MOCK_SIDEBAR_SESSIONS: tuple[SidebarSessionStatus, ...] = (
+    SidebarSessionStatus(
+        id="session_nanobot_documents",
         app_name="Nanobot",
-        agent_name="FileAgent",
+        display_session_id="websocket:documents-review",
         icon_type="nanobot",
         status="running",
-        task_text="正在访问 Documents",
-        latest_action="读取 ~/Documents/XSafeClaw",
-        model_text="继承 App 默认 GPT-4.1",
-        permission_text="读取 Documents",
+        activity_text="访问 Documents",
+        latest_message="读取 ~/Documents/XSafeClaw",
+        model_text="GPT-4.1",
+        source_text="~/.nanobot/workspace/sessions",
         pending_risk_count=1,
         risk_state="pending",
     ),
-    AgentInstanceStatus(
-        id="nanobot_summary_agent",
+    SidebarSessionStatus(
+        id="session_nanobot_summary",
         app_name="Nanobot",
-        agent_name="SummaryAgent",
+        display_session_id="api:project-summary",
         icon_type="document",
         status="running",
-        task_text="正在生成项目摘要",
-        latest_action="读取项目文件索引",
-        model_text="继承 App 默认 GPT-4.1",
-        permission_text="读取项目目录",
+        activity_text="生成项目摘要",
+        latest_message="读取项目文件索引",
+        model_text="GPT-4.1",
+        source_text="~/.nanobot/workspace/sessions",
         pending_risk_count=0,
         risk_state="safe",
     ),
-    AgentInstanceStatus(
-        id="nanobot_cleaner_agent",
+    SidebarSessionStatus(
+        id="session_nanobot_cleanup",
         app_name="Nanobot",
-        agent_name="CleanerAgent",
+        display_session_id="websocket:cleanup-check",
         icon_type="cleaner",
         status="waiting",
-        task_text="等待中",
-        latest_action="无最近动作",
-        model_text="继承 App 默认 GPT-4.1",
-        permission_text="未启用写入权限",
+        activity_text="等待新消息",
+        latest_message="暂无最近消息",
+        model_text="GPT-4.1",
+        source_text="~/.nanobot/workspace/sessions",
         pending_risk_count=0,
         risk_state="safe",
     ),
 )
 
-DEFAULT_SELECTED_AGENT_ID = "nanobot_file_agent"
+DEFAULT_SELECTED_SESSION_ID = "session_nanobot_documents"
 
 
 def get_agent_pet_state(agents: tuple[AgentItem, ...]) -> AgentPetState:
@@ -499,7 +499,7 @@ def run(parent_pid: int | None = None) -> None:
             self._focus_order: list[str] = []
             self._focused_key: str | None = None
             self.agent_detail_app: Literal["Nanobot", "OpenClaw", "Hermes"] | None = None
-            self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
+            self.selected_session_id = DEFAULT_SELECTED_SESSION_ID
             self.cost_limit_app = "OpenClaw"
             self.cost_limit_amount = ""
             self.cost_limit_duration = ""
@@ -1086,7 +1086,7 @@ def run(parent_pid: int | None = None) -> None:
             x = self.collapsed_width + self.expanded_gap
             if self.active_panel == "agents":
                 if self.agent_detail_app:
-                    self._draw_agent_instance_panel(x)
+                    self._draw_session_panel(x)
                     return
                 self._draw_agents_app_panel(x)
                 return
@@ -1207,7 +1207,7 @@ def run(parent_pid: int | None = None) -> None:
                 top + 126,
                 text="选择应用",
                 fill=self.muted,
-                font=(self.ui_font, 16),
+                font=(self.ui_font, 18),
                 max_width=220,
             )
             self._rounded_rect(
@@ -1235,9 +1235,9 @@ def run(parent_pid: int | None = None) -> None:
             input_x = divider_x + 44
             self._draw_text_line(
                 input_x,
-                top + 108,
+                top + 126,
                 text="成本限制",
-                fill=self.text,
+                fill=self.muted,
                 font=(self.ui_font, 18),
                 max_width=260,
             )
@@ -2026,22 +2026,13 @@ def run(parent_pid: int | None = None) -> None:
                 width=1,
             )
 
-            self._draw_page_icon(x + 32, 28)
             self.canvas.create_text(
-                x + 112,
+                x + 32,
                 34,
                 anchor="nw",
                 text="智能体",
                 fill=self.text,
                 font=(self.ui_font, 30, "bold"),
-            )
-            self._draw_text_line(
-                x + 112,
-                80,
-                text="3 个应用 · 6 个 Agent 运行中",
-                fill=self.muted,
-                font=(self.ui_font, 17),
-                max_width=420,
             )
             self._draw_collapse_button(x + self.expanded_width - 72, 38)
 
@@ -2108,7 +2099,7 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw_text_line(
                     x + 112,
                     y + 53,
-                    text="3 个 Agent 运行中 ·",
+                    text="3 个会话 ·",
                     fill=self.muted,
                     font=(self.ui_font, 16),
                     max_width=width - 360,
@@ -2144,7 +2135,7 @@ def run(parent_pid: int | None = None) -> None:
             )
             self._add_hitbox(app.id, x, y, x + width, y + 90)
 
-        def _draw_agent_instance_panel(self, x: int) -> None:
+        def _draw_session_panel(self, x: int) -> None:
             app_name = self.agent_detail_app or "Nanobot"
             content_x = x + 32
             content_width = self.expanded_width - 64
@@ -2163,53 +2154,44 @@ def run(parent_pid: int | None = None) -> None:
                 width=1,
             )
 
-            self._draw_page_icon(x + 32, 28)
             self.canvas.create_text(
-                x + 112,
+                x + 32,
                 34,
                 anchor="nw",
                 text=app_name,
                 fill=self.text,
                 font=(self.ui_font, 30, "bold"),
             )
-            self._draw_text_line(
-                x + 112,
-                80,
-                text="3 个 Agent 运行中",
-                fill=self.muted,
-                font=(self.ui_font, 17),
-                max_width=420,
-            )
             self._draw_collapse_button(x + self.expanded_width - 72, 38, key="back_to_agent_apps")
 
             card_y = 146
-            for agent in MOCK_AGENT_INSTANCES:
-                self._draw_agent_instance_card(content_x, card_y, agent, content_width)
+            for session in MOCK_SIDEBAR_SESSIONS:
+                self._draw_session_card(content_x, card_y, session, content_width)
                 card_y += 108
 
-            selected = self._selected_agent()
-            self._draw_selected_agent_card(content_x, 470, selected, bottom_width)
-            self._draw_agent_model_card(bottom_right_x, 470, selected, bottom_width)
+            selected = self._selected_session()
+            self._draw_selected_session_card(content_x, 470, selected, bottom_width)
+            self._draw_session_model_card(bottom_right_x, 470, selected, bottom_width)
 
-        def _selected_agent(self) -> AgentInstanceStatus:
-            for agent in MOCK_AGENT_INSTANCES:
-                if agent.id == self.selected_agent_id:
-                    return agent
-            return MOCK_AGENT_INSTANCES[0]
+        def _selected_session(self) -> SidebarSessionStatus:
+            for session in MOCK_SIDEBAR_SESSIONS:
+                if session.id == self.selected_session_id:
+                    return session
+            return MOCK_SIDEBAR_SESSIONS[0]
 
-        def _agent_status_text(self, agent: AgentInstanceStatus) -> str:
-            if agent.pending_risk_count:
-                return f"{agent.task_text} · {agent.pending_risk_count} 个待确认"
-            return f"{agent.task_text} · 无风险"
+        def _session_status_text(self, session: SidebarSessionStatus) -> str:
+            if session.pending_risk_count:
+                return f"{session.activity_text} · {session.pending_risk_count} 个待确认"
+            return f"{session.activity_text} · 无风险"
 
-        def _draw_agent_instance_card(
-            self, x: int, y: int, agent: AgentInstanceStatus, width: int
+        def _draw_session_card(
+            self, x: int, y: int, session: SidebarSessionStatus, width: int
         ) -> None:
-            selected = agent.id == self.selected_agent_id
-            is_pending = agent.pending_risk_count > 0
+            selected = session.id == self.selected_session_id
+            is_pending = session.pending_risk_count > 0
             outline = "#A15D14" if selected or is_pending else self.card_border
             fill = "#151B20" if selected or is_pending else self.card_bg
-            if self._focused_key == agent.id:
+            if self._focused_key == session.id:
                 outline = self.focus
 
             self._rounded_rect(x, y, x + width, y + 90, 14, fill=fill, outline=outline, width=1)
@@ -2219,11 +2201,11 @@ def run(parent_pid: int | None = None) -> None:
             self.canvas.create_oval(
                 x + 24, y + 16, x + 82, y + 74, fill="#080D13", outline="#1F2A34"
             )
-            self._draw_app_icon(agent.icon_type, x + 53, y + 45)
+            self._draw_app_icon(session.icon_type, x + 53, y + 45)
             self._draw_text_line(
                 x + 112,
                 y + 18,
-                text=agent.agent_name,
+                text=session.display_session_id,
                 fill=self.text,
                 font=(self.ui_font, 21, "bold"),
                 max_width=width - 250,
@@ -2233,7 +2215,7 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw_text_line(
                     x + 112,
                     y + 53,
-                    text=f"{agent.task_text} ·",
+                    text=f"{session.activity_text} ·",
                     fill=self.muted,
                     font=(self.ui_font, 16),
                     max_width=width - 360,
@@ -2241,7 +2223,7 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw_text_line(
                     x + 340,
                     y + 53,
-                    text=f"{agent.pending_risk_count} 个待确认",
+                    text=f"{session.pending_risk_count} 个待确认",
                     fill=self.pending_text,
                     font=(self.ui_font, 16, "bold"),
                     max_width=width - 450,
@@ -2250,14 +2232,14 @@ def run(parent_pid: int | None = None) -> None:
                 self._draw_text_line(
                     x + 112,
                     y + 53,
-                    text=self._agent_status_text(agent),
+                    text=self._session_status_text(session),
                     fill=self.muted,
                     font=(self.ui_font, 16),
                     max_width=width - 230,
                 )
 
             dot = self.pending if is_pending else self.ok
-            if agent.status in {"waiting", "idle"}:
+            if session.status in {"waiting", "idle"}:
                 dot = "#8A939E"
             self.canvas.create_oval(
                 x + width - 82, y + 40, x + width - 62, y + 60, fill=dot, outline=""
@@ -2269,10 +2251,10 @@ def run(parent_pid: int | None = None) -> None:
                 fill=self.muted,
                 font=(self.ui_font, 28, "bold"),
             )
-            self._add_hitbox(agent.id, x, y, x + width, y + 90)
+            self._add_hitbox(session.id, x, y, x + width, y + 90)
 
-        def _draw_selected_agent_card(
-            self, x: int, y: int, agent: AgentInstanceStatus, width: int
+        def _draw_selected_session_card(
+            self, x: int, y: int, session: SidebarSessionStatus, width: int
         ) -> None:
             self._rounded_rect(
                 x, y, x + width, y + 266, 14, fill=self.card_bg, outline=self.card_border
@@ -2283,14 +2265,14 @@ def run(parent_pid: int | None = None) -> None:
                 x + 64,
                 y + 20,
                 anchor="nw",
-                text="当前选中",
+                text="当前会话",
                 fill=self.text,
                 font=(self.ui_font, 19, "bold"),
             )
             self._draw_text_line(
                 x + 26,
                 y + 68,
-                text=agent.agent_name,
+                text=session.display_session_id,
                 fill=self.body_text,
                 font=(self.ui_font, 15),
                 max_width=width - 60,
@@ -2298,7 +2280,7 @@ def run(parent_pid: int | None = None) -> None:
             self._draw_text_line(
                 x + 26,
                 y + 96,
-                text=f"任务：{agent.task_text.replace('正在', '')}",
+                text=f"最近活动：{session.activity_text}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
                 max_width=width - 60,
@@ -2306,33 +2288,33 @@ def run(parent_pid: int | None = None) -> None:
             self._draw_text_line(
                 x + 26,
                 y + 124,
-                text=f"最近动作：{agent.latest_action}",
+                text=f"最近消息：{session.latest_message}",
                 fill=self.weak,
                 font=(self.ui_font, 13),
                 max_width=width - 60,
             )
 
-        def _draw_agent_model_card(
-            self, x: int, y: int, agent: AgentInstanceStatus, width: int
+        def _draw_session_model_card(
+            self, x: int, y: int, session: SidebarSessionStatus, width: int
         ) -> None:
             self._rounded_rect(
                 x, y, x + width, y + 266, 14, fill=self.card_bg, outline=self.card_border
             )
-            dot = self.pending if agent.pending_risk_count else self.ok
+            dot = self.pending if session.pending_risk_count else self.ok
             self.canvas.create_oval(x + 26, y + 24, x + 40, y + 38, fill=dot, outline="")
             self.canvas.create_oval(x + 22, y + 20, x + 44, y + 42, outline="#704C0A", width=3)
             self.canvas.create_text(
                 x + 64,
                 y + 20,
                 anchor="nw",
-                text="模型 / 权限",
+                text="模型 / 来源",
                 fill=self.text,
                 font=(self.ui_font, 19, "bold"),
             )
             self._draw_text_line(
                 x + 26,
                 y + 68,
-                text=f"模型：{agent.model_text}",
+                text=f"模型：{session.model_text}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
                 max_width=width - 52,
@@ -2340,7 +2322,7 @@ def run(parent_pid: int | None = None) -> None:
             self._draw_text_line(
                 x + 26,
                 y + 96,
-                text=f"权限：{agent.permission_text}",
+                text=f"来源：{session.source_text}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
                 max_width=width - 52,
@@ -2354,14 +2336,14 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 13),
             )
             risk_text = (
-                f"{agent.pending_risk_count} 个待确认" if agent.pending_risk_count else "无风险"
+                f"{session.pending_risk_count} 个待确认" if session.pending_risk_count else "无风险"
             )
             self._draw_text_line(
                 x + 76,
                 y + 124,
                 text=risk_text,
-                fill=self.pending_text if agent.pending_risk_count else self.body_text,
-                font=(self.ui_font, 13, "bold") if agent.pending_risk_count else (self.ui_font, 13),
+                fill=self.pending_text if session.pending_risk_count else self.body_text,
+                font=(self.ui_font, 13, "bold") if session.pending_risk_count else (self.ui_font, 13),
                 max_width=width - 112,
             )
 
@@ -2467,7 +2449,7 @@ def run(parent_pid: int | None = None) -> None:
             self._draw_text_line(
                 x + 26,
                 y + 68,
-                text=f"{MOCK_CURRENT_ACTIVE.app_name} / {MOCK_CURRENT_ACTIVE.agent_name}",
+                text=f"{MOCK_CURRENT_ACTIVE.app_name} / {MOCK_CURRENT_ACTIVE.session_display_id}",
                 fill=self.body_text,
                 font=(self.ui_font, 15),
                 max_width=width - 60,
@@ -2475,7 +2457,7 @@ def run(parent_pid: int | None = None) -> None:
             self._draw_text_line(
                 x + 26,
                 y + 96,
-                text=MOCK_CURRENT_ACTIVE.task,
+                text=MOCK_CURRENT_ACTIVE.activity,
                 fill=self.body_text,
                 font=(self.ui_font, 15),
                 max_width=width - 60,
@@ -2483,7 +2465,7 @@ def run(parent_pid: int | None = None) -> None:
             self._draw_text_line(
                 x + 26,
                 y + 124,
-                text=f"最近动作：{MOCK_CURRENT_ACTIVE.latest_action}",
+                text=f"最近消息：{MOCK_CURRENT_ACTIVE.latest_message}",
                 fill=self.weak,
                 font=(self.ui_font, 13),
                 max_width=width - 60,
@@ -2714,14 +2696,14 @@ def run(parent_pid: int | None = None) -> None:
             if app_name:
                 print(f"[XSafeClaw Mock] open app detail: {app_name}")
                 self.agent_detail_app = app_name
-                self.selected_agent_id = DEFAULT_SELECTED_AGENT_ID
+                self.selected_session_id = DEFAULT_SELECTED_SESSION_ID
                 self._focused_key = None
                 self._draw()
                 return
-            for agent in MOCK_AGENT_INSTANCES:
-                if agent.id == key:
-                    print(f"[XSafeClaw Mock] select agent: {agent.agent_name}")
-                    self.selected_agent_id = agent.id
+            for session in MOCK_SIDEBAR_SESSIONS:
+                if session.id == key:
+                    print(f"[XSafeClaw Mock] select session: {session.display_session_id}")
+                    self.selected_session_id = session.id
                     self._focused_key = key
                     self._draw()
                     return
