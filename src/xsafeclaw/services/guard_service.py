@@ -1038,6 +1038,7 @@ class RuntimeToolObservation:
 
 _pending: dict[str, PendingApproval] = {}
 _observations: dict[str, RuntimeToolObservation] = {}
+_pending_change_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
 _PENDING_TIMEOUT = 300  # 5 minutes max wait
 _MAX_OBSERVATIONS = 500
 
@@ -1077,6 +1078,32 @@ def get_pending(pending_id: str) -> PendingApproval | None:
     return _pending.get(pending_id)
 
 
+def subscribe_pending_changes() -> asyncio.Queue[dict[str, Any]]:
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10)
+    _pending_change_subscribers.add(queue)
+    return queue
+
+
+def unsubscribe_pending_changes(queue: asyncio.Queue[dict[str, Any]]) -> None:
+    _pending_change_subscribers.discard(queue)
+
+
+def _notify_pending_changed() -> None:
+    event = {"type": "pending_changed"}
+    for subscriber in list(_pending_change_subscribers):
+        try:
+            subscriber.put_nowait(dict(event))
+        except asyncio.QueueFull:
+            try:
+                subscriber.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                subscriber.put_nowait(dict(event))
+            except asyncio.QueueFull:
+                pass
+
+
 def _store_observation(observation: RuntimeToolObservation) -> None:
     _observations[observation.id] = observation
     if len(_observations) <= _MAX_OBSERVATIONS:
@@ -1097,6 +1124,7 @@ def resolve_pending(
     p.resolution = resolution
     p.resolved_at = time.time()
     p._event.set()
+    _notify_pending_changed()
     return p
 
 
@@ -1324,6 +1352,7 @@ async def check_runtime_tool_call(
         created_at=time.time(),
     )
     _pending[pending_id] = pending
+    _notify_pending_changed()
 
     try:
         await asyncio.wait_for(pending._event.wait(), timeout=_PENDING_TIMEOUT)
@@ -1331,6 +1360,7 @@ async def check_runtime_tool_call(
         pending.resolved = True
         pending.resolution = "rejected"
         pending.resolved_at = time.time()
+        _notify_pending_changed()
         _record_runtime_observation(
             platform=platform,
             instance_id=instance_id,
@@ -1493,6 +1523,7 @@ async def check_tool_call(
         created_at=time.time(),
     )
     _pending[pending_id] = p
+    _notify_pending_changed()
 
     try:
         await asyncio.wait_for(p._event.wait(), timeout=_PENDING_TIMEOUT)
@@ -1500,6 +1531,7 @@ async def check_tool_call(
         p.resolved = True
         p.resolution = "rejected"
         p.resolved_at = time.time()
+        _notify_pending_changed()
         return {"action": "block", "reason": _GUARD_BLOCK_REASON}
 
     if p.resolution == "approved":
@@ -1517,4 +1549,6 @@ def cleanup_resolved(max_age: float = 3600) -> int:
     ]
     for k in to_remove:
         del _pending[k]
+    if to_remove:
+        _notify_pending_changed()
     return len(to_remove)

@@ -9,9 +9,12 @@ Provides endpoints to:
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -306,6 +309,37 @@ async def list_pending(resolved: bool | None = Query(None)):
     if resolved is not None:
         items = [i for i in items if i.resolved == resolved]
     return [PendingApprovalResponse(**i.to_dict()) for i in items]
+
+
+def _serialize_pending_sse_event(event: dict[str, Any]) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@router.get("/pending/stream")
+async def pending_stream():
+    """Stream lightweight pending-approval change notifications."""
+
+    async def event_generator():
+        subscriber = guard_service.subscribe_pending_changes()
+        try:
+            yield _serialize_pending_sse_event({"type": "connected"})
+            while True:
+                try:
+                    event = await asyncio.wait_for(subscriber.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    event = {"type": "heartbeat"}
+                yield _serialize_pending_sse_event(event)
+        finally:
+            guard_service.unsubscribe_pending_changes(subscriber)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class RuntimeToolObservationResponse(BaseModel):

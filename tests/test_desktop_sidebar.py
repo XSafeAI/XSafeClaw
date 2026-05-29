@@ -1,5 +1,6 @@
 from xsafeclaw.desktop_sidebar import (
     MOCK_RISK_APPROVAL_CARDS,
+    approval_action_to_resolution,
     apply_risk_approval_action,
     get_collapsed_logo_crop_box,
     get_collapsed_logo_subsample_factor,
@@ -12,6 +13,7 @@ from xsafeclaw.desktop_sidebar import (
     normalize_api_base,
     parse_sse_data_line,
     parse_approval_hitbox_key,
+    risk_approval_card_from_pending,
     setup_states_from_install_status,
     sort_risk_approval_cards,
 )
@@ -112,6 +114,37 @@ def test_apply_risk_approval_action_with_unknown_id_keeps_cards() -> None:
         action="block",
     )
     assert len(next_cards) == len(MOCK_RISK_APPROVAL_CARDS)
+
+
+def test_pending_json_maps_to_real_risk_approval_card() -> None:
+    card = risk_approval_card_from_pending(
+        {
+            "id": "pending-1",
+            "platform": "hermes",
+            "tool_name": "exec",
+            "params": {"command": "cat ~/.ssh/id_rsa"},
+            "guard_verdict": "unsafe",
+            "failure_mode": "secret exfiltration",
+            "real_world_harm": "credential leak",
+            "created_at": 1000.0,
+        },
+        now=1125.0,
+    )
+
+    assert card.id == "pending-1"
+    assert card.app_name == "Hermes"
+    assert card.icon_type == "hermes"
+    assert card.title == "Hermes / exec 请求执行"
+    assert card.description == "credential leak"
+    assert card.risk_level == "high"
+    assert card.risk_label == "高风险"
+    assert card.occurred_text == "2 分钟前"
+
+
+def test_approval_actions_map_to_backend_resolutions() -> None:
+    assert approval_action_to_resolution("allow_once") == "approved"
+    assert approval_action_to_resolution("block") == "rejected"
+    assert approval_action_to_resolution("always_allow_session") is None
 
 
 def test_setup_api_base_normalization_defaults_and_strips_slash() -> None:

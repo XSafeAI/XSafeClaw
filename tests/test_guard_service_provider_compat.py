@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from xsafeclaw.api.routes.guard import _serialize_pending_sse_event, pending_stream
 from xsafeclaw.services import guard_service
 
 
@@ -54,10 +55,12 @@ def _reset_guard_runtime_state():
     original_enabled = guard_service._guard_enabled
     guard_service.invalidate_model_cache()
     guard_service._pending.clear()
+    guard_service._pending_change_subscribers.clear()
     guard_service._observations.clear()
     yield
     guard_service.invalidate_model_cache()
     guard_service._pending.clear()
+    guard_service._pending_change_subscribers.clear()
     guard_service._observations.clear()
     guard_service._guard_enabled = original_enabled
 
@@ -194,7 +197,7 @@ async def test_call_guard_model_uses_openai_chat_completions(monkeypatch):
     body = seen["json"]
     assert isinstance(body, dict)
     assert body["model"] == "gpt-5-mini"
-    assert body["max_tokens"] == 1024
+    assert body["max_tokens"] == 8192
     assert "test trajectory" in body["messages"][0]["content"]
 
 
@@ -263,6 +266,83 @@ async def test_check_tool_call_uses_anthropic_messages_and_creates_pending(monke
     result = await task
 
     assert result["action"] == "allow"
+
+
+@pytest.mark.asyncio
+async def test_pending_change_subscriber_receives_create_and_resolve(monkeypatch):
+    seen: dict[str, object] = {}
+    _install_fake_async_client(
+        monkeypatch,
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "unsafe\n"
+                        "Risk Source: shell access\n"
+                        "Failure Mode: destructive command\n"
+                        "Real World Harm: data loss"
+                    ),
+                }
+            ]
+        },
+        seen,
+    )
+    monkeypatch.setattr(
+        guard_service,
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
+            "provider": "custom-api-deepseek-com",
+            "model": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com/anthropic",
+            "api_key": "sk-anthropic",
+            "api_type": "anthropic-messages",
+        },
+    )
+    monkeypatch.setattr(guard_service, "_guard_enabled", True)
+    subscriber = guard_service.subscribe_pending_changes()
+
+    try:
+        task = asyncio.create_task(
+            guard_service.check_tool_call(
+                tool_name="exec",
+                params={"command": "Remove-Item important.txt"},
+                session_key="hermes:test-session",
+                platform="hermes",
+                instance_id="hermes-default",
+                messages=[{"role": "user", "content": "clean files"}],
+            )
+        )
+
+        pending = await _wait_for_pending()
+        created_event = await asyncio.wait_for(subscriber.get(), timeout=1)
+        assert created_event == {"type": "pending_changed"}
+
+        guard_service.resolve_pending(pending.id, "rejected")
+        resolved_event = await asyncio.wait_for(subscriber.get(), timeout=1)
+        assert resolved_event == {"type": "pending_changed"}
+
+        result = await task
+        assert result["action"] == "block"
+    finally:
+        guard_service.unsubscribe_pending_changes(subscriber)
+
+
+def test_pending_sse_event_serializer_uses_data_json_shape() -> None:
+    assert _serialize_pending_sse_event({"type": "connected"}) == 'data: {"type": "connected"}\n\n'
+
+
+@pytest.mark.asyncio
+async def test_pending_stream_initial_event_and_cleanup() -> None:
+    response = await pending_stream()
+    assert response.media_type == "text/event-stream"
+
+    body_iterator = response.body_iterator
+    first_chunk = await body_iterator.__anext__()
+    assert first_chunk == 'data: {"type": "connected"}\n\n'
+
+    await body_iterator.aclose()
+    assert not guard_service._pending_change_subscribers
 
 
 @pytest.mark.asyncio

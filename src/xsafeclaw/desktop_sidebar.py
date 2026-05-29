@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -84,6 +85,7 @@ class RiskApprovalCard:
     operation_type: str
     occurred_text: str
     icon_type: IconType
+    created_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -420,14 +422,114 @@ def setup_states_from_install_status(data: dict[str, Any]) -> dict[SetupPlatform
     return {platform.id: _state(platform.id) for platform in SETUP_PLATFORMS}
 
 
+def _pending_platform_display(platform: str) -> tuple[Literal["OpenClaw", "Hermes", "Nanobot"], IconType]:
+    normalized = str(platform or "").strip().lower()
+    if normalized == "hermes":
+        return "Hermes", "hermes"
+    if normalized == "nanobot":
+        return "Nanobot", "nanobot"
+    return "OpenClaw", "openclaw"
+
+
+def _compact_pending_params(params: Any, max_chars: int = 110) -> str:
+    if not params:
+        return ""
+    try:
+        text = json.dumps(params, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        text = str(params)
+    text = " ".join(text.split())
+    return text if len(text) <= max_chars else f"{text[: max_chars - 1]}..."
+
+
+def _pending_risk_level(verdict: str) -> tuple[RiskLevel, str]:
+    normalized = str(verdict or "").strip().lower()
+    if normalized == "unsafe":
+        return "high", "高风险"
+    if normalized == "error":
+        return "medium", "中风险"
+    return "low", "低风险"
+
+
+def _pending_elapsed_text(created_at: float, *, now: float | None = None) -> str:
+    if created_at <= 0:
+        return "刚刚"
+    elapsed = max(0, int((time.time() if now is None else now) - created_at))
+    if elapsed < 60:
+        return f"{max(1, elapsed)} 秒前"
+    minutes = elapsed // 60
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    return f"{hours // 24} 天前"
+
+
+def risk_approval_card_from_pending(
+    pending: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> RiskApprovalCard:
+    app_name, icon_type = _pending_platform_display(str(pending.get("platform", "")))
+    tool_name = str(pending.get("tool_name") or "tool")
+    description = (
+        pending.get("real_world_harm")
+        or pending.get("failure_mode")
+        or _compact_pending_params(pending.get("params"))
+        or "Guard marked this tool call for human review."
+    )
+    risk_level, risk_label = _pending_risk_level(str(pending.get("guard_verdict", "")))
+    created_at = float(pending.get("created_at") or 0.0)
+    return RiskApprovalCard(
+        id=str(pending.get("id") or ""),
+        app_name=app_name,
+        agent_name=tool_name,
+        action_verb="请求执行",
+        target_name=tool_name,
+        title=f"{app_name} / {tool_name} 请求执行",
+        description=str(description),
+        risk_level=risk_level,
+        risk_label=risk_label,
+        operation_type=tool_name,
+        occurred_text=_pending_elapsed_text(created_at, now=now),
+        icon_type=icon_type,
+        created_at=created_at,
+    )
+
+
+def risk_approval_cards_from_pending(
+    pending_items: list[dict[str, Any]],
+    *,
+    mode: RiskSortMode = "risk",
+    now: float | None = None,
+) -> list[RiskApprovalCard]:
+    cards = [
+        risk_approval_card_from_pending(item, now=now)
+        for item in pending_items
+        if isinstance(item, dict) and item.get("id")
+    ]
+    return sort_risk_approval_cards(cards, mode=mode)
+
+
+def approval_action_to_resolution(action: ApprovalAction) -> Literal["approved", "rejected"] | None:
+    if action == "allow_once":
+        return "approved"
+    if action == "block":
+        return "rejected"
+    return None
+
+
 def sort_risk_approval_cards(
     cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
     mode: RiskSortMode = "risk",
 ) -> list[RiskApprovalCard]:
     if mode == "time":
+        if any(card.created_at > 0 for card in cards):
+            return sorted(cards, key=lambda card: card.created_at, reverse=True)
         return sorted(cards, key=lambda card: int(card.occurred_text.split(" ", 1)[0]))
     rank: dict[RiskLevel, int] = {"high": 0, "medium": 1, "low": 2}
-    return sorted(cards, key=lambda card: rank[card.risk_level])
+    return sorted(cards, key=lambda card: (rank[card.risk_level], -card.created_at))
 
 
 def get_risk_sort_selector_layout(panel_x: int, is_open: bool) -> dict[str, int | str]:
@@ -585,11 +687,11 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self.pet_state = get_agent_pet_state(AGENTS)
             self.risk_sort_mode: RiskSortMode = "risk"
             self.risk_sort_dropdown_open = False
-            self.risk_approval_cards = sort_risk_approval_cards(
-                list(MOCK_RISK_APPROVAL_CARDS),
-                mode=self.risk_sort_mode,
-            )
+            self.risk_approval_cards: list[RiskApprovalCard] = []
             self.pending_risk_count = get_pending_risk_count_from_cards(self.risk_approval_cards)
+            self.risk_loading = False
+            self.risk_error = ""
+            self.risk_stream_status = "disconnected"
             self.left = 0
             self.top = self.default_top
             self._press_root_x = 0
@@ -613,6 +715,11 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._setup_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
             self._setup_poll_scheduled = False
             self._setup_status_thread_running = False
+            self._risk_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+            self._risk_poll_scheduled = False
+            self._risk_fetch_thread_running = False
+            self._risk_stream_thread_running = False
+            self._risk_resolving_ids: set[str] = set()
             self.cost_limit_app = "OpenClaw"
             self.cost_limit_amount = ""
             self.cost_limit_duration = ""
@@ -662,6 +769,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._set_geometry()
             self._draw()
             self._schedule_setup_queue_poll()
+            self._schedule_risk_queue_poll()
             if self.parent_pid is not None:
                 self._watch_parent_process()
 
@@ -812,6 +920,151 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                     )
                 except (OSError, urllib.error.URLError) as exc:
                     self._setup_queue.put(("install_error", (platform, f"{type(exc).__name__}: {exc}")))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _schedule_risk_queue_poll(self) -> None:
+            if self._risk_poll_scheduled:
+                return
+            self._risk_poll_scheduled = True
+            self.root.after(120, self._poll_risk_queue)
+
+        def _poll_risk_queue(self) -> None:
+            self._risk_poll_scheduled = False
+            changed = False
+            while True:
+                try:
+                    event, payload = self._risk_queue.get_nowait()
+                except queue.Empty:
+                    break
+                changed = True
+                if event == "fetch_started":
+                    self.risk_loading = True
+                    self.risk_error = ""
+                elif event == "fetch_done":
+                    self.risk_loading = False
+                    self.risk_error = ""
+                    self._risk_fetch_thread_running = False
+                    self.risk_approval_cards = risk_approval_cards_from_pending(
+                        payload,
+                        mode=self.risk_sort_mode,
+                    )
+                    self.pending_risk_count = get_pending_risk_count_from_cards(
+                        self.risk_approval_cards
+                    )
+                elif event == "fetch_error":
+                    self.risk_loading = False
+                    self._risk_fetch_thread_running = False
+                    self.risk_error = str(payload)
+                    self.risk_approval_cards = []
+                    self.pending_risk_count = 0
+                elif event == "stream_connected":
+                    self.risk_stream_status = "connected"
+                    self._start_risk_pending_refresh()
+                elif event == "stream_error":
+                    self.risk_stream_status = "disconnected"
+                    self.risk_error = str(payload)
+                elif event == "pending_changed":
+                    self._start_risk_pending_refresh()
+                elif event == "resolve_done":
+                    pending_id = str(payload)
+                    self._risk_resolving_ids.discard(pending_id)
+                    self._start_risk_pending_refresh()
+                elif event == "resolve_error":
+                    pending_id, message = payload
+                    self._risk_resolving_ids.discard(str(pending_id))
+                    self.risk_error = str(message)
+            if changed and self.expanded and self.active_panel == "riskApproval":
+                self._draw()
+            self._schedule_risk_queue_poll()
+
+        def _open_risk_approval_data_source(self) -> None:
+            self._start_risk_pending_refresh()
+            self._start_risk_pending_stream()
+
+        def _start_risk_pending_refresh(self) -> None:
+            if self._risk_fetch_thread_running:
+                return
+            self._risk_fetch_thread_running = True
+
+            def worker() -> None:
+                self._risk_queue.put(("fetch_started", None))
+                url = f"{self.api_base}/guard/pending?resolved=false"
+                try:
+                    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+                    with urllib.request.urlopen(request, timeout=12) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    if not isinstance(payload, list):
+                        raise ValueError("pending response was not a list")
+                    self._risk_queue.put(("fetch_done", payload))
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    self._risk_queue.put(("fetch_error", f"{type(exc).__name__}: {exc}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _start_risk_pending_stream(self) -> None:
+            if self._risk_stream_thread_running:
+                return
+            self._risk_stream_thread_running = True
+
+            def worker() -> None:
+                url = f"{self.api_base}/guard/pending/stream"
+                while True:
+                    try:
+                        request = urllib.request.Request(
+                            url,
+                            headers={"Accept": "text/event-stream"},
+                        )
+                        with urllib.request.urlopen(request, timeout=40) as response:
+                            for raw_line in response:
+                                line = raw_line.decode("utf-8", errors="replace")
+                                event = parse_sse_data_line(line)
+                                if not event:
+                                    continue
+                                event_type = event.get("type")
+                                if event_type == "connected":
+                                    self._risk_queue.put(("stream_connected", None))
+                                elif event_type == "pending_changed":
+                                    self._risk_queue.put(("pending_changed", None))
+                                elif event_type == "heartbeat":
+                                    continue
+                        self._risk_queue.put(("stream_error", "SSE stream closed"))
+                        time.sleep(2)
+                    except (OSError, urllib.error.URLError) as exc:
+                        self._risk_queue.put(("stream_error", f"{type(exc).__name__}: {exc}"))
+                        time.sleep(2)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _start_risk_pending_resolve(
+            self,
+            pending_id: str,
+            resolution: Literal["approved", "rejected"],
+        ) -> None:
+            if pending_id in self._risk_resolving_ids:
+                return
+            self._risk_resolving_ids.add(pending_id)
+
+            def worker() -> None:
+                url = f"{self.api_base}/guard/pending/{pending_id}/resolve"
+                body = json.dumps({"resolution": resolution}).encode("utf-8")
+                try:
+                    request = urllib.request.Request(
+                        url,
+                        data=body,
+                        method="POST",
+                        headers={
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    with urllib.request.urlopen(request, timeout=12) as response:
+                        response.read()
+                    self._risk_queue.put(("resolve_done", pending_id))
+                except (OSError, urllib.error.URLError) as exc:
+                    self._risk_queue.put(
+                        ("resolve_error", (pending_id, f"{type(exc).__name__}: {exc}"))
+                    )
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -2241,19 +2494,29 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 outline=self.card_border,
                 width=1,
             )
+            if self.risk_loading:
+                title = "正在读取审批请求"
+                subtitle = "连接 XSafeClaw 后端 pending 队列..."
+            elif self.risk_error:
+                title = "读取审批请求失败"
+                subtitle = self.risk_error
+            else:
+                title = "暂无待审批请求"
+                subtitle = "当前没有需要人工审核的工具调用"
             self.canvas.create_text(
                 x + 348,
                 y + 232,
-                text="暂无待审批请求",
+                text=title,
                 fill=self.text,
                 font=(self.ui_font, 22, "bold"),
             )
-            self.canvas.create_text(
-                x + 348,
-                y + 274,
-                text="当前智能体操作均在安全范围内",
-                fill=self.muted,
+            self._draw_text_line(
+                x + 174,
+                y + 266,
+                text=subtitle,
+                fill="#FFB020" if self.risk_error else self.muted,
                 font=(self.ui_font, 16),
+                max_width=348,
             )
 
         def _draw_agents_app_panel(self, x: int) -> None:
@@ -3054,6 +3317,8 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             if panel == "agents":
                 self.agent_detail_app = None
                 self.agent_setup_open = False
+            elif panel == "riskApproval":
+                self._open_risk_approval_data_source()
             self._focused_key = None
             self._set_geometry()
             self._draw()
@@ -3071,15 +3336,12 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             parsed_approval = parse_approval_hitbox_key(key)
             if parsed_approval:
                 card_id, action = parsed_approval
-                print(f"[XSafeClaw Mock] approval action: card={card_id}, action={action}")
-                self.risk_approval_cards = apply_risk_approval_action(
-                    self.risk_approval_cards,
-                    card_id=card_id,
-                    action=action,
-                )
-                self.pending_risk_count = get_pending_risk_count_from_cards(
-                    self.risk_approval_cards
-                )
+                resolution = approval_action_to_resolution(action)
+                if resolution is None:
+                    print(f"[XSafeClaw] approval action ignored: card={card_id}, action={action}")
+                    return
+                print(f"[XSafeClaw] resolve approval: card={card_id}, resolution={resolution}")
+                self._start_risk_pending_resolve(card_id, resolution)
                 self._focused_key = None
                 self._draw()
                 return
