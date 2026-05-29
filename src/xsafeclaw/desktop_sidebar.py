@@ -2478,42 +2478,23 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._draw_app_icon(platform.icon_type, x + 53, y + 51)
             self._draw_text_line(
                 x + 112,
-                y + 20,
+                y + 39,
                 text=platform.name,
                 fill=self.text,
                 font=(self.ui_font, 21, "bold"),
                 max_width=width - 360,
             )
-            detail = state.detail
-            if state.version:
-                detail = f"{detail} · v{state.version}"
-            self._draw_text_line(
-                x + 112,
-                y + 50,
-                text=detail,
-                fill=self.body_text if state.state != "failed" else self.risk,
-                font=(self.ui_font, 15),
-                max_width=width - 360,
-            )
-            self._draw_text_line(
-                x + 112,
-                y + 76,
-                text=platform.description,
-                fill=self.weak,
-                font=(self.ui_font, 12),
-                max_width=width - 340,
-            )
             self.canvas.create_oval(
                 x + width - 294,
-                y + 42,
+                y + 44,
                 x + width - 278,
-                y + 58,
+                y + 60,
                 fill=color,
                 outline="",
             )
             self._draw_text_line(
                 x + width - 270,
-                y + 38,
+                y + 39,
                 text=label,
                 fill=color,
                 font=(self.ui_font, 15, "bold"),
