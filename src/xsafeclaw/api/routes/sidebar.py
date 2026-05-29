@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import settings
@@ -168,16 +168,27 @@ async def desktop_sidebar_status() -> dict[str, int | bool | None]:
 @router.get("/desktop-sidebar/sessions")
 async def desktop_sidebar_sessions(
     platform: str = Query(..., pattern="^(openclaw|hermes|nanobot)$"),
-    limit: int = Query(3, ge=1, le=20),
+    limit: int | None = Query(None, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Return sidebar-ready session cards for one runtime platform."""
-    rows = await db.execute(
+    count_result = await db.execute(
+        select(func.count(Session.session_id)).where(
+            Session.deleted_at.is_(None),
+            Session.platform == platform,
+        )
+    )
+    total = count_result.scalar_one() or 0
+
+    stmt = (
         select(Session)
         .where(Session.deleted_at.is_(None), Session.platform == platform)
         .order_by(Session.last_activity_at.desc().nullslast(), Session.updated_at.desc())
-        .limit(limit)
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    rows = await db.execute(stmt)
     sessions = rows.scalars().all()
     pending_items = [item for item in guard_service.get_all_pending() if not item.resolved]
 
@@ -217,5 +228,5 @@ async def desktop_sidebar_sessions(
         "platform": platform,
         "app_name": _SIDEBAR_RUNTIME_LABELS.get(platform, "OpenClaw"),
         "sessions": payload_sessions,
-        "total": len(payload_sessions),
+        "total": total,
     }

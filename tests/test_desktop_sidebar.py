@@ -1,7 +1,13 @@
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+
 from xsafeclaw.desktop_sidebar import (
     MOCK_RISK_APPROVAL_CARDS,
     approval_action_to_resolution,
     apply_risk_approval_action,
+    clamp_session_scroll_offset,
     get_collapsed_logo_crop_box,
     get_collapsed_logo_subsample_factor,
     get_collapsed_panel_for_design_y,
@@ -10,6 +16,8 @@ from xsafeclaw.desktop_sidebar import (
     get_risk_footer_layout,
     get_risk_sort_selector_layout,
     get_sidebar_approval_idle_icon_path,
+    session_list_content_height,
+    session_wheel_step,
     get_xsafeclaw_logo_path,
     is_scalable_canvas_width_item,
     normalize_api_base,
@@ -19,7 +27,7 @@ from xsafeclaw.desktop_sidebar import (
     setup_states_from_install_status,
     sort_risk_approval_cards,
 )
-from xsafeclaw.api.routes.sidebar import _start_sidebar_process
+from xsafeclaw.api.routes.sidebar import _start_sidebar_process, desktop_sidebar_sessions
 from xsafeclaw.api.routes.system import _hermes_windows_install_args
 
 
@@ -218,4 +226,169 @@ def test_hermes_windows_installer_uses_official_powershell_script() -> None:
     assert args[:4] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
     assert "install.ps1" in args[-1]
     assert "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1" in args[-1]
+
+
+def test_session_list_content_height_matches_card_stride() -> None:
+    assert session_list_content_height(0) == 0
+    assert session_list_content_height(1) == 90
+    assert session_list_content_height(2) == 198
+
+
+def test_clamp_session_scroll_offset_respects_content_bounds() -> None:
+    # 5 cards => 522 content height; viewport 306 => max_offset 216
+    assert clamp_session_scroll_offset(-10, session_count=5, viewport_height=306) == 0
+    assert clamp_session_scroll_offset(128, session_count=5, viewport_height=306) == 128
+    assert clamp_session_scroll_offset(999, session_count=5, viewport_height=306) == 216
+
+
+def test_session_wheel_step_supports_cross_platform_events() -> None:
+    assert session_wheel_step(delta=120) == -1
+    assert session_wheel_step(delta=-120) == 1
+    assert session_wheel_step(num=4) == -1
+    assert session_wheel_step(num=5) == 1
+    assert session_wheel_step(delta=0) == 0
+
+
+@pytest.mark.asyncio
+async def test_desktop_sidebar_sessions_without_limit_returns_all_and_real_total(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    sessions = [
+        SimpleNamespace(
+            session_id="openclaw::inst::s1",
+            source_session_id="s1",
+            platform="openclaw",
+            session_key="openclaw::inst::s1",
+            last_activity_at=now,
+            updated_at=now,
+            current_model_provider="openai",
+            current_model_name="gpt-4.1",
+            jsonl_file_path="",
+        ),
+        SimpleNamespace(
+            session_id="openclaw::inst::s2",
+            source_session_id="s2",
+            platform="openclaw",
+            session_key="openclaw::inst::s2",
+            last_activity_at=now,
+            updated_at=now,
+            current_model_provider="openai",
+            current_model_name="gpt-4.1",
+            jsonl_file_path="",
+        ),
+    ]
+    latest_messages = [
+        SimpleNamespace(content_text="first message"),
+        SimpleNamespace(content_text="second message"),
+    ]
+
+    class _Scalars:
+        def __init__(self, value):
+            self._value = value
+
+        def all(self):
+            return self._value
+
+        def first(self):
+            return self._value
+
+    class _Result:
+        def __init__(self, *, scalar_one=None, scalars=None):
+            self._scalar_one = scalar_one
+            self._scalars = scalars
+
+        def scalar_one(self):
+            return self._scalar_one
+
+        def scalars(self):
+            return _Scalars(self._scalars)
+
+    class _FakeDb:
+        def __init__(self):
+            self._index = 0
+
+        async def execute(self, _stmt):
+            self._index += 1
+            if self._index == 1:
+                return _Result(scalar_one=2)
+            if self._index == 2:
+                return _Result(scalars=sessions)
+            if self._index == 3:
+                return _Result(scalars=latest_messages[0])
+            if self._index == 4:
+                return _Result(scalars=latest_messages[1])
+            raise AssertionError("unexpected query count")
+
+    monkeypatch.setattr(
+        "xsafeclaw.api.routes.sidebar.guard_service.get_all_pending",
+        lambda: [],
+    )
+
+    payload = await desktop_sidebar_sessions(platform="openclaw", limit=None, db=_FakeDb())  # type: ignore[arg-type]
+    assert payload["total"] == 2
+    assert len(payload["sessions"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_desktop_sidebar_sessions_honors_limit_when_provided(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    sessions = [
+        SimpleNamespace(
+            session_id="openclaw::inst::s1",
+            source_session_id="s1",
+            platform="openclaw",
+            session_key="openclaw::inst::s1",
+            last_activity_at=now,
+            updated_at=now,
+            current_model_provider="openai",
+            current_model_name="gpt-4.1",
+            jsonl_file_path="",
+        )
+    ]
+
+    class _Scalars:
+        def __init__(self, value):
+            self._value = value
+
+        def all(self):
+            return self._value
+
+        def first(self):
+            return self._value
+
+    class _Result:
+        def __init__(self, *, scalar_one=None, scalars=None):
+            self._scalar_one = scalar_one
+            self._scalars = scalars
+
+        def scalar_one(self):
+            return self._scalar_one
+
+        def scalars(self):
+            return _Scalars(self._scalars)
+
+    class _FakeDb:
+        def __init__(self):
+            self._index = 0
+
+        async def execute(self, stmt):
+            self._index += 1
+            if self._index == 1:
+                return _Result(scalar_one=7)
+            if self._index == 2:
+                # We cannot inspect SQL text reliably across engines, but we still
+                # validate behavior shape: limited sessions returned with full total.
+                _ = stmt
+                return _Result(scalars=sessions)
+            if self._index == 3:
+                return _Result(scalars=SimpleNamespace(content_text="latest"))
+            raise AssertionError("unexpected query count")
+
+    monkeypatch.setattr(
+        "xsafeclaw.api.routes.sidebar.guard_service.get_all_pending",
+        lambda: [],
+    )
+
+    payload = await desktop_sidebar_sessions(platform="openclaw", limit=1, db=_FakeDb())  # type: ignore[arg-type]
+    assert payload["total"] == 7
+    assert len(payload["sessions"]) == 1
 

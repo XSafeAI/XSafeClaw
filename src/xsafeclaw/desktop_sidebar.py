@@ -36,6 +36,12 @@ SetupInstallState = Literal["idle", "checking", "installed", "missing", "install
 
 DEFAULT_API_BASE = "http://127.0.0.1:6874/api"
 SESSION_REFRESH_INTERVAL_MS = 5000
+SESSION_CARD_HEIGHT = 90
+SESSION_CARD_GAP = 18
+SESSION_CARD_STRIDE = SESSION_CARD_HEIGHT + SESSION_CARD_GAP
+SESSION_LIST_TOP = 146
+SESSION_LIST_BOTTOM = 452
+SESSION_SCROLL_STEP_PX = 54
 
 
 @dataclass(frozen=True)
@@ -357,6 +363,28 @@ def parse_sse_data_line(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def session_list_content_height(session_count: int) -> int:
+    if session_count <= 0:
+        return 0
+    return session_count * SESSION_CARD_STRIDE - SESSION_CARD_GAP
+
+
+def clamp_session_scroll_offset(offset: int, session_count: int, viewport_height: int) -> int:
+    content_height = session_list_content_height(session_count)
+    max_offset = max(0, content_height - max(0, viewport_height))
+    return max(0, min(offset, max_offset))
+
+
+def session_wheel_step(delta: int | None = None, num: int | None = None) -> int:
+    if num == 4:
+        return -1
+    if num == 5:
+        return 1
+    if delta is None or delta == 0:
+        return 0
+    return -1 if delta > 0 else 1
 
 
 def _platform_for_app_name(app_name: str | None) -> SetupPlatform:
@@ -775,6 +803,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._session_poll_scheduled = False
             self._session_fetch_thread_running = False
             self._session_refresh_timer_id: str | None = None
+            self.session_scroll_offset = 0
             self.cost_limit_app = "OpenClaw"
             self.cost_limit_amount = ""
             self.cost_limit_duration = ""
@@ -812,6 +841,9 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self.canvas.bind("<B1-Motion>", self._drag)
             self.canvas.bind("<ButtonRelease-1>", self._finish_click_or_drag)
             self.canvas.bind("<Motion>", self._handle_motion)
+            self.canvas.bind("<MouseWheel>", self._handle_session_wheel)
+            self.canvas.bind("<Button-4>", self._handle_session_wheel)
+            self.canvas.bind("<Button-5>", self._handle_session_wheel)
             self.canvas.bind(
                 "<Leave>",
                 lambda _event: (self._hide_tooltip(), self.canvas.configure(cursor="")),
@@ -1064,12 +1096,18 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                             self.selected_session_id = self.session_statuses[0].id
                     else:
                         self.selected_session_id = ""
+                    self.session_scroll_offset = clamp_session_scroll_offset(
+                        self.session_scroll_offset,
+                        len(self.session_statuses),
+                        SESSION_LIST_BOTTOM - SESSION_LIST_TOP,
+                    )
                 elif event == "sessions_fetch_error":
                     self.sessions_loading = False
                     self._session_fetch_thread_running = False
                     self.sessions_error = str(payload)
                     self.session_statuses = []
                     self.selected_session_id = ""
+                    self.session_scroll_offset = 0
             if (
                 changed
                 and self.expanded
@@ -1209,7 +1247,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
 
             def worker() -> None:
                 self._session_queue.put(("sessions_fetch_started", None))
-                url = f"{self.api_base}/system/desktop-sidebar/sessions?platform={platform}&limit=3"
+                url = f"{self.api_base}/system/desktop-sidebar/sessions?platform={platform}"
                 try:
                     request = urllib.request.Request(url, headers={"Accept": "application/json"})
                     with urllib.request.urlopen(request, timeout=12) as response:
@@ -3074,6 +3112,9 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             bottom_gap = 24
             bottom_width = (content_width - bottom_gap) // 2
             bottom_right_x = content_x + bottom_width + bottom_gap
+            list_top = SESSION_LIST_TOP
+            list_bottom = SESSION_LIST_BOTTOM
+            viewport_height = list_bottom - list_top
 
             self._rounded_rect(
                 x,
@@ -3096,18 +3137,32 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             )
             self._draw_collapse_button(x + self.expanded_width - 72, 38, key="back_to_agent_apps")
 
-            card_y = 146
-            for session in self.session_statuses:
-                self._draw_session_card(content_x, card_y, session, content_width)
-                card_y += 108
-
             if not self.session_statuses:
-                self._draw_session_empty_state(content_x, 146, content_width)
+                self._draw_session_empty_state(content_x, list_top, content_width)
                 return
+
+            self.session_scroll_offset = clamp_session_scroll_offset(
+                self.session_scroll_offset,
+                len(self.session_statuses),
+                viewport_height,
+            )
+            for idx, session in enumerate(self.session_statuses):
+                card_y = list_top + idx * SESSION_CARD_STRIDE - self.session_scroll_offset
+                if card_y + SESSION_CARD_HEIGHT <= list_top or card_y >= list_bottom:
+                    continue
+                self._draw_session_card(content_x, card_y, session, content_width)
+
+            self._draw_session_scrollbar(
+                content_x + content_width - 10,
+                list_top,
+                list_bottom,
+                len(self.session_statuses),
+                self.session_scroll_offset,
+            )
 
             selected = self._selected_session()
             if selected is None:
-                self._draw_session_empty_state(content_x, 146, content_width)
+                self._draw_session_empty_state(content_x, list_top, content_width)
                 return
             self._draw_selected_session_card(content_x, 470, selected, bottom_width)
             self._draw_session_model_card(bottom_right_x, 470, selected, bottom_width)
@@ -3229,6 +3284,32 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 font=(self.ui_font, 28, "bold"),
             )
             self._add_hitbox(session.id, x, y, x + width, y + 90)
+
+        def _draw_session_scrollbar(
+            self,
+            x: int,
+            top: int,
+            bottom: int,
+            session_count: int,
+            offset: int,
+        ) -> None:
+            viewport_height = max(1, bottom - top)
+            content_height = session_list_content_height(session_count)
+            if content_height <= viewport_height:
+                return
+            self.canvas.create_line(x, top, x, bottom, fill="#1A242E", width=4)
+            thumb_h = max(36, round((viewport_height * viewport_height) / content_height))
+            max_offset = max(1, content_height - viewport_height)
+            travel = max(0, viewport_height - thumb_h)
+            thumb_top = top + round((offset / max_offset) * travel)
+            self._rounded_rect(
+                x - 4,
+                thumb_top,
+                x + 4,
+                thumb_top + thumb_h,
+                4,
+                fill="#3B4D60",
+            )
 
         def _draw_selected_session_card(
             self, x: int, y: int, session: SidebarSessionStatus, width: int
@@ -3696,6 +3777,7 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 self.selected_session_id = ""
                 self.session_statuses = []
                 self.sessions_error = ""
+                self.session_scroll_offset = 0
                 self._start_session_refresh(force=True)
                 self._schedule_session_periodic_refresh()
                 self._focused_key = None
@@ -3745,6 +3827,42 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 return
             self.canvas.configure(cursor="hand2")
             self._show_tooltip(self._tooltip_for_panel(panel), event.y)
+
+        def _session_list_window_bounds(self) -> tuple[int, int, int, int]:
+            expanded_x = self.collapsed_width + self.expanded_gap
+            left = self._window_x(expanded_x + 32)
+            right = self._window_x(expanded_x + self.expanded_width - 32)
+            top = self._window_y(SESSION_LIST_TOP)
+            bottom = self._window_y(SESSION_LIST_BOTTOM)
+            return left, top, right, bottom
+
+        def _handle_session_wheel(self, event: tk.Event) -> str | None:
+            if (
+                not self.expanded
+                or self.active_panel != "agents"
+                or not self.agent_detail_app
+                or self.agent_setup_open
+                or not self.session_statuses
+            ):
+                return None
+            left, top, right, bottom = self._session_list_window_bounds()
+            if not (left <= event.x <= right and top <= event.y <= bottom):
+                return None
+            step = session_wheel_step(
+                delta=int(getattr(event, "delta", 0) or 0),
+                num=getattr(event, "num", None),
+            )
+            if step == 0:
+                return "break"
+            next_offset = clamp_session_scroll_offset(
+                self.session_scroll_offset + step * SESSION_SCROLL_STEP_PX,
+                len(self.session_statuses),
+                SESSION_LIST_BOTTOM - SESSION_LIST_TOP,
+            )
+            if next_offset != self.session_scroll_offset:
+                self.session_scroll_offset = next_offset
+                self._draw()
+            return "break"
 
         def _panel_for_y(self, y: int) -> ActivePanel | None:
             return get_collapsed_panel_for_design_y(self._design_y(y))
