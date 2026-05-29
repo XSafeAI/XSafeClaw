@@ -2476,13 +2476,16 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
             self._rounded_rect(x, y, x + width, y + 104, 14, fill=self.card_bg, outline=outline)
             self.canvas.create_oval(x + 24, y + 22, x + 82, y + 80, fill="#080D13", outline="#1F2A34")
             self._draw_app_icon(platform.icon_type, x + 53, y + 51)
-            self._draw_text_line(
+            center_y = y + 52
+            title_font = (self.ui_font, 21, "bold")
+            status_font = (self.ui_font, 15, "bold")
+            self.canvas.create_text(
                 x + 112,
-                y + 39,
-                text=platform.name,
+                center_y,
+                anchor="w",
+                text=self._ellipsize(platform.name, title_font, width - 360),
                 fill=self.text,
-                font=(self.ui_font, 21, "bold"),
-                max_width=width - 360,
+                font=title_font,
             )
             self.canvas.create_oval(
                 x + width - 294,
@@ -2492,13 +2495,13 @@ def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None
                 fill=color,
                 outline="",
             )
-            self._draw_text_line(
+            self.canvas.create_text(
                 x + width - 270,
-                y + 39,
-                text=label,
+                center_y,
+                anchor="w",
+                text=self._ellipsize(label, status_font, 110),
                 fill=color,
-                font=(self.ui_font, 15, "bold"),
-                max_width=110,
+                font=status_font,
             )
 
             button_x = x + width - 144
