@@ -9,9 +9,14 @@ from xsafeclaw.desktop_sidebar import (
     get_risk_sort_selector_layout,
     get_xsafeclaw_logo_path,
     is_scalable_canvas_width_item,
+    normalize_api_base,
+    parse_sse_data_line,
     parse_approval_hitbox_key,
+    setup_states_from_install_status,
     sort_risk_approval_cards,
 )
+from xsafeclaw.api.routes.sidebar import _start_sidebar_process
+from xsafeclaw.api.routes.system import _hermes_windows_install_args
 
 
 def test_mock_risk_cards_default_count_is_three() -> None:
@@ -107,4 +112,62 @@ def test_apply_risk_approval_action_with_unknown_id_keeps_cards() -> None:
         action="block",
     )
     assert len(next_cards) == len(MOCK_RISK_APPROVAL_CARDS)
+
+
+def test_setup_api_base_normalization_defaults_and_strips_slash() -> None:
+    assert normalize_api_base(None) == "http://127.0.0.1:6874/api"
+    assert normalize_api_base(" http://localhost:6874/api/ ") == "http://localhost:6874/api"
+
+
+def test_setup_sse_parser_accepts_json_data_line() -> None:
+    assert parse_sse_data_line('data: {"type": "output", "text": "ok"}') == {
+        "type": "output",
+        "text": "ok",
+    }
+    assert parse_sse_data_line("event: ping") is None
+    assert parse_sse_data_line("data: not-json") is None
+
+
+def test_setup_states_from_install_status_maps_all_platforms() -> None:
+    states = setup_states_from_install_status(
+        {
+            "openclaw_installed": True,
+            "openclaw_version": "1.2.3",
+            "hermes_installed": False,
+            "nanobot_installed": True,
+            "nanobot_version": "0.4.0",
+            "requires_nanobot_configure": True,
+        }
+    )
+    assert states["openclaw"].state == "installed"
+    assert states["openclaw"].version == "1.2.3"
+    assert states["hermes"].state == "missing"
+    assert states["nanobot"].detail == "已安装，待配置模型"
+
+
+def test_sidebar_process_gets_api_base_argument(monkeypatch) -> None:
+    recorded: dict[str, object] = {}
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def fake_popen(args, **kwargs):
+        recorded["args"] = args
+        recorded["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr("xsafeclaw.api.routes.sidebar.subprocess.Popen", fake_popen)
+    process = _start_sidebar_process("http://127.0.0.1:9999/api")
+    assert process.poll() is None
+    args = recorded["args"]
+    assert "--api-base" in args
+    assert args[args.index("--api-base") + 1] == "http://127.0.0.1:9999/api"
+
+
+def test_hermes_windows_installer_uses_official_powershell_script() -> None:
+    args = _hermes_windows_install_args("powershell")
+    assert args[:4] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"]
+    assert "install.ps1" in args[-1]
+    assert "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1" in args[-1]
 

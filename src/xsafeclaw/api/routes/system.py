@@ -3837,6 +3837,26 @@ async def init_default_nanobot():
 _HERMES_INSTALL_SCRIPT_URL = (
     "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 )
+_HERMES_WINDOWS_INSTALL_SCRIPT_URL = (
+    "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1"
+)
+
+
+def _hermes_windows_install_args(shell: str | None = None) -> list[str]:
+    """Build the official Hermes PowerShell installer command for Windows."""
+    launcher = shell or _find_available_launcher(("pwsh", "powershell"), fallback="powershell") or "powershell"
+    return [
+        launcher,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        f"iex (irm {_HERMES_WINDOWS_INSTALL_SCRIPT_URL})",
+    ]
+
+
+def _hermes_windows_install_command() -> str:
+    return _format_command(_hermes_windows_install_args())
 
 
 def _hermes_repo_dir() -> Path:
@@ -4125,6 +4145,39 @@ async def install_hermes():
     env = _build_env()
 
     async def generate():
+        if _host_is_windows():
+            yield f"data: {json.dumps({'type': 'output', 'text': '━━━ Phase 1/1: Running official Hermes Windows installer ━━━'})}\n\n"
+            install_args = _hermes_windows_install_args()
+            yield f"data: {json.dumps({'type': 'output', 'text': f'▸ Running: {_format_command(install_args)}'})}\n\n"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *install_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=env,
+                )
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                await proc.wait()
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'Windows install script failed: {exc}'})}\n\n"
+                return
+
+            if proc.returncode != 0:
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'type': 'output', 'text': '✓ Hermes Windows installer completed. Configure credentials separately when needed.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
+            trigger_onboard_scan_preload()
+            return
+
         bash = shutil.which("bash")
         if not bash:
             yield f"data: {json.dumps({'type': 'error', 'message': 'bash not found. Hermes requires Linux / macOS / WSL2.'})}\n\n"

@@ -9,14 +9,20 @@ backend, it receives the backend PID and exits when that parent process exits.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import queue
+import threading
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 AgentStatus = Literal["ready", "working", "blocked", "offline"]
 ActivePanel = Literal["agents", "riskApproval", "settings"]
+SetupPlatform = Literal["openclaw", "hermes", "nanobot"]
 AgentPetState = Literal["typing", "sleeping"]
 RiskState = Literal["safe", "pending", "blocked"]
 IconType = Literal["openclaw", "hermes", "nanobot", "document", "cleaner"]
@@ -25,6 +31,9 @@ RiskLevel = Literal["high", "medium", "low"]
 ApprovalAction = Literal["allow_once", "always_allow_session", "block"]
 RiskSortMode = Literal["risk", "time"]
 ApprovalMode = Literal["all", "smart"]
+SetupInstallState = Literal["idle", "checking", "installed", "missing", "installing", "failed"]
+
+DEFAULT_API_BASE = "http://127.0.0.1:6874/api"
 
 
 @dataclass(frozen=True)
@@ -92,10 +101,50 @@ class SidebarSessionStatus:
     risk_state: RiskState
 
 
+@dataclass(frozen=True)
+class SetupPlatformInfo:
+    id: SetupPlatform
+    name: Literal["OpenClaw", "Hermes", "Nanobot"]
+    icon_type: IconType
+    description: str
+    install_path: str
+
+
+@dataclass
+class SetupRuntimeState:
+    state: SetupInstallState = "idle"
+    version: str | None = None
+    detail: str = "等待检测"
+
+
 AGENTS: tuple[AgentItem, ...] = (
     AgentItem("openclaw", "OpenClaw", "ready", 0),
     AgentItem("hermes", "Hermes", "working", 0),
     AgentItem("nanobot", "Nanobot", "blocked", 1),
+)
+
+SETUP_PLATFORMS: tuple[SetupPlatformInfo, ...] = (
+    SetupPlatformInfo(
+        "openclaw",
+        "OpenClaw",
+        "openclaw",
+        "官方 npm 安装：npm install -g openclaw@latest",
+        "system/install",
+    ),
+    SetupPlatformInfo(
+        "hermes",
+        "Hermes",
+        "hermes",
+        "官方安装脚本：Linux/macOS 使用 install.sh，Windows 使用 install.ps1",
+        "system/install-hermes",
+    ),
+    SetupPlatformInfo(
+        "nanobot",
+        "Nanobot",
+        "nanobot",
+        "官方 uv 安装：uv tool install nanobot-ai",
+        "system/nanobot/install",
+    ),
 )
 
 MOCK_AGENT_APPS: tuple[AgentAppStatus, ...] = (
@@ -318,6 +367,59 @@ def get_collapsed_panel_for_design_y(design_y: float) -> ActivePanel | None:
     return None
 
 
+def normalize_api_base(api_base: str | None) -> str:
+    base = (api_base or DEFAULT_API_BASE).strip() or DEFAULT_API_BASE
+    return base.rstrip("/")
+
+
+def parse_sse_data_line(line: str) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not stripped.startswith("data:"):
+        return None
+    payload = stripped[5:].strip()
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def setup_states_from_install_status(data: dict[str, Any]) -> dict[SetupPlatform, SetupRuntimeState]:
+    def _state(platform: SetupPlatform) -> SetupRuntimeState:
+        installed_key = f"{platform}_installed"
+        version_key = f"{platform}_version"
+        error_key = f"{platform}_error"
+        if platform == "openclaw":
+            installed_key = "openclaw_installed"
+            version_key = "openclaw_version"
+            error_key = "openclaw_error"
+        installed = bool(data.get(installed_key))
+        if installed:
+            version = data.get(version_key)
+            detail = "已安装"
+            if platform == "hermes" and data.get("requires_hermes_configure"):
+                detail = "已安装，待配置模型"
+            elif platform == "nanobot" and data.get("requires_nanobot_configure"):
+                detail = "已安装，待配置模型"
+            elif platform == "openclaw" and data.get("requires_configure"):
+                detail = "已安装，待配置"
+            return SetupRuntimeState(
+                state="installed",
+                version=str(version) if version else None,
+                detail=detail,
+            )
+        error = data.get(error_key)
+        return SetupRuntimeState(
+            state="missing",
+            version=None,
+            detail=str(error) if error else "未安装",
+        )
+
+    return {platform.id: _state(platform.id) for platform in SETUP_PLATFORMS}
+
+
 def sort_risk_approval_cards(
     cards: tuple[RiskApprovalCard, ...] | list[RiskApprovalCard],
     mode: RiskSortMode = "risk",
@@ -427,7 +529,7 @@ def _process_is_alive(pid: int) -> bool:
     return True
 
 
-def run(parent_pid: int | None = None) -> None:
+def run(parent_pid: int | None = None, api_base: str = DEFAULT_API_BASE) -> None:
     import tkinter as tk
     import tkinter.font as tkfont
 
@@ -462,7 +564,7 @@ def run(parent_pid: int | None = None) -> None:
         focus = "#36C275"
         ui_font = "Segoe UI"
 
-        def __init__(self, parent_pid: int | None) -> None:
+        def __init__(self, parent_pid: int | None, api_base: str) -> None:
             self.root = tk.Tk()
             self.root.title("XSafeClaw Sidebar")
             self.root.overrideredirect(True)
@@ -499,7 +601,18 @@ def run(parent_pid: int | None = None) -> None:
             self._focus_order: list[str] = []
             self._focused_key: str | None = None
             self.agent_detail_app: Literal["Nanobot", "OpenClaw", "Hermes"] | None = None
+            self.agent_setup_open = False
             self.selected_session_id = DEFAULT_SELECTED_SESSION_ID
+            self.api_base = normalize_api_base(api_base)
+            self.setup_states: dict[SetupPlatform, SetupRuntimeState] = {
+                platform.id: SetupRuntimeState() for platform in SETUP_PLATFORMS
+            }
+            self.setup_logs: list[tuple[str, str]] = []
+            self.setup_installing_platform: SetupPlatform | None = None
+            self.setup_detection_error = ""
+            self._setup_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+            self._setup_poll_scheduled = False
+            self._setup_status_thread_running = False
             self.cost_limit_app = "OpenClaw"
             self.cost_limit_amount = ""
             self.cost_limit_duration = ""
@@ -548,6 +661,7 @@ def run(parent_pid: int | None = None) -> None:
 
             self._set_geometry()
             self._draw()
+            self._schedule_setup_queue_poll()
             if self.parent_pid is not None:
                 self._watch_parent_process()
 
@@ -569,6 +683,137 @@ def run(parent_pid: int | None = None) -> None:
                 self.root.destroy()
                 return
             self.root.after(1000, self._watch_parent_process)
+
+        def _schedule_setup_queue_poll(self) -> None:
+            if self._setup_poll_scheduled:
+                return
+            self._setup_poll_scheduled = True
+            self.root.after(120, self._poll_setup_queue)
+
+        def _poll_setup_queue(self) -> None:
+            self._setup_poll_scheduled = False
+            changed = False
+            while True:
+                try:
+                    event, payload = self._setup_queue.get_nowait()
+                except queue.Empty:
+                    break
+                changed = True
+                if event == "status_started":
+                    self.setup_detection_error = ""
+                    for state in self.setup_states.values():
+                        state.state = "checking"
+                        state.detail = "检测中..."
+                elif event == "status_done":
+                    self.setup_states.update(setup_states_from_install_status(payload))
+                    self.setup_detection_error = ""
+                    self._setup_status_thread_running = False
+                elif event == "status_error":
+                    self.setup_detection_error = str(payload)
+                    for state in self.setup_states.values():
+                        if state.state == "checking":
+                            state.state = "failed"
+                            state.detail = "检测失败"
+                    self._setup_status_thread_running = False
+                elif event == "install_log":
+                    platform, text = payload
+                    if text:
+                        self.setup_logs.append((platform, text))
+                        self.setup_logs = self.setup_logs[-80:]
+                elif event == "install_done":
+                    platform, success = payload
+                    self.setup_installing_platform = None
+                    state = self.setup_states[platform]
+                    state.state = "checking" if success else "failed"
+                    state.detail = "安装完成，正在刷新状态" if success else "安装失败"
+                    self._start_setup_status_refresh()
+                elif event == "install_error":
+                    platform, message = payload
+                    self.setup_installing_platform = None
+                    state = self.setup_states[platform]
+                    state.state = "failed"
+                    state.detail = str(message)
+                    self.setup_logs.append((platform, str(message)))
+                    self.setup_logs = self.setup_logs[-80:]
+            if changed and self.expanded and self.active_panel == "agents" and self.agent_setup_open:
+                self._draw()
+            self._schedule_setup_queue_poll()
+
+        def _start_setup_status_refresh(self) -> None:
+            if self._setup_status_thread_running:
+                return
+            self._setup_status_thread_running = True
+
+            def worker() -> None:
+                self._setup_queue.put(("status_started", None))
+                url = f"{self.api_base}/system/install-status"
+                try:
+                    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+                    with urllib.request.urlopen(request, timeout=12) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("install-status response was not an object")
+                    self._setup_queue.put(("status_done", payload))
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    self._setup_queue.put(("status_error", f"{type(exc).__name__}: {exc}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _start_setup_install(self, platform: SetupPlatform) -> None:
+            if self.setup_installing_platform is not None:
+                return
+            info = next(item for item in SETUP_PLATFORMS if item.id == platform)
+            self.setup_installing_platform = platform
+            self.setup_states[platform].state = "installing"
+            self.setup_states[platform].detail = "安装中..."
+            self.setup_logs = [(platform, f"开始安装 {info.name}")]
+
+            def worker() -> None:
+                url = f"{self.api_base}/{info.install_path}"
+                try:
+                    request = urllib.request.Request(url, method="POST")
+                    with urllib.request.urlopen(request, timeout=900) as response:
+                        for raw_line in response:
+                            line = raw_line.decode("utf-8", errors="replace")
+                            event = parse_sse_data_line(line)
+                            if not event:
+                                continue
+                            event_type = event.get("type")
+                            if event_type == "output" and event.get("text") is not None:
+                                self._setup_queue.put(
+                                    ("install_log", (platform, str(event.get("text"))))
+                                )
+                            elif event_type == "node_status":
+                                step = event.get("step", "node")
+                                self._setup_queue.put(
+                                    ("install_log", (platform, f"Node.js: {step}"))
+                                )
+                            elif event_type == "node_progress":
+                                text = event.get("text") or event.get("percent")
+                                if text is not None:
+                                    self._setup_queue.put(
+                                        ("install_log", (platform, f"Node.js: {text}"))
+                                    )
+                            elif event_type == "npm_install_start":
+                                self._setup_queue.put(
+                                    ("install_log", (platform, "开始执行 npm install"))
+                                )
+                            elif event_type == "done":
+                                self._setup_queue.put(
+                                    ("install_done", (platform, bool(event.get("success"))))
+                                )
+                                return
+                            elif event_type == "error":
+                                message = event.get("message") or "安装失败"
+                                self._setup_queue.put(("install_error", (platform, str(message))))
+                                return
+                    self._setup_queue.put(
+                        ("install_error", (platform, "安装流结束，但没有收到完成事件"))
+                    )
+                except (OSError, urllib.error.URLError) as exc:
+                    self._setup_queue.put(("install_error", (platform, f"{type(exc).__name__}: {exc}")))
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def _set_geometry(self) -> None:
             width = (
@@ -1085,6 +1330,9 @@ def run(parent_pid: int | None = None) -> None:
         def _draw_expanded_panel(self) -> None:
             x = self.collapsed_width + self.expanded_gap
             if self.active_panel == "agents":
+                if self.agent_setup_open:
+                    self._draw_agent_setup_panel(x)
+                    return
                 if self.agent_detail_app:
                     self._draw_session_panel(x)
                     return
@@ -2034,6 +2282,7 @@ def run(parent_pid: int | None = None) -> None:
                 fill=self.text,
                 font=(self.ui_font, 30, "bold"),
             )
+            self._draw_setup_button(x + self.expanded_width - 124, 38)
             self._draw_collapse_button(x + self.expanded_width - 72, 38)
 
             card_y = 146
@@ -2068,6 +2317,19 @@ def run(parent_pid: int | None = None) -> None:
                 text="<<",
                 fill="#C5CBD2",
                 font=(self.ui_font, 22, "bold"),
+            )
+            self._add_hitbox(key, x, y, x + 40, y + 40)
+
+        def _draw_setup_button(self, x: int, y: int) -> None:
+            key = "open_agent_setup"
+            outline = self.focus if self._focused_key == key else self.card_border
+            self._rounded_rect(x, y, x + 40, y + 40, 8, fill="#172231", outline=outline)
+            self.canvas.create_text(
+                x + 20,
+                y + 19,
+                text="+",
+                fill="#C5CBD2",
+                font=(self.ui_font, 24, "bold"),
             )
             self._add_hitbox(key, x, y, x + 40, y + 40)
 
@@ -2134,6 +2396,199 @@ def run(parent_pid: int | None = None) -> None:
                 font=(self.ui_font, 28, "bold"),
             )
             self._add_hitbox(app.id, x, y, x + width, y + 90)
+
+        def _setup_state_label(self, state: SetupRuntimeState) -> tuple[str, str]:
+            if state.state == "checking":
+                return "检测中", self.pending_text
+            if state.state == "installed":
+                return "已安装", self.ok
+            if state.state == "missing":
+                return "未安装", self.weak
+            if state.state == "installing":
+                return "安装中", self.pending_text
+            if state.state == "failed":
+                return "失败", self.risk
+            return "待检测", self.weak
+
+        def _draw_agent_setup_panel(self, x: int) -> None:
+            content_x = x + 32
+            content_width = self.expanded_width - 64
+            self._rounded_rect(
+                x,
+                0,
+                x + self.expanded_width,
+                self.height,
+                18,
+                fill=self.panel_bg,
+                outline=self.border,
+                width=1,
+            )
+            self.canvas.create_text(
+                x + 32,
+                34,
+                anchor="nw",
+                text="安装",
+                fill=self.text,
+                font=(self.ui_font, 30, "bold"),
+            )
+            self._draw_text_line(
+                x + 32,
+                82,
+                text="安装 OpenClaw / Hermes / Nanobot",
+                fill=self.muted,
+                font=(self.ui_font, 17),
+                max_width=480,
+            )
+            self._draw_collapse_button(x + self.expanded_width - 72, 38, key="back_to_agent_apps")
+
+            if self.setup_detection_error:
+                self._draw_text_line(
+                    content_x,
+                    116,
+                    text=f"检测失败：{self.setup_detection_error}",
+                    fill=self.risk,
+                    font=(self.ui_font, 13),
+                    max_width=content_width,
+                )
+
+            card_y = 138
+            for platform in SETUP_PLATFORMS:
+                self._draw_setup_platform_card(content_x, card_y, platform, content_width)
+                card_y += 120
+            self._draw_setup_logs_card(content_x, 526, content_width)
+
+        def _draw_setup_platform_card(
+            self, x: int, y: int, platform: SetupPlatformInfo, width: int
+        ) -> None:
+            state = self.setup_states[platform.id]
+            label, color = self._setup_state_label(state)
+            installing_other = (
+                self.setup_installing_platform is not None
+                and self.setup_installing_platform != platform.id
+            )
+            can_install = state.state in {"missing", "failed"} and not installing_other
+            outline = self.focus if self._focused_key == f"setup_install:{platform.id}" else self.card_border
+            if state.state == "failed":
+                outline = "#803333"
+            elif state.state == "installing":
+                outline = "#A15D14"
+
+            self._rounded_rect(x, y, x + width, y + 104, 14, fill=self.card_bg, outline=outline)
+            self.canvas.create_oval(x + 24, y + 22, x + 82, y + 80, fill="#080D13", outline="#1F2A34")
+            self._draw_app_icon(platform.icon_type, x + 53, y + 51)
+            self._draw_text_line(
+                x + 112,
+                y + 20,
+                text=platform.name,
+                fill=self.text,
+                font=(self.ui_font, 21, "bold"),
+                max_width=width - 360,
+            )
+            detail = state.detail
+            if state.version:
+                detail = f"{detail} · v{state.version}"
+            self._draw_text_line(
+                x + 112,
+                y + 50,
+                text=detail,
+                fill=self.body_text if state.state != "failed" else self.risk,
+                font=(self.ui_font, 15),
+                max_width=width - 360,
+            )
+            self._draw_text_line(
+                x + 112,
+                y + 76,
+                text=platform.description,
+                fill=self.weak,
+                font=(self.ui_font, 12),
+                max_width=width - 340,
+            )
+            self.canvas.create_oval(
+                x + width - 294,
+                y + 42,
+                x + width - 278,
+                y + 58,
+                fill=color,
+                outline="",
+            )
+            self._draw_text_line(
+                x + width - 270,
+                y + 38,
+                text=label,
+                fill=color,
+                font=(self.ui_font, 15, "bold"),
+                max_width=110,
+            )
+
+            button_x = x + width - 144
+            button_y = y + 32
+            button_fill = "#182333" if can_install else "#121820"
+            button_outline = "#2F8E55" if can_install else self.card_border
+            self._rounded_rect(
+                button_x,
+                button_y,
+                button_x + 112,
+                button_y + 42,
+                10,
+                fill=button_fill,
+                outline=button_outline,
+            )
+            button_text = "安装"
+            button_color = self.text if can_install else self.weak
+            if state.state == "installed":
+                button_text = "已检测到"
+            elif state.state == "installing":
+                button_text = "安装中"
+            elif installing_other:
+                button_text = "等待"
+            self.canvas.create_text(
+                button_x + 56,
+                button_y + 21,
+                text=button_text,
+                fill=button_color,
+                font=(self.ui_font, 15, "bold"),
+            )
+            if can_install:
+                self._add_hitbox(
+                    f"setup_install:{platform.id}",
+                    button_x,
+                    button_y,
+                    button_x + 112,
+                    button_y + 42,
+                )
+
+        def _draw_setup_logs_card(self, x: int, y: int, width: int) -> None:
+            self._rounded_rect(x, y, x + width, y + 184, 14, fill=self.card_bg, outline=self.card_border)
+            self.canvas.create_text(
+                x + 24,
+                y + 18,
+                anchor="nw",
+                text="安装日志",
+                fill=self.text,
+                font=(self.ui_font, 19, "bold"),
+            )
+            lines = self.setup_logs[-7:]
+            if not lines:
+                self._draw_text_line(
+                    x + 24,
+                    y + 58,
+                    text="点击安装后，这里会显示下载与安装进度。",
+                    fill=self.muted,
+                    font=(self.ui_font, 14),
+                    max_width=width - 48,
+                )
+                return
+            platform_name = {item.id: item.name for item in SETUP_PLATFORMS}
+            for index, (platform, text) in enumerate(lines):
+                prefix = platform_name.get(platform, platform)
+                self._draw_text_line(
+                    x + 24,
+                    y + 54 + index * 18,
+                    text=f"{prefix}: {text}",
+                    fill=self.body_text,
+                    font=(self.ui_font, 12),
+                    max_width=width - 48,
+                )
 
         def _draw_session_panel(self, x: int) -> None:
             app_name = self.agent_detail_app or "Nanobot"
@@ -2614,6 +3069,7 @@ def run(parent_pid: int | None = None) -> None:
             self.risk_sort_dropdown_open = False
             if panel == "agents":
                 self.agent_detail_app = None
+                self.agent_setup_open = False
             self._focused_key = None
             self._set_geometry()
             self._draw()
@@ -2684,8 +3140,25 @@ def run(parent_pid: int | None = None) -> None:
                 return
             if key == "back_to_agent_apps":
                 self.agent_detail_app = None
+                self.agent_setup_open = False
                 self._focused_key = None
                 self._draw()
+                return
+            if key == "open_agent_setup":
+                print("[XSafeClaw Setup] open native setup page")
+                self.agent_detail_app = None
+                self.agent_setup_open = True
+                self._focused_key = None
+                self._start_setup_status_refresh()
+                self._draw()
+                return
+            if key.startswith("setup_install:"):
+                platform = key.split(":", 1)[1]
+                if platform in {"openclaw", "hermes", "nanobot"}:
+                    print(f"[XSafeClaw Setup] install {platform}")
+                    self._focused_key = key
+                    self._start_setup_install(platform)  # type: ignore[arg-type]
+                    self._draw()
                 return
             app_by_key = {
                 "app_openclaw": "OpenClaw",
@@ -2696,6 +3169,7 @@ def run(parent_pid: int | None = None) -> None:
             if app_name:
                 print(f"[XSafeClaw Mock] open app detail: {app_name}")
                 self.agent_detail_app = app_name
+                self.agent_setup_open = False
                 self.selected_session_id = DEFAULT_SELECTED_SESSION_ID
                 self._focused_key = None
                 self._draw()
@@ -2787,14 +3261,15 @@ def run(parent_pid: int | None = None) -> None:
         def mainloop(self) -> None:
             self.root.mainloop()
 
-    SidebarWindow(parent_pid).mainloop()
+    SidebarWindow(parent_pid, api_base).mainloop()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--parent-pid", type=int, default=None)
+    parser.add_argument("--api-base", default=DEFAULT_API_BASE)
     args = parser.parse_args()
-    run(args.parent_pid)
+    run(args.parent_pid, args.api_base)
 
 
 if __name__ == "__main__":

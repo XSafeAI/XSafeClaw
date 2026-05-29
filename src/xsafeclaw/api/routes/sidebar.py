@@ -8,6 +8,8 @@ import sys
 
 from fastapi import APIRouter
 
+from ...config import settings
+
 router = APIRouter()
 
 _sidebar_process: subprocess.Popen[bytes] | None = None
@@ -17,7 +19,14 @@ def _is_running(process: subprocess.Popen[bytes] | None) -> bool:
     return process is not None and process.poll() is None
 
 
-def _start_sidebar_process() -> subprocess.Popen[bytes]:
+def _desktop_sidebar_api_base() -> str:
+    host = settings.api_host
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
+    return f"http://{host}:{settings.api_port}/api"
+
+
+def _start_sidebar_process(api_base: str | None = None) -> subprocess.Popen[bytes]:
     creationflags = 0
     start_new_session = False
     if os.name == "nt":
@@ -25,6 +34,7 @@ def _start_sidebar_process() -> subprocess.Popen[bytes]:
     else:
         start_new_session = True
 
+    resolved_api_base = api_base or _desktop_sidebar_api_base()
     return subprocess.Popen(
         [
             sys.executable,
@@ -32,6 +42,8 @@ def _start_sidebar_process() -> subprocess.Popen[bytes]:
             "xsafeclaw.desktop_sidebar",
             "--parent-pid",
             str(os.getpid()),
+            "--api-base",
+            resolved_api_base,
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
