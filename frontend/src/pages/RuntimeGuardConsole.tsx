@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { type CSSProperties, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -154,21 +154,35 @@ export default function RuntimeGuardConsole() {
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
-  const [viewportFit, setViewportFit] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
+  const [layoutFit, setLayoutFit] = useState({
+    scale: 1,
+    height: 570,
+    leftWidth: 156,
+    rightWidth: 207,
+    mainWidth: 491,
+    mainDesignWidth: 491,
+  });
 
   useEffect(() => {
-    const updateViewportFit = () => {
-      const scale = Math.min(window.innerWidth / 854, window.innerHeight / 570);
-      setViewportFit({
+    const updateLayoutFit = () => {
+      const scale = window.innerHeight / 570;
+      const leftWidth = 156 * scale;
+      const rightWidth = 207 * scale;
+      const mainWidth = Math.max(window.innerWidth - leftWidth - rightWidth, 280 * scale);
+
+      setLayoutFit({
         scale,
-        offsetX: (window.innerWidth - 854 * scale) / 2,
-        offsetY: (window.innerHeight - 570 * scale) / 2,
+        height: window.innerHeight,
+        leftWidth,
+        rightWidth,
+        mainWidth,
+        mainDesignWidth: mainWidth / scale,
       });
     };
 
-    updateViewportFit();
-    window.addEventListener('resize', updateViewportFit);
-    return () => window.removeEventListener('resize', updateViewportFit);
+    updateLayoutFit();
+    window.addEventListener('resize', updateLayoutFit);
+    return () => window.removeEventListener('resize', updateLayoutFit);
   }, []);
 
   const approvalCount = useMemo(
@@ -211,17 +225,29 @@ export default function RuntimeGuardConsole() {
     });
   };
 
+  const leftScaleStyle = {
+    width: layoutFit.leftWidth,
+    height: layoutFit.height,
+    '--rg-scale': layoutFit.scale,
+  } as CSSProperties;
+  const mainFluidStyle = {
+    left: layoutFit.leftWidth,
+    width: layoutFit.mainWidth,
+    height: layoutFit.height,
+    '--rg-scale': layoutFit.scale,
+    '--rg-main-design-width': `${layoutFit.mainDesignWidth}px`,
+  } as CSSProperties;
+  const rightScaleStyle = {
+    left: layoutFit.leftWidth + layoutFit.mainWidth,
+    width: layoutFit.rightWidth,
+    height: layoutFit.height,
+    '--rg-scale': layoutFit.scale,
+  } as CSSProperties;
+
   return (
     <div className="runtime-guard-page">
       {placeholder && <div className="rg-toast">{placeholder}</div>}
-      <div
-        className="rg-scale-surface"
-        style={{
-          left: viewportFit.offsetX,
-          top: viewportFit.offsetY,
-          transform: `scale(${viewportFit.scale})`,
-        }}
-      >
+      <div className="rg-left-scale" style={leftScaleStyle}>
       <aside className="rg-sidebar">
         <div className="rg-window-dots">
           <span className="rg-window-dot rg-red" />
@@ -309,7 +335,9 @@ export default function RuntimeGuardConsole() {
           <button type="button" title="Notifications"><Bell /></button>
         </div>
       </aside>
+      </div>
 
+      <div className="rg-main-fluid" style={mainFluidStyle}>
       <main className="rg-main">
         <div className="rg-tabs">
           <div className="rg-session-tabs">
@@ -351,9 +379,6 @@ export default function RuntimeGuardConsole() {
             ))}
             <button className="rg-tab-add" type="button" onClick={() => openSession(selectedAgent)}>+</button>
           </div>
-          <IconButton className="rg-top-icon-one" title="Single layout"><Square /></IconButton>
-          <IconButton className="rg-top-icon-two" title="Split layout"><Columns2 /></IconButton>
-          <IconButton className="rg-heartbeat" title="Heartbeat monitor"><HeartPulse /></IconButton>
         </div>
 
         <section className="rg-task-title">
@@ -456,6 +481,26 @@ export default function RuntimeGuardConsole() {
           )}
         </section>
 
+        <footer className="rg-statusbar">
+          <StatusDot tone="success" />
+          <span className="rg-status-active">Runtime Guard Active</span>
+          <span>Events: 128</span>
+          <span>Blocked: 2</span>
+          <span>Warnings: 1</span>
+        </footer>
+
+        <div className="rg-version">
+          <span>v1.0.0</span>
+          <Shield />
+        </div>
+      </main>
+      </div>
+      <div className="rg-right-scale" style={rightScaleStyle}>
+        <div className="rg-right-top-actions">
+          <IconButton className="rg-top-icon-one" title="Single layout"><Square /></IconButton>
+          <IconButton className="rg-top-icon-two" title="Split layout"><Columns2 /></IconButton>
+          <IconButton className="rg-heartbeat" title="Heartbeat monitor"><HeartPulse /></IconButton>
+        </div>
         <aside className="rg-right-panel">
           <section className="rg-approval-center">
             <div className="rg-card-head rg-approval-head">
@@ -517,20 +562,6 @@ export default function RuntimeGuardConsole() {
             ))}
           </section>
         </aside>
-
-        <footer className="rg-statusbar">
-          <StatusDot tone="success" />
-          <span className="rg-status-active">Runtime Guard Active</span>
-          <span>Events: 128</span>
-          <span>Blocked: 2</span>
-          <span>Warnings: 1</span>
-        </footer>
-
-        <div className="rg-version">
-          <span>v1.0.0</span>
-          <Shield />
-        </div>
-      </main>
       </div>
     </div>
   );

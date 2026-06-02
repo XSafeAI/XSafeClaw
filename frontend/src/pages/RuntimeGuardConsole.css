@@ -11,12 +11,36 @@
   letter-spacing: 0;
 }
 
-.rg-scale-surface {
+.rg-left-scale,
+.rg-main-fluid,
+.rg-right-scale {
   position: absolute;
   top: 0;
+  overflow: hidden;
+}
+
+.rg-left-scale {
   left: 0;
-  width: 854px;
-  height: 570px;
+  z-index: 20;
+  background: #071016;
+}
+
+.rg-main-fluid {
+  z-index: 15;
+  overflow: visible;
+  background: #02070a;
+}
+
+.rg-right-scale {
+  z-index: 10;
+  background: #02070a;
+}
+
+.rg-left-scale .rg-sidebar,
+.rg-main-fluid .rg-main,
+.rg-right-scale .rg-right-top-actions,
+.rg-right-scale .rg-right-panel {
+  transform: scale(var(--rg-scale));
   transform-origin: 0 0;
 }
 
@@ -405,8 +429,8 @@
 .rg-main {
   position: absolute;
   top: 0;
-  left: 156px;
-  width: 698px;
+  left: 0;
+  width: var(--rg-main-design-width);
   height: 570px;
   background: #02070a;
 }
@@ -415,7 +439,7 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 698px;
+  width: 100%;
   height: 38px;
   border-bottom: 1px solid #0f1c25;
   background: #03090d;
@@ -428,7 +452,7 @@
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  width: 540px;
+  width: calc(100% - 170px);
   height: 25px;
   overflow: hidden;
 }
@@ -528,9 +552,17 @@
   color: #63747e;
 }
 
-.rg-top-icon-one { left: 568px; width: 24px; }
-.rg-top-icon-two { left: 598px; width: 24px; }
-.rg-heartbeat { left: 641px; width: 44px; color: #00c879; }
+.rg-right-top-actions {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 207px;
+  height: 38px;
+}
+
+.rg-top-icon-one { right: 86px; width: 24px; }
+.rg-top-icon-two { right: 56px; width: 24px; }
+.rg-heartbeat { right: 0; width: 44px; color: #00c879; }
 
 .rg-task-title {
   position: absolute;
@@ -559,7 +591,7 @@
 .rg-run-buttons {
   position: absolute;
   top: 52px;
-  left: 372px;
+  left: calc(100% - 109px);
   z-index: 15;
   display: flex;
   align-items: center;
@@ -647,7 +679,7 @@
   top: 88px;
   left: 10px;
   z-index: 2;
-  width: 460px;
+  width: calc(100% - 21px);
   height: 450px;
   border: 1px solid #13232e;
   border-radius: 6px;
@@ -658,7 +690,7 @@
 .rg-log-list {
   position: absolute;
   inset: 0 auto auto 0;
-  width: 460px;
+  width: 100%;
   height: 380px;
 }
 
@@ -669,7 +701,7 @@
   grid-template-columns: 42px 18px 1fr auto;
   align-items: center;
   gap: 4px;
-  width: 440px;
+  width: calc(100% - 20px);
   height: 18px;
   color: #a7b4bd;
   font-size: 8px;
@@ -710,7 +742,7 @@
   top: 100px;
   left: 58px;
   z-index: 5;
-  width: 391px;
+  width: calc(100% - 69px);
   height: 107px;
   border: 1px solid #3a3211;
   border-radius: 5px;
@@ -757,7 +789,7 @@
   position: absolute;
   top: 32px;
   left: 31px;
-  width: 345px;
+  width: calc(100% - 46px);
   height: 18px;
   padding: 4px 8px;
   border-radius: 3px;
@@ -781,7 +813,7 @@
 .rg-command-actions {
   position: absolute;
   top: 79px;
-  left: 180px;
+  right: 15px;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -836,7 +868,7 @@
   position: absolute;
   top: 388px;
   left: 11px;
-  width: 439px;
+  width: calc(100% - 21px);
   height: 60px;
   border: 1px solid #172835;
   border-radius: 5px;
@@ -861,7 +893,7 @@
 .rg-command-input button {
   position: absolute;
   top: 26px;
-  left: 411px;
+  right: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -878,8 +910,8 @@
 
 .rg-right-panel {
   position: absolute;
-  top: 88px;
-  left: 481px;
+  top: calc(88px * var(--rg-scale));
+  left: 0;
   z-index: 2;
   width: 207px;
   height: 450px;
