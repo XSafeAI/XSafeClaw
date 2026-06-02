@@ -1,11 +1,16 @@
 export const DAY_MS = 24 * 60 * 60 * 1000;
+export const HOUR_MS = 60 * 60 * 1000;
 export const BUDGET_STORAGE_KEY = 'xsafeclaw:budget:settings';
+
+export type BudgetPeriodUnit = 'hour' | 'day';
 
 export type BudgetSettings = {
   maxCost: number | null;
   periodStartAt: number;
   baselineCost: number;
   updatedAt: number;
+  periodValue?: number;
+  periodUnit?: BudgetPeriodUnit;
 };
 
 export type BudgetStatus = {
@@ -24,7 +29,16 @@ function defaultBudgetSettings(now: number): BudgetSettings {
     periodStartAt: now,
     baselineCost: 0,
     updatedAt: now,
+    periodValue: 24,
+    periodUnit: 'hour',
   };
+}
+
+export function getBudgetPeriodMs(settings: BudgetSettings): number {
+  const value = Number(settings.periodValue);
+  const unit = settings.periodUnit === 'day' ? 'day' : 'hour';
+  if (!Number.isFinite(value) || value <= 0) return DAY_MS;
+  return value * (unit === 'day' ? DAY_MS : HOUR_MS);
 }
 
 export function loadBudgetSettings(now = Date.now()): BudgetSettings {
@@ -36,11 +50,15 @@ export function loadBudgetSettings(now = Date.now()): BudgetSettings {
     const periodStartAt = Number(parsed.periodStartAt);
     const baselineCost = Number(parsed.baselineCost);
     const updatedAt = Number(parsed.updatedAt);
+    const periodValue = Number(parsed.periodValue);
+    const periodUnit = parsed.periodUnit === 'day' ? 'day' : 'hour';
     return {
       maxCost: Number.isFinite(maxCost) && maxCost > 0 ? maxCost : null,
       periodStartAt: Number.isFinite(periodStartAt) && periodStartAt > 0 ? periodStartAt : now,
       baselineCost: Number.isFinite(baselineCost) && baselineCost >= 0 ? baselineCost : 0,
       updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : now,
+      periodValue: Number.isFinite(periodValue) && periodValue > 0 ? periodValue : 24,
+      periodUnit,
     };
   } catch {
     return defaultBudgetSettings(now);
@@ -69,7 +87,8 @@ export function getBudgetStatus(
   now = Date.now(),
 ): BudgetStatus {
   const safeCost = Number.isFinite(currentCost) && currentCost >= 0 ? currentCost : 0;
-  const periodEnd = settings.periodStartAt + DAY_MS;
+  const periodMs = getBudgetPeriodMs(settings);
+  const periodEnd = settings.periodStartAt + periodMs;
   const settingsRolled = now >= periodEnd;
   const normalizedSettings: BudgetSettings = settingsRolled
     ? {
@@ -86,7 +105,7 @@ export function getBudgetStatus(
     ? Math.min(100, (budgetUsed / budgetLimit) * 100)
     : 0;
   const budgetOverLimit = Boolean(budgetLimit && budgetUsed >= budgetLimit);
-  const budgetRemainingMs = Math.max(0, normalizedSettings.periodStartAt + DAY_MS - now);
+  const budgetRemainingMs = Math.max(0, normalizedSettings.periodStartAt + getBudgetPeriodMs(normalizedSettings) - now);
 
   return {
     budgetLimit,

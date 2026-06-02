@@ -30,6 +30,14 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { statsAPI, systemAPI } from '../services/api';
+import {
+  getBudgetStatus,
+  loadBudgetSettings,
+  saveBudgetSettings,
+  type BudgetPeriodUnit,
+  type BudgetSettings,
+} from '../utils/budgetControl';
 import './RuntimeGuardConsole.css';
 
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
@@ -40,11 +48,18 @@ type ChatSession = {
   agent: AgentName;
   title: string;
 };
+type InstallMap = Record<AgentName, boolean | null>;
+type AgentDisplay = {
+  name: AgentName;
+  status: 'Running' | 'Idle' | 'Not installed';
+  className: string;
+  installed: boolean;
+};
 
-const agents: Array<{ name: AgentName; status: 'Running' | 'Idle'; className: string }> = [
-  { name: 'OpenClaw', status: 'Running', className: 'agent-openclaw' },
-  { name: 'Hermes', status: 'Idle', className: 'agent-hermes' },
-  { name: 'Nanobot', status: 'Idle', className: 'agent-nanobot' },
+const agentDefinitions: Array<{ name: AgentName; defaultStatus: 'Running' | 'Idle'; className: string }> = [
+  { name: 'OpenClaw', defaultStatus: 'Running', className: 'agent-openclaw' },
+  { name: 'Hermes', defaultStatus: 'Idle', className: 'agent-hermes' },
+  { name: 'Nanobot', defaultStatus: 'Idle', className: 'agent-nanobot' },
 ];
 
 const tools = [
@@ -84,6 +99,23 @@ const logRows = [
 
 function StatusDot({ tone }: { tone: 'success' | 'muted' | 'warning' | 'mcp' }) {
   return <span className={`rg-dot rg-dot-${tone}`} />;
+}
+
+function formatMoney(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '$0.00';
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatBudgetRefreshTime(remainingMs: number): string {
+  const clamped = Math.max(0, remainingMs);
+  const totalMinutes = Math.ceil(clamped / 60_000);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}天${hours}小时`;
+  if (hours > 0) return `${hours}小时${minutes}分钟`;
+  return `${minutes}分钟`;
 }
 
 function IconButton({
@@ -142,6 +174,12 @@ function ApprovalCard({
 
 export default function RuntimeGuardConsole() {
   const navigate = useNavigate();
+  const [installedAgents, setInstalledAgents] = useState<InstallMap>({
+    OpenClaw: null,
+    Hermes: null,
+    Nanobot: null,
+  });
+  const [installProbeFailed, setInstallProbeFailed] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([
     { id: 'session-openclaw-1', agent: 'OpenClaw', title: 'OpenClaw' },
   ]);
@@ -154,6 +192,13 @@ export default function RuntimeGuardConsole() {
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
+  const [budgetSettings, setBudgetSettings] = useState<BudgetSettings>(() => loadBudgetSettings());
+  const [budgetModalOpen, setBudgetModalOpen] = useState(false);
+  const [budgetAmountInput, setBudgetAmountInput] = useState('');
+  const [budgetPeriodInput, setBudgetPeriodInput] = useState('');
+  const [budgetPeriodUnit, setBudgetPeriodUnit] = useState<BudgetPeriodUnit>('hour');
+  const [dashboardCost, setDashboardCost] = useState(3.21);
+  const [nowTs, setNowTs] = useState(() => Date.now());
   const [layoutFit, setLayoutFit] = useState({
     scale: 1,
     height: 570,
@@ -185,19 +230,162 @@ export default function RuntimeGuardConsole() {
     return () => window.removeEventListener('resize', updateLayoutFit);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    systemAPI.installStatus()
+      .then((res) => {
+        if (cancelled) return;
+        setInstalledAgents({
+          OpenClaw: Boolean(res.data.openclaw_installed),
+          Hermes: Boolean(res.data.hermes_installed),
+          Nanobot: Boolean(res.data.nanobot_installed),
+        });
+        setInstallProbeFailed(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setInstallProbeFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const pullDashboardCost = async () => {
+      try {
+        const { data } = await statsAPI.dashboard();
+        const nextCost = Number(data?.cost);
+        if (!cancelled && Number.isFinite(nextCost) && nextCost >= 0) {
+          setDashboardCost(nextCost);
+        }
+      } catch {
+        // RuntimeGuard is still a frontend mock; keep the visual fallback.
+      }
+    };
+
+    pullDashboardCost();
+    const timer = window.setInterval(pullDashboardCost, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowTs(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const approvalCount = useMemo(
     () => [shellApproval, fileApproval].filter(state => state === 'pending').length,
     [shellApproval, fileApproval],
   );
+  const agents: AgentDisplay[] = useMemo(
+    () => agentDefinitions.map(agent => {
+      const installed = installedAgents[agent.name];
+      const probeUnknown = installed === null || installProbeFailed;
+      return {
+        name: agent.name,
+        className: agent.className,
+        installed: probeUnknown ? true : installed,
+        status: probeUnknown ? agent.defaultStatus : installed ? agent.defaultStatus : 'Not installed',
+      };
+    }),
+    [installProbeFailed, installedAgents],
+  );
   const activeSession = sessions.find(session => session.id === activeSessionId) ?? sessions[0] ?? null;
   const activeAgent = activeSession?.agent ?? selectedAgent;
+  const preApprovalLogRows = logRows.filter(row => row.y < 100);
+  const postApprovalLogRows = logRows.filter(row => row.y >= 100);
+  const budgetStatus = useMemo(
+    () => getBudgetStatus(budgetSettings, dashboardCost, nowTs),
+    [budgetSettings, dashboardCost, nowTs],
+  );
+  const {
+    budgetLimit,
+    budgetUsed,
+    budgetPercent,
+    budgetOverLimit,
+    budgetRemainingMs,
+  } = budgetStatus;
+  const budgetConfigured = Boolean(budgetLimit);
+  const budgetDisplayCost = budgetConfigured ? budgetUsed : dashboardCost;
+  const budgetBarPercent = budgetConfigured ? Math.max(4, budgetPercent) : 0;
+  const budgetResetText = budgetConfigured
+    ? `额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`
+    : '24h total cost';
+
+  useEffect(() => {
+    if (!budgetStatus.settingsRolled) return;
+    setBudgetSettings(budgetStatus.settings);
+    saveBudgetSettings(budgetStatus.settings);
+  }, [budgetStatus]);
 
   const showPlaceholder = () => {
     setPlaceholder('This is a frontend-only placeholder.');
     window.setTimeout(() => setPlaceholder(''), 2200);
   };
 
-  const openSession = (agent: AgentName) => {
+  const showInstallHint = (agent: AgentName) => {
+    setPlaceholder(`${agent} is not installed. Open Setup to install it.`);
+    window.setTimeout(() => setPlaceholder(''), 2600);
+  };
+
+  const openBudgetModal = () => {
+    setBudgetAmountInput(budgetLimit ? String(budgetLimit) : '');
+    setBudgetPeriodInput(budgetLimit && budgetSettings.periodValue ? String(budgetSettings.periodValue) : '');
+    setBudgetPeriodUnit(budgetSettings.periodUnit === 'day' ? 'day' : 'hour');
+    setBudgetModalOpen(true);
+  };
+
+  const saveBudgetLimit = () => {
+    const maxCost = Number(budgetAmountInput);
+    const periodValue = Number(budgetPeriodInput);
+    if (!Number.isFinite(maxCost) || maxCost <= 0 || !Number.isFinite(periodValue) || periodValue <= 0) return;
+
+    const now = Date.now();
+    const next: BudgetSettings = {
+      maxCost,
+      periodValue,
+      periodUnit: budgetPeriodUnit,
+      periodStartAt: now,
+      baselineCost: dashboardCost,
+      updatedAt: now,
+    };
+    setBudgetSettings(next);
+    setNowTs(now);
+    saveBudgetSettings(next);
+    setBudgetModalOpen(false);
+  };
+
+  const clearBudgetLimit = () => {
+    const now = Date.now();
+    const next: BudgetSettings = {
+      maxCost: null,
+      periodValue: budgetSettings.periodValue || 24,
+      periodUnit: budgetSettings.periodUnit || 'hour',
+      periodStartAt: now,
+      baselineCost: dashboardCost,
+      updatedAt: now,
+    };
+    setBudgetSettings(next);
+    setNowTs(now);
+    saveBudgetSettings(next);
+    setBudgetAmountInput('');
+    setBudgetPeriodInput('');
+    setBudgetModalOpen(false);
+  };
+
+  const openSession = (agent: AgentName, installed = true) => {
+    if (!installed) {
+      showInstallHint(agent);
+      return;
+    }
+
     setSelectedAgent(agent);
     const sameAgentCount = sessions.filter(session => session.agent === agent).length + 1;
     const id = `${agent.toLowerCase()}-${Date.now()}-${sameAgentCount}`;
@@ -210,6 +398,10 @@ export default function RuntimeGuardConsole() {
     setSessions(current => [...current, session]);
     setActiveSessionId(id);
     setEmptyTask(false);
+  };
+
+  const openSelectedAgentSession = () => {
+    openSession(selectedAgent, agents.find(agent => agent.name === selectedAgent)?.installed ?? true);
   };
 
   const closeSession = (id: string) => {
@@ -247,6 +439,68 @@ export default function RuntimeGuardConsole() {
   return (
     <div className="runtime-guard-page">
       {placeholder && <div className="rg-toast">{placeholder}</div>}
+      {budgetModalOpen && (
+        <div className="rg-modal-backdrop" role="presentation">
+          <div className="rg-budget-modal" role="dialog" aria-modal="true" aria-labelledby="rg-budget-modal-title">
+            <button className="rg-modal-close" type="button" title="Close budget settings" onClick={() => setBudgetModalOpen(false)}>
+              <X />
+            </button>
+            <div className="rg-budget-modal-kicker">BUDGET LIMIT</div>
+            <h2 id="rg-budget-modal-title">Set runtime budget</h2>
+            <p>Set a spending limit for this browser session. Leave either field blank to only show the 24h total cost.</p>
+            <div className="rg-budget-sentence">
+              <input
+                aria-label="Maximum USD usage"
+                inputMode="decimal"
+                min="0"
+                onChange={(event) => setBudgetAmountInput(event.target.value)}
+                placeholder="__"
+                step="0.01"
+                type="number"
+                value={budgetAmountInput}
+              />
+              <span>USD</span>
+              <input
+                aria-label="Budget refresh interval"
+                inputMode="numeric"
+                min="1"
+                onChange={(event) => setBudgetPeriodInput(event.target.value)}
+                placeholder="__"
+                step="1"
+                type="number"
+                value={budgetPeriodInput}
+              />
+              <select
+                aria-label="Budget interval unit"
+                onChange={(event) => setBudgetPeriodUnit(event.target.value as BudgetPeriodUnit)}
+                value={budgetPeriodUnit}
+              >
+                <option value="hour">小时</option>
+                <option value="day">天</option>
+              </select>
+            </div>
+            <div className="rg-budget-modal-preview">
+              Current cost: {formatMoney(dashboardCost)}
+            </div>
+            <div className="rg-budget-modal-actions">
+              <button type="button" className="rg-budget-clear" onClick={clearBudgetLimit}>Clear</button>
+              <button
+                type="button"
+                className="rg-budget-save"
+                disabled={
+                  !Number.isFinite(Number(budgetAmountInput))
+                  || Number(budgetAmountInput) <= 0
+                  || !Number.isFinite(Number(budgetPeriodInput))
+                  || Number(budgetPeriodInput) <= 0
+                }
+                onClick={saveBudgetLimit}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="rg-left-scale" style={leftScaleStyle}>
       <aside className="rg-sidebar">
         <div className="rg-window-dots">
@@ -261,7 +515,7 @@ export default function RuntimeGuardConsole() {
           <span className="rg-subtitle">AI Runtime Guard</span>
         </div>
 
-        <button className="rg-new-task" onClick={() => setEmptyTask(true)} type="button">
+        <button className="rg-new-task" onClick={openSelectedAgentSession} type="button">
           <span>+</span>
           <span>New Task</span>
           <span className="rg-shortcut">Cmd N</span>
@@ -274,16 +528,24 @@ export default function RuntimeGuardConsole() {
           </div>
           {agents.map((agent, index) => (
             <div
-              className={`rg-agent-row ${selectedAgent === agent.name ? 'is-selected' : ''}`}
+              className={`rg-agent-row ${selectedAgent === agent.name ? 'is-selected' : ''} ${!agent.installed ? 'is-uninstalled' : ''}`}
               key={agent.name}
-              onClick={() => setSelectedAgent(agent.name)}
+              aria-disabled={!agent.installed}
+              title={agent.installed ? `${agent.name} runtime` : `${agent.name} is not installed`}
+              onClick={() => {
+                if (!agent.installed) {
+                  showInstallHint(agent.name);
+                  return;
+                }
+                setSelectedAgent(agent.name);
+              }}
               style={{ top: 18 + index * 36 }}
             >
               <span className={`rg-agent-mark ${agent.className}`}>{agent.name === 'OpenClaw' ? <Zap /> : agent.name === 'Hermes' ? <Bot /> : <Hexagon />}</span>
               <span className="rg-agent-copy">
                 <span className="rg-agent-name">{agent.name}</span>
                 <span className="rg-agent-state">
-                  <StatusDot tone={agent.status === 'Running' ? 'success' : 'muted'} />
+                  <StatusDot tone={agent.status === 'Running' ? 'success' : agent.installed ? 'muted' : 'warning'} />
                   {agent.status}
                 </span>
               </span>
@@ -291,11 +553,16 @@ export default function RuntimeGuardConsole() {
                 className="rg-open-agent"
                 onClick={(event) => {
                   event.stopPropagation();
-                  openSession(agent.name);
+                  if (!agent.installed) {
+                    showInstallHint(agent.name);
+                    navigate('/setup');
+                    return;
+                  }
+                  openSession(agent.name, agent.installed);
                 }}
                 type="button"
               >
-                Open <ChevronRight />
+                {agent.installed ? 'Open' : 'Setup'} <ChevronRight />
               </button>
             </div>
           ))}
@@ -315,14 +582,14 @@ export default function RuntimeGuardConsole() {
           })}
         </section>
 
-        <section className="rg-budget">
+        <button className={`rg-budget ${budgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
           <div className="rg-budget-title">BUDGET</div>
-          <div className="rg-budget-amount">$3.21</div>
-          <div className="rg-budget-total">/ $10.00</div>
-          <div className="rg-budget-bar"><span /></div>
-          <div className="rg-budget-percent">32%</div>
-          <div className="rg-budget-reset">Resets in 2h 35m</div>
-        </section>
+          <div className="rg-budget-amount">{formatMoney(budgetDisplayCost)}</div>
+          {budgetConfigured && <div className="rg-budget-total">/ {formatMoney(budgetLimit ?? 0)}</div>}
+          <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
+          <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
+          <div className="rg-budget-reset">{budgetOverLimit ? '已达到最大用量' : budgetResetText}</div>
+        </button>
 
         <section className="rg-user">
           <span className="rg-avatar"><User /></span>
@@ -377,7 +644,7 @@ export default function RuntimeGuardConsole() {
                 </span>
               </button>
             ))}
-            <button className="rg-tab-add" type="button" onClick={() => openSession(selectedAgent)}>+</button>
+            <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession}>+</button>
           </div>
         </div>
 
@@ -437,11 +704,12 @@ export default function RuntimeGuardConsole() {
             </div>
           ) : (
             <>
+              <div className="rg-task-scroll">
               <div className="rg-log-list">
-                {logRows.map(row => {
+                {preApprovalLogRows.map(row => {
                   const RowIcon = row.icon;
                   return (
-                    <div className="rg-log-row" key={`${row.time}-${row.y}`} style={{ top: row.y }}>
+                    <div className="rg-log-row" key={`${row.time}-${row.y}`}>
                       <span className="rg-log-time">{row.time}</span>
                       <RowIcon className={`rg-log-icon rg-icon-${row.iconTone || 'default'}`} />
                       <span className={`rg-log-content rg-text-${row.textTone || 'default'}`}>
@@ -472,10 +740,46 @@ export default function RuntimeGuardConsole() {
                 </div>
               </div>
 
-              <div className="rg-command-input">
-                <span>Ask {activeAgent} ...</span>
-                <span className="rg-command-shortcuts">Cmd K&nbsp;&nbsp; Commands&nbsp;&nbsp;&nbsp;&nbsp; Cmd /&nbsp;&nbsp; Quick Actions</span>
-                <button type="button" title="Send placeholder"><Send /></button>
+              <div className="rg-log-list">
+                {postApprovalLogRows.map(row => {
+                  const RowIcon = row.icon;
+                  return (
+                    <div className="rg-log-row" key={`${row.time}-${row.y}`}>
+                      <span className="rg-log-time">{row.time}</span>
+                      <RowIcon className={`rg-log-icon rg-icon-${row.iconTone || 'default'}`} />
+                      <span className={`rg-log-content rg-text-${row.textTone || 'default'}`}>
+                        {row.text}
+                        {row.badge && <span className="rg-inline-badge">{row.badge}</span>}
+                        {row.path && <code>{row.path}</code>}
+                        {row.code && <code className="rg-code-inline">{row.code}</code>}
+                      </span>
+                      {row.delta && <span className={`rg-delta rg-delta-${row.deltaTone || 'plain'}`}>{row.delta}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+
+              </div>
+
+              <div className={`rg-command-input ${budgetOverLimit ? 'is-budget-blocked' : ''}`}>
+                <span>{budgetOverLimit ? '已达到最大用量' : `Ask ${activeAgent} ...`}</span>
+                <span className="rg-command-shortcuts">
+                  {budgetOverLimit
+                    ? `额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`
+                    : 'Cmd K  Commands    Cmd /  Quick Actions'}
+                </span>
+                <button
+                  disabled={budgetOverLimit}
+                  onClick={() => {
+                    if (budgetOverLimit) {
+                      setPlaceholder(`已达到最大用量，额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`);
+                    }
+                  }}
+                  type="button"
+                  title={budgetOverLimit ? '已达到最大用量' : 'Send placeholder'}
+                >
+                  <Send />
+                </button>
               </div>
             </>
           )}

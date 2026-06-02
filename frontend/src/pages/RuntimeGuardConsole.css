@@ -213,6 +213,40 @@
   border-color: #1d2d39;
 }
 
+.rg-agent-row.is-uninstalled {
+  background: #090f14;
+  border-color: #121c24;
+  opacity: 0.72;
+}
+
+.rg-agent-row.is-uninstalled:hover {
+  background: #0b1218;
+  border-color: #1b2730;
+}
+
+.rg-agent-row.is-uninstalled .rg-agent-mark {
+  color: #697782;
+  background: #121a20;
+  filter: grayscale(1);
+}
+
+.rg-agent-row.is-uninstalled .rg-agent-name,
+.rg-agent-row.is-uninstalled .rg-agent-state {
+  color: #798790;
+}
+
+.rg-agent-row.is-uninstalled .rg-open-agent {
+  border-color: #303a42;
+  background: #111820;
+  color: #a5b0b8;
+}
+
+.rg-agent-row.is-uninstalled .rg-open-agent:hover {
+  background: #18212a;
+  border-color: #44505a;
+  color: #d1d9df;
+}
+
 .rg-agent-mark {
   display: flex;
   align-items: center;
@@ -249,6 +283,7 @@
   color: #74838d;
   font-size: 7px;
   line-height: 9px;
+  white-space: nowrap;
 }
 
 .rg-open-agent {
@@ -310,6 +345,23 @@
   border: 1px solid #13232e;
   border-radius: 6px;
   background: #09131b;
+  padding: 0;
+  text-align: left;
+}
+
+.rg-budget:hover {
+  border-color: #24404d;
+  background: #0b1720;
+}
+
+.rg-budget:focus-visible {
+  outline: 1px solid #1e8cff;
+  outline-offset: 1px;
+}
+
+.rg-budget.is-over-limit {
+  border-color: #4a3512;
+  background: #161207;
 }
 
 .rg-budget-title {
@@ -350,10 +402,14 @@
 
 .rg-budget-bar span {
   display: block;
-  width: 36px;
+  width: 0;
   height: 5px;
   border-radius: 3px;
   background: #00c879;
+}
+
+.rg-budget.is-over-limit .rg-budget-bar span {
+  background: #e1b931;
 }
 
 .rg-budget-percent {
@@ -368,8 +424,16 @@
   position: absolute;
   top: 68px;
   left: 8px;
+  width: 120px;
   color: #6f7e88;
   font-size: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rg-budget.is-over-limit .rg-budget-reset {
+  color: #e1b931;
 }
 
 .rg-user {
@@ -687,11 +751,48 @@
   overflow: hidden;
 }
 
+.rg-task-scroll {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 72px;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 10px 8px;
+  overflow-y: auto;
+  scrollbar-color: #22313d transparent;
+}
+
+.rg-task-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.rg-task-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #22313d;
+}
+
+.rg-task-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .rg-log-list {
   position: absolute;
   inset: 0 auto auto 0;
   width: 100%;
   height: 380px;
+}
+
+.rg-task-scroll .rg-log-list {
+  position: relative;
+  inset: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  height: auto;
 }
 
 .rg-log-row {
@@ -705,6 +806,13 @@
   height: 18px;
   color: #a7b4bd;
   font-size: 8px;
+}
+
+.rg-task-scroll .rg-log-row {
+  position: relative;
+  left: auto;
+  width: 100%;
+  min-height: 18px;
 }
 
 .rg-log-time {
@@ -742,11 +850,30 @@
   top: 100px;
   left: 58px;
   z-index: 5;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 7px 10px;
   width: calc(100% - 69px);
-  height: 107px;
+  min-height: 107px;
+  max-height: 276px;
+  height: auto;
+  padding: 11px 12px 12px 31px;
   border: 1px solid #3a3211;
   border-radius: 5px;
   background: rgba(26, 20, 5, 0.82);
+  overflow-y: auto;
+}
+
+.rg-task-scroll .rg-command-card {
+  position: relative;
+  top: auto;
+  left: auto;
+  width: calc(100% - 48px);
+  max-height: none;
+  margin: 6px 0 6px 48px;
+  overflow: visible;
+  flex: 0 0 auto;
 }
 
 .rg-command-card.is-approved {
@@ -764,61 +891,75 @@
 .rg-command-card.is-approved > svg { color: #00c879; }
 
 .rg-command-title {
-  position: absolute;
-  top: 11px;
-  left: 31px;
+  grid-column: 1;
+  min-width: 0;
   color: #e1b931;
   font-size: 8px;
   font-weight: 600;
+  line-height: 12px;
 }
 
 .rg-command-card.is-approved .rg-command-title { color: #00c879; }
 
 .rg-command-risk {
-  position: absolute;
-  top: 27px;
-  right: 11px;
+  grid-column: 2;
+  align-self: start;
+  justify-self: end;
   color: #ff5b5b;
   font-size: 7px;
   font-weight: 600;
+  line-height: 12px;
+  white-space: nowrap;
 }
 
 .rg-command-card.is-approved .rg-command-risk { color: #00c879; }
 
 .rg-command-code {
-  position: absolute;
-  top: 32px;
-  left: 31px;
-  width: calc(100% - 46px);
-  height: 18px;
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 18px;
+  max-height: 116px;
   padding: 4px 8px;
   border-radius: 3px;
   background: #050a0e;
   color: #d9e4ea;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 8px;
+  line-height: 12px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.rg-task-scroll .rg-command-code {
+  max-height: none;
+  overflow: visible;
 }
 
 .rg-command-reason {
-  position: absolute;
-  top: 57px;
-  left: 31px;
+  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
   color: #9eacb5;
   font-size: 8px;
+  line-height: 12px;
+}
+
+.rg-command-reason span {
+  overflow-wrap: anywhere;
 }
 
 .rg-command-actions {
-  position: absolute;
-  top: 79px;
-  right: 15px;
+  grid-column: 1 / -1;
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-  width: 196px;
-  height: 20px;
+  width: 100%;
+  min-height: 20px;
+  margin-top: 1px;
 }
 
 .rg-command-actions button,
@@ -866,7 +1007,8 @@
 
 .rg-command-input {
   position: absolute;
-  top: 388px;
+  top: auto;
+  bottom: 10px;
   left: 11px;
   width: calc(100% - 21px);
   height: 60px;
@@ -875,6 +1017,17 @@
   background: #071018;
   color: #5f707a;
   font-size: 8px;
+}
+
+.rg-task-scroll .rg-command-input {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: auto;
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 60px;
+  margin-top: 2px;
 }
 
 .rg-command-input > span:first-child {
@@ -907,6 +1060,27 @@
 
 .rg-command-input button:hover { background: #17232e; }
 .rg-command-input button:active { background: #0b141b; }
+
+.rg-command-input.is-budget-blocked {
+  border-color: #4a3512;
+  background: #120f07;
+  color: #e1b931;
+}
+
+.rg-command-input.is-budget-blocked .rg-command-shortcuts {
+  color: #b9962f;
+}
+
+.rg-command-input.is-budget-blocked button {
+  cursor: not-allowed;
+  border-color: #3d3418;
+  background: #181309;
+  color: #7d6f43;
+}
+
+.rg-command-input.is-budget-blocked button:hover {
+  background: #181309;
+}
 
 .rg-right-panel {
   position: absolute;
@@ -1264,6 +1438,152 @@
   color: #d4dee5;
   font-size: 9px;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+}
+
+.rg-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.rg-budget-modal {
+  position: relative;
+  width: 278px;
+  min-height: 205px;
+  padding: 18px;
+  border: 1px solid #1c3443;
+  border-radius: 7px;
+  background: #071018;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.48);
+}
+
+.rg-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid #22313d;
+  border-radius: 4px;
+  background: #101923;
+  color: #81919b;
+}
+
+.rg-modal-close:hover {
+  background: #17232e;
+  color: #d6e0e7;
+}
+
+.rg-modal-close svg {
+  width: 10px;
+  height: 10px;
+}
+
+.rg-budget-modal-kicker {
+  color: #00c879;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.rg-budget-modal h2 {
+  margin: 6px 28px 0 0;
+  color: #e8f1f6;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.rg-budget-modal p {
+  margin: 6px 0 0;
+  color: #84949e;
+  font-size: 9px;
+  line-height: 14px;
+}
+
+.rg-budget-sentence {
+  display: grid;
+  grid-template-columns: 72px 28px 58px 1fr;
+  align-items: center;
+  gap: 7px;
+  margin-top: 18px;
+  color: #cddae1;
+  font-size: 10px;
+}
+
+.rg-budget-sentence input,
+.rg-budget-sentence select {
+  width: 100%;
+  height: 27px;
+  border: 1px solid #20313d;
+  border-radius: 4px;
+  background: #050a0e;
+  color: #e8f1f6;
+  font-size: 10px;
+  outline: none;
+}
+
+.rg-budget-sentence input {
+  padding: 0 8px;
+}
+
+.rg-budget-sentence select {
+  padding: 0 5px;
+}
+
+.rg-budget-sentence input:focus,
+.rg-budget-sentence select:focus {
+  border-color: #00a7ff;
+}
+
+.rg-budget-modal-preview {
+  margin-top: 10px;
+  color: #6f7e88;
+  font-size: 8px;
+}
+
+.rg-budget-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.rg-budget-modal-actions button {
+  height: 25px;
+  padding: 0 12px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.rg-budget-clear {
+  border: 1px solid #293844;
+  background: #0e1821;
+  color: #c8d5dd;
+}
+
+.rg-budget-clear:hover {
+  background: #17232e;
+}
+
+.rg-budget-save {
+  background: #00c879;
+  color: #06100b;
+}
+
+.rg-budget-save:hover {
+  background: #14d88a;
+}
+
+.rg-budget-save:disabled {
+  cursor: not-allowed;
+  background: #1a3b30;
+  color: #668d7c;
 }
 
 .runtime-guard-page button {
