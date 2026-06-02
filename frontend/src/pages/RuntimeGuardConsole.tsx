@@ -154,19 +154,21 @@ export default function RuntimeGuardConsole() {
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
-  const [scale, setScale] = useState({ x: 1, y: 1 });
+  const [viewportFit, setViewportFit] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
 
   useEffect(() => {
-    const updateScale = () => {
-      setScale({
-        x: window.innerWidth / 854,
-        y: window.innerHeight / 570,
+    const updateViewportFit = () => {
+      const scale = Math.min(window.innerWidth / 854, window.innerHeight / 570);
+      setViewportFit({
+        scale,
+        offsetX: (window.innerWidth - 854 * scale) / 2,
+        offsetY: (window.innerHeight - 570 * scale) / 2,
       });
     };
 
-    updateScale();
-    window.addEventListener('resize', updateScale);
-    return () => window.removeEventListener('resize', updateScale);
+    updateViewportFit();
+    window.addEventListener('resize', updateViewportFit);
+    return () => window.removeEventListener('resize', updateViewportFit);
   }, []);
 
   const approvalCount = useMemo(
@@ -215,7 +217,9 @@ export default function RuntimeGuardConsole() {
       <div
         className="rg-scale-surface"
         style={{
-          transform: `scale(${scale.x}, ${scale.y})`,
+          left: viewportFit.offsetX,
+          top: viewportFit.offsetY,
+          transform: `scale(${viewportFit.scale})`,
         }}
       >
       <aside className="rg-sidebar">
