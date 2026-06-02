@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Layout from './components/Layout';
 import Monitor from './pages/Monitor';
+import RuntimeGuardConsole from './pages/RuntimeGuardConsole';
 import World from './pages/World';
 import Assets from './pages/Assets';
 import RiskScanner from './pages/RiskScanner';
@@ -52,6 +53,11 @@ const EXEMPT_PATHS = [
   '/hermes_configure',
   '/nanobot_configure',
   '/configure_select',
+  '/runtime-guard-console',
+];
+
+const FRONTEND_ONLY_PATHS = [
+  '/runtime-guard-console',
 ];
 
 const SETUP_VISITED_KEY = 'xsafeclaw:setup_visited';
@@ -62,6 +68,11 @@ function AppRoutes() {
   const location = useLocation();
 
   useEffect(() => {
+    if (FRONTEND_ONLY_PATHS.includes(window.location.pathname)) {
+      setCheckState('ok');
+      return;
+    }
+
     let cancelled = false;
 
     (async () => {
@@ -126,6 +137,7 @@ function AppRoutes() {
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />
       <Route path="/world" element={<World />} />
+      <Route path="/runtime-guard-console" element={<RuntimeGuardConsole />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/monitor" element={<Monitor />} />
