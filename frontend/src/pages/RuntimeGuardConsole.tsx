@@ -40,6 +40,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { chatAPI, statsAPI, systemAPI, type RuntimeInstance } from '../services/api';
+import MarkdownMessage from '../components/MarkdownMessage';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
 import {
@@ -579,6 +580,8 @@ function TimelineMessage({
         <span className="rg-stream-title">{isUser ? 'You' : isError ? 'Runtime error' : 'Assistant'}</span>
         {msg.pending && !msg.content ? (
           <span className="rg-stream-pending"><i /><i /><i /></span>
+        ) : !isUser && !isError ? (
+          <MarkdownMessage content={msg.content} className="rg-stream-markdown" />
         ) : (
           <p>{msg.content}</p>
         )}
@@ -1027,7 +1030,7 @@ export default function RuntimeGuardConsole() {
       const response = await fetch('/api/chat/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_key: key, message: text }),
+        body: JSON.stringify({ session_key: key, message: text, client_context: 'runtime_guard' }),
       });
 
       if (!response.ok || !response.body) {

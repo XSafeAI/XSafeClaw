@@ -359,7 +359,9 @@ def _read_nanobot_history_from_jsonl(
             if role == "user":
                 messages.extend(queued_tool_calls)
                 queued_tool_calls = []
-                text = _nanobot_result_text(entry.get("content")).strip()
+                text = _strip_runtime_guard_markdown_instruction(
+                    _nanobot_result_text(entry.get("content"))
+                ).strip()
                 if text:
                     messages.append(
                         {
@@ -1183,6 +1185,7 @@ def _read_history_from_jsonl(
                     b.get("text", "") for b in content
                     if isinstance(b, dict) and b.get("type") == "text"
                 ) if isinstance(content, list) else "")
+                text = _strip_runtime_guard_markdown_instruction(text)
                 text = re.sub(r"^\[[^\]]*\d{4}-\d{2}-\d{2}[^\]]*\]\s*", "", text)
                 text = re.sub(r"\n\[message_id:[^\]]*\]", "", text)
                 text = text.strip()
@@ -1524,6 +1527,51 @@ _HERMES_TRACE_NOISE_PHASES = {
     "answer",
     "final",
 }
+
+_RUNTIME_GUARD_CLIENT_CONTEXT = "runtime_guard"
+_RUNTIME_GUARD_MARKDOWN_BEGIN = "<!-- XSafeClaw RuntimeGuard Markdown Output Instruction -->"
+_RUNTIME_GUARD_MARKDOWN_END = "<!-- /XSafeClaw RuntimeGuard Markdown Output Instruction -->"
+_RUNTIME_GUARD_MARKDOWN_OUTPUT_INSTRUCTION = """RuntimeGuard final-answer formatting requirements:
+- Write the final assistant answer in GitHub Flavored Markdown.
+- Use fenced code blocks for code, commands, JSON, logs, stack traces, and multi-line output.
+- Use inline code for file paths, commands, environment variables, identifiers, and literal values.
+- Use lists or tables when they make the answer easier to scan.
+- Do not include internal tool events, trace events, approval events, or hidden reasoning in the final answer."""
+
+
+def _is_runtime_guard_context(value: object) -> bool:
+    return str(value or "").strip().lower() == _RUNTIME_GUARD_CLIENT_CONTEXT
+
+
+def _runtime_guard_markdown_user_message(message: str, *, enabled: bool) -> str:
+    if not enabled:
+        return message
+    return (
+        f"{_RUNTIME_GUARD_MARKDOWN_BEGIN}\n"
+        f"{_RUNTIME_GUARD_MARKDOWN_OUTPUT_INSTRUCTION}\n"
+        f"{_RUNTIME_GUARD_MARKDOWN_END}\n\n"
+        f"{message}"
+    )
+
+
+def _strip_runtime_guard_markdown_instruction(text: str) -> str:
+    if _RUNTIME_GUARD_MARKDOWN_BEGIN not in text:
+        return text
+    pattern = (
+        rf"\s*{re.escape(_RUNTIME_GUARD_MARKDOWN_BEGIN)}"
+        rf".*?"
+        rf"{re.escape(_RUNTIME_GUARD_MARKDOWN_END)}\s*"
+    )
+    return re.sub(pattern, "", text, count=1, flags=re.DOTALL).strip()
+
+
+def _runtime_guard_markdown_system_prompt(base_prompt: str, *, enabled: bool) -> str:
+    if not enabled:
+        return base_prompt
+    base = str(base_prompt or "").strip()
+    if not base:
+        return _RUNTIME_GUARD_MARKDOWN_OUTPUT_INSTRUCTION
+    return f"{base}\n\n---\n\n{_RUNTIME_GUARD_MARKDOWN_OUTPUT_INSTRUCTION}"
 
 
 def _normalize_trace_token(value: object) -> str:
@@ -2169,6 +2217,7 @@ class SendMessageRequest(BaseModel):
     session_key: str = Field(..., description="Gateway session key")
     message: str = Field(..., description="Message to send to the agent")
     images: list[ImageAttachment] = Field(default_factory=list, description="Optional image attachments")
+    client_context: str | None = Field(default=None, description="Optional frontend context")
 
 
 class SendMessageResponse(BaseModel):
@@ -2923,6 +2972,11 @@ async def send_message(request: SendMessageRequest):
     instance, local_session_key, public_session_key = await _resolve_chat_runtime(
         session_key=request.session_key,
     )
+    markdown_context_enabled = _is_runtime_guard_context(request.client_context)
+    runtime_message = _runtime_guard_markdown_user_message(
+        request.message,
+        enabled=markdown_context_enabled and not request.images,
+    )
 
     try:
         if instance.platform == "nanobot":
@@ -2936,12 +2990,12 @@ async def send_message(request: SendMessageRequest):
                 local_session_key,
                 instance,
             )
-            result = await client.send_chat(request.message, timeout_s=120.0)
+            result = await client.send_chat(runtime_message, timeout_s=120.0)
         else:
             client = await _get_or_create_client(instance, public_session_key)
             chat_kwargs: dict = {
                 "session_key": local_session_key,
-                "message": request.message,
+                "message": request.message if instance.platform == "hermes" else runtime_message,
                 "timeout_ms": 120_000,
             }
             if instance.platform == "hermes":
@@ -2965,8 +3019,12 @@ async def send_message(request: SendMessageRequest):
                 # files are deployed → kwarg is omitted entirely so the
                 # request body matches the legacy shape byte-for-byte.
                 safety_prompt = load_hermes_safety_system_prompt()
-                if safety_prompt:
-                    chat_kwargs["safety_system_prompt"] = safety_prompt
+                merged_system_prompt = _runtime_guard_markdown_system_prompt(
+                    safety_prompt,
+                    enabled=markdown_context_enabled,
+                )
+                if merged_system_prompt:
+                    chat_kwargs["safety_system_prompt"] = merged_system_prompt
                 # Acquire-or-rewrite-then-send loop: read-lock fast path for
                 # cache hits (parallel reads); write-lock to rewrite on miss
                 # (drains in-flight readers first to prevent A's request being
@@ -3077,6 +3135,11 @@ async def send_message_stream(request: SendMessageRequest):
     instance, local_session_key, public_session_key = await _resolve_chat_runtime(
         session_key=request.session_key,
     )
+    markdown_context_enabled = _is_runtime_guard_context(request.client_context)
+    runtime_message = _runtime_guard_markdown_user_message(
+        request.message,
+        enabled=markdown_context_enabled and not request.images,
+    )
 
     # Convert image attachments to OpenClaw's format
     attachments = None
@@ -3157,7 +3220,7 @@ async def send_message_stream(request: SendMessageRequest):
                 for _attempt in range(2):
                     try:
                         async for chunk in _iter_stream_with_tailer(
-                            client.stream_chat(request.message, timeout_s=360.0),
+                            client.stream_chat(runtime_message, timeout_s=360.0),
                             tailer=nanobot_tailer,
                         ):
                             if isinstance(chunk, dict) and chunk.get("text"):
@@ -3204,7 +3267,7 @@ async def send_message_stream(request: SendMessageRequest):
                 client = await _get_or_create_client(instance, public_session_key)
                 stream_kwargs: dict = {
                     "session_key": local_session_key,
-                    "message": request.message,
+                    "message": request.message if instance.platform == "hermes" else runtime_message,
                     "attachments": attachments,
                 }
                 if instance.platform == "hermes":
@@ -3223,8 +3286,12 @@ async def send_message_stream(request: SendMessageRequest):
                     # branch in send_message. Cached in-process so the
                     # extra IO is a single ``stat()`` per file per turn.
                     safety_prompt = load_hermes_safety_system_prompt()
-                    if safety_prompt:
-                        stream_kwargs["safety_system_prompt"] = safety_prompt
+                    merged_system_prompt = _runtime_guard_markdown_system_prompt(
+                        safety_prompt,
+                        enabled=markdown_context_enabled,
+                    )
+                    if merged_system_prompt:
+                        stream_kwargs["safety_system_prompt"] = merged_system_prompt
                     while True:
                         async with _hermes_yaml_lock.read():
                             if (

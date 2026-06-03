@@ -854,6 +854,31 @@
   overflow-wrap: anywhere;
 }
 
+.rg-stream-markdown {
+  margin-top: 2px;
+  max-width: 100%;
+  color: #aebbc4;
+  line-height: 1.55;
+}
+
+.rg-stream-markdown pre,
+.rg-stream-markdown table {
+  max-width: 100%;
+}
+
+.rg-stream-markdown pre {
+  border-radius: 5px;
+  background: #071018;
+}
+
+.rg-stream-markdown code {
+  color: #d7e3ea;
+}
+
+.rg-stream-markdown a {
+  color: #00a7ff;
+}
+
 .rg-stream-user .rg-stream-icon,
 .rg-stream-user .rg-stream-title {
   color: #00a7ff;
