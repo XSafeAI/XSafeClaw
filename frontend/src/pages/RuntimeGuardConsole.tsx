@@ -1,25 +1,33 @@
-import { type CSSProperties, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
+  type CSSProperties,
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+import { useNavigate } from 'react-router-dom';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  AlertCircle,
   AlertTriangle,
   Bell,
   Bot,
   Box,
+  Brain,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Columns2,
-  FileText,
   FolderOpen,
   Globe2,
   HeartPulse,
   Hexagon,
+  Loader2,
   Lock,
-  PenLine,
-  Play,
-  Plus,
-  Search,
   Send,
   Server,
   Settings,
@@ -27,10 +35,13 @@ import {
   Square,
   Terminal,
   User,
+  Wrench,
   X,
   Zap,
 } from 'lucide-react';
-import { statsAPI, systemAPI } from '../services/api';
+import { chatAPI, statsAPI, systemAPI, type RuntimeInstance } from '../services/api';
+import { useRuntimeInstances } from '../hooks/useAPI';
+import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
 import {
   getBudgetStatus,
   loadBudgetSettings,
@@ -41,12 +52,19 @@ import {
 import './RuntimeGuardConsole.css';
 
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
+type RuntimePlatform = RuntimeInstance['platform'];
 type ApprovalState = 'pending' | 'allowed' | 'denied';
 type GuardMode = 'Off' | 'On';
-type ChatSession = {
-  id: string;
+type RuntimeGuardSession = {
+  sessionKey: string;
   agent: AgentName;
+  platform: RuntimePlatform;
+  instanceId: string;
+  displayName?: string;
   title: string;
+  createdAt: string;
+  status: 'ready' | 'error';
+  autoTitlePending?: boolean;
 };
 type InstallMap = Record<AgentName, boolean | null>;
 type AgentDisplay = {
@@ -56,10 +74,18 @@ type AgentDisplay = {
   installed: boolean;
 };
 
-const agentDefinitions: Array<{ name: AgentName; defaultStatus: 'Running' | 'Idle'; className: string }> = [
-  { name: 'OpenClaw', defaultStatus: 'Running', className: 'agent-openclaw' },
-  { name: 'Hermes', defaultStatus: 'Idle', className: 'agent-hermes' },
-  { name: 'Nanobot', defaultStatus: 'Idle', className: 'agent-nanobot' },
+const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
+const RUNTIME_GUARD_DRAFTS_KEY = 'xsafeclaw:runtime-guard:drafts';
+
+const agentDefinitions: Array<{
+  name: AgentName;
+  platform: RuntimePlatform;
+  defaultStatus: 'Running' | 'Idle';
+  className: string;
+}> = [
+  { name: 'OpenClaw', platform: 'openclaw', defaultStatus: 'Running', className: 'agent-openclaw' },
+  { name: 'Hermes', platform: 'hermes', defaultStatus: 'Idle', className: 'agent-hermes' },
+  { name: 'Nanobot', platform: 'nanobot', defaultStatus: 'Idle', className: 'agent-nanobot' },
 ];
 
 const tools = [
@@ -82,20 +108,189 @@ const blockedRows = [
   ['14:18', 'Upload .env file'],
 ] as const;
 
-const logRows = [
-  { y: 10, time: '14:32:10', icon: Search, text: 'Thinking...', iconTone: 'rose' },
-  { y: 32, time: '14:32:12', icon: FileText, text: 'Read', path: 'src/controllers/auth.ts', delta: '+128 lines' },
-  { y: 54, time: '14:32:15', icon: PenLine, text: 'Edit', path: 'src/utils/jwt.ts', delta: '+23 -6', deltaTone: 'mixed' },
-  { y: 76, time: '14:32:18', icon: FolderOpen, text: 'Read', path: 'src/middleware/ratelimit.ts', delta: '+85 lines' },
-  { y: 215, time: '14:33:21', icon: Zap, text: 'Waiting for approval...', textTone: 'warning' },
-  { y: 237, time: '14:33:45', icon: CheckCircle2, text: 'Approved by you', badge: 'Allow Once', textTone: 'success' },
-  { y: 259, time: '14:33:45', icon: Play, text: 'Execute', code: 'rm -rf ./tmp/cache/*' },
-  { y: 281, time: '14:33:45', icon: CheckCircle2, text: 'Command executed', code: '(0.21s)', textTone: 'success' },
-  { y: 303, time: '14:33:47', icon: Hexagon, text: 'MCP', badge: 'github.com', code: 'list_issues (7 results)', iconTone: 'mcp' },
-  { y: 325, time: '14:33:49', icon: Hexagon, text: 'MCP', badge: 'context7.com', code: 'get_docs (6k)', iconTone: 'mcp' },
-  { y: 347, time: '14:33:53', icon: Bot, text: 'Analyzing results...' },
-  { y: 369, time: '14:33:58', icon: PenLine, text: 'Edit', path: 'src/middleware/ratelimit.ts', delta: '+34 -2', deltaTone: 'mixed' },
-];
+const traceTypes = new Set([
+  'trace_start',
+  'trace_step',
+  'trace_status',
+  'reasoning_summary',
+  'approval_pending',
+  'approval_resolved',
+  'trace_end',
+]);
+
+function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RUNTIME_GUARD_SESSIONS_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((item: any): RuntimeGuardSession | null => {
+        const sessionKey = typeof item?.sessionKey === 'string' ? item.sessionKey : '';
+        const platform = item?.platform;
+        const agent = item?.agent;
+        if (!sessionKey || !['openclaw', 'hermes', 'nanobot'].includes(platform)) return null;
+        if (!['OpenClaw', 'Hermes', 'Nanobot'].includes(agent)) return null;
+        return {
+          sessionKey,
+          agent,
+          platform,
+          instanceId: typeof item?.instanceId === 'string' ? item.instanceId : '',
+          displayName: typeof item?.displayName === 'string' ? item.displayName : undefined,
+          title: typeof item?.title === 'string' && item.title.trim() ? item.title : agent,
+          createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+          status: item?.status === 'error' ? 'error' : 'ready',
+          autoTitlePending: Boolean(item?.autoTitlePending),
+        };
+      })
+      .filter((item): item is RuntimeGuardSession => item !== null);
+  } catch {
+    return [];
+  }
+}
+
+function saveRuntimeGuardSessions(sessions: RuntimeGuardSession[]) {
+  localStorage.setItem(RUNTIME_GUARD_SESSIONS_KEY, JSON.stringify(sessions));
+}
+
+function loadRuntimeGuardDrafts(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RUNTIME_GUARD_DRAFTS_KEY) ?? '{}');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return Object.fromEntries(
+      Object.entries(raw).filter((entry): entry is [string, string] => (
+        typeof entry[0] === 'string' && typeof entry[1] === 'string'
+      )),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveRuntimeGuardDrafts(drafts: Record<string, string>) {
+  localStorage.setItem(RUNTIME_GUARD_DRAFTS_KEY, JSON.stringify(drafts));
+}
+
+async function responseErrorMessage(response: Response): Promise<string> {
+  const fallback = `HTTP ${response.status}`;
+  try {
+    const text = await response.text();
+    if (!text) return fallback;
+    try {
+      const data = JSON.parse(text);
+      const detail = data?.detail;
+      if (typeof detail === 'string' && detail.trim()) return detail;
+      if (detail) return JSON.stringify(detail);
+    } catch {
+      return text;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
+function formatTime(value: Date) {
+  return value.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function formatSessionStart(iso: string) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return 'Started just now';
+  return `Started ${date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+}
+
+function titleFromUserMessage(input: string): string {
+  const cleaned = input.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  return cleaned.length > 48 ? `${cleaned.slice(0, 48).trimEnd()}...` : cleaned;
+}
+
+function extractMessageText(msg: any): string {
+  if (!msg) return '';
+  const content = msg.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block: any) => block.text)
+      .join('');
+  }
+  if (typeof msg.text === 'string') return msg.text;
+  return '';
+}
+
+function formatValue(value: any): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function agentToPlatform(agent: AgentName): RuntimePlatform {
+  return agentDefinitions.find(item => item.name === agent)?.platform ?? 'openclaw';
+}
+
+function agentIcon(agent: AgentName) {
+  if (agent === 'OpenClaw') return <Zap />;
+  if (agent === 'Hermes') return <Bot />;
+  return <Hexagon />;
+}
+
+function runtimeUnavailableMessage(instance: RuntimeInstance) {
+  if (instance.platform === 'nanobot' && instance.health_status !== 'healthy') {
+    return `${instance.display_name || 'Nanobot'} gateway offline.`;
+  }
+  if ((instance.platform === 'openclaw' || instance.platform === 'hermes') && instance.health_status === 'unreachable') {
+    return `${instance.display_name || instance.platform} is unreachable.`;
+  }
+  return '';
+}
+
+function mapHistoryMessage(raw: any): ChatMessage | null {
+  if (raw?.role === 'tool_call') {
+    return {
+      id: raw.id || uuidv4(),
+      role: 'tool_call',
+      content: '',
+      timestamp: raw.timestamp ? new Date(raw.timestamp) : new Date(),
+      tool_id: raw.tool_id,
+      tool_name: raw.tool_name,
+      args: raw.args,
+      result: raw.result,
+      is_error: raw.is_error,
+      result_pending: raw.result_pending ?? false,
+    };
+  }
+
+  if (raw?.role === 'user' || raw?.role === 'assistant' || raw?.role === 'error') {
+    const text = typeof raw.content === 'string' ? raw.content : extractMessageText(raw);
+    if (!text.trim()) return null;
+    return {
+      id: raw.id || uuidv4(),
+      role: raw.role,
+      content: text,
+      timestamp: raw.timestamp ? new Date(raw.timestamp) : new Date(),
+    };
+  }
+
+  if (raw?.role === 'trace') {
+    const evt = raw.trace_event && typeof raw.trace_event === 'object' ? raw.trace_event : {};
+    return {
+      id: raw.id || uuidv4(),
+      role: 'trace',
+      content: typeof raw.content === 'string' ? raw.content : '',
+      timestamp: raw.timestamp ? new Date(raw.timestamp) : new Date(),
+      trace_type: typeof evt.type === 'string' ? evt.type : 'trace_step',
+      trace_phase: typeof evt.phase === 'string' ? evt.phase : '',
+      trace_step: typeof evt.step === 'number' ? evt.step : undefined,
+      trace_summary: typeof evt.summary === 'string' ? evt.summary : '',
+    };
+  }
+
+  return null;
+}
 
 function StatusDot({ tone }: { tone: 'success' | 'muted' | 'warning' | 'mcp' }) {
   return <span className={`rg-dot rg-dot-${tone}`} />;
@@ -172,23 +367,115 @@ function ApprovalCard({
   );
 }
 
+function TimelineMessage({
+  msg,
+  expanded,
+  onToggle,
+}: {
+  msg: ChatMessage;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const time = formatTime(msg.timestamp);
+
+  if (msg.role === 'tool_call') {
+    const resultText = formatValue(msg.result);
+    const argsText = formatValue(msg.args);
+    const summary = argsText.replace(/\s+/g, ' ').slice(0, 100);
+    return (
+      <div className={`rg-stream-row rg-stream-tool ${msg.is_error ? 'is-error' : ''}`}>
+        <span className="rg-stream-time">{time}</span>
+        <Wrench className="rg-stream-icon" />
+        <div className="rg-stream-body">
+          <button className="rg-tool-toggle" type="button" onClick={onToggle}>
+            <span className="rg-stream-title">{msg.tool_name || 'tool'}</span>
+            {summary && <code>{summary}</code>}
+            {msg.result_pending ? <Loader2 className="rg-stream-state is-spinning" /> : msg.is_error ? <AlertCircle className="rg-stream-state" /> : <CheckCircle2 className="rg-stream-state" />}
+            {expanded ? <ChevronDown /> : <ChevronRight />}
+          </button>
+          {expanded && (
+            <div className="rg-tool-detail">
+              {argsText && (
+                <>
+                  <span>Arguments</span>
+                  <pre>{argsText}</pre>
+                </>
+              )}
+              {msg.result_pending ? (
+                <div className="rg-tool-running"><Loader2 className="is-spinning" /> Running...</div>
+              ) : resultText ? (
+                <>
+                  <span>{msg.is_error ? 'Error' : 'Result'}</span>
+                  <pre>{resultText}</pre>
+                </>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (msg.role === 'trace') {
+    const label = [
+      msg.trace_type || 'trace',
+      typeof msg.trace_step === 'number' ? `#${msg.trace_step}` : '',
+      msg.trace_phase || '',
+    ].filter(Boolean).join(' · ');
+    return (
+      <div className="rg-stream-row rg-stream-trace">
+        <span className="rg-stream-time">{time}</span>
+        <Brain className="rg-stream-icon" />
+        <div className="rg-stream-body">
+          <span className="rg-stream-title">{label}</span>
+          {msg.trace_summary && <p>{msg.trace_summary}</p>}
+          {msg.content && <p>{msg.content}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  const isUser = msg.role === 'user';
+  const isError = msg.role === 'error';
+  return (
+    <div className={`rg-stream-row ${isUser ? 'rg-stream-user' : isError ? 'rg-stream-error' : 'rg-stream-assistant'}`}>
+      <span className="rg-stream-time">{time}</span>
+      {isUser ? <User className="rg-stream-icon" /> : isError ? <AlertTriangle className="rg-stream-icon" /> : <Bot className="rg-stream-icon" />}
+      <div className="rg-stream-body">
+        <span className="rg-stream-title">{isUser ? 'You' : isError ? 'Runtime error' : 'Assistant'}</span>
+        {msg.pending && !msg.content ? (
+          <span className="rg-stream-pending"><i /><i /><i /></span>
+        ) : (
+          <p>{msg.content}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function RuntimeGuardConsole() {
   const navigate = useNavigate();
+  const runtimeInstancesQuery = useRuntimeInstances();
+  const subscribeToChatStore = useCallback((listener: () => void) => chatStreamStore.subscribe(listener), []);
+  const messageMap = useSyncExternalStore(subscribeToChatStore, () => chatStreamStore.getSnapshot());
+  const sendingMap = useSyncExternalStore(subscribeToChatStore, () => chatStreamStore.getSendingSnapshot());
+
   const [installedAgents, setInstalledAgents] = useState<InstallMap>({
     OpenClaw: null,
     Hermes: null,
     Nanobot: null,
   });
   const [installProbeFailed, setInstallProbeFailed] = useState(false);
-  const [sessions, setSessions] = useState<ChatSession[]>([
-    { id: 'session-openclaw-1', agent: 'OpenClaw', title: 'OpenClaw' },
-  ]);
-  const [activeSessionId, setActiveSessionId] = useState('session-openclaw-1');
+  const [sessions, setSessions] = useState<RuntimeGuardSession[]>(() => loadRuntimeGuardSessions());
+  const [activeSessionId, setActiveSessionId] = useState(() => loadRuntimeGuardSessions()[0]?.sessionKey ?? '');
   const [selectedAgent, setSelectedAgent] = useState<AgentName>('OpenClaw');
+  const [draftBySessionKey, setDraftBySessionKey] = useState<Record<string, string>>(() => loadRuntimeGuardDrafts());
+  const [loadingHistory, setLoadingHistory] = useState<string | null>(null);
+  const [creatingAgent, setCreatingAgent] = useState<AgentName | null>(null);
+  const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
+  const [isComposing, setIsComposing] = useState(false);
   const [shellApproval, setShellApproval] = useState<ApprovalState>('pending');
   const [fileApproval, setFileApproval] = useState<ApprovalState>('pending');
-  const [commandApproved, setCommandApproved] = useState(false);
-  const [emptyTask, setEmptyTask] = useState(false);
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
@@ -207,6 +494,29 @@ export default function RuntimeGuardConsole() {
     mainWidth: 491,
     mainDesignWidth: 491,
   });
+  const taskScrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inFlightKeysRef = useRef<Set<string>>(new Set());
+
+  const setMessageMap = useCallback((
+    updaterOrValue: Record<string, ChatMessage[]> | ((prev: Record<string, ChatMessage[]>) => Record<string, ChatMessage[]>),
+  ) => {
+    if (typeof updaterOrValue === 'function') {
+      chatStreamStore.replaceAll(updaterOrValue(chatStreamStore.getSnapshot()));
+    } else {
+      chatStreamStore.replaceAll(updaterOrValue);
+    }
+  }, []);
+
+  const activeSession = sessions.find(session => session.sessionKey === activeSessionId) ?? null;
+  const activeAgent = activeSession?.agent ?? selectedAgent;
+  const activeMessages = activeSession ? (messageMap[activeSession.sessionKey] ?? []) : [];
+  const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
+  const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
+  const availableInstances = useMemo(
+    () => (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled),
+    [runtimeInstancesQuery.data?.instances],
+  );
 
   useEffect(() => {
     const updateLayoutFit = () => {
@@ -229,6 +539,21 @@ export default function RuntimeGuardConsole() {
     window.addEventListener('resize', updateLayoutFit);
     return () => window.removeEventListener('resize', updateLayoutFit);
   }, []);
+
+  useEffect(() => {
+    saveRuntimeGuardSessions(sessions);
+  }, [sessions]);
+
+  useEffect(() => {
+    saveRuntimeGuardDrafts(draftBySessionKey);
+  }, [draftBySessionKey]);
+
+  useEffect(() => {
+    if (activeSessionId && sessions.some(session => session.sessionKey === activeSessionId)) return;
+    const nextActive = sessions[0] ?? null;
+    setActiveSessionId(nextActive?.sessionKey ?? '');
+    if (nextActive) setSelectedAgent(nextActive.agent);
+  }, [activeSessionId, sessions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -263,7 +588,7 @@ export default function RuntimeGuardConsole() {
           setDashboardCost(nextCost);
         }
       } catch {
-        // RuntimeGuard is still a frontend mock; keep the visual fallback.
+        // Keep the visual fallback when stats are temporarily unavailable.
       }
     };
 
@@ -279,6 +604,37 @@ export default function RuntimeGuardConsole() {
     const timer = window.setInterval(() => setNowTs(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    taskScrollRef.current?.scrollTo({ top: taskScrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [activeSession?.sessionKey, activeMessages.length]);
+
+  useEffect(() => {
+    if (!activeSession) return;
+    window.setTimeout(() => textareaRef.current?.focus(), 80);
+  }, [activeSession?.sessionKey]);
+
+  const loadHistory = useCallback(async (sessionKey: string, force = false) => {
+    if (!force && chatStreamStore.hasLoadedMessages(sessionKey)) return;
+    setLoadingHistory(sessionKey);
+    try {
+      const res = await chatAPI.getHistory(sessionKey);
+      const loaded = (res.data.messages ?? [])
+        .map(mapHistoryMessage)
+        .filter((message): message is ChatMessage => message !== null);
+      setMessageMap(prev => ({ ...prev, [sessionKey]: loaded }));
+    } catch {
+      setMessageMap(prev => ({ ...prev, [sessionKey]: [] }));
+    } finally {
+      setLoadingHistory(current => (current === sessionKey ? null : current));
+    }
+  }, [setMessageMap]);
+
+  useEffect(() => {
+    if (activeSession?.sessionKey) {
+      loadHistory(activeSession.sessionKey);
+    }
+  }, [activeSession?.sessionKey, loadHistory]);
 
   const approvalCount = useMemo(
     () => [shellApproval, fileApproval].filter(state => state === 'pending').length,
@@ -297,10 +653,6 @@ export default function RuntimeGuardConsole() {
     }),
     [installProbeFailed, installedAgents],
   );
-  const activeSession = sessions.find(session => session.id === activeSessionId) ?? sessions[0] ?? null;
-  const activeAgent = activeSession?.agent ?? selectedAgent;
-  const preApprovalLogRows = logRows.filter(row => row.y < 100);
-  const postApprovalLogRows = logRows.filter(row => row.y >= 100);
   const budgetStatus = useMemo(
     () => getBudgetStatus(budgetSettings, dashboardCost, nowTs),
     [budgetSettings, dashboardCost, nowTs],
@@ -325,14 +677,17 @@ export default function RuntimeGuardConsole() {
     saveBudgetSettings(budgetStatus.settings);
   }, [budgetStatus]);
 
+  const showToast = useCallback((message: string, timeout = 2600) => {
+    setPlaceholder(message);
+    window.setTimeout(() => setPlaceholder(''), timeout);
+  }, []);
+
   const showPlaceholder = () => {
-    setPlaceholder('This is a frontend-only placeholder.');
-    window.setTimeout(() => setPlaceholder(''), 2200);
+    showToast('This panel is still presentation-only.');
   };
 
   const showInstallHint = (agent: AgentName) => {
-    setPlaceholder(`${agent} is not installed. Open Setup to install it.`);
-    window.setTimeout(() => setPlaceholder(''), 2600);
+    showToast(`${agent} is not installed. Open Setup to install it.`);
   };
 
   const openBudgetModal = () => {
@@ -380,41 +735,359 @@ export default function RuntimeGuardConsole() {
     setBudgetModalOpen(false);
   };
 
-  const openSession = (agent: AgentName, installed = true) => {
+  const findRuntimeForAgent = useCallback((agent: AgentName): RuntimeInstance | null => {
+    const platform = agentToPlatform(agent);
+    return availableInstances.find(instance => instance.platform === platform && instance.is_default)
+      ?? availableInstances.find(instance => instance.platform === platform)
+      ?? null;
+  }, [availableInstances]);
+
+  const openSession = useCallback(async (agent: AgentName, installed = true) => {
+    if (creatingAgent) return;
     if (!installed) {
       showInstallHint(agent);
       return;
     }
+    if (runtimeInstancesQuery.isLoading) {
+      showToast('Runtime instances are still loading.');
+      return;
+    }
 
+    const runtime = findRuntimeForAgent(agent);
+    if (!runtime) {
+      showToast(`No enabled ${agent} runtime found. Open Setup to configure it.`);
+      return;
+    }
+
+    const unavailable = runtimeUnavailableMessage(runtime);
+    if (unavailable) {
+      showToast(unavailable);
+      return;
+    }
+
+    setCreatingAgent(agent);
     setSelectedAgent(agent);
-    const sameAgentCount = sessions.filter(session => session.agent === agent).length + 1;
-    const id = `${agent.toLowerCase()}-${Date.now()}-${sameAgentCount}`;
-    const session: ChatSession = {
-      id,
-      agent,
-      title: sameAgentCount === 1 ? agent : `${agent} ${sameAgentCount}`,
-    };
+    try {
+      const sameAgentCount = sessions.filter(session => session.agent === agent).length + 1;
+      const label = sameAgentCount === 1 ? agent : `${agent} ${sameAgentCount}`;
+      const res = await chatAPI.startSession({ instance_id: runtime.instance_id, label });
+      const session: RuntimeGuardSession = {
+        sessionKey: res.data.session_key,
+        agent,
+        platform: res.data.platform as RuntimePlatform,
+        instanceId: res.data.instance_id,
+        displayName: res.data.instance?.display_name || runtime.display_name,
+        title: label,
+        createdAt: new Date().toISOString(),
+        status: 'ready',
+        autoTitlePending: true,
+      };
 
-    setSessions(current => [...current, session]);
-    setActiveSessionId(id);
-    setEmptyTask(false);
-  };
+      setSessions(current => [session, ...current]);
+      setMessageMap(prev => ({ ...prev, [session.sessionKey]: [] }));
+      setDraftBySessionKey(current => ({ ...current, [session.sessionKey]: current[session.sessionKey] ?? '' }));
+      setActiveSessionId(session.sessionKey);
+    } catch (err: any) {
+      const detail = String(err?.response?.data?.detail || err?.message || 'Failed to create session.');
+      showToast(detail);
+    } finally {
+      setCreatingAgent(null);
+    }
+  }, [
+    creatingAgent,
+    findRuntimeForAgent,
+    runtimeInstancesQuery.isLoading,
+    sessions,
+    setMessageMap,
+    showToast,
+  ]);
 
   const openSelectedAgentSession = () => {
     openSession(selectedAgent, agents.find(agent => agent.name === selectedAgent)?.installed ?? true);
   };
 
-  const closeSession = (id: string) => {
+  const closeSession = (sessionKey: string) => {
     setSessions(current => {
-      const closingIndex = current.findIndex(session => session.id === id);
-      const next = current.filter(session => session.id !== id);
-      if (id === activeSessionId) {
+      const closingIndex = current.findIndex(session => session.sessionKey === sessionKey);
+      const next = current.filter(session => session.sessionKey !== sessionKey);
+      if (sessionKey === activeSessionId) {
         const nextActive = next[Math.max(0, closingIndex - 1)] ?? next[0] ?? null;
-        setActiveSessionId(nextActive?.id ?? '');
+        setActiveSessionId(nextActive?.sessionKey ?? '');
         if (nextActive) setSelectedAgent(nextActive.agent);
       }
       return next;
     });
+    setDraftBySessionKey(current => {
+      const next = { ...current };
+      delete next[sessionKey];
+      return next;
+    });
+    chatStreamStore.deleteMessages(sessionKey);
+  };
+
+  const updateActiveDraft = (value: string) => {
+    if (!activeSession) return;
+    setDraftBySessionKey(current => ({ ...current, [activeSession.sessionKey]: value }));
+  };
+
+  const renameSessionKey = useCallback((previousKey: string, nextKey: string) => {
+    if (previousKey === nextKey) return;
+    chatStreamStore.renameSession(previousKey, nextKey);
+    setSessions(current => current.map(session => (
+      session.sessionKey === previousKey ? { ...session, sessionKey: nextKey } : session
+    )));
+    setDraftBySessionKey(current => {
+      const next = { ...current, [nextKey]: current[previousKey] ?? '' };
+      delete next[previousKey];
+      return next;
+    });
+    setActiveSessionId(current => (current === previousKey ? nextKey : current));
+  }, []);
+
+  const applyAutoSessionTitle = useCallback((sessionKey: string, text: string) => {
+    const title = titleFromUserMessage(text);
+    if (!title) return;
+    setSessions(current => current.map(session => (
+      session.sessionKey === sessionKey && session.autoTitlePending
+        ? { ...session, title, autoTitlePending: false }
+        : session
+    )));
+  }, []);
+
+  const handleSend = async () => {
+    if (!activeSession) return;
+    const originalKey = activeSession.sessionKey;
+    const text = activeDraft.trim();
+    if (!text || activeSending || inFlightKeysRef.current.has(originalKey)) return;
+
+    if (budgetOverLimit) {
+      showToast(`已达到最大用量，额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`);
+      return;
+    }
+
+    let key = originalKey;
+    inFlightKeysRef.current.add(key);
+    chatStreamStore.setSending(key, true);
+    setDraftBySessionKey(current => ({ ...current, [key]: '' }));
+    applyAutoSessionTitle(key, text);
+
+    const userMsg: ChatMessage = {
+      id: uuidv4(),
+      role: 'user',
+      content: text,
+      timestamp: new Date(),
+    };
+    const pendingId = uuidv4();
+    const pendingMsg: ChatMessage = {
+      id: pendingId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      pending: true,
+    };
+    setMessageMap(prev => ({ ...prev, [key]: [...(prev[key] ?? []), userMsg, pendingMsg] }));
+
+    try {
+      const response = await fetch('/api/chat/send-message-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_key: key, message: text }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(await responseErrorMessage(response));
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') break;
+
+          try {
+            const chunk = JSON.parse(raw) as {
+              type: string;
+              text?: string;
+              session_key?: string;
+              tool_id?: string;
+              tool_name?: string;
+              args?: any;
+              result?: any;
+              is_error?: boolean;
+              reason?: string;
+              phase?: string;
+              step?: number;
+              summary?: string;
+            };
+
+            const appendBeforeAssistant = (message: ChatMessage) => {
+              setMessageMap(prev => {
+                const messages = [...(prev[key] ?? [])];
+                const assistantIndex = messages.findIndex(item => item.id === pendingId);
+                messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, message);
+                return { ...prev, [key]: messages };
+              });
+            };
+
+            if (chunk.type === 'session_relinked' && chunk.session_key && chunk.session_key !== key) {
+              const previousKey = key;
+              key = chunk.session_key;
+              inFlightKeysRef.current.delete(previousKey);
+              inFlightKeysRef.current.add(key);
+              renameSessionKey(previousKey, key);
+            } else if (chunk.type === 'delta' && chunk.text) {
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(message => (
+                  message.id === pendingId
+                    ? { ...message, content: chunk.text!, pending: false }
+                    : message
+                )),
+              }));
+            } else if (chunk.type === 'tool_start') {
+              appendBeforeAssistant({
+                id: `tool-${chunk.tool_id || uuidv4()}`,
+                role: 'tool_call',
+                content: '',
+                timestamp: new Date(),
+                tool_id: chunk.tool_id,
+                tool_name: chunk.tool_name,
+                args: chunk.args,
+                result_pending: true,
+              });
+            } else if (chunk.type === 'tool_result') {
+              setMessageMap(prev => {
+                const messages = [...(prev[key] ?? [])];
+                let updated = false;
+                if (chunk.tool_id) {
+                  for (let i = messages.length - 1; i >= 0; i -= 1) {
+                    const message = messages[i];
+                    if (message.role === 'tool_call' && message.tool_id === chunk.tool_id) {
+                      messages[i] = { ...message, result: chunk.result, is_error: chunk.is_error, result_pending: false };
+                      updated = true;
+                      break;
+                    }
+                  }
+                }
+                if (!updated && chunk.tool_name) {
+                  for (let i = messages.length - 1; i >= 0; i -= 1) {
+                    const message = messages[i];
+                    if (message.role === 'tool_call' && message.tool_name === chunk.tool_name && message.result_pending) {
+                      messages[i] = { ...message, result: chunk.result, is_error: chunk.is_error, result_pending: false };
+                      break;
+                    }
+                  }
+                }
+                return { ...prev, [key]: messages };
+              });
+            } else if (chunk.type === 'status') {
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(message => (
+                  message.id === pendingId && message.pending && !message.content
+                    ? { ...message, content: chunk.text || message.content, pending: false }
+                    : message
+                )),
+              }));
+            } else if (traceTypes.has(chunk.type)) {
+              appendBeforeAssistant({
+                id: `trace-${uuidv4()}`,
+                role: 'trace',
+                content: chunk.text || '',
+                timestamp: new Date(),
+                trace_type: chunk.type,
+                trace_phase: chunk.phase || '',
+                trace_step: typeof chunk.step === 'number' ? chunk.step : undefined,
+                trace_summary: chunk.summary || '',
+              });
+            } else if (chunk.type === 'tool_blocked') {
+              const toolName = chunk.tool_name || 'tool';
+              const reason = chunk.reason || '';
+              const blockedText = chunk.text || `安全审核拦截\n\n工具 ${toolName} 的调用已被安全系统拒绝。${reason ? `\n原因：${reason}` : ''}`;
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(message => {
+                  if (message.id === pendingId) {
+                    return { ...message, role: 'error' as const, content: blockedText, pending: false };
+                  }
+                  if (message.role === 'tool_call' && message.result_pending && chunk.tool_name && message.tool_name === chunk.tool_name) {
+                    return { ...message, result: reason || blockedText, is_error: true, result_pending: false };
+                  }
+                  return message;
+                }),
+              }));
+            } else if (chunk.type === 'final') {
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(message => (
+                  message.id === pendingId
+                    ? { ...message, content: chunk.text || message.content || '[No response]', pending: false }
+                    : message
+                )),
+              }));
+            } else if (chunk.type === 'error' || chunk.type === 'timeout' || chunk.type === 'aborted') {
+              setMessageMap(prev => ({
+                ...prev,
+                [key]: (prev[key] ?? []).map(message => (
+                  message.id === pendingId
+                    ? {
+                        ...message,
+                        role: chunk.type === 'error' ? 'error' as const : 'assistant' as const,
+                        content: chunk.text || `[${chunk.type}]`,
+                        pending: false,
+                      }
+                    : message
+                )),
+              }));
+            }
+          } catch {
+            // Ignore malformed SSE data.
+          }
+        }
+      }
+
+      setMessageMap(prev => ({
+        ...prev,
+        [key]: (prev[key] ?? []).map(message => (
+          message.id === pendingId && message.pending
+            ? { ...message, content: message.content || '[No response]', pending: false }
+            : message
+        )),
+      }));
+    } catch (err: any) {
+      setMessageMap(prev => ({
+        ...prev,
+        [key]: (prev[key] ?? []).map(message => (
+          message.id === pendingId
+            ? { ...message, role: 'error' as const, content: `[Error] ${err.message}`, pending: false }
+            : message
+        )),
+      }));
+    } finally {
+      chatStreamStore.setSending(key, false);
+      inFlightKeysRef.current.delete(key);
+    }
+  };
+
+  const handleInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey || isComposing) return;
+    event.preventDefault();
+    handleSend();
+  };
+
+  const toggleToolExpanded = (id: string) => {
+    setExpandedToolIds(current => ({ ...current, [id]: !current[id] }));
   };
 
   const leftScaleStyle = {
@@ -515,7 +1188,7 @@ export default function RuntimeGuardConsole() {
           <span className="rg-subtitle">AI Runtime Guard</span>
         </div>
 
-        <button className="rg-new-task" onClick={openSelectedAgentSession} type="button">
+        <button className="rg-new-task" onClick={openSelectedAgentSession} type="button" disabled={Boolean(creatingAgent)}>
           <span>+</span>
           <span>New Task</span>
           <span className="rg-shortcut">Cmd N</span>
@@ -541,7 +1214,7 @@ export default function RuntimeGuardConsole() {
               }}
               style={{ top: 18 + index * 36 }}
             >
-              <span className={`rg-agent-mark ${agent.className}`}>{agent.name === 'OpenClaw' ? <Zap /> : agent.name === 'Hermes' ? <Bot /> : <Hexagon />}</span>
+              <span className={`rg-agent-mark ${agent.className}`}>{agentIcon(agent.name)}</span>
               <span className="rg-agent-copy">
                 <span className="rg-agent-name">{agent.name}</span>
                 <span className="rg-agent-state">
@@ -551,6 +1224,7 @@ export default function RuntimeGuardConsole() {
               </span>
               <button
                 className="rg-open-agent"
+                disabled={creatingAgent === agent.name}
                 onClick={(event) => {
                   event.stopPropagation();
                   if (!agent.installed) {
@@ -562,7 +1236,7 @@ export default function RuntimeGuardConsole() {
                 }}
                 type="button"
               >
-                {agent.installed ? 'Open' : 'Setup'} <ChevronRight />
+                {agent.installed ? creatingAgent === agent.name ? '...' : 'Open' : 'Setup'} <ChevronRight />
               </button>
             </div>
           ))}
@@ -610,17 +1284,16 @@ export default function RuntimeGuardConsole() {
           <div className="rg-session-tabs">
             {sessions.map(session => (
               <button
-                className={`rg-chat-tab ${session.id === activeSessionId ? 'is-active' : ''}`}
-                key={session.id}
+                className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
+                key={session.sessionKey}
                 onClick={() => {
-                  setActiveSessionId(session.id);
+                  setActiveSessionId(session.sessionKey);
                   setSelectedAgent(session.agent);
-                  setEmptyTask(false);
                 }}
                 type="button"
               >
                 <span className="rg-chat-tab-agent">
-                  {session.agent === 'OpenClaw' ? <Zap /> : session.agent === 'Hermes' ? <Bot /> : <Hexagon />}
+                  {agentIcon(session.agent)}
                 </span>
                 <span className="rg-chat-tab-title">{session.title}</span>
                 <span
@@ -630,13 +1303,13 @@ export default function RuntimeGuardConsole() {
                   title="Close session"
                   onClick={(event) => {
                     event.stopPropagation();
-                    closeSession(session.id);
+                    closeSession(session.sessionKey);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
                       event.stopPropagation();
-                      closeSession(session.id);
+                      closeSession(session.sessionKey);
                     }
                   }}
                 >
@@ -644,13 +1317,17 @@ export default function RuntimeGuardConsole() {
                 </span>
               </button>
             ))}
-            <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession}>+</button>
+            <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession} disabled={Boolean(creatingAgent)}>+</button>
           </div>
         </div>
 
         <section className="rg-task-title">
-          <h1>{!activeSession || emptyTask ? 'Untitled frontend mock task' : 'Fix login bug and add rate limit'}</h1>
-          <p>{!activeSession ? 'Open an Agent session from the left panel' : emptyTask ? 'Frontend-only placeholder task' : `Started 2 mins ago  -  ${activeSession.title}  -  Workspace: /Users/xclaw/project`}</p>
+          <h1>{activeSession ? activeSession.title : '暂无会话内容'}</h1>
+          <p>
+            {activeSession
+              ? `${formatSessionStart(activeSession.createdAt)}  -  ${activeSession.displayName || activeSession.agent}  -  ${activeSession.platform}  -  ${activeSession.instanceId || 'runtime'}`
+              : '使用 New Task、+ 或 Agent Open 创建真实会话'}
+          </p>
         </section>
 
         <section className="rg-run-buttons">
@@ -691,94 +1368,57 @@ export default function RuntimeGuardConsole() {
         <section className="rg-task-panel">
           {!activeSession ? (
             <div className="rg-empty-task">
-              <Plus />
-              <strong>No open chat page</strong>
-              <span>Click Open on an Agent to create a frontend-only session.</span>
-            </div>
-          ) : emptyTask ? (
-            <div className="rg-empty-task">
-              <Plus />
-              <strong>Frontend-only task placeholder</strong>
-              <span>No real task was created.</span>
-              <button type="button" onClick={() => setEmptyTask(false)}>Restore Mock Task</button>
+              <strong>暂无会话内容</strong>
+              <span>点击 New Task、+ 或 Agent Open 创建真实会话。</span>
             </div>
           ) : (
             <>
-              <div className="rg-task-scroll">
-              <div className="rg-log-list">
-                {preApprovalLogRows.map(row => {
-                  const RowIcon = row.icon;
-                  return (
-                    <div className="rg-log-row" key={`${row.time}-${row.y}`}>
-                      <span className="rg-log-time">{row.time}</span>
-                      <RowIcon className={`rg-log-icon rg-icon-${row.iconTone || 'default'}`} />
-                      <span className={`rg-log-content rg-text-${row.textTone || 'default'}`}>
-                        {row.text}
-                        {row.badge && <span className="rg-inline-badge">{row.badge}</span>}
-                        {row.path && <code>{row.path}</code>}
-                        {row.code && <code className="rg-code-inline">{row.code}</code>}
-                      </span>
-                      {row.delta && <span className={`rg-delta rg-delta-${row.deltaTone || 'plain'}`}>{row.delta}</span>}
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className={`rg-command-card ${commandApproved ? 'is-approved' : ''}`}>
-                <AlertTriangle />
-                <div className="rg-command-title">{commandApproved ? 'Shell Command Approved' : 'Shell Command Request'}</div>
-                <div className="rg-command-risk">{commandApproved ? 'Allowed' : 'High Risk'}</div>
-                <div className="rg-command-code">rm -rf ./tmp/cache/*</div>
-                <div className="rg-command-reason">
-                  <span>Reason: Delete files recursively</span>
-                  <span>Impact: May delete important project data</span>
-                </div>
-                <div className="rg-command-actions">
-                  <button type="button" className="rg-deny" onClick={() => setCommandApproved(false)}>Deny</button>
-                  <button type="button" className="rg-once" onClick={() => setCommandApproved(true)}>Allow Once</button>
-                  <button type="button" className="rg-always" onClick={() => setCommandApproved(true)}>Allow Always</button>
-                </div>
-              </div>
-
-              <div className="rg-log-list">
-                {postApprovalLogRows.map(row => {
-                  const RowIcon = row.icon;
-                  return (
-                    <div className="rg-log-row" key={`${row.time}-${row.y}`}>
-                      <span className="rg-log-time">{row.time}</span>
-                      <RowIcon className={`rg-log-icon rg-icon-${row.iconTone || 'default'}`} />
-                      <span className={`rg-log-content rg-text-${row.textTone || 'default'}`}>
-                        {row.text}
-                        {row.badge && <span className="rg-inline-badge">{row.badge}</span>}
-                        {row.path && <code>{row.path}</code>}
-                        {row.code && <code className="rg-code-inline">{row.code}</code>}
-                      </span>
-                      {row.delta && <span className={`rg-delta rg-delta-${row.deltaTone || 'plain'}`}>{row.delta}</span>}
-                    </div>
-                  );
-                })}
-              </div>
-
+              <div className="rg-task-scroll" ref={taskScrollRef}>
+                {loadingHistory === activeSession.sessionKey ? (
+                  <div className="rg-loading-history"><Loader2 className="is-spinning" /> Loading history...</div>
+                ) : activeMessages.length === 0 ? (
+                  <div className="rg-session-empty">
+                    <Bot />
+                    <strong>{activeSession.agent} session ready</strong>
+                    <span>发送第一条消息后，assistant、tool 和 trace 事件会显示在这里。</span>
+                  </div>
+                ) : (
+                  activeMessages.map(message => (
+                    <TimelineMessage
+                      key={message.id}
+                      msg={message}
+                      expanded={Boolean(expandedToolIds[message.id])}
+                      onToggle={() => toggleToolExpanded(message.id)}
+                    />
+                  ))
+                )}
               </div>
 
               <div className={`rg-command-input ${budgetOverLimit ? 'is-budget-blocked' : ''}`}>
-                <span>{budgetOverLimit ? '已达到最大用量' : `Ask ${activeAgent} ...`}</span>
+                <textarea
+                  ref={textareaRef}
+                  aria-label={`Ask ${activeAgent}`}
+                  disabled={budgetOverLimit || activeSending}
+                  onChange={(event) => updateActiveDraft(event.target.value)}
+                  onCompositionEnd={() => setIsComposing(false)}
+                  onCompositionStart={() => setIsComposing(true)}
+                  onKeyDown={handleInputKeyDown}
+                  placeholder={budgetOverLimit ? '已达到最大用量' : `Ask ${activeAgent} ...`}
+                  rows={2}
+                  value={activeDraft}
+                />
                 <span className="rg-command-shortcuts">
                   {budgetOverLimit
                     ? `额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`
-                    : 'Cmd K  Commands    Cmd /  Quick Actions'}
+                    : 'Enter Send    Shift Enter New Line'}
                 </span>
                 <button
-                  disabled={budgetOverLimit}
-                  onClick={() => {
-                    if (budgetOverLimit) {
-                      setPlaceholder(`已达到最大用量，额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`);
-                    }
-                  }}
+                  disabled={budgetOverLimit || activeSending || !activeDraft.trim()}
+                  onClick={handleSend}
                   type="button"
-                  title={budgetOverLimit ? '已达到最大用量' : 'Send placeholder'}
+                  title={budgetOverLimit ? '已达到最大用量' : 'Send message'}
                 >
-                  <Send />
+                  {activeSending ? <Loader2 className="is-spinning" /> : <Send />}
                 </button>
               </div>
             </>
@@ -788,9 +1428,9 @@ export default function RuntimeGuardConsole() {
         <footer className="rg-statusbar">
           <StatusDot tone="success" />
           <span className="rg-status-active">Runtime Guard Active</span>
-          <span>Events: 128</span>
-          <span>Blocked: 2</span>
-          <span>Warnings: 1</span>
+          <span>Events: {activeMessages.length}</span>
+          <span>Blocked: {activeMessages.filter(message => message.role === 'error').length}</span>
+          <span>Warnings: {activeMessages.filter(message => message.role === 'trace' && message.trace_type?.includes('approval')).length}</span>
         </footer>
 
         <div className="rg-version">
