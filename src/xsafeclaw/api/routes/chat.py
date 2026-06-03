@@ -1492,6 +1492,72 @@ _TRACE_PERSIST_EVENT_TYPES = {
     "trace_end",
 }
 
+_HERMES_TRACE_THINKING_PHASES = {
+    "thinking",
+    "reasoning",
+    "reasoning_summary",
+    "planning",
+    "plan",
+    "analysis",
+    "analyzing",
+    "progress",
+    "thought",
+}
+
+_HERMES_TRACE_NOISE_PHASES = {
+    "start",
+    "finish",
+    "finished",
+    "done",
+    "complete",
+    "completed",
+    "end",
+    "status",
+    "tool",
+    "tool_call",
+    "tool_use",
+    "tool_start",
+    "tool_result",
+    "tool_finish",
+    "tool_finished",
+    "assistant",
+    "answer",
+    "final",
+}
+
+
+def _normalize_trace_token(value: object) -> str:
+    return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+
+
+def _is_hermes_thinking_trace_event(event: dict) -> bool:
+    event_type = _normalize_trace_token(event.get("type"))
+    phase = _normalize_trace_token(event.get("phase"))
+    text = str(event.get("text") or event.get("summary") or "").strip().lower()
+
+    if event_type == "reasoning_summary" or phase in _HERMES_TRACE_THINKING_PHASES:
+        return True
+    if phase in _HERMES_TRACE_NOISE_PHASES:
+        return False
+    if event_type != "trace_step":
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "thinking",
+            "reasoning",
+            "planning",
+            "analyzing",
+            "analysis",
+            "progress",
+        )
+    )
+
+
+def _should_persist_hermes_trace_event(event: dict) -> bool:
+    event_type = str(event.get("type") or "").strip()
+    return event_type in _TRACE_PERSIST_EVENT_TYPES and _is_hermes_thinking_trace_event(event)
+
 
 async def _iter_hermes_stream_with_bridge(
     stream,
@@ -2674,9 +2740,9 @@ async def _persist_hermes_trace_events(
         )
         seq_base = count_result.scalar() or 0
         for offset, event in enumerate(trace_events):
-            event_type = str(event.get("type") or "").strip()
-            if event_type not in _TRACE_PERSIST_EVENT_TYPES:
+            if not _should_persist_hermes_trace_event(event):
                 continue
+            event_type = str(event.get("type") or "").strip()
             text = (
                 str(event.get("text") or "").strip()
                 or str(event.get("summary") or "").strip()
@@ -3043,7 +3109,7 @@ async def send_message_stream(request: SendMessageRequest):
                     return None
                 emitted_tool_event_keys.add(dedupe_key)
             chunk_type = str(chunk.get("type") or "")
-            if chunk_type in _TRACE_PERSIST_EVENT_TYPES:
+            if instance.platform == "hermes" and _should_persist_hermes_trace_event(chunk):
                 emitted_trace_events.append(
                     {
                         **chunk,

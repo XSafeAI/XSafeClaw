@@ -70,6 +70,27 @@ def test_hermes_events_endpoint_rejects_non_hermes_session_and_accepts_raw(monke
     assert recorded[0][1]["type"] == "tool_start"
 
 
+def test_hermes_trace_persist_filter_keeps_thinking_only():
+    assert chat_routes._should_persist_hermes_trace_event(
+        {"type": "reasoning_summary", "text": "I should inspect the files."}
+    )
+    assert chat_routes._should_persist_hermes_trace_event(
+        {"type": "trace_step", "phase": "planning", "text": "Plan the next tool call."}
+    )
+    assert not chat_routes._should_persist_hermes_trace_event(
+        {"type": "trace_start", "phase": "start", "text": "start"}
+    )
+    assert not chat_routes._should_persist_hermes_trace_event(
+        {"type": "trace_step", "phase": "tool_start", "text": "Calling tool: exec"}
+    )
+    assert not chat_routes._should_persist_hermes_trace_event(
+        {"type": "trace_step", "phase": "tool_result", "text": "Tool finished: exec (ok)"}
+    )
+    assert not chat_routes._should_persist_hermes_trace_event(
+        {"type": "approval_pending", "text": "approval requested"}
+    )
+
+
 @pytest.mark.asyncio
 async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkeypatch):
     instance = RuntimeInstance(
@@ -95,10 +116,27 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
             chat_routes.hermes_event_bridge.publish(
                 "hermes::hermes-default::sess-local",
                 {
+                    "type": "trace_step",
+                    "text": "Calling tool: exec",
+                    "phase": "tool_start",
+                },
+            )
+            chat_routes.hermes_event_bridge.publish(
+                "hermes::hermes-default::sess-local",
+                {
                     "type": "tool_start",
                     "tool_name": "exec",
                     "tool_call_id": "call-1",
                     "args": {"command": "echo hi"},
+                },
+            )
+            chat_routes.hermes_event_bridge.publish(
+                "hermes::hermes-default::sess-local",
+                {
+                    "type": "trace_step",
+                    "text": "Hermes planning",
+                    "phase": "planning",
+                    "step": 1,
                 },
             )
             yield {"type": "delta", "text": "thinking"}
@@ -110,6 +148,14 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
                     "tool_call_id": "call-1",
                     "result": "ok",
                     "is_error": False,
+                },
+            )
+            chat_routes.hermes_event_bridge.publish(
+                "hermes::hermes-default::sess-local",
+                {
+                    "type": "trace_step",
+                    "text": "Tool finished: exec (ok)",
+                    "phase": "tool_result",
                 },
             )
             yield {"type": "final", "text": "done"}
@@ -126,10 +172,16 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
     async def _fake_persist(*_args, **_kwargs):
         return None
 
+    persisted_trace_events: list[dict] = []
+
+    async def _fake_persist_trace(_session_key, events, **_kwargs):
+        persisted_trace_events.extend(events)
+
     monkeypatch.setattr(chat_routes, "_resolve_chat_runtime", _fake_resolve_chat_runtime)
     monkeypatch.setattr(chat_routes, "_get_or_create_client", _fake_get_or_create_client)
     monkeypatch.setattr(chat_routes, "_resolve_hermes_session_model_info", _fake_resolve_model_info)
     monkeypatch.setattr(chat_routes, "_persist_hermes_chat_turn", _fake_persist)
+    monkeypatch.setattr(chat_routes, "_persist_hermes_trace_events", _fake_persist_trace)
     monkeypatch.setattr(chat_routes, "load_hermes_safety_system_prompt", lambda: "")
     monkeypatch.setattr(
         chat_routes,
@@ -154,8 +206,11 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
     tool_starts = [event for event in events if event.get("type") == "tool_start"]
     tool_results = [event for event in events if event.get("type") == "tool_result"]
     trace_starts = [event for event in events if event.get("type") == "trace_start"]
+    planning_traces = [event for event in events if event.get("type") == "trace_step" and event.get("phase") == "planning"]
     assert len(tool_starts) == 1
     assert len(tool_results) == 1
     assert len(trace_starts) == 1
+    assert len(planning_traces) == 1
+    assert [event.get("phase") for event in persisted_trace_events] == ["planning"]
     assert tool_starts[0]["tool_id"] == "call-1"
     assert events[-1]["type"] == "final"

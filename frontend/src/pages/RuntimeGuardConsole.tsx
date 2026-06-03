@@ -118,6 +118,136 @@ const traceTypes = new Set([
   'trace_end',
 ]);
 
+const hermesTraceNoisePhases = new Set([
+  'start',
+  'finish',
+  'finished',
+  'done',
+  'complete',
+  'completed',
+  'end',
+  'status',
+  'tool',
+  'tool_call',
+  'tool_use',
+  'tool_start',
+  'tool_result',
+  'tool_finish',
+  'tool_finished',
+  'assistant',
+  'answer',
+  'final',
+]);
+
+const hermesTraceThinkingPhases = new Set([
+  'thinking',
+  'reasoning',
+  'reasoning_summary',
+  'planning',
+  'plan',
+  'analysis',
+  'analyzing',
+  'progress',
+  'thought',
+]);
+
+function normalizeTraceToken(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function isHermesTraceNoise(event: {
+  type?: string;
+  text?: string;
+  summary?: string;
+  phase?: string;
+}): boolean {
+  const type = normalizeTraceToken(event.type);
+  const phase = normalizeTraceToken(event.phase);
+  const text = String(event.text || event.summary || '').trim().toLowerCase();
+
+  if (type === 'reasoning_summary' || hermesTraceThinkingPhases.has(phase)) {
+    return false;
+  }
+  if (hermesTraceNoisePhases.has(phase)) {
+    return true;
+  }
+  if (type === 'trace_start' || type === 'trace_end') {
+    return true;
+  }
+  if (type === 'trace_status' && !hermesTraceThinkingPhases.has(phase)) {
+    return true;
+  }
+
+  if (!text) return false;
+  if (
+    text === 'start' ||
+    text === 'finish' ||
+    text === 'finished' ||
+    text === 'done' ||
+    text === 'complete' ||
+    text === 'completed' ||
+    text === 'status'
+  ) {
+    return true;
+  }
+  return (
+    text.startsWith('calling tool:') ||
+    text.startsWith('tool finished:') ||
+    text.startsWith('tool started:') ||
+    text.startsWith('tool result:') ||
+    text.startsWith('final answer:') ||
+    text.startsWith('assistant final:')
+  );
+}
+
+function isHermesThinkingTrace(event: {
+  type?: string;
+  text?: string;
+  summary?: string;
+  phase?: string;
+}): boolean {
+  const type = normalizeTraceToken(event.type);
+  const phase = normalizeTraceToken(event.phase);
+  const text = String(event.text || event.summary || '').trim().toLowerCase();
+
+  if (type === 'reasoning_summary' || hermesTraceThinkingPhases.has(phase)) {
+    return true;
+  }
+  if (isHermesTraceNoise(event)) {
+    return false;
+  }
+  if (type !== 'trace_step') {
+    return false;
+  }
+  return (
+    text.includes('thinking') ||
+    text.includes('reasoning') ||
+    text.includes('planning') ||
+    text.includes('analyzing') ||
+    text.includes('analysis') ||
+    text.includes('progress')
+  );
+}
+
+function shouldDisplayTraceMessage(platform: RuntimePlatform | undefined, event: {
+  type?: string;
+  text?: string;
+  summary?: string;
+  phase?: string;
+}): boolean {
+  return platform !== 'hermes' || isHermesThinkingTrace(event);
+}
+
+function traceDisplayLabel(msg: ChatMessage): string {
+  const phase = normalizeTraceToken(msg.trace_phase);
+  const type = normalizeTraceToken(msg.trace_type);
+  if (type === 'reasoning_summary' || phase === 'reasoning_summary' || phase === 'reasoning') return 'Reasoning';
+  if (phase === 'planning' || phase === 'plan') return 'Planning';
+  if (phase === 'analysis' || phase === 'analyzing') return 'Analysis';
+  if (phase === 'progress') return 'Progress';
+  return 'Thinking';
+}
+
 function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
   try {
     const raw = JSON.parse(localStorage.getItem(RUNTIME_GUARD_SESSIONS_KEY) ?? '[]');
@@ -248,7 +378,7 @@ function runtimeUnavailableMessage(instance: RuntimeInstance) {
   return '';
 }
 
-function mapHistoryMessage(raw: any): ChatMessage | null {
+function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | null {
   if (raw?.role === 'tool_call') {
     return {
       id: raw.id || uuidv4(),
@@ -277,6 +407,14 @@ function mapHistoryMessage(raw: any): ChatMessage | null {
 
   if (raw?.role === 'trace') {
     const evt = raw.trace_event && typeof raw.trace_event === 'object' ? raw.trace_event : {};
+    if (!shouldDisplayTraceMessage(platform, {
+      type: typeof evt.type === 'string' ? evt.type : 'trace_step',
+      text: typeof raw.content === 'string' ? raw.content : '',
+      summary: typeof evt.summary === 'string' ? evt.summary : '',
+      phase: typeof evt.phase === 'string' ? evt.phase : '',
+    })) {
+      return null;
+    }
     return {
       id: raw.id || uuidv4(),
       role: 'trace',
@@ -417,11 +555,7 @@ function TimelineMessage({
   }
 
   if (msg.role === 'trace') {
-    const label = [
-      msg.trace_type || 'trace',
-      typeof msg.trace_step === 'number' ? `#${msg.trace_step}` : '',
-      msg.trace_phase || '',
-    ].filter(Boolean).join(' · ');
+    const label = traceDisplayLabel(msg);
     return (
       <div className="rg-stream-row rg-stream-trace">
         <span className="rg-stream-time">{time}</span>
@@ -619,8 +753,9 @@ export default function RuntimeGuardConsole() {
     setLoadingHistory(sessionKey);
     try {
       const res = await chatAPI.getHistory(sessionKey);
+      const sessionPlatform = sessions.find(session => session.sessionKey === sessionKey)?.platform;
       const loaded = (res.data.messages ?? [])
-        .map(mapHistoryMessage)
+        .map((message: any) => mapHistoryMessage(message, sessionPlatform))
         .filter((message): message is ChatMessage => message !== null);
       setMessageMap(prev => ({ ...prev, [sessionKey]: loaded }));
     } catch {
@@ -628,7 +763,7 @@ export default function RuntimeGuardConsole() {
     } finally {
       setLoadingHistory(current => (current === sessionKey ? null : current));
     }
-  }, [setMessageMap]);
+  }, [sessions, setMessageMap]);
 
   useEffect(() => {
     if (activeSession?.sessionKey) {
@@ -866,6 +1001,7 @@ export default function RuntimeGuardConsole() {
     }
 
     let key = originalKey;
+    const streamPlatform = activeSession.platform;
     inFlightKeysRef.current.add(key);
     chatStreamStore.setSending(key, true);
     setDraftBySessionKey(current => ({ ...current, [key]: '' }));
@@ -1001,16 +1137,23 @@ export default function RuntimeGuardConsole() {
                 )),
               }));
             } else if (traceTypes.has(chunk.type)) {
-              appendBeforeAssistant({
-                id: `trace-${uuidv4()}`,
-                role: 'trace',
-                content: chunk.text || '',
-                timestamp: new Date(),
-                trace_type: chunk.type,
-                trace_phase: chunk.phase || '',
-                trace_step: typeof chunk.step === 'number' ? chunk.step : undefined,
-                trace_summary: chunk.summary || '',
-              });
+              if (shouldDisplayTraceMessage(streamPlatform, {
+                type: chunk.type,
+                text: chunk.text,
+                summary: chunk.summary,
+                phase: chunk.phase,
+              })) {
+                appendBeforeAssistant({
+                  id: `trace-${uuidv4()}`,
+                  role: 'trace',
+                  content: chunk.text || '',
+                  timestamp: new Date(),
+                  trace_type: chunk.type,
+                  trace_phase: chunk.phase || '',
+                  trace_step: typeof chunk.step === 'number' ? chunk.step : undefined,
+                  trace_summary: chunk.summary || '',
+                });
+              }
             } else if (chunk.type === 'tool_blocked') {
               const toolName = chunk.tool_name || 'tool';
               const reason = chunk.reason || '';
