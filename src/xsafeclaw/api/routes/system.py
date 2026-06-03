@@ -5724,7 +5724,15 @@ async def _run_openclaw_json(args: list[str], timeout: int = 30) -> dict | list 
     if not openclaw_path:
         print(f"[openclaw-json] openclaw executable not found for args={args!r}")
         return None
-    if not await _openclaw_gateway_reachable():
+    # OpenClaw 2026.5.x can answer model catalog/status queries without the
+    # gateway listener. Keep the gateway short-circuit for other subcommands
+    # that may still block for their whole timeout when :18789 is down.
+    gateway_optional = (
+        len(args) >= 2
+        and args[0] == "models"
+        and args[1] in {"list", "status"}
+    )
+    if not gateway_optional and not await _openclaw_gateway_reachable():
         print(
             f"[openclaw-json] skipped cmd={args!r}: gateway :18789 not "
             "accepting TCP connections (autostart may still be coming up)"
