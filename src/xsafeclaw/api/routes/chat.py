@@ -28,6 +28,7 @@ from ...services.guard_service import GUARD_REJECTION_MARKER
 from ...services.hermes_event_bridge import hermes_event_bridge
 from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
 from ...services.nanobot_trace_tailer import NanobotJsonlTraceTailer
+from ...services.openclaw_trace_tailer import OpenClawJsonlTraceTailer
 from ..runtime_helpers import resolve_instance, serialize_instance
 
 # ── Per-instance path helpers (was: module-level platform switch) ─────────
@@ -1549,10 +1550,10 @@ async def _iter_hermes_stream_with_bridge(
                 pass
 
 
-async def _iter_nanobot_stream_with_tailer(
+async def _iter_stream_with_tailer(
     stream,
     *,
-    tailer: NanobotJsonlTraceTailer | None,
+    tailer,
     poll_interval_s: float = 0.3,
 ):
     queue: asyncio.Queue = asyncio.Queue()
@@ -3089,7 +3090,7 @@ async def send_message_stream(request: SendMessageRequest):
                 # Retry once on websocket failure (handles zombie connections)
                 for _attempt in range(2):
                     try:
-                        async for chunk in _iter_nanobot_stream_with_tailer(
+                        async for chunk in _iter_stream_with_tailer(
                             client.stream_chat(request.message, timeout_s=360.0),
                             tailer=nanobot_tailer,
                         ):
@@ -3184,7 +3185,22 @@ async def send_message_stream(request: SendMessageRequest):
                         async with _hermes_yaml_lock.write():
                             await _ensure_hermes_yaml_pinned_to(target_full, target_slug)
                 else:
-                    async for chunk in client.stream_chat(**stream_kwargs):
+                    openclaw_tailer = None
+                    if instance.platform == "openclaw":
+                        openclaw_tailer = OpenClawJsonlTraceTailer(
+                            sessions_json=_sessions_json_for(instance),
+                            sessions_dir=_sessions_dir_for(instance),
+                            session_key=local_session_key,
+                        )
+                    stream_iter = (
+                        _iter_stream_with_tailer(
+                            client.stream_chat(**stream_kwargs),
+                            tailer=openclaw_tailer,
+                        )
+                        if openclaw_tailer is not None
+                        else client.stream_chat(**stream_kwargs)
+                    )
+                    async for chunk in stream_iter:
                         if isinstance(chunk, dict):
                             chunk_type = str(chunk.get("type") or "")
                             if chunk_type in {"delta", "final"} and chunk.get("text"):
