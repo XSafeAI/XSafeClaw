@@ -1471,6 +1471,70 @@
 .rg-approval-shell { top: 33px; height: 100px; }
 .rg-approval-file { top: 143px; height: 104px; }
 
+.rg-approval-item.is-modal {
+  --rg-modal-card-scale: var(--rg-modal-scale, 1);
+  position: relative;
+  top: auto;
+  left: auto;
+  flex: 0 0 auto;
+  width: 100%;
+  height: calc(104px * var(--rg-modal-card-scale));
+  border-radius: calc(5px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-code-strip {
+  top: calc(31px * var(--rg-modal-card-scale));
+  left: calc(10px * var(--rg-modal-card-scale));
+  width: calc(100% - calc(20px * var(--rg-modal-card-scale)));
+  height: calc(21px * var(--rg-modal-card-scale));
+  padding: 0 calc(8px * var(--rg-modal-card-scale));
+  border-radius: calc(3px * var(--rg-modal-card-scale));
+  font-size: calc(8px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-approval-title {
+  top: calc(8px * var(--rg-modal-card-scale));
+  left: calc(10px * var(--rg-modal-card-scale));
+  font-size: calc(8px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-risk-text {
+  top: calc(8px * var(--rg-modal-card-scale));
+  right: calc(10px * var(--rg-modal-card-scale));
+  font-size: calc(7px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-meta {
+  left: calc(10px * var(--rg-modal-card-scale));
+  font-size: calc(7px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-meta-by {
+  top: calc(61px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-meta-time {
+  top: calc(76px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-small-action {
+  top: calc(76px * var(--rg-modal-card-scale));
+  height: calc(19px * var(--rg-modal-card-scale));
+  font-size: calc(8px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-small-deny {
+  right: calc(61px * var(--rg-modal-card-scale));
+  left: auto;
+  width: calc(42px * var(--rg-modal-card-scale));
+}
+
+.rg-approval-item.is-modal .rg-small-allow {
+  right: calc(10px * var(--rg-modal-card-scale));
+  left: auto;
+  width: calc(41px * var(--rg-modal-card-scale));
+}
+
 .rg-approval-title {
   position: absolute;
   top: 8px;
@@ -1572,8 +1636,9 @@
   align-items: center;
   justify-content: center;
   gap: 2px;
-  width: 44px;
+  min-width: 44px;
   height: 16px;
+  padding: 0 7px;
   border-radius: 8px;
   background: #062719;
   color: #00c879;
@@ -1582,6 +1647,21 @@
 }
 
 .rg-secure svg { width: 8px; height: 8px; }
+
+.rg-secure.rg-status-guarded {
+  background: #241d08;
+  color: #e1b931;
+}
+
+.rg-secure.rg-status-attention {
+  background: #2a0d10;
+  color: #ff5b5b;
+}
+
+.rg-secure.rg-status-off {
+  background: #151d24;
+  color: #7f8d96;
+}
 
 .rg-score-ring {
   position: absolute;
@@ -1597,6 +1677,24 @@
   border-right-color: #17342a;
   border-radius: 50%;
   box-shadow: 0 0 16px rgba(0, 200, 121, 0.18);
+}
+
+.rg-score-ring.rg-score-guarded {
+  border-color: #e1b931;
+  border-right-color: #3b3214;
+  box-shadow: 0 0 16px rgba(225, 185, 49, 0.16);
+}
+
+.rg-score-ring.rg-score-attention {
+  border-color: #ff5b5b;
+  border-right-color: #3d171b;
+  box-shadow: 0 0 16px rgba(255, 91, 91, 0.16);
+}
+
+.rg-score-ring.rg-score-off {
+  border-color: #5b6972;
+  border-right-color: #1d2931;
+  box-shadow: 0 0 16px rgba(91, 105, 114, 0.12);
 }
 
 .rg-score-ring strong {
@@ -1843,6 +1941,172 @@
 .rg-modal-close svg {
   width: 10px;
   height: 10px;
+}
+
+.rg-list-modal {
+  --rg-modal-scale: clamp(1, var(--rg-scale, 1), 1.72);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(calc(420px * var(--rg-modal-scale)), calc(100vw - 36px));
+  max-height: min(calc(468px * var(--rg-modal-scale)), calc(100vh - 36px));
+  padding: calc(18px * var(--rg-modal-scale));
+  border: 1px solid #1c3443;
+  border-radius: calc(7px * var(--rg-modal-scale));
+  background: #071018;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.48);
+}
+
+.rg-list-modal .rg-modal-close {
+  top: calc(12px * var(--rg-modal-scale));
+  right: calc(12px * var(--rg-modal-scale));
+  width: calc(20px * var(--rg-modal-scale));
+  height: calc(20px * var(--rg-modal-scale));
+  border-radius: calc(4px * var(--rg-modal-scale));
+}
+
+.rg-list-modal .rg-modal-close svg {
+  width: calc(10px * var(--rg-modal-scale));
+  height: calc(10px * var(--rg-modal-scale));
+}
+
+.rg-blocked-list-modal {
+  width: min(calc(560px * var(--rg-modal-scale)), calc(100vw - 36px));
+}
+
+.rg-list-modal-kicker {
+  color: #00c879;
+  font-size: calc(8px * var(--rg-modal-scale));
+  font-weight: 700;
+}
+
+.rg-list-modal h2 {
+  margin: calc(6px * var(--rg-modal-scale)) calc(74px * var(--rg-modal-scale)) 0 0;
+  color: #e8f1f6;
+  font-size: calc(14px * var(--rg-modal-scale));
+  line-height: calc(18px * var(--rg-modal-scale));
+}
+
+.rg-list-modal-subtitle {
+  margin-top: calc(3px * var(--rg-modal-scale));
+  color: #6f7e88;
+  font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-list-modal-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: calc(10px * var(--rg-modal-scale));
+  min-height: calc(118px * var(--rg-modal-scale));
+  max-height: min(calc(348px * var(--rg-modal-scale)), calc(100vh - 120px));
+  margin-top: calc(14px * var(--rg-modal-scale));
+  padding-right: calc(4px * var(--rg-modal-scale));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rg-list-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(118px * var(--rg-modal-scale));
+  border: 1px dashed #162734;
+  border-radius: calc(5px * var(--rg-modal-scale));
+  background: #081219;
+  color: #6f7e88;
+  font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-range-tabs {
+  position: absolute;
+  top: calc(18px * var(--rg-modal-scale));
+  right: calc(46px * var(--rg-modal-scale));
+  display: grid;
+  grid-template-columns: repeat(3, calc(36px * var(--rg-modal-scale)));
+  gap: calc(2px * var(--rg-modal-scale));
+  padding: calc(2px * var(--rg-modal-scale));
+  border: 1px solid #20313d;
+  border-radius: calc(5px * var(--rg-modal-scale));
+  background: #050a0e;
+}
+
+.rg-range-tabs button {
+  height: calc(20px * var(--rg-modal-scale));
+  border-radius: calc(3px * var(--rg-modal-scale));
+  color: #8797a0;
+  font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-range-tabs button.is-active {
+  background: #0f2734;
+  color: #00c879;
+}
+
+.rg-block-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: calc(7px * var(--rg-modal-scale));
+  padding: calc(11px * var(--rg-modal-scale));
+  border: 1px solid #162734;
+  border-radius: calc(5px * var(--rg-modal-scale));
+  background: #081219;
+}
+
+.rg-block-detail-head {
+  display: grid;
+  grid-template-columns: calc(48px * var(--rg-modal-scale)) calc(52px * var(--rg-modal-scale)) 1fr;
+  align-items: center;
+  gap: calc(8px * var(--rg-modal-scale));
+  color: #6f7e88;
+  font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-block-detail-head strong {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(14px * var(--rg-modal-scale));
+  border-radius: calc(3px * var(--rg-modal-scale));
+  background: #2a0d10;
+  color: #ff5b5b;
+  font-size: calc(8px * var(--rg-modal-scale));
+  font-weight: 600;
+}
+
+.rg-block-detail-head em {
+  justify-self: end;
+  color: #00a7ff;
+  font-style: normal;
+  font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-block-detail-title {
+  color: #d7e3ea;
+  font-size: calc(10px * var(--rg-modal-scale));
+  font-weight: 600;
+}
+
+.rg-block-detail-card code {
+  display: block;
+  min-height: calc(23px * var(--rg-modal-scale));
+  padding: calc(6px * var(--rg-modal-scale)) calc(8px * var(--rg-modal-scale));
+  border-radius: calc(3px * var(--rg-modal-scale));
+  background: #050a0e;
+  color: #d8e3ea;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: calc(8px * var(--rg-modal-scale));
+  line-height: calc(12px * var(--rg-modal-scale));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rg-block-detail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: calc(4px * var(--rg-modal-scale));
+  color: #8a9aa3;
+  font-size: calc(8px * var(--rg-modal-scale));
+  line-height: calc(12px * var(--rg-modal-scale));
 }
 
 .rg-budget-modal-kicker {

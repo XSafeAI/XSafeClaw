@@ -53,13 +53,17 @@ import {
 import {
   buildActiveTimelineRows,
   getActiveApprovalCards,
-  normalizeSessionKey,
   upsertMiddleApprovalCards,
   type ApprovalDecision,
   type MiddleApprovalCardsBySession,
   type MiddleApprovalCard,
   type MiddleApprovalStatus,
 } from './runtimeGuardApproval';
+import {
+  mergeBlockedItems,
+  type RecentBlockedItem,
+  type RecentBlockedSource,
+} from './runtimeGuardBlocked';
 import './RuntimeGuardConsole.css';
 
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
@@ -83,22 +87,18 @@ type AgentDisplay = {
   className: string;
   installed: boolean;
 };
-type RecentBlockedSource = 'approval' | 'observation';
-type RecentBlockedItem = {
-  id: string;
-  source: RecentBlockedSource;
-  dedupeKey: string;
-  timestamp: number;
-  sessionKey: string;
-  toolName: string;
-  params: Record<string, unknown>;
-  reason?: string | null;
+type RuntimeGuardModal = 'approvals' | 'blocked' | null;
+export type BlockedModalRange = '24h' | '7d' | 'all';
+type GuardStatusTone = 'secure' | 'guarded' | 'attention' | 'off';
+type GuardStatusSummary = {
+  score: number;
+  label: string;
+  tone: GuardStatusTone;
 };
 
 const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
 const RUNTIME_GUARD_DRAFTS_KEY = 'xsafeclaw:runtime-guard:drafts';
 const APPROVAL_POLL_INTERVAL_MS = 3000;
-const BLOCKED_DEDUPE_WINDOW_SECONDS = 30;
 
 const agentDefinitions: Array<{
   name: AgentName;
@@ -416,107 +416,6 @@ function responseStatus(error: unknown): number | null {
   return typeof response?.status === 'number' ? response.status : null;
 }
 
-function stableJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(stableJsonValue);
-  }
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entryValue]) => [key, stableJsonValue(entryValue)]),
-    );
-  }
-  return value;
-}
-
-function stableParamsKey(params: Record<string, unknown> = {}): string {
-  try {
-    return JSON.stringify(stableJsonValue(params));
-  } catch {
-    return String(params);
-  }
-}
-
-function blockedDedupeKey(
-  sessionKey: string,
-  toolName: string,
-  params: Record<string, unknown>,
-): string {
-  return [
-    normalizeSessionKey(sessionKey),
-    String(toolName || 'tool'),
-    stableParamsKey(params),
-  ].join('|');
-}
-
-function blockedItemFromApproval(item: GuardPendingApproval): RecentBlockedItem | null {
-  if (!item.resolved || item.resolution !== 'rejected') return null;
-  const timestamp = Number(item.resolved_at || item.created_at || 0);
-  return {
-    id: `approval-${item.id}`,
-    source: 'approval',
-    dedupeKey: blockedDedupeKey(item.session_key, item.tool_name, item.params),
-    timestamp,
-    sessionKey: item.session_key,
-    toolName: item.tool_name || 'tool',
-    params: item.params ?? {},
-  };
-}
-
-function blockedItemFromObservation(item: GuardRuntimeObservation): RecentBlockedItem | null {
-  if (String(item.action || '').toLowerCase() !== 'block') return null;
-  const timestamp = Number(item.created_at || 0);
-  return {
-    id: `observation-${item.id}`,
-    source: 'observation',
-    dedupeKey: blockedDedupeKey(item.session_key, item.tool_name, item.params),
-    timestamp,
-    sessionKey: item.session_key,
-    toolName: item.tool_name || 'tool',
-    params: item.params ?? {},
-    reason: item.reason,
-  };
-}
-
-function mergeBlockedItems(
-  approvals: GuardPendingApproval[],
-  observations: GuardRuntimeObservation[],
-): RecentBlockedItem[] {
-  const candidates = [
-    ...approvals.map(blockedItemFromApproval),
-    ...observations.map(blockedItemFromObservation),
-  ].filter((item): item is RecentBlockedItem => item !== null && Number.isFinite(item.timestamp));
-
-  const merged: RecentBlockedItem[] = [];
-  for (const candidate of candidates) {
-    const duplicateIndex = merged.findIndex(item => (
-      item.source !== candidate.source
-      && item.dedupeKey === candidate.dedupeKey
-      && Math.abs(item.timestamp - candidate.timestamp) <= BLOCKED_DEDUPE_WINDOW_SECONDS
-    ));
-
-    if (duplicateIndex === -1) {
-      merged.push(candidate);
-      continue;
-    }
-
-    const existing = merged[duplicateIndex];
-    const preferred = existing.source === 'observation'
-      ? existing
-      : candidate.source === 'observation'
-        ? candidate
-        : existing;
-    merged[duplicateIndex] = {
-      ...preferred,
-      id: `${existing.id}|${candidate.id}`,
-      timestamp: Math.max(existing.timestamp, candidate.timestamp),
-    };
-  }
-
-  return merged.sort((left, right) => Number(right.timestamp || 0) - Number(left.timestamp || 0));
-}
-
 function formatBlockedTime(timestamp: number): string {
   const timestampMs = Number(timestamp) * 1000;
   if (!Number.isFinite(timestampMs) || timestampMs <= 0) return '--:--';
@@ -530,6 +429,38 @@ function formatBlockedTime(timestamp: number): string {
 function blockedDisplayText(item: RecentBlockedItem): string {
   const preview = previewApprovalParams(item.params);
   return preview ? `${item.toolName} ${preview}` : item.toolName;
+}
+
+function clampGuardScore(score: number): number {
+  return Math.min(100, Math.max(75, Math.round(score)));
+}
+
+function guardStatusFromScore(score: number): Pick<GuardStatusSummary, 'label' | 'tone'> {
+  if (score >= 94) return { label: 'Secure', tone: 'secure' };
+  if (score >= 85) return { label: 'Guarded', tone: 'guarded' };
+  return { label: 'Attention', tone: 'attention' };
+}
+
+function calculateGuardStatusSummary(
+  guardMode: GuardMode,
+  unresolvedApprovals: GuardPendingApproval[],
+  blockedItems: RecentBlockedItem[],
+  nowMs: number,
+): GuardStatusSummary {
+  if (guardMode === 'Off') {
+    return { score: 75, label: 'Off', tone: 'off' };
+  }
+
+  const highRiskApprovals = unresolvedApprovals.filter(item => item.guard_verdict === 'unsafe').length;
+  const nowSeconds = Math.floor(nowMs / 1000);
+  const recentBlocked = blockedItems.filter(item => Number(item.timestamp || 0) >= nowSeconds - 24 * 60 * 60).length;
+  const score = clampGuardScore(
+    100
+    - unresolvedApprovals.length * 3
+    - highRiskApprovals * 2
+    - recentBlocked * 2,
+  );
+  return { score, ...guardStatusFromScore(score) };
 }
 
 function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | null {
@@ -655,16 +586,18 @@ function ApprovalCard({
   slotIndex,
   resolving,
   onDecision,
+  modal = false,
 }: {
   item: GuardPendingApproval;
   slotIndex: number;
   resolving: boolean;
   onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
+  modal?: boolean;
 }) {
   const riskTone = item.guard_verdict === 'unsafe' ? 'high' : 'medium';
   const risk = riskTone === 'high' ? 'High Risk' : 'Medium Risk';
   const content = previewApprovalParams(item.params);
-  const cardClass = slotIndex === 0 ? 'rg-approval-shell' : 'rg-approval-file';
+  const cardClass = modal ? 'is-modal' : slotIndex === 0 ? 'rg-approval-shell' : 'rg-approval-file';
 
   return (
     <div className={`rg-approval-item ${cardClass}`}>
@@ -754,6 +687,168 @@ export function InlineApprovalCard({
               >
                 Allow
               </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function blockedByline(item: RecentBlockedItem): string {
+  return item.instanceId ? `${item.platform} / ${item.instanceId}` : item.platform;
+}
+
+function blockedSourceLabel(source: RecentBlockedSource): string {
+  return source === 'approval' ? 'Approval' : 'Observation';
+}
+
+function filterBlockedItemsByRange(
+  items: RecentBlockedItem[],
+  range: BlockedModalRange,
+  nowMs: number,
+): RecentBlockedItem[] {
+  const nowSeconds = Math.floor(nowMs / 1000);
+  const cutoff = range === '24h'
+    ? nowSeconds - 24 * 60 * 60
+    : range === '7d'
+      ? nowSeconds - 7 * 24 * 60 * 60
+      : Number.NEGATIVE_INFINITY;
+  return items
+    .filter(item => Number(item.timestamp || 0) >= cutoff)
+    .sort((left, right) => Number(right.timestamp || 0) - Number(left.timestamp || 0));
+}
+
+function useRuntimeGuardModalEscape(onClose: () => void) {
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+}
+
+export function ApprovalViewAllModal({
+  items,
+  loading,
+  resolvingApprovalId,
+  onDecision,
+  onClose,
+}: {
+  items: GuardPendingApproval[];
+  loading: boolean;
+  resolvingApprovalId: string | null;
+  onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
+  onClose: () => void;
+}) {
+  useRuntimeGuardModalEscape(onClose);
+
+  return (
+    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div className="rg-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-approval-modal-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="rg-modal-close" type="button" title="Close approvals" onClick={onClose}>
+          <X />
+        </button>
+        <div className="rg-list-modal-kicker">APPROVAL CENTER</div>
+        <h2 id="rg-approval-modal-title">Pending approvals</h2>
+        <div className="rg-list-modal-subtitle">{items.length} pending request{items.length === 1 ? '' : 's'}</div>
+        <div className="rg-list-modal-scroll">
+          {items.length > 0 ? (
+            items.map((item, index) => (
+              <ApprovalCard
+                item={item}
+                key={item.id}
+                slotIndex={index}
+                resolving={resolvingApprovalId === item.id}
+                onDecision={onDecision}
+                modal
+              />
+            ))
+          ) : (
+            <div className="rg-list-empty">
+              {loading ? 'Loading approvals...' : 'No pending approvals'}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function BlockedViewAllModal({
+  items,
+  loading,
+  range,
+  nowMs,
+  onRangeChange,
+  onClose,
+}: {
+  items: RecentBlockedItem[];
+  loading: boolean;
+  range: BlockedModalRange;
+  nowMs: number;
+  onRangeChange: (range: BlockedModalRange) => void;
+  onClose: () => void;
+}) {
+  useRuntimeGuardModalEscape(onClose);
+
+  const filteredItems = filterBlockedItemsByRange(items, range, nowMs);
+  const rangeOptions: Array<{ value: BlockedModalRange; label: string }> = [
+    { value: '24h', label: '24h' },
+    { value: '7d', label: '7d' },
+    { value: 'all', label: 'All' },
+  ];
+
+  return (
+    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div className="rg-list-modal rg-blocked-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-blocked-modal-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="rg-modal-close" type="button" title="Close blocked events" onClick={onClose}>
+          <X />
+        </button>
+        <div className="rg-list-modal-kicker">RECENT BLOCKED</div>
+        <h2 id="rg-blocked-modal-title">Blocked events</h2>
+        <div className="rg-range-tabs" role="tablist" aria-label="Blocked time range">
+          {rangeOptions.map(option => (
+            <button
+              aria-pressed={range === option.value}
+              className={range === option.value ? 'is-active' : ''}
+              key={option.value}
+              onClick={() => onRangeChange(option.value)}
+              type="button"
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="rg-list-modal-scroll">
+          {filteredItems.length > 0 ? (
+            filteredItems.map(item => (
+              <article className="rg-block-detail-card" key={item.id}>
+                <div className="rg-block-detail-head">
+                  <span>{formatApprovalTime(item.timestamp)}</span>
+                  <strong>Blocked</strong>
+                  <em>{blockedSourceLabel(item.source)}</em>
+                </div>
+                <div className="rg-block-detail-title">{item.toolName}</div>
+                <code>{previewApprovalParams(item.params)}</code>
+                <div className="rg-block-detail-meta">
+                  <span>By: {blockedByline(item)}</span>
+                  {item.sessionKey && <span>Session: {item.sessionKey}</span>}
+                  {item.reason && <span>Reason: {item.reason}</span>}
+                  {item.impact && <span>Impact: {item.impact}</span>}
+                </div>
+              </article>
+            ))
+          ) : (
+            <div className="rg-list-empty">
+              {loading && items.length === 0 ? 'Loading blocked...' : 'No blocked events in this range'}
             </div>
           )}
         </div>
@@ -873,6 +968,8 @@ export default function RuntimeGuardConsole() {
   const [middleApprovalCardsBySession, setMiddleApprovalCardsBySession] = useState<MiddleApprovalCardsBySession>({});
   const [blockedObservations, setBlockedObservations] = useState<GuardRuntimeObservation[]>([]);
   const [blockedLoading, setBlockedLoading] = useState(true);
+  const [activeRuntimeGuardModal, setActiveRuntimeGuardModal] = useState<RuntimeGuardModal>(null);
+  const [blockedModalRange, setBlockedModalRange] = useState<BlockedModalRange>('24h');
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [guardModeSyncing, setGuardModeSyncing] = useState(false);
@@ -1060,7 +1157,9 @@ export default function RuntimeGuardConsole() {
   }, [sessions]);
 
   const unresolvedApprovalItems = useMemo(
-    () => approvalItems.filter(item => !item.resolved),
+    () => [...approvalItems]
+      .filter(item => !item.resolved)
+      .sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0)),
     [approvalItems],
   );
   const approvalCount = useMemo(
@@ -1068,14 +1167,20 @@ export default function RuntimeGuardConsole() {
     [unresolvedApprovalItems.length],
   );
   const visibleApprovals = useMemo(
-    () => [...unresolvedApprovalItems]
-      .sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0))
-      .slice(0, 2),
+    () => unresolvedApprovalItems.slice(0, 2),
     [unresolvedApprovalItems],
   );
-  const recentBlockedItems = useMemo(
-    () => mergeBlockedItems(approvalItems, blockedObservations).slice(0, 2),
+  const allBlockedItems = useMemo(
+    () => mergeBlockedItems(approvalItems, blockedObservations),
     [approvalItems, blockedObservations],
+  );
+  const recentBlockedItems = useMemo(
+    () => allBlockedItems.slice(0, 2),
+    [allBlockedItems],
+  );
+  const guardStatusSummary = useMemo(
+    () => calculateGuardStatusSummary(guardMode, unresolvedApprovalItems, allBlockedItems, nowTs),
+    [allBlockedItems, guardMode, nowTs, unresolvedApprovalItems],
   );
   const agents: AgentDisplay[] = useMemo(
     () => agentDefinitions.map(agent => {
@@ -1190,10 +1295,6 @@ export default function RuntimeGuardConsole() {
       cancelled = true;
     };
   }, [showToast]);
-
-  const showPlaceholder = () => {
-    showToast('This panel is still presentation-only.');
-  };
 
   const resolveApproval = async (item: GuardPendingApproval, resolution: ApprovalDecision) => {
     if (resolvingApprovalId) return;
@@ -1702,9 +1803,12 @@ export default function RuntimeGuardConsole() {
     height: layoutFit.height,
     '--rg-scale': layoutFit.scale,
   } as CSSProperties;
+  const runtimeGuardPageStyle = {
+    '--rg-scale': layoutFit.scale,
+  } as CSSProperties;
 
   return (
-    <div className="runtime-guard-page">
+    <div className="runtime-guard-page" style={runtimeGuardPageStyle}>
       {placeholder && <div className="rg-toast">{placeholder}</div>}
       {budgetModalOpen && (
         <div className="rg-modal-backdrop" role="presentation">
@@ -1767,6 +1871,25 @@ export default function RuntimeGuardConsole() {
             </div>
           </div>
         </div>
+      )}
+      {activeRuntimeGuardModal === 'approvals' && (
+        <ApprovalViewAllModal
+          items={unresolvedApprovalItems}
+          loading={approvalLoading}
+          resolvingApprovalId={resolvingApprovalId}
+          onDecision={resolveApproval}
+          onClose={() => setActiveRuntimeGuardModal(null)}
+        />
+      )}
+      {activeRuntimeGuardModal === 'blocked' && (
+        <BlockedViewAllModal
+          items={allBlockedItems}
+          loading={blockedLoading}
+          range={blockedModalRange}
+          nowMs={nowTs}
+          onRangeChange={setBlockedModalRange}
+          onClose={() => setActiveRuntimeGuardModal(null)}
+        />
       )}
       <div className="rg-left-scale" style={leftScaleStyle}>
       <aside className="rg-sidebar">
@@ -2052,7 +2175,7 @@ export default function RuntimeGuardConsole() {
             <div className="rg-card-head rg-approval-head">
               <span>APPROVAL CENTER</span>
               <span className="rg-count">{approvalCount}</span>
-              <button type="button" onClick={showPlaceholder}>View All</button>
+              <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>View All</button>
             </div>
             {visibleApprovals.length > 0 ? (
               visibleApprovals.map((item, index) => (
@@ -2074,10 +2197,17 @@ export default function RuntimeGuardConsole() {
           <section className="rg-guard-status">
             <div className="rg-card-head">
               <span>GUARD STATUS</span>
-              <span className="rg-secure"><Check /> Secure</span>
+              <span className={`rg-secure rg-status-${guardStatusSummary.tone}`}>
+                {guardStatusSummary.tone === 'attention'
+                  ? <AlertTriangle />
+                  : guardStatusSummary.tone === 'off'
+                    ? <Lock />
+                    : <Check />}
+                {guardStatusSummary.label}
+              </span>
             </div>
-            <div className="rg-score-ring">
-              <strong>98</strong>
+            <div className={`rg-score-ring rg-score-${guardStatusSummary.tone}`}>
+              <strong>{guardStatusSummary.score}</strong>
               <span>/100</span>
             </div>
             <div className="rg-guard-list">
@@ -2094,7 +2224,7 @@ export default function RuntimeGuardConsole() {
           <section className="rg-recent-blocked">
             <div className="rg-card-head rg-recent-head">
               <span>RECENT BLOCKED</span>
-              <button type="button" onClick={showPlaceholder}>View All</button>
+              <button type="button" onClick={() => setActiveRuntimeGuardModal('blocked')}>View All</button>
             </div>
             {recentBlockedItems.length > 0 ? (
               recentBlockedItems.map((item, index) => (
