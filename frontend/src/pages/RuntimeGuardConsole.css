@@ -694,6 +694,12 @@
   color: #6f7e88;
 }
 
+.rg-auto-approval-trigger:disabled,
+.rg-auto-approval-menu button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .rg-auto-approval-menu {
   position: absolute;
   top: 25px;
@@ -836,6 +842,18 @@
   margin-top: 3px;
   color: #74838d;
 }
+
+.rg-stream-approval {
+  align-items: flex-start;
+  margin: 4px 0 6px;
+}
+
+.rg-approval-timeline-icon {
+  color: #e1b931;
+}
+
+.rg-stream-approval.is-approved .rg-approval-timeline-icon { color: #00c879; }
+.rg-stream-approval.is-denied .rg-approval-timeline-icon { color: #ff5b5b; }
 
 .rg-stream-body {
   min-width: 0;
@@ -1132,9 +1150,19 @@
   flex: 0 0 auto;
 }
 
+.rg-task-scroll .rg-stream-approval .rg-command-card {
+  width: 100%;
+  margin: 0;
+}
+
 .rg-command-card.is-approved {
   border-color: #0a3b2b;
   background: rgba(6, 26, 20, 0.92);
+}
+
+.rg-command-card.is-denied {
+  border-color: #4b171d;
+  background: rgba(28, 9, 12, 0.9);
 }
 
 .rg-command-card > svg {
@@ -1145,6 +1173,7 @@
 }
 
 .rg-command-card.is-approved > svg { color: #00c879; }
+.rg-command-card.is-denied > svg { color: #ff5b5b; }
 
 .rg-command-title {
   grid-column: 1;
@@ -1156,6 +1185,7 @@
 }
 
 .rg-command-card.is-approved .rg-command-title { color: #00c879; }
+.rg-command-card.is-denied .rg-command-title { color: #ff8a8a; }
 
 .rg-command-risk {
   grid-column: 2;
@@ -1169,6 +1199,7 @@
 }
 
 .rg-command-card.is-approved .rg-command-risk { color: #00c879; }
+.rg-command-card.is-denied .rg-command-risk { color: #ff5b5b; }
 
 .rg-command-code {
   grid-column: 1 / -1;
@@ -1232,6 +1263,11 @@
 .rg-command-actions button:active,
 .rg-small-action:active {
   transform: translateY(1px);
+}
+
+.rg-command-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .rg-deny {
@@ -1495,6 +1531,11 @@
   font-size: 8px;
 }
 
+.rg-small-action:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .rg-small-deny {
   left: 88px;
   width: 42px;
@@ -1508,6 +1549,22 @@
   width: 41px;
   background: #00c879;
   color: #06100b;
+}
+
+.rg-approval-empty {
+  position: absolute;
+  top: 33px;
+  left: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 189px;
+  height: 214px;
+  border: 1px dashed #162734;
+  border-radius: 5px;
+  background: #081219;
+  color: #6f7e88;
+  font-size: 8px;
 }
 
 .rg-secure {
@@ -1597,6 +1654,14 @@
 }
 
 .rg-block-row > span:first-child { color: #6f7e88; }
+
+.rg-block-row > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rg-block-row strong {
   display: flex;
   align-items: center;
@@ -1607,6 +1672,22 @@
   color: #ff5b5b;
   font-size: 7px;
   font-weight: 600;
+}
+
+.rg-block-empty {
+  position: absolute;
+  top: 28px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 187px;
+  height: 30px;
+  border: 1px dashed #162734;
+  border-radius: 5px;
+  background: #081219;
+  color: #6f7e88;
+  font-size: 8px;
 }
 
 .rg-statusbar {

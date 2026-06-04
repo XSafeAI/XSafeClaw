@@ -39,7 +39,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { chatAPI, statsAPI, systemAPI, type RuntimeInstance } from '../services/api';
+import { chatAPI, guardAPI, statsAPI, systemAPI, type GuardPendingApproval, type GuardRuntimeObservation, type RuntimeInstance } from '../services/api';
 import MarkdownMessage from '../components/MarkdownMessage';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
@@ -50,11 +50,20 @@ import {
   type BudgetPeriodUnit,
   type BudgetSettings,
 } from '../utils/budgetControl';
+import {
+  buildActiveTimelineRows,
+  getActiveApprovalCards,
+  normalizeSessionKey,
+  upsertMiddleApprovalCards,
+  type ApprovalDecision,
+  type MiddleApprovalCardsBySession,
+  type MiddleApprovalCard,
+  type MiddleApprovalStatus,
+} from './runtimeGuardApproval';
 import './RuntimeGuardConsole.css';
 
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
 type RuntimePlatform = RuntimeInstance['platform'];
-type ApprovalState = 'pending' | 'allowed' | 'denied';
 type GuardMode = 'Off' | 'On';
 type RuntimeGuardSession = {
   sessionKey: string;
@@ -74,9 +83,22 @@ type AgentDisplay = {
   className: string;
   installed: boolean;
 };
+type RecentBlockedSource = 'approval' | 'observation';
+type RecentBlockedItem = {
+  id: string;
+  source: RecentBlockedSource;
+  dedupeKey: string;
+  timestamp: number;
+  sessionKey: string;
+  toolName: string;
+  params: Record<string, unknown>;
+  reason?: string | null;
+};
 
 const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
 const RUNTIME_GUARD_DRAFTS_KEY = 'xsafeclaw:runtime-guard:drafts';
+const APPROVAL_POLL_INTERVAL_MS = 3000;
+const BLOCKED_DEDUPE_WINDOW_SECONDS = 30;
 
 const agentDefinitions: Array<{
   name: AgentName;
@@ -102,11 +124,6 @@ const guardRows = [
   ['Command Exec', 'Protected', 'success'],
   ['File System', 'Guarded', 'warning'],
   ['Network Access', 'Guarded', 'warning'],
-] as const;
-
-const blockedRows = [
-  ['14:31', 'Read ~/.ssh/id_rsa'],
-  ['14:18', 'Upload .env file'],
 ] as const;
 
 const traceTypes = new Set([
@@ -379,6 +396,142 @@ function runtimeUnavailableMessage(instance: RuntimeInstance) {
   return '';
 }
 
+function approvalStatusLabel(status: MiddleApprovalStatus): string {
+  if (status === 'approved') return 'Allowed';
+  if (status === 'rejected') return 'Denied';
+  return '';
+}
+
+function upsertApprovalItem(
+  current: GuardPendingApproval[],
+  item: GuardPendingApproval,
+): GuardPendingApproval[] {
+  const next = current.filter(existing => existing.id !== item.id);
+  next.push(item);
+  return next;
+}
+
+function responseStatus(error: unknown): number | null {
+  const response = (error as { response?: { status?: unknown } } | null)?.response;
+  return typeof response?.status === 'number' ? response.status : null;
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stableJsonValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => [key, stableJsonValue(entryValue)]),
+    );
+  }
+  return value;
+}
+
+function stableParamsKey(params: Record<string, unknown> = {}): string {
+  try {
+    return JSON.stringify(stableJsonValue(params));
+  } catch {
+    return String(params);
+  }
+}
+
+function blockedDedupeKey(
+  sessionKey: string,
+  toolName: string,
+  params: Record<string, unknown>,
+): string {
+  return [
+    normalizeSessionKey(sessionKey),
+    String(toolName || 'tool'),
+    stableParamsKey(params),
+  ].join('|');
+}
+
+function blockedItemFromApproval(item: GuardPendingApproval): RecentBlockedItem | null {
+  if (!item.resolved || item.resolution !== 'rejected') return null;
+  const timestamp = Number(item.resolved_at || item.created_at || 0);
+  return {
+    id: `approval-${item.id}`,
+    source: 'approval',
+    dedupeKey: blockedDedupeKey(item.session_key, item.tool_name, item.params),
+    timestamp,
+    sessionKey: item.session_key,
+    toolName: item.tool_name || 'tool',
+    params: item.params ?? {},
+  };
+}
+
+function blockedItemFromObservation(item: GuardRuntimeObservation): RecentBlockedItem | null {
+  if (String(item.action || '').toLowerCase() !== 'block') return null;
+  const timestamp = Number(item.created_at || 0);
+  return {
+    id: `observation-${item.id}`,
+    source: 'observation',
+    dedupeKey: blockedDedupeKey(item.session_key, item.tool_name, item.params),
+    timestamp,
+    sessionKey: item.session_key,
+    toolName: item.tool_name || 'tool',
+    params: item.params ?? {},
+    reason: item.reason,
+  };
+}
+
+function mergeBlockedItems(
+  approvals: GuardPendingApproval[],
+  observations: GuardRuntimeObservation[],
+): RecentBlockedItem[] {
+  const candidates = [
+    ...approvals.map(blockedItemFromApproval),
+    ...observations.map(blockedItemFromObservation),
+  ].filter((item): item is RecentBlockedItem => item !== null && Number.isFinite(item.timestamp));
+
+  const merged: RecentBlockedItem[] = [];
+  for (const candidate of candidates) {
+    const duplicateIndex = merged.findIndex(item => (
+      item.source !== candidate.source
+      && item.dedupeKey === candidate.dedupeKey
+      && Math.abs(item.timestamp - candidate.timestamp) <= BLOCKED_DEDUPE_WINDOW_SECONDS
+    ));
+
+    if (duplicateIndex === -1) {
+      merged.push(candidate);
+      continue;
+    }
+
+    const existing = merged[duplicateIndex];
+    const preferred = existing.source === 'observation'
+      ? existing
+      : candidate.source === 'observation'
+        ? candidate
+        : existing;
+    merged[duplicateIndex] = {
+      ...preferred,
+      id: `${existing.id}|${candidate.id}`,
+      timestamp: Math.max(existing.timestamp, candidate.timestamp),
+    };
+  }
+
+  return merged.sort((left, right) => Number(right.timestamp || 0) - Number(left.timestamp || 0));
+}
+
+function formatBlockedTime(timestamp: number): string {
+  const timestampMs = Number(timestamp) * 1000;
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return '--:--';
+  return new Date(timestampMs).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function blockedDisplayText(item: RecentBlockedItem): string {
+  const preview = previewApprovalParams(item.params);
+  return preview ? `${item.toolName} ${preview}` : item.toolName;
+}
+
 function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | null {
   if (raw?.role === 'tool_call') {
     return {
@@ -470,38 +623,141 @@ function IconButton({
   );
 }
 
+function formatApprovalTime(createdAt: number): string {
+  const timestampMs = Number(createdAt) * 1000;
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return '--:--:--';
+  return new Date(timestampMs).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
+function previewApprovalParams(params: Record<string, unknown> = {}): string {
+  const preferred = [params.command, params.path, params.file_path, params.url]
+    .find(value => value !== null && value !== undefined && String(value).trim());
+  if (preferred !== undefined) return String(preferred);
+  try {
+    return JSON.stringify(params).replace(/\s+/g, ' ');
+  } catch {
+    return String(params);
+  }
+}
+
+function approvalByline(item: GuardPendingApproval): string {
+  const platform = item.platform || 'runtime';
+  return item.instance_id ? `${platform} / ${item.instance_id}` : platform;
+}
+
 function ApprovalCard({
-  kind,
-  risk,
-  riskTone,
-  content,
-  time,
-  state,
+  item,
+  slotIndex,
+  resolving,
   onDecision,
 }: {
-  kind: string;
-  risk: string;
-  riskTone: 'high' | 'medium';
-  content: string;
-  time: string;
-  state: ApprovalState;
-  onDecision: (state: ApprovalState) => void;
+  item: GuardPendingApproval;
+  slotIndex: number;
+  resolving: boolean;
+  onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
 }) {
+  const riskTone = item.guard_verdict === 'unsafe' ? 'high' : 'medium';
+  const risk = riskTone === 'high' ? 'High Risk' : 'Medium Risk';
+  const content = previewApprovalParams(item.params);
+  const cardClass = slotIndex === 0 ? 'rg-approval-shell' : 'rg-approval-file';
+
   return (
-    <div className={`rg-approval-item ${kind === 'File Upload' ? 'rg-approval-file' : 'rg-approval-shell'}`}>
-      <div className="rg-approval-title">{kind}</div>
-      <div className={`rg-risk-text rg-risk-${riskTone}`}>{state === 'pending' ? risk : state === 'allowed' ? 'Allowed' : 'Denied'}</div>
+    <div className={`rg-approval-item ${cardClass}`}>
+      <div className="rg-approval-title">{item.tool_name || 'Tool Call'}</div>
+      <div className={`rg-risk-text rg-risk-${riskTone}`}>{risk}</div>
       <div className="rg-code-strip">
         <span>{content}</span>
       </div>
-      <div className="rg-meta rg-meta-by">By: OpenClaw</div>
-      <div className="rg-meta rg-meta-time">Time: {time}</div>
-      <button className="rg-small-action rg-small-deny" onClick={() => onDecision('denied')} type="button">
+      <div className="rg-meta rg-meta-by">By: {approvalByline(item)}</div>
+      <div className="rg-meta rg-meta-time">Time: {formatApprovalTime(item.created_at)}</div>
+      <button
+        className="rg-small-action rg-small-deny"
+        disabled={resolving}
+        onClick={() => onDecision(item, 'rejected')}
+        type="button"
+      >
         Deny
       </button>
-      <button className="rg-small-action rg-small-allow" onClick={() => onDecision('allowed')} type="button">
+      <button
+        className="rg-small-action rg-small-allow"
+        disabled={resolving}
+        onClick={() => onDecision(item, 'approved')}
+        type="button"
+      >
         Allow
       </button>
+    </div>
+  );
+}
+
+export function InlineApprovalCard({
+  card,
+  resolving,
+  onDecision,
+}: {
+  card: MiddleApprovalCard;
+  resolving: boolean;
+  onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
+}) {
+  const item = card.item;
+  const isPending = card.status === 'pending';
+  const riskTone = item.guard_verdict === 'unsafe' ? 'high' : 'medium';
+  const risk = riskTone === 'high' ? 'High Risk' : 'Medium Risk';
+  const statusText = isPending ? risk : approvalStatusLabel(card.status);
+  const statusClass = isPending ? `rg-risk-${riskTone}` : '';
+  const cardStateClass = card.status === 'pending'
+    ? 'is-pending'
+    : card.status === 'approved'
+      ? 'is-approved'
+      : 'is-denied';
+  const requestTitle = item.tool_name && /\brequest$/i.test(item.tool_name)
+    ? item.tool_name
+    : `${item.tool_name || 'Tool Call'} Request`;
+  const content = previewApprovalParams(item.params);
+  const reason = item.failure_mode || item.risk_source;
+  const impact = item.real_world_harm;
+
+  return (
+    <div className={`rg-stream-row rg-stream-approval ${cardStateClass}`}>
+      <span className="rg-stream-time">{formatApprovalTime(item.created_at)}</span>
+      <AlertTriangle className="rg-stream-icon rg-approval-timeline-icon" />
+      <div className="rg-stream-body">
+        <div className={`rg-command-card ${cardStateClass}`}>
+          <AlertTriangle />
+          <div className="rg-command-title">{requestTitle}</div>
+          <div className={`rg-command-risk ${statusClass}`}>{statusText}</div>
+          <pre className="rg-command-code">{content}</pre>
+          <div className="rg-command-reason">
+            {reason && <span>Reason: {reason}</span>}
+            {impact && <span>Impact: {impact}</span>}
+          </div>
+          {isPending && (
+            <div className="rg-command-actions">
+              <button
+                className="rg-deny"
+                disabled={resolving}
+                onClick={() => onDecision(item, 'rejected')}
+                type="button"
+              >
+                Deny
+              </button>
+              <button
+                className="rg-always"
+                disabled={resolving}
+                onClick={() => onDecision(item, 'approved')}
+                type="button"
+              >
+                Allow
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -611,10 +867,15 @@ export default function RuntimeGuardConsole() {
   const [creatingAgent, setCreatingAgent] = useState<AgentName | null>(null);
   const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
   const [isComposing, setIsComposing] = useState(false);
-  const [shellApproval, setShellApproval] = useState<ApprovalState>('pending');
-  const [fileApproval, setFileApproval] = useState<ApprovalState>('pending');
+  const [approvalItems, setApprovalItems] = useState<GuardPendingApproval[]>([]);
+  const [approvalLoading, setApprovalLoading] = useState(true);
+  const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
+  const [middleApprovalCardsBySession, setMiddleApprovalCardsBySession] = useState<MiddleApprovalCardsBySession>({});
+  const [blockedObservations, setBlockedObservations] = useState<GuardRuntimeObservation[]>([]);
+  const [blockedLoading, setBlockedLoading] = useState(true);
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
+  const [guardModeSyncing, setGuardModeSyncing] = useState(false);
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
   const [budgetSettings, setBudgetSettings] = useState<BudgetSettings>(() => loadBudgetSettings());
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
@@ -634,6 +895,7 @@ export default function RuntimeGuardConsole() {
   const taskScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inFlightKeysRef = useRef<Set<string>>(new Set());
+  const approvalRefreshTimerRef = useRef<number | null>(null);
 
   const setMessageMap = useCallback((
     updaterOrValue: Record<string, ChatMessage[]> | ((prev: Record<string, ChatMessage[]>) => Record<string, ChatMessage[]>),
@@ -646,8 +908,19 @@ export default function RuntimeGuardConsole() {
   }, []);
 
   const activeSession = sessions.find(session => session.sessionKey === activeSessionId) ?? null;
+  const activeSessionKey = activeSession?.sessionKey ?? '';
   const activeAgent = activeSession?.agent ?? selectedAgent;
-  const activeMessages = activeSession ? (messageMap[activeSession.sessionKey] ?? []) : [];
+  const activeMessages = useMemo(
+    () => (activeSessionKey ? (messageMap[activeSessionKey] ?? []) : []),
+    [activeSessionKey, messageMap],
+  );
+  const activeApprovalCards = useMemo(
+    () => getActiveApprovalCards(middleApprovalCardsBySession, activeSessionKey),
+    [activeSessionKey, middleApprovalCardsBySession],
+  );
+  const activeTimelineRows = useMemo(() => {
+    return buildActiveTimelineRows(activeMessages, activeApprovalCards);
+  }, [activeApprovalCards, activeMessages]);
   const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
   const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
   const availableInstances = useMemo(
@@ -744,12 +1017,12 @@ export default function RuntimeGuardConsole() {
 
   useEffect(() => {
     taskScrollRef.current?.scrollTo({ top: taskScrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [activeSession?.sessionKey, activeMessages.length]);
+  }, [activeSessionKey, activeMessages.length, activeTimelineRows.length]);
 
   useEffect(() => {
-    if (!activeSession) return;
+    if (!activeSessionKey) return;
     window.setTimeout(() => textareaRef.current?.focus(), 80);
-  }, [activeSession?.sessionKey]);
+  }, [activeSessionKey]);
 
   const loadHistory = useCallback(async (sessionKey: string, force = false) => {
     if (!force && chatStreamStore.hasLoadedMessages(sessionKey)) return;
@@ -774,9 +1047,35 @@ export default function RuntimeGuardConsole() {
     }
   }, [activeSession?.sessionKey, loadHistory]);
 
+  const syncMiddleApprovalCards = useCallback((
+    items: GuardPendingApproval[],
+    options: {
+      createResolvedIds?: Set<string>;
+      preferredSessionKey?: string;
+    } = {},
+  ) => {
+    setMiddleApprovalCardsBySession(current => (
+      upsertMiddleApprovalCards(current, items, sessions, options)
+    ));
+  }, [sessions]);
+
+  const unresolvedApprovalItems = useMemo(
+    () => approvalItems.filter(item => !item.resolved),
+    [approvalItems],
+  );
   const approvalCount = useMemo(
-    () => [shellApproval, fileApproval].filter(state => state === 'pending').length,
-    [shellApproval, fileApproval],
+    () => unresolvedApprovalItems.length,
+    [unresolvedApprovalItems.length],
+  );
+  const visibleApprovals = useMemo(
+    () => [...unresolvedApprovalItems]
+      .sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0))
+      .slice(0, 2),
+    [unresolvedApprovalItems],
+  );
+  const recentBlockedItems = useMemo(
+    () => mergeBlockedItems(approvalItems, blockedObservations).slice(0, 2),
+    [approvalItems, blockedObservations],
   );
   const agents: AgentDisplay[] = useMemo(
     () => agentDefinitions.map(agent => {
@@ -820,13 +1119,118 @@ export default function RuntimeGuardConsole() {
     window.setTimeout(() => setPlaceholder(''), timeout);
   }, []);
 
+  const fetchApprovalItems = useCallback(async (showLoading = false): Promise<GuardPendingApproval[] | null> => {
+    if (showLoading) setApprovalLoading(true);
+    try {
+      const { data } = await guardAPI.pending();
+      setApprovalItems(data);
+      syncMiddleApprovalCards(data);
+      return data;
+    } catch {
+      // Keep the last known approval queue if the poll fails temporarily.
+      return null;
+    } finally {
+      if (showLoading) setApprovalLoading(false);
+    }
+  }, [syncMiddleApprovalCards]);
+
+  const fetchBlockedObservations = useCallback(async (showLoading = false): Promise<GuardRuntimeObservation[] | null> => {
+    if (showLoading) setBlockedLoading(true);
+    try {
+      const { data } = await guardAPI.observations();
+      setBlockedObservations(data);
+      return data;
+    } catch {
+      // Keep the last known blocked list if observations are temporarily unavailable.
+      return null;
+    } finally {
+      if (showLoading) setBlockedLoading(false);
+    }
+  }, []);
+
+  const refreshApprovalItemsSoon = useCallback(() => {
+    void fetchApprovalItems(false);
+    void fetchBlockedObservations(false);
+    if (approvalRefreshTimerRef.current !== null) {
+      window.clearTimeout(approvalRefreshTimerRef.current);
+    }
+    approvalRefreshTimerRef.current = window.setTimeout(() => {
+      approvalRefreshTimerRef.current = null;
+      void fetchApprovalItems(false);
+      void fetchBlockedObservations(false);
+    }, 500);
+  }, [fetchApprovalItems, fetchBlockedObservations]);
+
+  useEffect(() => {
+    fetchApprovalItems(true);
+    fetchBlockedObservations(true);
+    const timer = window.setInterval(() => {
+      void fetchApprovalItems(false);
+      void fetchBlockedObservations(false);
+    }, APPROVAL_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [fetchApprovalItems, fetchBlockedObservations]);
+
+  useEffect(() => () => {
+    if (approvalRefreshTimerRef.current !== null) {
+      window.clearTimeout(approvalRefreshTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    guardAPI.getEnabled()
+      .then(res => {
+        if (!cancelled) setGuardMode(res.data.enabled ? 'On' : 'Off');
+      })
+      .catch(() => {
+        if (!cancelled) showToast('Failed to load Guard mode.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
+
   const showPlaceholder = () => {
     showToast('This panel is still presentation-only.');
   };
 
-  const showInstallHint = (agent: AgentName) => {
-    showToast(`${agent} is not installed. Open Setup to install it.`);
+  const resolveApproval = async (item: GuardPendingApproval, resolution: ApprovalDecision) => {
+    if (resolvingApprovalId) return;
+    setResolvingApprovalId(item.id);
+    try {
+      const { data } = await guardAPI.resolve(item.id, resolution);
+      setApprovalItems(current => upsertApprovalItem(current, data));
+      syncMiddleApprovalCards([data], {
+        createResolvedIds: new Set([item.id]),
+        preferredSessionKey: activeSession?.sessionKey,
+      });
+      await fetchApprovalItems(false);
+      if (resolution === 'rejected') {
+        void fetchBlockedObservations(false);
+      }
+    } catch (err: unknown) {
+      const status = responseStatus(err);
+      const latest = await fetchApprovalItems(false);
+      const latestItem = latest?.find(approval => approval.id === item.id);
+      if (status === 404 && latestItem?.resolved) {
+        syncMiddleApprovalCards([latestItem], {
+          createResolvedIds: new Set([item.id]),
+          preferredSessionKey: activeSession?.sessionKey,
+        });
+      } else if (status === 404) {
+        showToast('Approval request is no longer available.');
+      } else {
+        showToast(`Failed to ${resolution === 'approved' ? 'allow' : 'deny'} approval.`);
+      }
+    } finally {
+      setResolvingApprovalId(null);
+    }
   };
+
+  const showInstallHint = useCallback((agent: AgentName) => {
+    showToast(`${agent} is not installed. Open Setup to install it.`);
+  }, [showToast]);
 
   const openBudgetModal = () => {
     setBudgetAmountInput(budgetLimit ? String(budgetLimit) : '');
@@ -937,11 +1341,32 @@ export default function RuntimeGuardConsole() {
     runtimeInstancesQuery.isLoading,
     sessions,
     setMessageMap,
+    showInstallHint,
     showToast,
   ]);
 
   const openSelectedAgentSession = () => {
     openSession(selectedAgent, agents.find(agent => agent.name === selectedAgent)?.installed ?? true);
+  };
+
+  const applyGuardMode = async (mode: GuardMode) => {
+    if (mode === guardMode || guardModeSyncing) {
+      setAutoApprovalOpen(false);
+      return;
+    }
+    const previous = guardMode;
+    setGuardMode(mode);
+    setAutoApprovalOpen(false);
+    setGuardModeSyncing(true);
+    try {
+      const res = await guardAPI.setEnabled(mode === 'On');
+      setGuardMode(res.data.enabled ? 'On' : 'Off');
+    } catch {
+      setGuardMode(previous);
+      showToast('Failed to update Guard mode.');
+    } finally {
+      setGuardModeSyncing(false);
+    }
   };
 
   const closeSession = (sessionKey: string) => {
@@ -956,6 +1381,12 @@ export default function RuntimeGuardConsole() {
       return next;
     });
     setDraftBySessionKey(current => {
+      const next = { ...current };
+      delete next[sessionKey];
+      return next;
+    });
+    setMiddleApprovalCardsBySession(current => {
+      if (!current[sessionKey]) return current;
       const next = { ...current };
       delete next[sessionKey];
       return next;
@@ -976,6 +1407,19 @@ export default function RuntimeGuardConsole() {
     )));
     setDraftBySessionKey(current => {
       const next = { ...current, [nextKey]: current[previousKey] ?? '' };
+      delete next[previousKey];
+      return next;
+    });
+    setMiddleApprovalCardsBySession(current => {
+      const previousCards = current[previousKey];
+      if (!previousCards) return current;
+      const nextCards = Object.fromEntries(
+        Object.entries(previousCards).map(([id, card]) => [
+          id,
+          { ...card, sessionKey: nextKey },
+        ]),
+      );
+      const next = { ...current, [nextKey]: { ...(current[nextKey] ?? {}), ...nextCards } };
       delete next[previousKey];
       return next;
     });
@@ -1139,6 +1583,10 @@ export default function RuntimeGuardConsole() {
                     : message
                 )),
               }));
+            } else if (chunk.type === 'approval_pending') {
+              refreshApprovalItemsSoon();
+            } else if (chunk.type === 'approval_resolved') {
+              refreshApprovalItemsSoon();
             } else if (traceTypes.has(chunk.type)) {
               if (shouldDisplayTraceMessage(streamPlatform, {
                 type: chunk.type,
@@ -1482,21 +1930,20 @@ export default function RuntimeGuardConsole() {
               aria-expanded={autoApprovalOpen}
               aria-haspopup="listbox"
               className="rg-auto-approval-trigger"
+              disabled={guardModeSyncing}
               onClick={() => setAutoApprovalOpen(open => !open)}
               type="button"
             >
-              <Lock /> Guard: {guardMode} <ChevronDown />
+              <Lock /> Guard: {guardModeSyncing ? 'Updating' : guardMode} <ChevronDown />
             </button>
             {autoApprovalOpen && (
               <div className="rg-auto-approval-menu" role="listbox" aria-label="Guard mode">
                 {(['Off', 'On'] as const).map(mode => (
                   <button
                     className={mode === guardMode ? 'is-selected' : ''}
+                    disabled={guardModeSyncing}
                     key={mode}
-                    onClick={() => {
-                      setGuardMode(mode);
-                      setAutoApprovalOpen(false);
-                    }}
+                    onClick={() => void applyGuardMode(mode)}
                     role="option"
                     aria-selected={mode === guardMode}
                     type="button"
@@ -1522,20 +1969,29 @@ export default function RuntimeGuardConsole() {
               <div className="rg-task-scroll" ref={taskScrollRef}>
                 {loadingHistory === activeSession.sessionKey ? (
                   <div className="rg-loading-history"><Loader2 className="is-spinning" /> Loading history...</div>
-                ) : activeMessages.length === 0 ? (
+                ) : activeMessages.length === 0 && activeApprovalCards.length === 0 ? (
                   <div className="rg-session-empty">
                     <Bot />
                     <strong>{activeSession.agent} session ready</strong>
                     <span>发送第一条消息后，assistant、tool 和 trace 事件会显示在这里。</span>
                   </div>
                 ) : (
-                  activeMessages.map(message => (
-                    <TimelineMessage
-                      key={message.id}
-                      msg={message}
-                      expanded={Boolean(expandedToolIds[message.id])}
-                      onToggle={() => toggleToolExpanded(message.id)}
-                    />
+                  activeTimelineRows.map(row => (
+                    row.type === 'approval' ? (
+                      <InlineApprovalCard
+                        card={row.card}
+                        key={`approval-${row.card.id}`}
+                        resolving={resolvingApprovalId === row.card.id}
+                        onDecision={resolveApproval}
+                      />
+                    ) : (
+                      <TimelineMessage
+                        key={`message-${row.message.id}`}
+                        msg={row.message}
+                        expanded={Boolean(expandedToolIds[row.message.id])}
+                        onToggle={() => toggleToolExpanded(row.message.id)}
+                      />
+                    )
                   ))
                 )}
               </div>
@@ -1598,24 +2054,21 @@ export default function RuntimeGuardConsole() {
               <span className="rg-count">{approvalCount}</span>
               <button type="button" onClick={showPlaceholder}>View All</button>
             </div>
-            <ApprovalCard
-              kind="Shell Command"
-              risk="High Risk"
-              riskTone="high"
-              content="rm -rf ./dist/temp/*"
-              time="14:32:20"
-              state={shellApproval}
-              onDecision={setShellApproval}
-            />
-            <ApprovalCard
-              kind="File Upload"
-              risk="Medium Risk"
-              riskTone="medium"
-              content="competitors_report.pdf (2.4MB)"
-              time="14:31:02"
-              state={fileApproval}
-              onDecision={setFileApproval}
-            />
+            {visibleApprovals.length > 0 ? (
+              visibleApprovals.map((item, index) => (
+                <ApprovalCard
+                  item={item}
+                  key={item.id}
+                  slotIndex={index}
+                  resolving={resolvingApprovalId === item.id}
+                  onDecision={resolveApproval}
+                />
+              ))
+            ) : (
+              <div className="rg-approval-empty">
+                {approvalLoading ? 'Loading approvals...' : 'No pending approvals'}
+              </div>
+            )}
           </section>
 
           <section className="rg-guard-status">
@@ -1643,13 +2096,19 @@ export default function RuntimeGuardConsole() {
               <span>RECENT BLOCKED</span>
               <button type="button" onClick={showPlaceholder}>View All</button>
             </div>
-            {blockedRows.map(([time, text], index) => (
-              <div className="rg-block-row" key={time} style={{ top: 28 + index * 16 }}>
-                <span>{time}</span>
-                <strong>Blocked</strong>
-                <span>{text}</span>
+            {recentBlockedItems.length > 0 ? (
+              recentBlockedItems.map((item, index) => (
+                <div className="rg-block-row" key={item.id} style={{ top: 28 + index * 16 }}>
+                  <span>{formatBlockedTime(item.timestamp)}</span>
+                  <strong>Blocked</strong>
+                  <span>{blockedDisplayText(item)}</span>
+                </div>
+              ))
+            ) : (
+              <div className="rg-block-empty">
+                {blockedLoading ? 'Loading blocked...' : 'No recent blocked'}
               </div>
-            ))}
+            )}
           </section>
         </aside>
       </div>

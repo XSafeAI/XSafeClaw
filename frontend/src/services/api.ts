@@ -585,26 +585,52 @@ export const statsAPI = {
     api.get<any>('/stats/dashboard'),
 };
 
+export interface GuardPendingApproval {
+  id: string;
+  platform: string;
+  instance_id: string;
+  guard_mode: string;
+  session_key: string;
+  tool_name: string;
+  params: Record<string, unknown>;
+  guard_verdict: string;
+  guard_raw: string;
+  session_context: string;
+  risk_source: string | null;
+  failure_mode: string | null;
+  real_world_harm: string | null;
+  created_at: number;
+  resolved: boolean;
+  resolution: string;
+  resolved_at: number;
+}
+
+export interface GuardRuntimeObservation {
+  id: string;
+  platform: string;
+  instance_id: string;
+  guard_mode: string;
+  session_key: string;
+  tool_name: string;
+  params: Record<string, unknown>;
+  action: string;
+  reason: string | null;
+  guard_verdict: string;
+  guard_raw: string;
+  session_context: string;
+  created_at: number;
+}
+
 // Guard API
 export const guardAPI = {
   pending: (resolved?: boolean) =>
-    api.get<{
-      id: string;
-      session_key: string;
-      tool_name: string;
-      params: Record<string, any>;
-      guard_verdict: string;
-      guard_raw: string;
-      risk_source: string | null;
-      failure_mode: string | null;
-      created_at: number;
-      resolved: boolean;
-      resolution: string;
-      resolved_at: number;
-    }[]>('/guard/pending', { params: resolved !== undefined ? { resolved } : {} }),
+    api.get<GuardPendingApproval[]>('/guard/pending', { params: resolved !== undefined ? { resolved } : {} }),
 
   resolve: (pendingId: string, resolution: string) =>
-    api.post(`/guard/pending/${pendingId}/resolve`, { resolution }),
+    api.post<GuardPendingApproval>(`/guard/pending/${pendingId}/resolve`, { resolution }),
+
+  observations: () =>
+    api.get<GuardRuntimeObservation[]>('/guard/observations'),
 
   status: () => api.get('/guard/status'),
 
