@@ -2106,8 +2106,8 @@
   max-width: none;
   align-self: stretch;
   gap: 0;
-  padding: 20px 14px 14px;
-  border-radius: 4px;
+  padding: 0;
+  border-radius: 8px;
   border: 1px solid rgba(154, 137, 225, 0.32);
   border-left: 3px solid rgba(154, 137, 225, 0.48);
   background:
@@ -2120,6 +2120,55 @@
 
 .console-dialog-item-tool .console-dialog-tag {
   border-radius: 3px;
+}
+
+.console-dialog-tool-summary {
+  width: 100%;
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.console-dialog-tool-summary:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.console-dialog-tool-summary-title {
+  min-width: 0;
+  color: #f3ead7;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-dialog-tool-summary-hint {
+  color: #aa9778;
+  font-family: var(--px-font);
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.console-dialog-tool-chevron {
+  color: #e8d08c;
+  font-family: var(--px-font);
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 0.14s ease;
+}
+
+.console-dialog-tool-chevron-open {
+  transform: rotate(90deg);
 }
 
 .console-dialog-meta {
@@ -2148,6 +2197,7 @@
 
 .console-dialog-tool-payload {
   margin-top: 0;
+  padding: 8px 12px 12px;
   padding-top: 8px;
   border-top: 1px solid rgba(255, 224, 177, 0.08);
   background: transparent;
@@ -6185,4 +6235,3 @@
   box-shadow: 0 0 10px rgba(255, 215, 0, .25);
   transform: translateY(-1px);
 }
-

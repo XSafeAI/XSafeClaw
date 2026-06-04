@@ -2302,8 +2302,8 @@ body.agent-town-page-cursor.cursor-grab-full *,
   max-width: none;
   align-self: stretch;
   gap: 0;
-  padding: 20px 14px 14px;
-  border-radius: 4px;
+  padding: 0;
+  border-radius: 8px;
   border: 1px solid rgba(154, 137, 225, 0.32);
   border-left: 3px solid rgba(154, 137, 225, 0.48);
   background:
@@ -2316,6 +2316,55 @@ body.agent-town-page-cursor.cursor-grab-full *,
 
 .agent-dialog-item-tool .agent-dialog-tag {
   border-radius: 3px;
+}
+
+.agent-dialog-tool-summary {
+  width: 100%;
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.agent-dialog-tool-summary:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.agent-dialog-tool-summary-title {
+  min-width: 0;
+  color: #f3ead7;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-dialog-tool-summary-hint {
+  color: #aa9778;
+  font-family: var(--px-font);
+  font-size: 6px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.agent-dialog-tool-chevron {
+  color: #e8d08c;
+  font-family: var(--px-font);
+  font-size: 12px;
+  line-height: 1;
+  transition: transform 0.14s ease;
+}
+
+.agent-dialog-tool-chevron-open {
+  transform: rotate(90deg);
 }
 
 .agent-dialog-meta {
@@ -2345,6 +2394,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 /* Tool body sits inside the outer item-tool shell (no second card) */
 .agent-dialog-tool-payload {
   margin-top: 0;
+  padding: 8px 11px 11px;
   padding-top: 8px;
   border-top: 1px solid rgba(96, 165, 250, 0.12);
   background: transparent;

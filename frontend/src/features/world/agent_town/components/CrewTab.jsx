@@ -1,7 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MarkdownMessage from '../../../../components/MarkdownMessage';
 import { CHAR_BASE, CHAR_NAMES, formatAgentDisplayName } from '../config/constants';
 import { getAgentTownText } from '../i18n';
+import {
+  getToolDisclosureSummary,
+  isNearScrollBottom,
+  shouldAutoScrollConversation,
+} from './conversationPanelUtils';
 
 const FILTER_META = [
   { id: 'working', label: 'WORKING' },
@@ -378,30 +383,31 @@ function pendingApprovalToolMessage(item) {
 }
 
 function ToolCallBubble({ msg, helpers }) {
+  const [expanded, setExpanded] = useState(false);
   const argsPreview = previewChatValue(msg.args || msg.content || '');
   const resultPreview = msg.result_pending ? 'Running...' : previewChatValue(msg.result);
-  const metaTag = msg.result_pending
-    ? 'RUNNING'
-    : msg.is_error
-      ? 'ERROR'
-      : 'TOOL';
+  const summary = getToolDisclosureSummary(msg);
   const metaClass = msg.result_pending
     ? 'console-dialog-tag-tool-running'
     : msg.is_error
       ? 'console-dialog-tag-tool-error'
       : 'console-dialog-tag-tool';
-  const toolName = msg.tool_name || 'unknown';
 
   return (
-    <div className="console-dialog-item console-dialog-item-tool">
-      <div className="console-dialog-meta">
-        <div className="console-dialog-meta-main">
-          <span className={`console-dialog-tag ${metaClass}`}>{metaTag}</span>
-          <span className="console-dialog-tool-name">{toolName}</span>
-        </div>
+    <div className={`console-dialog-item console-dialog-item-tool ${expanded ? 'console-dialog-item-tool-expanded' : ''}`}>
+      <button
+        type="button"
+        className="console-dialog-tool-summary"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <span className={`console-dialog-tag ${metaClass}`}>{summary.label}</span>
+        <span className="console-dialog-tool-summary-title">{summary.title}</span>
+        <span className="console-dialog-tool-summary-hint">{expanded ? '收起' : summary.detailHint}</span>
         <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
-      </div>
-      {(argsPreview || resultPreview) ? (
+        <span className={`console-dialog-tool-chevron ${expanded ? 'console-dialog-tool-chevron-open' : ''}`}>›</span>
+      </button>
+      {expanded && (argsPreview || resultPreview) ? (
         <div className="console-dialog-tool-payload">
           {argsPreview ? (
             <div className="console-dialog-tool-row console-dialog-tool-row-call">
@@ -792,7 +798,10 @@ export default function CrewTab({
   townText = getAgentTownText('en'),
 }) {
   const currentChar = currentAgent ? charNameMap[currentAgent.id] || CHAR_NAMES[0] : CHAR_NAMES[0];
+  const chatLogRef = useRef(null);
   const chatEndRef = useRef(null);
+  const lastChatAgentIdRef = useRef('');
+  const shouldStickToBottomRef = useRef(true);
   const copyTimerRef = useRef(null);
   const [selectedLedgerTask, setSelectedLedgerTask] = useState(null);
   const [detailMessages, setDetailMessages] = useState([]);
@@ -824,8 +833,37 @@ export default function CrewTab({
     return [...baseMessages, ...pendingToolMessages]
       .sort((a, b) => getMessageTimestampValue(a.timestamp) - getMessageTimestampValue(b.timestamp));
   }, [activeMessages, agentPendingItems]);
+
+  const handleChatLogScroll = useCallback(() => {
+    shouldStickToBottomRef.current = isNearScrollBottom(chatLogRef.current);
+  }, []);
+
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ block: 'end' });
+    const agentId = currentAgent?.id || '';
+    const agentChanged = lastChatAgentIdRef.current !== agentId;
+    if (agentChanged) {
+      lastChatAgentIdRef.current = agentId;
+      shouldStickToBottomRef.current = true;
+    }
+
+    if (!shouldAutoScrollConversation({
+      agentChanged,
+      wasPinnedToBottom: shouldStickToBottomRef.current,
+    })) {
+      return undefined;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const log = chatLogRef.current;
+      if (log) {
+        log.scrollTop = log.scrollHeight;
+        shouldStickToBottomRef.current = true;
+      } else {
+        chatEndRef.current?.scrollIntoView({ block: 'end' });
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
   }, [conversationMessages, currentAgent?.id, loadingHistory, sending]);
 
   useEffect(() => () => {
@@ -1229,7 +1267,11 @@ export default function CrewTab({
                     <div className="console-dialog-status">{sending ? townText.stage.transmitting : loadingHistory ? townText.stage.syncing : townText.stage.ready}</div>
                   </div>
 
-                  <div className="console-dialog-log">
+                  <div
+                    className="console-dialog-log"
+                    ref={chatLogRef}
+                    onScroll={handleChatLogScroll}
+                  >
                     {loadingHistory ? (
                       <div className="console-dialog-empty">{townText.stage.syncingLog}</div>
                     ) : conversationMessages.length === 0 ? (
