@@ -6,10 +6,19 @@ import {
   ApprovalViewAllModal,
   BlockedViewAllModal,
   InlineApprovalCard,
+  ToolsViewAllModal,
   type BlockedModalRange,
 } from './RuntimeGuardConsole';
 import type { RecentBlockedItem } from './runtimeGuardBlocked';
 import type { MiddleApprovalCard } from './runtimeGuardApproval';
+import {
+  buildGuardStatusRows,
+  calculateGuardStatusSummary,
+  runtimeGuardToolPermissionLabel,
+  toolPermissionsFromPolicies,
+  toolPoliciesFromPermissions,
+  type RuntimeGuardToolPermissions,
+} from './runtimeGuardToolPolicy';
 
 function approval(overrides: Partial<GuardPendingApproval> = {}): GuardPendingApproval {
   return {
@@ -80,6 +89,151 @@ describe('InlineApprovalCard', () => {
     expect(screen.getByText('Denied')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull();
+  });
+});
+
+describe('ToolsViewAllModal', () => {
+  it('calculates Guard Status from guard mode, tool permissions, and pending approvals', () => {
+    const defaultPermissions: RuntimeGuardToolPermissions = {
+      shell: 'Allowed',
+      fileSystem: 'Guard',
+      browser: 'Allowed',
+      network: 'Guard',
+      git: 'Guard',
+    };
+
+    expect(calculateGuardStatusSummary('On', defaultPermissions, []).score).toBe(97);
+    expect(calculateGuardStatusSummary('Off', defaultPermissions, []).score).toBe(87);
+    expect(calculateGuardStatusSummary('On', defaultPermissions, [
+      approval({ id: 'pending-1' }),
+      approval({ id: 'pending-2' }),
+    ]).score).toBe(95);
+    expect(calculateGuardStatusSummary('Off', {
+      shell: 'Allowed',
+      fileSystem: 'Allowed',
+      browser: 'Allowed',
+      network: 'Allowed',
+      git: 'Allowed',
+    }, [
+      approval({ id: 'pending-1' }),
+      approval({ id: 'pending-2' }),
+      approval({ id: 'pending-3' }),
+      approval({ id: 'pending-4' }),
+    ]).score).toBe(77);
+  });
+
+  it('builds Guard Status rows from current tool settings', () => {
+    const rows = buildGuardStatusRows('Off', {
+      shell: 'Allowed',
+      fileSystem: 'Asked',
+      browser: 'Allowed',
+      network: 'Guard',
+      git: 'Allowed',
+    }, 2);
+
+    expect(rows).toEqual([
+      { label: 'Guard Mode', status: 'Ask fallback', tone: 'warning' },
+      { label: 'Pending', status: '2 waiting', tone: 'warning' },
+      { label: 'Shell', status: 'Allow', tone: 'success' },
+      { label: 'File System', status: 'Ask', tone: 'asked' },
+      { label: 'Browser', status: 'Allow', tone: 'success' },
+      { label: 'Network/Git', status: 'Guard/Allow', tone: 'warning' },
+    ]);
+  });
+
+  it('maps backend tool policies to frontend permissions and back', () => {
+    const permissions = toolPermissionsFromPolicies({
+      shell: 'ask',
+      file_system: 'allow',
+      browser: 'guard',
+      network: 'allow',
+      git: 'ask',
+    });
+
+    expect(permissions).toEqual({
+      shell: 'Asked',
+      fileSystem: 'Allowed',
+      browser: 'Guard',
+      network: 'Allowed',
+      git: 'Asked',
+    });
+    expect(toolPoliciesFromPermissions(permissions)).toEqual({
+      shell: 'ask',
+      file_system: 'allow',
+      browser: 'guard',
+      network: 'allow',
+      git: 'ask',
+    });
+  });
+
+  it('renders configurable tool permissions and updates the selected state', () => {
+    function Harness() {
+      const [permissions, setPermissions] = useState<RuntimeGuardToolPermissions>({
+        shell: 'Allowed',
+        fileSystem: 'Guard',
+        browser: 'Allowed',
+        network: 'Guard',
+        git: 'Guard',
+      });
+
+      return (
+        <>
+          <span data-testid="sidebar-shell">{runtimeGuardToolPermissionLabel(permissions.shell)}</span>
+          <ToolsViewAllModal
+            permissions={permissions}
+            onClose={vi.fn()}
+            onPermissionChange={(toolId, permission) => {
+              setPermissions(current => ({ ...current, [toolId]: permission }));
+            }}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+
+    expect(document.querySelectorAll('.rg-tool-permission-mark')).toHaveLength(5);
+
+    const shellGroup = screen.getByRole('group', { name: 'Shell permission' });
+    const fileSystemGroup = screen.getByRole('group', { name: 'File System permission' });
+    const browserGroup = screen.getByRole('group', { name: 'Browser permission' });
+    const networkGroup = screen.getByRole('group', { name: 'Network permission' });
+    const gitGroup = screen.getByRole('group', { name: 'Git permission' });
+
+    expect(within(shellGroup).getByRole('button', { name: 'Allow' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(fileSystemGroup).getByRole('button', { name: 'Guard' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(browserGroup).getByRole('button', { name: 'Allow' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(networkGroup).getByRole('button', { name: 'Guard' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(gitGroup).getByRole('button', { name: 'Guard' })).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(within(shellGroup).getByRole('button', { name: 'Ask' }));
+
+    expect(screen.getByTestId('sidebar-shell')).toHaveTextContent('Ask');
+    expect(within(shellGroup).getByRole('button', { name: 'Ask' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(shellGroup).getByRole('button', { name: 'Allow' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('supports close interactions', () => {
+    const onClose = vi.fn();
+    const { container } = render(
+      <ToolsViewAllModal
+        permissions={{ shell: 'Allowed', fileSystem: 'Guard', browser: 'Allowed', network: 'Guard', git: 'Guard' }}
+        onClose={onClose}
+        onPermissionChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('dialog', { name: 'Tool permissions' }));
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.mouseDown(container.querySelector('.rg-modal-backdrop') as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTitle('Close tool permissions'));
+    expect(onClose).toHaveBeenCalledTimes(2);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(3);
   });
 });
 

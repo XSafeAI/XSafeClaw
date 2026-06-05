@@ -31,7 +31,8 @@ from xsafeclaw.services import runtime_autostart
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_instances_cache():
+def _reset_runtime_instances_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(guard_service, "_TOOL_POLICY_FILE", tmp_path / "tool_policies.json")
     runtime_helpers.invalidate_instances_cache()
     yield
     runtime_helpers.invalidate_instances_cache()
@@ -2002,6 +2003,8 @@ async def test_nanobot_health_probe_ignores_environment_ssl_settings(monkeypatch
 
 @pytest.mark.asyncio
 async def test_runtime_tool_check_observe_records_unsafe_without_blocking(monkeypatch):
+    guard_service.save_tool_policies({"shell": "guard"})
+
     async def fake_call_guard_model(_trajectory_text: str, **_kwargs) -> str:
         return (
             "unsafe\n"

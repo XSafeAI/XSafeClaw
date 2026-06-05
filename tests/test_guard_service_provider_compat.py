@@ -50,8 +50,9 @@ async def _wait_for_pending() -> guard_service.PendingApproval:
 
 
 @pytest.fixture(autouse=True)
-def _reset_guard_runtime_state():
+def _reset_guard_runtime_state(tmp_path, monkeypatch):
     original_enabled = guard_service._guard_enabled
+    monkeypatch.setattr(guard_service, "_TOOL_POLICY_FILE", tmp_path / "tool_policies.json")
     guard_service.invalidate_model_cache()
     guard_service._pending.clear()
     guard_service._observations.clear()
@@ -201,6 +202,7 @@ async def test_call_guard_model_uses_openai_chat_completions(monkeypatch):
 @pytest.mark.asyncio
 async def test_check_tool_call_uses_anthropic_messages_and_creates_pending(monkeypatch):
     seen: dict[str, object] = {}
+    guard_service.save_tool_policies({"shell": "guard"})
     _install_fake_async_client(
         monkeypatch,
         {

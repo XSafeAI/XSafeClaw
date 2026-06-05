@@ -46,9 +46,9 @@ export default function Layout() {
     icon: LucideIcon;
     desc: string;
   }> = [
+    { name: '返回对话页面',              href: '/runtime-guard-console', icon: ShieldCheck, desc: 'Runtime Guard' },
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,      desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
-    { name: 'Guard Console',          href: '/runtime-guard-console', icon: ShieldCheck, desc: 'Frontend mock' },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },
     { name: t.layout.assetShield,     href: '/assets',           icon: Shield,         desc: t.layout.descAsset },
     { name: t.layout.riskTest,        href: '/risk-test',        icon: FlaskConical,   desc: t.layout.descRiskTest },

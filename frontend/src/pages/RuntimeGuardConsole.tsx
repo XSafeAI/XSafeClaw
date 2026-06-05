@@ -11,9 +11,9 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import {
+  type LucideIcon,
   AlertCircle,
   AlertTriangle,
-  Bell,
   Bot,
   Box,
   Brain,
@@ -23,13 +23,14 @@ import {
   ChevronRight,
   Columns2,
   FolderOpen,
+  GitBranch,
   Globe2,
   HeartPulse,
   Hexagon,
   Loader2,
   Lock,
+  Network,
   Send,
-  Server,
   Settings,
   Shield,
   Square,
@@ -64,6 +65,18 @@ import {
   type RecentBlockedItem,
   type RecentBlockedSource,
 } from './runtimeGuardBlocked';
+import {
+  buildGuardStatusRows,
+  calculateGuardStatusSummary,
+  defaultToolPermissions,
+  runtimeGuardToolPermissionLabel,
+  toolPermissionsFromPolicies,
+  toolPoliciesFromPermissions,
+  type GuardStatusRowTone,
+  type RuntimeGuardToolId,
+  type RuntimeGuardToolPermission,
+  type RuntimeGuardToolPermissions,
+} from './runtimeGuardToolPolicy';
 import './RuntimeGuardConsole.css';
 
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
@@ -87,14 +100,8 @@ type AgentDisplay = {
   className: string;
   installed: boolean;
 };
-type RuntimeGuardModal = 'approvals' | 'blocked' | null;
+type RuntimeGuardModal = 'tools' | 'approvals' | 'blocked' | null;
 export type BlockedModalRange = '24h' | '7d' | 'all';
-type GuardStatusTone = 'secure' | 'guarded' | 'attention' | 'off';
-type GuardStatusSummary = {
-  score: number;
-  label: string;
-  tone: GuardStatusTone;
-};
 
 const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
 const RUNTIME_GUARD_DRAFTS_KEY = 'xsafeclaw:runtime-guard:drafts';
@@ -111,20 +118,19 @@ const agentDefinitions: Array<{
   { name: 'Nanobot', platform: 'nanobot', defaultStatus: 'Idle', className: 'agent-nanobot' },
 ];
 
-const tools = [
-  { icon: Terminal, name: 'Shell', status: 'Allowed', tone: 'success' },
-  { icon: FolderOpen, name: 'File System', status: 'Guarded', tone: 'warning' },
-  { icon: Globe2, name: 'Browser', status: 'Allowed', tone: 'success' },
-  { icon: Server, name: 'MCP Servers', status: '3 Active', tone: 'mcp' },
-];
+const toolPermissionOptions: RuntimeGuardToolPermission[] = ['Allowed', 'Guard', 'Asked'];
 
-const guardRows = [
-  ['Prompt Injection', 'Protected', 'success'],
-  ['Data Leakage', 'Protected', 'success'],
-  ['Command Exec', 'Protected', 'success'],
-  ['File System', 'Guarded', 'warning'],
-  ['Network Access', 'Guarded', 'warning'],
-] as const;
+const configurableTools: Array<{
+  id: RuntimeGuardToolId;
+  icon: LucideIcon;
+  name: string;
+}> = [
+  { id: 'shell', icon: Terminal, name: 'Shell' },
+  { id: 'fileSystem', icon: FolderOpen, name: 'File System' },
+  { id: 'browser', icon: Globe2, name: 'Browser' },
+  { id: 'network', icon: Network, name: 'Network' },
+  { id: 'git', icon: GitBranch, name: 'Git' },
+];
 
 const traceTypes = new Set([
   'trace_start',
@@ -386,6 +392,16 @@ function agentIcon(agent: AgentName) {
   return <Hexagon />;
 }
 
+function toolPermissionTone(permission: RuntimeGuardToolPermission): 'success' | 'warning' | 'asked' {
+  if (permission === 'Allowed') return 'success';
+  if (permission === 'Guard') return 'warning';
+  return 'asked';
+}
+
+function toolPermissionButtonLabel(permission: RuntimeGuardToolPermission): string {
+  return runtimeGuardToolPermissionLabel(permission);
+}
+
 function runtimeUnavailableMessage(instance: RuntimeInstance) {
   if (instance.platform === 'nanobot' && instance.health_status !== 'healthy') {
     return `${instance.display_name || 'Nanobot'} gateway offline.`;
@@ -429,38 +445,6 @@ function formatBlockedTime(timestamp: number): string {
 function blockedDisplayText(item: RecentBlockedItem): string {
   const preview = previewApprovalParams(item.params);
   return preview ? `${item.toolName} ${preview}` : item.toolName;
-}
-
-function clampGuardScore(score: number): number {
-  return Math.min(100, Math.max(75, Math.round(score)));
-}
-
-function guardStatusFromScore(score: number): Pick<GuardStatusSummary, 'label' | 'tone'> {
-  if (score >= 94) return { label: 'Secure', tone: 'secure' };
-  if (score >= 85) return { label: 'Guarded', tone: 'guarded' };
-  return { label: 'Attention', tone: 'attention' };
-}
-
-function calculateGuardStatusSummary(
-  guardMode: GuardMode,
-  unresolvedApprovals: GuardPendingApproval[],
-  blockedItems: RecentBlockedItem[],
-  nowMs: number,
-): GuardStatusSummary {
-  if (guardMode === 'Off') {
-    return { score: 75, label: 'Off', tone: 'off' };
-  }
-
-  const highRiskApprovals = unresolvedApprovals.filter(item => item.guard_verdict === 'unsafe').length;
-  const nowSeconds = Math.floor(nowMs / 1000);
-  const recentBlocked = blockedItems.filter(item => Number(item.timestamp || 0) >= nowSeconds - 24 * 60 * 60).length;
-  const score = clampGuardScore(
-    100
-    - unresolvedApprovals.length * 3
-    - highRiskApprovals * 2
-    - recentBlocked * 2,
-  );
-  return { score, ...guardStatusFromScore(score) };
 }
 
 function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | null {
@@ -515,7 +499,7 @@ function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | 
   return null;
 }
 
-function StatusDot({ tone }: { tone: 'success' | 'muted' | 'warning' | 'mcp' }) {
+function StatusDot({ tone }: { tone: GuardStatusRowTone | 'mcp' }) {
   return <span className={`rg-dot rg-dot-${tone}`} />;
 }
 
@@ -729,6 +713,57 @@ function useRuntimeGuardModalEscape(onClose: () => void) {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
+}
+
+export function ToolsViewAllModal({
+  permissions,
+  onPermissionChange,
+  onClose,
+}: {
+  permissions: RuntimeGuardToolPermissions;
+  onPermissionChange: (toolId: RuntimeGuardToolId, permission: RuntimeGuardToolPermission) => void;
+  onClose: () => void;
+}) {
+  useRuntimeGuardModalEscape(onClose);
+
+  return (
+    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div className="rg-list-modal rg-tools-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-tools-modal-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="rg-modal-close" type="button" title="Close tool permissions" onClick={onClose}>
+          <X />
+        </button>
+        <div className="rg-list-modal-kicker">TOOLS</div>
+        <h2 id="rg-tools-modal-title">Tool permissions</h2>
+        <div className="rg-list-modal-scroll rg-tools-modal-scroll">
+          {configurableTools.map(tool => {
+            const ToolIcon = tool.icon;
+            const permission = permissions[tool.id];
+            return (
+              <article className="rg-tool-permission-row" key={tool.id}>
+                <span className="rg-tool-permission-mark"><ToolIcon /></span>
+                <strong>{tool.name}</strong>
+                <div className="rg-permission-segment" role="group" aria-label={`${tool.name} permission`}>
+                  {toolPermissionOptions.map(option => (
+                    <button
+                      aria-pressed={permission === option}
+                      className={permission === option ? 'is-active' : ''}
+                      key={option}
+                      onClick={() => onPermissionChange(tool.id, option)}
+                      type="button"
+                    >
+                      {toolPermissionButtonLabel(option)}
+                    </button>
+                  ))}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function ApprovalViewAllModal({
@@ -970,6 +1005,7 @@ export default function RuntimeGuardConsole() {
   const [blockedLoading, setBlockedLoading] = useState(true);
   const [activeRuntimeGuardModal, setActiveRuntimeGuardModal] = useState<RuntimeGuardModal>(null);
   const [blockedModalRange, setBlockedModalRange] = useState<BlockedModalRange>('24h');
+  const [toolPermissions, setToolPermissions] = useState<RuntimeGuardToolPermissions>(() => ({ ...defaultToolPermissions }));
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [guardModeSyncing, setGuardModeSyncing] = useState(false);
@@ -1024,6 +1060,31 @@ export default function RuntimeGuardConsole() {
     () => (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled),
     [runtimeInstancesQuery.data?.instances],
   );
+  const sidebarTools = useMemo(() => ([
+    ...configurableTools.map(tool => {
+      const permission = toolPermissions[tool.id];
+      return {
+        ...tool,
+        status: runtimeGuardToolPermissionLabel(permission),
+        tone: toolPermissionTone(permission),
+      };
+    }).filter(tool => tool.id === 'shell' || tool.id === 'fileSystem' || tool.id === 'browser'),
+  ]), [toolPermissions]);
+  const updateToolPermission = useCallback((toolId: RuntimeGuardToolId, permission: RuntimeGuardToolPermission) => {
+    if (toolPermissions[toolId] === permission) return;
+    const previousPermissions = toolPermissions;
+    const nextPermissions = { ...toolPermissions, [toolId]: permission };
+    setToolPermissions(nextPermissions);
+    guardAPI.setToolPolicies(toolPoliciesFromPermissions(nextPermissions))
+      .then(({ data }) => {
+        setToolPermissions(toolPermissionsFromPolicies(data.policies));
+      })
+      .catch(() => {
+        setToolPermissions(previousPermissions);
+        setPlaceholder('Failed to save tool permission.');
+        window.setTimeout(() => setPlaceholder(''), 2600);
+      });
+  }, [toolPermissions]);
 
   useEffect(() => {
     const updateLayoutFit = () => {
@@ -1054,6 +1115,26 @@ export default function RuntimeGuardConsole() {
   useEffect(() => {
     saveRuntimeGuardDrafts(draftBySessionKey);
   }, [draftBySessionKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    guardAPI.toolPolicies()
+      .then(({ data }) => {
+        if (!cancelled) {
+          setToolPermissions(toolPermissionsFromPolicies(data.policies));
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPlaceholder('Failed to load tool permissions.');
+        window.setTimeout(() => setPlaceholder(''), 2600);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (activeSessionId && sessions.some(session => session.sessionKey === activeSessionId)) return;
@@ -1179,8 +1260,12 @@ export default function RuntimeGuardConsole() {
     [allBlockedItems],
   );
   const guardStatusSummary = useMemo(
-    () => calculateGuardStatusSummary(guardMode, unresolvedApprovalItems, allBlockedItems, nowTs),
-    [allBlockedItems, guardMode, nowTs, unresolvedApprovalItems],
+    () => calculateGuardStatusSummary(guardMode, toolPermissions, unresolvedApprovalItems),
+    [guardMode, toolPermissions, unresolvedApprovalItems],
+  );
+  const guardStatusRows = useMemo(
+    () => buildGuardStatusRows(guardMode, toolPermissions, unresolvedApprovalItems.length),
+    [guardMode, toolPermissions, unresolvedApprovalItems.length],
   );
   const agents: AgentDisplay[] = useMemo(
     () => agentDefinitions.map(agent => {
@@ -1872,6 +1957,13 @@ export default function RuntimeGuardConsole() {
           </div>
         </div>
       )}
+      {activeRuntimeGuardModal === 'tools' && (
+        <ToolsViewAllModal
+          permissions={toolPermissions}
+          onPermissionChange={updateToolPermission}
+          onClose={() => setActiveRuntimeGuardModal(null)}
+        />
+      )}
       {activeRuntimeGuardModal === 'approvals' && (
         <ApprovalViewAllModal
           items={unresolvedApprovalItems}
@@ -1960,8 +2052,11 @@ export default function RuntimeGuardConsole() {
         </section>
 
         <section className="rg-tools">
-          <div className="rg-tools-title">TOOLS</div>
-          {tools.map((tool, index) => {
+          <div className="rg-tools-title">
+            <span>TOOLS</span>
+            <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>View All</button>
+          </div>
+          {sidebarTools.map((tool, index) => {
             const ToolIcon = tool.icon;
             return (
               <div className="rg-tool-row" key={tool.name} style={{ top: 20 + index * 23 }}>
@@ -1989,8 +2084,7 @@ export default function RuntimeGuardConsole() {
         </section>
 
         <div className="rg-bottom-icons">
-          <button type="button" title="Settings"><Settings /></button>
-          <button type="button" title="Notifications"><Bell /></button>
+          <button type="button" title="Open monitor" onClick={() => navigate('/monitor')}><Settings /></button>
         </div>
       </aside>
       </div>
@@ -2211,7 +2305,7 @@ export default function RuntimeGuardConsole() {
               <span>/100</span>
             </div>
             <div className="rg-guard-list">
-              {guardRows.map(([label, status, tone]) => (
+              {guardStatusRows.map(({ label, status, tone }) => (
                 <div className="rg-guard-row" key={label}>
                   <StatusDot tone={tone} />
                   <span>{label}</span>
