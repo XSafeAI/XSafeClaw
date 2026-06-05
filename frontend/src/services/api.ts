@@ -267,10 +267,38 @@ export interface NanobotConfigPayload {
   guard_timeout_s: number;
 }
 
+export interface RuntimeSessionRecord {
+  session_id: string;
+  platform: RuntimeInstance['platform'] | string;
+  instance_id: string;
+  source_session_id: string | null;
+  display_session_id: string;
+  session_key: string | null;
+  first_seen_at: string;
+  last_activity_at: string | null;
+  cwd: string | null;
+  current_model_provider: string | null;
+  current_model_name: string | null;
+  total_runs: number;
+  total_tokens: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RuntimeSessionListResponse {
+  sessions: RuntimeSessionRecord[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 // Sessions API
 export const sessionsAPI = {
   list: (params?: { page?: number; page_size?: number }) =>
     api.get<PaginatedResponse<Session>>('/sessions/', { params }),
+
+  listRuntime: (params?: { page?: number; page_size?: number; platform?: string; instance_id?: string }) =>
+    api.get<RuntimeSessionListResponse>('/sessions/', { params }),
   
   get: (sessionId: string) =>
     api.get<Session>(`/sessions/${sessionId}`),
@@ -537,6 +565,9 @@ export const chatAPI = {
     api.get<{ session_key: string; messages: any[] }>('/chat/history', {
       params: { session_key: sessionKey, limit },
     }),
+
+  sessionTitle: (data: { message: string; session_key?: string; platform?: string; instance_id?: string }) =>
+    api.post<{ title: string }>('/chat/session-title', data),
 
   closeSession: (sessionKey: string) =>
     api.post('/chat/close-session', null, { params: { session_key: sessionKey } }),

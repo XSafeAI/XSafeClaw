@@ -21,9 +21,9 @@ export type GuardStatusRow = {
 };
 
 export const defaultToolPermissions: RuntimeGuardToolPermissions = {
-  shell: 'Allowed',
+  shell: 'Guard',
   fileSystem: 'Guard',
-  browser: 'Allowed',
+  browser: 'Guard',
   network: 'Guard',
   git: 'Guard',
 };

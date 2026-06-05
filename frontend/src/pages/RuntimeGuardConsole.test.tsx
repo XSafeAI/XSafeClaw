@@ -6,8 +6,13 @@ import {
   ApprovalViewAllModal,
   BlockedViewAllModal,
   InlineApprovalCard,
+  SessionHistoryViewAllModal,
   ToolsViewAllModal,
+  mergeSessionHistorySessions,
+  promoteRuntimeGuardSession,
+  runtimeSessionRecordToRuntimeGuardSession,
   type BlockedModalRange,
+  type RuntimeGuardSession,
 } from './RuntimeGuardConsole';
 import type { RecentBlockedItem } from './runtimeGuardBlocked';
 import type { MiddleApprovalCard } from './runtimeGuardApproval';
@@ -92,22 +97,189 @@ describe('InlineApprovalCard', () => {
   });
 });
 
+describe('SessionHistoryViewAllModal', () => {
+  const sessions: RuntimeGuardSession[] = [
+    {
+      sessionKey: 'session-openclaw',
+      historySessionId: 'db-session-openclaw',
+      agent: 'OpenClaw' as const,
+      platform: 'openclaw' as const,
+      instanceId: 'openclaw-1',
+      displayName: 'OpenClaw',
+      title: 'Fix login bug and add rate limit',
+      createdAt: '2026-06-05T06:32:00.000Z',
+      lastActivityAt: '2026-06-05T06:36:00.000Z',
+      status: 'ready' as const,
+    },
+    {
+      sessionKey: 'session-hermes',
+      historySessionId: 'db-session-hermes',
+      agent: 'Hermes' as const,
+      platform: 'hermes' as const,
+      instanceId: 'hermes-1',
+      displayName: 'Hermes',
+      title: 'Review protected file access',
+      createdAt: '2026-06-05T05:58:00.000Z',
+      lastActivityAt: '2026-06-05T06:01:00.000Z',
+      status: 'ready' as const,
+    },
+  ];
+
+  it('maps backend session records and merges them with open frontend tabs', () => {
+    const mapped = runtimeSessionRecordToRuntimeGuardSession({
+      session_id: 'db-session-1',
+      platform: 'hermes',
+      instance_id: 'hermes-main',
+      source_session_id: 'source-session-1',
+      display_session_id: 'Hermes real session',
+      session_key: 'public-session-1',
+      first_seen_at: '2026-06-05T04:00:00.000Z',
+      last_activity_at: '2026-06-05T05:00:00.000Z',
+      cwd: null,
+      current_model_provider: null,
+      current_model_name: null,
+      total_runs: 2,
+      total_tokens: 1024,
+      created_at: '2026-06-05T04:00:00.000Z',
+      updated_at: '2026-06-05T05:00:00.000Z',
+    });
+
+    expect(mapped).toMatchObject({
+      sessionKey: 'public-session-1',
+      historySessionId: 'db-session-1',
+      agent: 'Hermes',
+      platform: 'hermes',
+      title: 'Hermes real session',
+      lastActivityAt: '2026-06-05T05:00:00.000Z',
+    });
+
+    const merged = mergeSessionHistorySessions([mapped as RuntimeGuardSession], [{
+      ...(mapped as RuntimeGuardSession),
+      title: 'Frontend title',
+      autoTitlePending: true,
+    }]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].title).toBe('Frontend title');
+    expect(merged[0].historySessionId).toBe('db-session-1');
+  });
+
+  it('promotes an already opened history session to the first tab position', () => {
+    const promoted = promoteRuntimeGuardSession(sessions, sessions[1]);
+
+    expect(promoted.map(session => session.sessionKey)).toEqual(['session-hermes', 'session-openclaw']);
+  });
+
+  it('renders existing frontend sessions, filters, and switches the active session', () => {
+    const onSelectSession = vi.fn();
+    const onDeleteSession = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <SessionHistoryViewAllModal
+        sessions={sessions}
+        loading={false}
+        activeSessionId="session-openclaw"
+        messageMap={{}}
+        middleApprovalCardsBySession={{}}
+        onSelectSession={onSelectSession}
+        onDeleteSession={onDeleteSession}
+        onClose={onClose}
+      />,
+    );
+
+    expect(screen.getByRole('dialog', { name: 'Session history' })).toBeTruthy();
+    expect(screen.getByText('Fix login bug and add rate limit')).toBeTruthy();
+    expect(screen.getByText('Review protected file access')).toBeTruthy();
+    expect(screen.getByText('Active')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('Search session history'), { target: { value: 'protected' } });
+    expect(screen.queryByText('Fix login bug and add rate limit')).toBeNull();
+    expect(screen.getByText('Review protected file access')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('Search session history'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Hermes' }));
+    expect(screen.queryByText('Fix login bug and add rate limit')).toBeNull();
+    expect(screen.getByText('Review protected file access')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('Review protected file access').closest('button') as HTMLElement);
+    expect(onSelectSession).toHaveBeenCalledWith(sessions[1]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms before deleting a session record', () => {
+    const onDeleteSession = vi.fn();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(
+      <SessionHistoryViewAllModal
+        sessions={sessions}
+        loading={false}
+        activeSessionId="session-openclaw"
+        messageMap={{}}
+        middleApprovalCardsBySession={{}}
+        onSelectSession={vi.fn()}
+        onDeleteSession={onDeleteSession}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTitle('Delete Fix login bug and add rate limit'));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(onDeleteSession).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByTitle('Delete Fix login bug and add rate limit'));
+    expect(onDeleteSession).toHaveBeenCalledWith(sessions[0]);
+
+    confirmSpy.mockRestore();
+  });
+
+  it('shows an empty state and supports close interactions', () => {
+    const onClose = vi.fn();
+    const { container } = render(
+      <SessionHistoryViewAllModal
+        sessions={[]}
+        loading={false}
+        activeSessionId=""
+        messageMap={{}}
+        middleApprovalCardsBySession={{}}
+        onSelectSession={vi.fn()}
+        onDeleteSession={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+
+    expect(screen.getByText('No session history')).toBeTruthy();
+
+    fireEvent.mouseDown(screen.getByRole('dialog', { name: 'Session history' }));
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.mouseDown(container.querySelector('.rg-modal-backdrop') as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTitle('Close session history'));
+    expect(onClose).toHaveBeenCalledTimes(2);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe('ToolsViewAllModal', () => {
   it('calculates Guard Status from guard mode, tool permissions, and pending approvals', () => {
     const defaultPermissions: RuntimeGuardToolPermissions = {
-      shell: 'Allowed',
+      shell: 'Guard',
       fileSystem: 'Guard',
-      browser: 'Allowed',
+      browser: 'Guard',
       network: 'Guard',
       git: 'Guard',
     };
 
-    expect(calculateGuardStatusSummary('On', defaultPermissions, []).score).toBe(97);
-    expect(calculateGuardStatusSummary('Off', defaultPermissions, []).score).toBe(87);
+    expect(calculateGuardStatusSummary('On', defaultPermissions, []).score).toBe(100);
+    expect(calculateGuardStatusSummary('Off', defaultPermissions, []).score).toBe(90);
     expect(calculateGuardStatusSummary('On', defaultPermissions, [
       approval({ id: 'pending-1' }),
       approval({ id: 'pending-2' }),
-    ]).score).toBe(95);
+    ]).score).toBe(98);
     expect(calculateGuardStatusSummary('Off', {
       shell: 'Allowed',
       fileSystem: 'Allowed',

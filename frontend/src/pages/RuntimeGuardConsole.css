@@ -38,7 +38,7 @@
 
 .rg-left-scale .rg-sidebar,
 .rg-main-fluid .rg-main,
-.rg-right-scale .rg-right-top-actions,
+.rg-right-scale .rg-session-history,
 .rg-right-scale .rg-right-panel {
   transform: scale(var(--rg-scale));
   transform-origin: 0 0;
@@ -606,35 +606,9 @@
 }
 
 .rg-tab-add:hover,
-.rg-icon-button:hover,
 .rg-run-buttons button:hover {
   filter: brightness(1.12);
 }
-
-.rg-icon-button {
-  position: absolute;
-  top: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 23px;
-  border: 1px solid #172835;
-  border-radius: 5px;
-  background: #061018;
-  color: #63747e;
-}
-
-.rg-right-top-actions {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 207px;
-  height: 38px;
-}
-
-.rg-top-icon-one { right: 86px; width: 24px; }
-.rg-top-icon-two { right: 56px; width: 24px; }
-.rg-heartbeat { right: 0; width: 44px; color: #00c879; }
 
 .rg-task-title {
   position: absolute;
@@ -668,7 +642,7 @@
   display: flex;
   align-items: center;
   gap: 11px;
-  width: 194px;
+  width: 98px;
   height: 21px;
 }
 
@@ -742,13 +716,6 @@
 .rg-auto-approval-menu button svg {
   width: 8px;
   height: 8px;
-  color: #00c879;
-}
-
-.rg-run-buttons .rg-sandbox {
-  width: 85px;
-  border-color: #0a3b2b;
-  background: #061a14;
   color: #00c879;
 }
 
@@ -1416,6 +1383,7 @@
   height: 450px;
 }
 
+.rg-session-history,
 .rg-approval-center,
 .rg-guard-status,
 .rg-recent-blocked {
@@ -1425,6 +1393,11 @@
   border: 1px solid #13232e;
   border-radius: 6px;
   background: #061018;
+}
+
+.rg-session-history {
+  top: 10px;
+  height: 66px;
 }
 
 .rg-approval-center { top: 0; height: 254px; }
@@ -1454,6 +1427,91 @@
 .rg-card-head button:hover { color: #52c4ff; }
 .rg-approval-head { justify-content: flex-start; gap: 6px; }
 .rg-approval-head button { margin-left: auto; }
+
+.rg-session-history-head {
+  top: 9px;
+}
+
+.rg-session-history-list {
+  position: absolute;
+  top: 27px;
+  left: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 189px;
+}
+
+.rg-session-history-row {
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr) 27px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 15px;
+  padding: 0 5px;
+  border: 1px solid #122431;
+  border-radius: 4px;
+  background: #07121a;
+  text-align: left;
+}
+
+.rg-session-history-row:hover {
+  border-color: #1f3f4f;
+  background: #0a1720;
+}
+
+.rg-session-history-time {
+  color: #63747e;
+  font-size: 7px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.rg-session-history-main {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rg-session-history-main strong {
+  color: #d7e3ea;
+  font-size: 7px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rg-session-history-main span {
+  min-width: 0;
+  overflow: hidden;
+  color: #7c8b95;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rg-session-history-row em {
+  color: #7f8c96;
+  font-size: 7px;
+  font-style: normal;
+  text-align: right;
+}
+
+.rg-session-history-row em.is-active {
+  color: #00c879;
+}
+
+.rg-session-history-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  border: 1px dashed #162734;
+  border-radius: 4px;
+  background: #07121a;
+  color: #667782;
+  font-size: 7px;
+}
 
 .rg-count {
   display: flex;
@@ -1988,6 +2046,10 @@
   width: min(460px, calc(100vw - 36px));
 }
 
+.rg-session-list-modal {
+  width: min(calc(620px * var(--rg-modal-scale)), calc(100vw - 36px));
+}
+
 .rg-list-modal-kicker {
   color: #00c879;
   font-size: calc(8px * var(--rg-modal-scale));
@@ -2029,6 +2091,191 @@
   background: #081219;
   color: #6f7e88;
   font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-session-modal-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: calc(10px * var(--rg-modal-scale));
+  align-items: center;
+  margin-top: calc(14px * var(--rg-modal-scale));
+}
+
+.rg-session-modal-controls input {
+  width: 100%;
+  height: calc(27px * var(--rg-modal-scale));
+  padding: 0 calc(10px * var(--rg-modal-scale));
+  border: 1px solid #20313d;
+  border-radius: calc(5px * var(--rg-modal-scale));
+  outline: 0;
+  background: #050a0e;
+  color: #d8e4eb;
+  font-size: calc(9px * var(--rg-modal-scale));
+}
+
+.rg-session-modal-controls input::placeholder {
+  color: #596873;
+}
+
+.rg-session-agent-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, calc(58px * var(--rg-modal-scale)));
+  gap: calc(2px * var(--rg-modal-scale));
+  padding: calc(2px * var(--rg-modal-scale));
+  border: 1px solid #20313d;
+  border-radius: calc(5px * var(--rg-modal-scale));
+  background: #050a0e;
+}
+
+.rg-session-agent-tabs button {
+  height: calc(22px * var(--rg-modal-scale));
+  border-radius: calc(3px * var(--rg-modal-scale));
+  color: #8797a0;
+  font-size: calc(8px * var(--rg-modal-scale));
+  font-weight: 600;
+}
+
+.rg-session-agent-tabs button:hover,
+.rg-session-agent-tabs button.is-active {
+  background: #0f2734;
+  color: #00c879;
+}
+
+.rg-session-modal-scroll {
+  gap: calc(7px * var(--rg-modal-scale));
+  margin-top: calc(12px * var(--rg-modal-scale));
+}
+
+.rg-session-modal-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) calc(27px * var(--rg-modal-scale));
+  align-items: center;
+  gap: calc(7px * var(--rg-modal-scale));
+  width: 100%;
+  min-height: calc(45px * var(--rg-modal-scale));
+  padding: calc(7px * var(--rg-modal-scale));
+  border: 1px solid #162734;
+  border-radius: calc(5px * var(--rg-modal-scale));
+  background: #081219;
+}
+
+.rg-session-modal-row:hover,
+.rg-session-modal-row.is-active {
+  border-color: #1f3f4f;
+  background: #0a1720;
+}
+
+.rg-session-modal-row.is-active {
+  box-shadow: inset 2px 0 0 #00c879;
+}
+
+.rg-session-modal-open {
+  display: grid;
+  grid-template-columns:
+    calc(43px * var(--rg-modal-scale))
+    calc(88px * var(--rg-modal-scale))
+    minmax(0, 1fr)
+    calc(150px * var(--rg-modal-scale))
+    calc(63px * var(--rg-modal-scale));
+  align-items: center;
+  gap: calc(8px * var(--rg-modal-scale));
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.rg-session-modal-time {
+  color: #63747e;
+  font-family: "JetBrains Mono", monospace;
+  font-size: calc(8px * var(--rg-modal-scale));
+}
+
+.rg-session-modal-agent {
+  display: flex;
+  align-items: center;
+  gap: calc(5px * var(--rg-modal-scale));
+  min-width: 0;
+  color: #d7e3ea;
+  font-size: calc(9px * var(--rg-modal-scale));
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rg-session-modal-agent svg {
+  width: calc(12px * var(--rg-modal-scale));
+  height: calc(12px * var(--rg-modal-scale));
+  color: #00c879;
+}
+
+.rg-session-modal-title {
+  display: flex;
+  flex-direction: column;
+  gap: calc(2px * var(--rg-modal-scale));
+  min-width: 0;
+}
+
+.rg-session-modal-title strong,
+.rg-session-modal-title em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rg-session-modal-title strong {
+  color: #e1ebf1;
+  font-size: calc(9px * var(--rg-modal-scale));
+  font-weight: 600;
+}
+
+.rg-session-modal-title em {
+  color: #6f7e88;
+  font-size: calc(8px * var(--rg-modal-scale));
+  font-style: normal;
+}
+
+.rg-session-modal-stats {
+  display: flex;
+  justify-content: flex-end;
+  gap: calc(6px * var(--rg-modal-scale));
+  min-width: 0;
+  color: #74838d;
+  font-size: calc(8px * var(--rg-modal-scale));
+  white-space: nowrap;
+}
+
+.rg-session-modal-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(4px * var(--rg-modal-scale));
+  color: #9daab2;
+  font-size: calc(8px * var(--rg-modal-scale));
+  font-weight: 600;
+}
+
+.rg-session-modal-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(27px * var(--rg-modal-scale));
+  height: calc(27px * var(--rg-modal-scale));
+  border: 1px solid #24323d;
+  border-radius: calc(4px * var(--rg-modal-scale));
+  background: #0b141b;
+  color: #7f8c96;
+}
+
+.rg-session-modal-delete:hover {
+  border-color: #4a2025;
+  background: #1d0d10;
+  color: #ff5b5b;
+}
+
+.rg-session-modal-delete svg {
+  width: calc(12px * var(--rg-modal-scale));
+  height: calc(12px * var(--rg-modal-scale));
 }
 
 .rg-tools-modal-scroll {

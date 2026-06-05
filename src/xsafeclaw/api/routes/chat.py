@@ -24,7 +24,7 @@ from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_ses
 from ...runtime.usage import attach_usage_metadata, normalize_usage
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
-from ...services.guard_service import GUARD_REJECTION_MARKER
+from ...services.guard_service import GUARD_REJECTION_MARKER, summarize_runtime_request_title
 from ...services.hermes_event_bridge import hermes_event_bridge
 from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
 from ...services.nanobot_trace_tailer import NanobotJsonlTraceTailer
@@ -2228,6 +2228,17 @@ class SendMessageResponse(BaseModel):
     stop_reason: str | None = None
 
 
+class SessionTitleRequest(BaseModel):
+    message: str = Field(..., description="First user request to summarize as a UI-only session title")
+    session_key: str | None = Field(None, description="Runtime chat session key")
+    platform: str | None = Field(None, description="Fallback runtime platform")
+    instance_id: str | None = Field(None, description="Fallback runtime instance")
+
+
+class SessionTitleResponse(BaseModel):
+    title: str
+
+
 class HermesEventIngestRequest(BaseModel):
     session_key: str = Field(..., description="Hermes chat session key")
     event_type: str = Field(
@@ -2952,6 +2963,35 @@ async def start_session(request: StartSessionRequest | None = None):
         platform=instance.platform,
         instance=serialize_instance(instance),
     )
+
+
+@router.post("/session-title", response_model=SessionTitleResponse)
+async def session_title(request: SessionTitleRequest):
+    """Generate a UI-only session title without appending to runtime history."""
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    platform = (request.platform or "openclaw").strip() or "openclaw"
+    instance_id = (request.instance_id or "").strip()
+    if request.session_key:
+        try:
+            instance, _, _ = await _resolve_chat_runtime(session_key=request.session_key)
+            platform = instance.platform
+            instance_id = instance.instance_id
+        except HTTPException:
+            if not request.platform:
+                raise
+
+    try:
+        title = await summarize_runtime_request_title(
+            message,
+            platform=platform,
+            instance_id=instance_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to generate session title: {exc}") from exc
+    return SessionTitleResponse(title=title)
 
 
 @router.post("/send-message", response_model=SendMessageResponse)

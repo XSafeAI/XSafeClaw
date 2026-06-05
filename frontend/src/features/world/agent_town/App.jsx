@@ -351,7 +351,7 @@ export default function App() {
         </a>
         <a
           className="town-hud-btn town-hud-home"
-          href="/monitor"
+          href="/runtime-guard-console"
           title="Back to Backend  [H]"
         >
           <span className="town-hud-pip" />

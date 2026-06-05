@@ -15,17 +15,14 @@ import {
   AlertCircle,
   AlertTriangle,
   Bot,
-  Box,
   Brain,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Columns2,
   FolderOpen,
   GitBranch,
   Globe2,
-  HeartPulse,
   Hexagon,
   Loader2,
   Lock,
@@ -33,14 +30,24 @@ import {
   Send,
   Settings,
   Shield,
-  Square,
   Terminal,
+  Trash2,
   User,
   Wrench,
   X,
   Zap,
 } from 'lucide-react';
-import { chatAPI, guardAPI, statsAPI, systemAPI, type GuardPendingApproval, type GuardRuntimeObservation, type RuntimeInstance } from '../services/api';
+import {
+  chatAPI,
+  guardAPI,
+  sessionsAPI,
+  statsAPI,
+  systemAPI,
+  type GuardPendingApproval,
+  type GuardRuntimeObservation,
+  type RuntimeInstance,
+  type RuntimeSessionRecord,
+} from '../services/api';
 import MarkdownMessage from '../components/MarkdownMessage';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
@@ -82,14 +89,16 @@ import './RuntimeGuardConsole.css';
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
 type RuntimePlatform = RuntimeInstance['platform'];
 type GuardMode = 'Off' | 'On';
-type RuntimeGuardSession = {
+export type RuntimeGuardSession = {
   sessionKey: string;
+  historySessionId?: string;
   agent: AgentName;
   platform: RuntimePlatform;
   instanceId: string;
   displayName?: string;
   title: string;
   createdAt: string;
+  lastActivityAt?: string;
   status: 'ready' | 'error';
   autoTitlePending?: boolean;
 };
@@ -100,7 +109,8 @@ type AgentDisplay = {
   className: string;
   installed: boolean;
 };
-type RuntimeGuardModal = 'tools' | 'approvals' | 'blocked' | null;
+type RuntimeGuardModal = 'tools' | 'sessions' | 'approvals' | 'blocked' | null;
+type SessionHistoryAgentFilter = 'All' | AgentName;
 export type BlockedModalRange = '24h' | '7d' | 'all';
 
 const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
@@ -117,6 +127,8 @@ const agentDefinitions: Array<{
   { name: 'Hermes', platform: 'hermes', defaultStatus: 'Idle', className: 'agent-hermes' },
   { name: 'Nanobot', platform: 'nanobot', defaultStatus: 'Idle', className: 'agent-nanobot' },
 ];
+
+const sessionHistoryFilters: SessionHistoryAgentFilter[] = ['All', 'OpenClaw', 'Hermes', 'Nanobot'];
 
 const toolPermissionOptions: RuntimeGuardToolPermission[] = ['Allowed', 'Guard', 'Asked'];
 
@@ -272,6 +284,93 @@ function traceDisplayLabel(msg: ChatMessage): string {
   return 'Thinking';
 }
 
+function isRuntimePlatform(value: unknown): value is RuntimePlatform {
+  return value === 'openclaw' || value === 'hermes' || value === 'nanobot';
+}
+
+function platformToAgent(platform: RuntimePlatform): AgentName {
+  if (platform === 'hermes') return 'Hermes';
+  if (platform === 'nanobot') return 'Nanobot';
+  return 'OpenClaw';
+}
+
+function normalizeRuntimePlatform(value: unknown): RuntimePlatform {
+  return isRuntimePlatform(value) ? value : 'openclaw';
+}
+
+function firstText(...values: unknown[]): string {
+  const found = values.find(value => typeof value === 'string' && value.trim());
+  return typeof found === 'string' ? found.trim() : '';
+}
+
+function runtimeSessionKeyFromRecord(record: RuntimeSessionRecord): string {
+  return firstText(
+    record.session_key,
+    record.display_session_id,
+    record.source_session_id,
+    record.session_id,
+  );
+}
+
+export function runtimeSessionRecordToRuntimeGuardSession(
+  record: RuntimeSessionRecord,
+): RuntimeGuardSession | null {
+  const sessionKey = runtimeSessionKeyFromRecord(record);
+  if (!sessionKey) return null;
+  const platform = normalizeRuntimePlatform(record.platform);
+  const agent = platformToAgent(platform);
+  const createdAt = firstText(record.first_seen_at, record.created_at, record.updated_at) || new Date().toISOString();
+  const lastActivityAt = firstText(record.last_activity_at, record.updated_at, record.created_at, createdAt);
+  const title = firstText(record.display_session_id, record.source_session_id, record.session_id) || `${agent} Session`;
+
+  return {
+    sessionKey,
+    historySessionId: record.session_id,
+    agent,
+    platform,
+    instanceId: firstText(record.instance_id),
+    title,
+    createdAt,
+    lastActivityAt,
+    status: 'ready',
+    autoTitlePending: false,
+  };
+}
+
+export function mergeSessionHistorySessions(
+  historySessions: RuntimeGuardSession[],
+  openSessions: RuntimeGuardSession[],
+): RuntimeGuardSession[] {
+  const byKey = new Map<string, RuntimeGuardSession>();
+  historySessions.forEach(session => {
+    byKey.set(session.sessionKey, session);
+  });
+  openSessions.forEach(openSession => {
+    const historySession = byKey.get(openSession.sessionKey);
+    byKey.set(openSession.sessionKey, historySession ? {
+      ...historySession,
+      ...openSession,
+      historySessionId: historySession.historySessionId ?? openSession.historySessionId,
+      lastActivityAt: historySession.lastActivityAt ?? openSession.lastActivityAt,
+    } : openSession);
+  });
+  return sortSessionsNewestFirst([...byKey.values()]);
+}
+
+export function promoteRuntimeGuardSession(
+  current: RuntimeGuardSession[],
+  session: RuntimeGuardSession,
+): RuntimeGuardSession[] {
+  const existing = current.find(item => item.sessionKey === session.sessionKey);
+  const front = existing ? {
+    ...session,
+    ...existing,
+    historySessionId: existing.historySessionId ?? session.historySessionId,
+    lastActivityAt: session.lastActivityAt ?? existing.lastActivityAt,
+  } : session;
+  return [front, ...current.filter(item => item.sessionKey !== session.sessionKey)];
+}
+
 function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
   try {
     const raw = JSON.parse(localStorage.getItem(RUNTIME_GUARD_SESSIONS_KEY) ?? '[]');
@@ -285,12 +384,14 @@ function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
         if (!['OpenClaw', 'Hermes', 'Nanobot'].includes(agent)) return null;
         return {
           sessionKey,
+          historySessionId: typeof item?.historySessionId === 'string' ? item.historySessionId : undefined,
           agent,
           platform,
           instanceId: typeof item?.instanceId === 'string' ? item.instanceId : '',
           displayName: typeof item?.displayName === 'string' ? item.displayName : undefined,
           title: typeof item?.title === 'string' && item.title.trim() ? item.title : agent,
           createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+          lastActivityAt: typeof item?.lastActivityAt === 'string' ? item.lastActivityAt : undefined,
           status: item?.status === 'error' ? 'error' : 'ready',
           autoTitlePending: Boolean(item?.autoTitlePending),
         };
@@ -350,6 +451,39 @@ function formatSessionStart(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return 'Started just now';
   return `Started ${date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+}
+
+function formatSessionHistoryTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '--:--';
+  return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function sessionHistoryStatus(session: RuntimeGuardSession, activeSessionId: string): 'Active' | 'Idle' | 'Blocked' {
+  if (session.sessionKey === activeSessionId) return 'Active';
+  return session.status === 'error' ? 'Blocked' : 'Idle';
+}
+
+function sessionHistoryMatchesSearch(session: RuntimeGuardSession, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return [
+    session.agent,
+    session.displayName ?? '',
+    session.instanceId,
+    session.sessionKey,
+    session.title,
+    session.platform,
+  ].some(value => String(value).toLowerCase().includes(normalizedQuery));
+}
+
+function sessionCreatedAtMs(session: RuntimeGuardSession): number {
+  const timestamp = new Date(session.lastActivityAt || session.createdAt).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortSessionsNewestFirst(sessions: RuntimeGuardSession[]): RuntimeGuardSession[] {
+  return [...sessions].sort((left, right) => sessionCreatedAtMs(right) - sessionCreatedAtMs(left));
 }
 
 function titleFromUserMessage(input: string): string {
@@ -518,24 +652,6 @@ function formatBudgetRefreshTime(remainingMs: number): string {
   if (days > 0) return `${days}天${hours}小时`;
   if (hours > 0) return `${hours}小时${minutes}分钟`;
   return `${minutes}分钟`;
-}
-
-function IconButton({
-  className = '',
-  title,
-  children,
-  onClick,
-}: {
-  className?: string;
-  title: string;
-  children: React.ReactNode;
-  onClick?: () => void;
-}) {
-  return (
-    <button className={`rg-icon-button ${className}`} title={title} onClick={onClick} type="button">
-      {children}
-    </button>
-  );
 }
 
 function formatApprovalTime(createdAt: number): string {
@@ -713,6 +829,132 @@ function useRuntimeGuardModalEscape(onClose: () => void) {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
+}
+
+export function SessionHistoryViewAllModal({
+  sessions,
+  loading,
+  activeSessionId,
+  messageMap,
+  middleApprovalCardsBySession,
+  onSelectSession,
+  onDeleteSession,
+  onClose,
+}: {
+  sessions: RuntimeGuardSession[];
+  loading: boolean;
+  activeSessionId: string;
+  messageMap: Record<string, ChatMessage[]>;
+  middleApprovalCardsBySession: MiddleApprovalCardsBySession;
+  onSelectSession: (session: RuntimeGuardSession) => void;
+  onDeleteSession: (session: RuntimeGuardSession) => void;
+  onClose: () => void;
+}) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [agentFilter, setAgentFilter] = useState<SessionHistoryAgentFilter>('All');
+  useRuntimeGuardModalEscape(onClose);
+
+  const filteredSessions = useMemo(() => (
+    sortSessionsNewestFirst(sessions)
+      .filter(session => agentFilter === 'All' || session.agent === agentFilter)
+      .filter(session => sessionHistoryMatchesSearch(session, searchQuery))
+  ), [agentFilter, searchQuery, sessions]);
+
+  return (
+    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div className="rg-list-modal rg-session-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-session-modal-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="rg-modal-close" type="button" title="Close session history" onClick={onClose}>
+          <X />
+        </button>
+        <div className="rg-list-modal-kicker">SESSION HISTORY</div>
+        <h2 id="rg-session-modal-title">Session history</h2>
+        <div className="rg-list-modal-subtitle">{filteredSessions.length} session{filteredSessions.length === 1 ? '' : 's'}</div>
+        <div className="rg-session-modal-controls">
+          <input
+            aria-label="Search session history"
+            onChange={event => setSearchQuery(event.target.value)}
+            placeholder="Search sessions..."
+            type="search"
+            value={searchQuery}
+          />
+          <div className="rg-session-agent-tabs" role="group" aria-label="Session agent filter">
+            {sessionHistoryFilters.map(filter => (
+              <button
+                aria-pressed={agentFilter === filter}
+                className={agentFilter === filter ? 'is-active' : ''}
+                key={filter}
+                onClick={() => setAgentFilter(filter)}
+                type="button"
+              >
+                {filter}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="rg-list-modal-scroll rg-session-modal-scroll">
+          {filteredSessions.length > 0 ? (
+            filteredSessions.map(session => {
+              const status = sessionHistoryStatus(session, activeSessionId);
+              const messages = messageMap[session.sessionKey] ?? [];
+              const pendingApprovals = Object.values(middleApprovalCardsBySession[session.sessionKey] ?? {})
+                .filter(card => card.status === 'pending').length;
+              const blockedCount = messages.filter(message => message.role === 'error').length;
+              const statusTone = status === 'Active' ? 'success' : status === 'Blocked' ? 'warning' : 'muted';
+              return (
+                <article
+                  aria-current={status === 'Active' ? 'true' : undefined}
+                  className={`rg-session-modal-row ${status === 'Active' ? 'is-active' : ''}`}
+                  key={session.sessionKey}
+                >
+                  <button
+                    className="rg-session-modal-open"
+                    onClick={() => {
+                      onSelectSession(session);
+                      onClose();
+                    }}
+                    type="button"
+                  >
+                    <span className="rg-session-modal-time">{formatSessionHistoryTime(session.createdAt)}</span>
+                    <span className="rg-session-modal-agent">{agentIcon(session.agent)} {session.agent}</span>
+                    <span className="rg-session-modal-title">
+                      <strong>{session.title}</strong>
+                      <em>{session.displayName || session.instanceId || session.platform}</em>
+                    </span>
+                    <span className="rg-session-modal-stats">
+                      <span>Events {messages.length}</span>
+                      <span>Blocked {blockedCount}</span>
+                      <span>Pending {pendingApprovals}</span>
+                    </span>
+                    <span className="rg-session-modal-status">
+                      <StatusDot tone={statusTone} />
+                      {status}
+                    </span>
+                  </button>
+                  <button
+                    className="rg-session-modal-delete"
+                    onClick={() => {
+                      const confirmed = window.confirm(`Delete session "${session.title}" from history? This cannot be undone.`);
+                      if (confirmed) onDeleteSession(session);
+                    }}
+                    title={`Delete ${session.title}`}
+                    type="button"
+                  >
+                    <Trash2 />
+                  </button>
+                </article>
+              );
+            })
+          ) : (
+            <div className="rg-list-empty">
+              {loading && sessions.length === 0 ? 'Loading session history...' : sessions.length === 0 ? 'No session history' : 'No sessions match this filter'}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function ToolsViewAllModal({
@@ -991,6 +1233,8 @@ export default function RuntimeGuardConsole() {
   const [installProbeFailed, setInstallProbeFailed] = useState(false);
   const [sessions, setSessions] = useState<RuntimeGuardSession[]>(() => loadRuntimeGuardSessions());
   const [activeSessionId, setActiveSessionId] = useState(() => loadRuntimeGuardSessions()[0]?.sessionKey ?? '');
+  const [sessionHistoryItems, setSessionHistoryItems] = useState<RuntimeGuardSession[]>([]);
+  const [sessionHistoryLoading, setSessionHistoryLoading] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<AgentName>('OpenClaw');
   const [draftBySessionKey, setDraftBySessionKey] = useState<Record<string, string>>(() => loadRuntimeGuardDrafts());
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null);
@@ -1054,6 +1298,14 @@ export default function RuntimeGuardConsole() {
   const activeTimelineRows = useMemo(() => {
     return buildActiveTimelineRows(activeMessages, activeApprovalCards);
   }, [activeApprovalCards, activeMessages]);
+  const visibleSessionHistoryItems = useMemo(
+    () => mergeSessionHistorySessions(sessionHistoryItems, sessions),
+    [sessionHistoryItems, sessions],
+  );
+  const sessionHistoryPreviewItems = useMemo(
+    () => visibleSessionHistoryItems.slice(0, 2),
+    [visibleSessionHistoryItems],
+  );
   const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
   const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
   const availableInstances = useMemo(
@@ -1115,6 +1367,30 @@ export default function RuntimeGuardConsole() {
   useEffect(() => {
     saveRuntimeGuardDrafts(draftBySessionKey);
   }, [draftBySessionKey]);
+
+  const fetchSessionHistory = useCallback(async (showLoading = false): Promise<RuntimeGuardSession[] | null> => {
+    if (showLoading) setSessionHistoryLoading(true);
+    try {
+      const { data } = await sessionsAPI.listRuntime({ page: 1, page_size: 100 });
+      const nextSessions = (data.sessions ?? [])
+        .map(runtimeSessionRecordToRuntimeGuardSession)
+        .filter((session): session is RuntimeGuardSession => session !== null);
+      setSessionHistoryItems(sortSessionsNewestFirst(nextSessions));
+      return nextSessions;
+    } catch {
+      return null;
+    } finally {
+      if (showLoading) setSessionHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchSessionHistory(true);
+    const timer = window.setInterval(() => {
+      void fetchSessionHistory(false);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [fetchSessionHistory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1507,11 +1783,13 @@ export default function RuntimeGuardConsole() {
         displayName: res.data.instance?.display_name || runtime.display_name,
         title: label,
         createdAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
         status: 'ready',
         autoTitlePending: true,
       };
 
       setSessions(current => [session, ...current]);
+      setSessionHistoryItems(current => sortSessionsNewestFirst([session, ...current.filter(item => item.sessionKey !== session.sessionKey)]));
       setMessageMap(prev => ({ ...prev, [session.sessionKey]: [] }));
       setDraftBySessionKey(current => ({ ...current, [session.sessionKey]: current[session.sessionKey] ?? '' }));
       setActiveSessionId(session.sessionKey);
@@ -1555,7 +1833,7 @@ export default function RuntimeGuardConsole() {
     }
   };
 
-  const closeSession = (sessionKey: string) => {
+  const closeSession = useCallback((sessionKey: string) => {
     setSessions(current => {
       const closingIndex = current.findIndex(session => session.sessionKey === sessionKey);
       const next = current.filter(session => session.sessionKey !== sessionKey);
@@ -1578,6 +1856,41 @@ export default function RuntimeGuardConsole() {
       return next;
     });
     chatStreamStore.deleteMessages(sessionKey);
+  }, [activeSessionId]);
+
+  const openHistorySession = useCallback((session: RuntimeGuardSession) => {
+    setSessions(current => promoteRuntimeGuardSession(current, session));
+    setDraftBySessionKey(current => ({ ...current, [session.sessionKey]: current[session.sessionKey] ?? '' }));
+    setSelectedAgent(session.agent);
+    setActiveSessionId(session.sessionKey);
+  }, []);
+
+  const deleteHistorySession = async (session: RuntimeGuardSession) => {
+    const removeLocalSession = () => {
+      setSessionHistoryItems(current => current.filter(item => (
+        item.sessionKey !== session.sessionKey
+        && (!session.historySessionId || item.historySessionId !== session.historySessionId)
+      )));
+      closeSession(session.sessionKey);
+    };
+
+    if (!session.historySessionId) {
+      removeLocalSession();
+      return;
+    }
+
+    try {
+      await chatAPI.deleteSession(session.historySessionId);
+      removeLocalSession();
+      void fetchSessionHistory(false);
+    } catch (error: unknown) {
+      if (responseStatus(error) === 404) {
+        removeLocalSession();
+        void fetchSessionHistory(false);
+        return;
+      }
+      showToast('Failed to delete session history.');
+    }
   };
 
   const updateActiveDraft = (value: string) => {
@@ -1589,6 +1902,9 @@ export default function RuntimeGuardConsole() {
     if (previousKey === nextKey) return;
     chatStreamStore.renameSession(previousKey, nextKey);
     setSessions(current => current.map(session => (
+      session.sessionKey === previousKey ? { ...session, sessionKey: nextKey } : session
+    )));
+    setSessionHistoryItems(current => current.map(session => (
       session.sessionKey === previousKey ? { ...session, sessionKey: nextKey } : session
     )));
     setDraftBySessionKey(current => {
@@ -1612,12 +1928,30 @@ export default function RuntimeGuardConsole() {
     setActiveSessionId(current => (current === previousKey ? nextKey : current));
   }, []);
 
-  const applyAutoSessionTitle = useCallback((sessionKey: string, text: string) => {
-    const title = titleFromUserMessage(text);
-    if (!title) return;
+  const markSessionTitleRequested = useCallback((sessionKey: string) => {
     setSessions(current => current.map(session => (
       session.sessionKey === sessionKey && session.autoTitlePending
-        ? { ...session, title, autoTitlePending: false }
+        ? { ...session, autoTitlePending: false }
+        : session
+    )));
+    setSessionHistoryItems(current => current.map(session => (
+      session.sessionKey === sessionKey && session.autoTitlePending
+        ? { ...session, autoTitlePending: false }
+        : session
+    )));
+  }, []);
+
+  const applySessionTitle = useCallback((sessionKey: string, title: string) => {
+    const nextTitle = titleFromUserMessage(title);
+    if (!nextTitle) return;
+    setSessions(current => current.map(session => (
+      session.sessionKey === sessionKey
+        ? { ...session, title: nextTitle, autoTitlePending: false }
+        : session
+    )));
+    setSessionHistoryItems(current => current.map(session => (
+      session.sessionKey === sessionKey
+        ? { ...session, title: nextTitle, autoTitlePending: false }
         : session
     )));
   }, []);
@@ -1635,10 +1969,27 @@ export default function RuntimeGuardConsole() {
 
     let key = originalKey;
     const streamPlatform = activeSession.platform;
+    const titlePlatform = activeSession.platform;
+    const titleInstanceId = activeSession.instanceId;
+    const shouldGenerateTitle = Boolean(activeSession.autoTitlePending);
     inFlightKeysRef.current.add(key);
     chatStreamStore.setSending(key, true);
     setDraftBySessionKey(current => ({ ...current, [key]: '' }));
-    applyAutoSessionTitle(key, text);
+    if (shouldGenerateTitle) {
+      markSessionTitleRequested(key);
+      void chatAPI.sessionTitle({
+        session_key: originalKey,
+        message: text,
+        platform: titlePlatform,
+        instance_id: titleInstanceId,
+      })
+        .then(({ data }) => {
+          applySessionTitle(key, data.title);
+        })
+        .catch(() => {
+          applySessionTitle(key, text);
+        });
+    }
 
     const userMsg: ChatMessage = {
       id: uuidv4(),
@@ -1654,6 +2005,13 @@ export default function RuntimeGuardConsole() {
       timestamp: new Date(),
       pending: true,
     };
+    const activityIso = userMsg.timestamp.toISOString();
+    setSessions(current => current.map(session => (
+      session.sessionKey === key ? { ...session, lastActivityAt: activityIso } : session
+    )));
+    setSessionHistoryItems(current => sortSessionsNewestFirst(current.map(session => (
+      session.sessionKey === key ? { ...session, lastActivityAt: activityIso } : session
+    ))));
     setMessageMap(prev => ({ ...prev, [key]: [...(prev[key] ?? []), userMsg, pendingMsg] }));
 
     try {
@@ -1964,6 +2322,18 @@ export default function RuntimeGuardConsole() {
           onClose={() => setActiveRuntimeGuardModal(null)}
         />
       )}
+      {activeRuntimeGuardModal === 'sessions' && (
+        <SessionHistoryViewAllModal
+          sessions={visibleSessionHistoryItems}
+          loading={sessionHistoryLoading}
+          activeSessionId={activeSessionId}
+          messageMap={messageMap}
+          middleApprovalCardsBySession={middleApprovalCardsBySession}
+          onSelectSession={openHistorySession}
+          onDeleteSession={deleteHistorySession}
+          onClose={() => setActiveRuntimeGuardModal(null)}
+        />
+      )}
       {activeRuntimeGuardModal === 'approvals' && (
         <ApprovalViewAllModal
           items={unresolvedApprovalItems}
@@ -2172,7 +2542,6 @@ export default function RuntimeGuardConsole() {
               </div>
             )}
           </div>
-          <button type="button" className="rg-sandbox"><Box /> Sandbox: On</button>
         </section>
 
         <section className="rg-task-panel">
@@ -2259,11 +2628,46 @@ export default function RuntimeGuardConsole() {
       </main>
       </div>
       <div className="rg-right-scale" style={rightScaleStyle}>
-        <div className="rg-right-top-actions">
-          <IconButton className="rg-top-icon-one" title="Single layout"><Square /></IconButton>
-          <IconButton className="rg-top-icon-two" title="Split layout"><Columns2 /></IconButton>
-          <IconButton className="rg-heartbeat" title="Heartbeat monitor"><HeartPulse /></IconButton>
-        </div>
+        <section className="rg-session-history">
+          <div className="rg-card-head rg-session-history-head">
+            <span>SESSION HISTORY</span>
+            <button
+              type="button"
+              onClick={() => {
+                void fetchSessionHistory(false);
+                setActiveRuntimeGuardModal('sessions');
+              }}
+            >
+              View All
+            </button>
+          </div>
+          <div className="rg-session-history-list">
+            {sessionHistoryPreviewItems.length > 0 ? (
+              sessionHistoryPreviewItems.map(session => {
+                const status = sessionHistoryStatus(session, activeSessionId);
+                return (
+                  <button
+                    className="rg-session-history-row"
+                    key={session.sessionKey}
+                    onClick={() => openHistorySession(session)}
+                    type="button"
+                  >
+                    <span className="rg-session-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
+                    <div className="rg-session-history-main">
+                      <strong>{session.agent}</strong>
+                      <span>{session.title}</span>
+                    </div>
+                    <em className={status === 'Active' ? 'is-active' : ''}>{status}</em>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="rg-session-history-empty">
+                {sessionHistoryLoading ? 'Loading history...' : 'No session history'}
+              </div>
+            )}
+          </div>
+        </section>
         <aside className="rg-right-panel">
           <section className="rg-approval-center">
             <div className="rg-card-head rg-approval-head">

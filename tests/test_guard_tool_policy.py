@@ -38,9 +38,9 @@ def _tool_policy_state(tmp_path, monkeypatch):
 
 def test_tool_policies_default_and_persistence():
     assert guard_service.load_tool_policies() == {
-        "shell": "allow",
+        "shell": "guard",
         "file_system": "guard",
-        "browser": "allow",
+        "browser": "guard",
         "network": "guard",
         "git": "guard",
     }

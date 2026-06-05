@@ -459,6 +459,112 @@ def _extract_openai_guard_response(data: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_openai_text_response(data: dict[str, Any]) -> str:
+    choice = data.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    result = _extract_text_content(message.get("content"))
+    if result:
+        return result
+    return str(message.get("reasoning_content") or "").strip()
+
+
+async def call_runtime_model_prompt(
+    prompt: str,
+    *,
+    platform: str = "openclaw",
+    instance_id: str = "",
+    max_tokens: int = 128,
+) -> str:
+    """Call the active runtime model with a plain prompt and return text only."""
+    model_info = _resolve_guard_model_info(platform=platform, instance_id=instance_id)
+    api_type = model_info.get("api_type", "openai-completions")
+    base_url = _normalize_model_api_base(model_info.get("base_url", ""), api_type)
+
+    headers = {"Content-Type": "application/json"}
+    token_limit = max(16, min(max_tokens, 512))
+    if api_type == "openai-completions":
+        payload = {
+            "model": model_info["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": token_limit,
+            "temperature": 0.2,
+        }
+        url = f"{base_url}/chat/completions"
+        headers["Authorization"] = f"Bearer {model_info['api_key']}"
+    elif api_type == "anthropic-messages":
+        payload = {
+            "model": model_info["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": token_limit,
+            "temperature": 0.2,
+        }
+        url = f"{base_url}/messages"
+        headers["x-api-key"] = model_info["api_key"]
+        headers["Authorization"] = f"Bearer {model_info['api_key']}"
+        headers["anthropic-version"] = _ANTHROPIC_VERSION
+    else:
+        raise RuntimeError(
+            f"Unsupported runtime model api type: {api_type} "
+            f"(provider={model_info.get('provider', 'unknown')})"
+        )
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    if api_type == "openai-completions":
+        return _extract_openai_text_response(data)
+    return _extract_text_content(data.get("content"))
+
+
+def clean_runtime_session_title(raw: str, fallback: str = "New session") -> str:
+    title = str(raw or "").strip()
+    title = re.sub(r"^```(?:text|markdown)?\s*", "", title, flags=re.IGNORECASE)
+    title = title.replace("```", "").strip()
+    title = next((line.strip() for line in title.splitlines() if line.strip()), "")
+    title = title.strip(" \t\r\n\"'`“”‘’")
+    title = re.sub(r"^(title|summary|session title|标题|摘要)\s*[:：]\s*", "", title, flags=re.IGNORECASE)
+    title = title.strip(" \t\r\n\"'`“”‘’")
+    title = re.sub(r"\s+", " ", title).strip()
+    title = title.rstrip(".。")
+    if not title:
+        title = fallback.strip() or "New session"
+    if len(title) > 48:
+        title = title[:48].rstrip() + "..."
+    return title
+
+
+async def summarize_runtime_request_title(
+    message: str,
+    *,
+    platform: str = "openclaw",
+    instance_id: str = "",
+) -> str:
+    """Generate a short UI-only session title without touching chat history."""
+    request_text = re.sub(r"\s+", " ", str(message or "")).strip()
+    if not request_text:
+        return "New session"
+    truncated_request = request_text[:1600]
+    fallback = clean_runtime_session_title(truncated_request)
+    prompt = (
+        "Create a short UI title for this agent session.\n"
+        "Rules:\n"
+        "- Use the same language as the user's request.\n"
+        "- Return exactly one concise sentence or phrase.\n"
+        "- Keep it under 12 words.\n"
+        "- Do not include quotes, markdown, prefixes, or explanations.\n\n"
+        f"User request:\n{truncated_request}"
+    )
+    raw_title = await call_runtime_model_prompt(
+        prompt,
+        platform=platform,
+        instance_id=instance_id,
+        max_tokens=64,
+    )
+    return clean_runtime_session_title(raw_title, fallback=fallback)
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -1053,9 +1159,9 @@ _TOOL_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
 TOOL_POLICY_CATEGORIES = ("shell", "file_system", "browser", "network", "git")
 TOOL_POLICY_VALUES = ("allow", "guard", "ask")
 DEFAULT_TOOL_POLICIES = {
-    "shell": "allow",
+    "shell": "guard",
     "file_system": "guard",
-    "browser": "allow",
+    "browser": "guard",
     "network": "guard",
     "git": "guard",
 }
