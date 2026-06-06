@@ -132,6 +132,10 @@ Agent wants to run a tool
 
 When rejected (or timed out after 5 min), the agent is instructed to **stop all subsequent actions**, **inform the user about the risk**, and **wait for explicit confirmation**.
 
+For write-capable OpenClaw tools that affect public social accounts, see
+[Guarding Public Social Account Tools](docs/social-account-guard.md) for a
+TweetClaw dry-run scenario and persistent-rule guidance.
+
 ---
 
 ## 🏗️ Architecture
