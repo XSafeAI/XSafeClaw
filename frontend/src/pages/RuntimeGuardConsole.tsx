@@ -697,6 +697,12 @@ function formatMoney(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
+function formatVersionLabel(version: string | null): string {
+  const trimmed = version?.trim();
+  if (!trimmed) return 'v--';
+  return trimmed.toLowerCase().startsWith('v') ? trimmed : `v${trimmed}`;
+}
+
 function formatBudgetRefreshTime(remainingMs: number): string {
   const clamped = Math.max(0, remainingMs);
   const totalMinutes = Math.ceil(clamped / 60_000);
@@ -1285,6 +1291,7 @@ export default function RuntimeGuardConsole() {
     Nanobot: null,
   });
   const [installProbeFailed, setInstallProbeFailed] = useState(false);
+  const [xsafeclawVersion, setXsafeclawVersion] = useState<string | null>(null);
   const [sessions, setSessions] = useState<RuntimeGuardSession[]>(() => loadRuntimeGuardSessions());
   const [activeSessionId, setActiveSessionId] = useState(() => loadRuntimeGuardSessions()[0]?.sessionKey ?? '');
   const [sessionHistoryItems, setSessionHistoryItems] = useState<RuntimeGuardSession[]>([]);
@@ -1508,6 +1515,7 @@ export default function RuntimeGuardConsole() {
           Hermes: Boolean(res.data.hermes_installed),
           Nanobot: Boolean(res.data.nanobot_installed),
         });
+        setXsafeclawVersion(res.data.xsafeclaw_version ?? null);
         setInstallProbeFailed(false);
       })
       .catch(() => {
@@ -2340,6 +2348,7 @@ export default function RuntimeGuardConsole() {
   const runtimeGuardPageStyle = {
     '--rg-scale': layoutFit.scale,
   } as CSSProperties;
+  const xsafeclawVersionLabel = formatVersionLabel(xsafeclawVersion);
 
   return (
     <div className="runtime-guard-page" style={runtimeGuardPageStyle}>
@@ -2460,12 +2469,6 @@ export default function RuntimeGuardConsole() {
       )}
       <div className="rg-left-scale" style={leftScaleStyle}>
       <aside className="rg-sidebar">
-        <div className="rg-window-dots">
-          <span className="rg-window-dot rg-red" />
-          <span className="rg-window-dot rg-yellow" />
-          <span className="rg-window-dot rg-green" />
-        </div>
-
         <div className="rg-brand">
           <span className="rg-brand-name">XSafeClaw</span>
           <span className="rg-pro">PRO</span>
@@ -2736,10 +2739,6 @@ export default function RuntimeGuardConsole() {
           <span>Warnings: {activeMessages.filter(message => message.role === 'trace' && message.trace_type?.includes('approval')).length}</span>
         </footer>
 
-        <div className="rg-version">
-          <span>v1.0.0</span>
-          <Shield />
-        </div>
       </main>
       </div>
       <div className="rg-right-scale" style={rightScaleStyle}>
@@ -2854,6 +2853,10 @@ export default function RuntimeGuardConsole() {
             )}
           </section>
         </aside>
+      </div>
+      <div className="rg-version">
+        <span>{xsafeclawVersionLabel}</span>
+        <Shield />
       </div>
     </div>
   );

@@ -71,30 +71,9 @@
   border-right: 1px solid #12202a;
 }
 
-.rg-window-dots {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 36px;
-  height: 8px;
-}
-
-.rg-window-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-.rg-red { background: #ff5f57; }
-.rg-yellow { background: #ffbd2e; }
-.rg-green { background: #28c840; }
-
 .rg-brand {
   position: absolute;
-  top: 30px;
+  top: 12px;
   left: 12px;
   width: 120px;
   height: 35px;
@@ -1917,20 +1896,29 @@
 
 .rg-version {
   position: absolute;
-  top: 550px;
-  left: 640px;
+  right: 10px;
+  bottom: 6px;
   z-index: 30;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
-  width: 48px;
+  min-width: 48px;
+  max-width: 120px;
   height: 14px;
   color: #5f707a;
   font-size: 7px;
 }
 
+.rg-version span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rg-version svg {
+  flex: 0 0 auto;
   width: 12px;
   height: 12px;
   color: #00c879;
