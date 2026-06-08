@@ -129,6 +129,34 @@ export interface RuntimeInstanceHealth {
   chat_ready: boolean;
 }
 
+export type RuntimeBudgetPlatform = 'openclaw' | 'hermes' | 'nanobot';
+export type BudgetPeriodUnit = 'hour' | 'day';
+
+export interface RuntimeBudgetStatus {
+  platform: RuntimeBudgetPlatform;
+  maxCost: number | null;
+  periodValue: number;
+  periodUnit: BudgetPeriodUnit;
+  periodStartAt: string;
+  periodEndAt: string;
+  updatedAt: string;
+  currentCost: number;
+  budgetUsed: number;
+  budgetPercent: number;
+  overLimit: boolean;
+  remainingMs: number;
+  estimatedTokens: number;
+  costUnknownTokens: number;
+  costUnknownModels: number;
+  costBreakdown: unknown[];
+}
+
+export interface UpdateRuntimeBudgetPayload {
+  maxCost: number | null;
+  periodValue: number;
+  periodUnit: BudgetPeriodUnit;
+}
+
 export interface RuntimeInstanceCapabilitiesResponse {
   instance_id: string;
   platform: 'openclaw' | 'nanobot' | 'hermes';
@@ -612,8 +640,16 @@ export const statsAPI = {
   toolUsage: () =>
     api.get('/stats/tool-usage'),
 
-  dashboard: () =>
-    api.get<any>('/stats/dashboard'),
+  dashboard: (params?: { platform?: string; instance_id?: string }) =>
+    api.get<any>('/stats/dashboard', { params }),
+};
+
+export const budgetAPI = {
+  listRuntimeBudgets: () =>
+    api.get<{ budgets: RuntimeBudgetStatus[] }>('/stats/runtime-budgets'),
+
+  updateRuntimeBudget: (platform: RuntimeBudgetPlatform, payload: UpdateRuntimeBudgetPayload) =>
+    api.put<RuntimeBudgetStatus>(`/stats/runtime-budgets/${platform}`, payload),
 };
 
 export interface GuardPendingApproval {

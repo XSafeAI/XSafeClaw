@@ -2485,12 +2485,43 @@
   line-height: 14px;
 }
 
+.rg-budget-runtime-picker {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: #cddae1;
+  font-size: 9px;
+}
+
+.rg-budget-runtime-picker span {
+  color: #7f8d96;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.rg-budget-runtime-picker select {
+  width: 100%;
+  height: 27px;
+  border: 1px solid #20313d;
+  border-radius: 4px;
+  background: #050a0e;
+  color: #e8f1f6;
+  font-size: 10px;
+  outline: none;
+}
+
+.rg-budget-runtime-picker select:focus {
+  border-color: #00a7ff;
+}
+
 .rg-budget-sentence {
   display: grid;
   grid-template-columns: 72px 28px 58px 1fr;
   align-items: center;
   gap: 7px;
-  margin-top: 18px;
+  margin-top: 12px;
   color: #cddae1;
   font-size: 10px;
 }

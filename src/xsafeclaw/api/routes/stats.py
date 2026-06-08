@@ -7,14 +7,15 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
-from ...models import Message, Session, ToolCall
+from ...models import Message, RuntimeBudgetSetting, Session, ToolCall
 from ...runtime.pricing import get_builtin_catalog, lookup_price
 from ..runtime_helpers import apply_runtime_filters, list_instances, serialize_instance
 
@@ -23,6 +24,8 @@ router = APIRouter()
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
+RUNTIME_BUDGET_PLATFORMS = ("openclaw", "hermes", "nanobot")
+BudgetPeriodUnit = Literal["hour", "day"]
 
 
 @router.post("/resync")
@@ -76,6 +79,14 @@ class DailyStats(BaseModel):
     assistant_message_count: int
     user_message_count: int
     total_tokens: int
+
+
+class RuntimeBudgetUpdate(BaseModel):
+    """Runtime budget update payload."""
+
+    maxCost: float | None = Field(default=None, description="Maximum USD budget")
+    periodValue: int = Field(default=24, ge=1, description="Budget period length")
+    periodUnit: BudgetPeriodUnit = Field(default="hour", description="Budget period unit")
 
 
 @router.get("/overview", response_model=OverallStats)
@@ -401,6 +412,325 @@ def _resolve_cost_config(catalog: dict, provider: str | None, model_id: str | No
     return {}
 
 
+def _normalize_runtime_budget_platform(platform: str) -> str:
+    normalized = str(platform or "").strip().lower()
+    if normalized not in RUNTIME_BUDGET_PLATFORMS:
+        raise HTTPException(status_code=404, detail="Unknown runtime budget platform")
+    return normalized
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _budget_period_delta(period_value: int, period_unit: str) -> timedelta:
+    safe_value = period_value if period_value > 0 else 24
+    if period_unit == "day":
+        return timedelta(days=safe_value)
+    return timedelta(hours=safe_value)
+
+
+def _budget_period_end(setting: RuntimeBudgetSetting) -> datetime:
+    return _ensure_utc(setting.period_start_at) + _budget_period_delta(
+        setting.period_value,
+        setting.period_unit,
+    )
+
+
+def _apply_message_window(
+    stmt,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+):
+    if start_at is not None:
+        stmt = stmt.where(Message.timestamp >= start_at)
+    if end_at is not None:
+        stmt = stmt.where(Message.timestamp < end_at)
+    return stmt
+
+
+async def _compute_runtime_cost_summary(
+    db: AsyncSession,
+    *,
+    price_catalog: dict,
+    platform: str | None = None,
+    instance_id: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+) -> dict:
+    token_stmt = select(
+        func.sum(Message.total_tokens).label("total"),
+        func.sum(Message.input_tokens).label("input"),
+        func.sum(Message.output_tokens).label("output"),
+        func.sum(Message.cache_read_tokens).label("cache_read"),
+        func.sum(Message.cache_write_tokens).label("cache_write"),
+    ).where(Message.role == "assistant")
+    token_stmt = _apply_message_window(token_stmt, start_at=start_at, end_at=end_at)
+    token_stmt = apply_runtime_filters(
+        token_stmt,
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
+    token_row = (await db.execute(token_stmt)).one()
+
+    tokens = {
+        "total": token_row.total or 0,
+        "input": token_row.input or 0,
+        "output": token_row.output or 0,
+        "cacheRead": token_row.cache_read or 0,
+        "cacheWrite": token_row.cache_write or 0,
+    }
+
+    grouped_stmt = (
+        select(
+            Message.provider,
+            Message.model_id,
+            Session.current_model_provider,
+            Session.current_model_name,
+            func.count(Message.id).label("count"),
+            func.sum(Message.total_tokens).label("total_tokens"),
+            func.sum(Message.input_tokens).label("input_tokens"),
+            func.sum(Message.output_tokens).label("output_tokens"),
+            func.sum(Message.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(Message.cache_write_tokens).label("cache_write_tokens"),
+        )
+        .join(Session, Message.session_id == Session.session_id, isouter=True)
+        .where(Message.role == "assistant")
+        .group_by(
+            Message.provider,
+            Message.model_id,
+            Session.current_model_provider,
+            Session.current_model_name,
+        )
+    )
+    grouped_stmt = _apply_message_window(grouped_stmt, start_at=start_at, end_at=end_at)
+    grouped_stmt = apply_runtime_filters(
+        grouped_stmt,
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
+    grouped_rows = (await db.execute(grouped_stmt)).all()
+
+    estimated_tokens = 0
+    estimated_stmt = select(Message.total_tokens, Message.raw_entry).where(
+        Message.role == "assistant"
+    )
+    estimated_stmt = _apply_message_window(estimated_stmt, start_at=start_at, end_at=end_at)
+    estimated_stmt = apply_runtime_filters(
+        estimated_stmt,
+        Message,
+        platform=platform,
+        instance_id=instance_id,
+    )
+    for row in (await db.execute(estimated_stmt)).all():
+        meta = row.raw_entry.get("_xsafeclaw_usage") if isinstance(row.raw_entry, dict) else None
+        if isinstance(meta, dict) and bool(meta.get("estimated")):
+            estimated_tokens += int(row.total_tokens or 0)
+
+    cost_breakdown = []
+    unknown_cost_tokens = 0
+    unknown_cost_models = 0
+    total_cost = 0.0
+    for row in grouped_rows:
+        row_tokens = {
+            "total": row.total_tokens or 0,
+            "input": row.input_tokens or 0,
+            "output": row.output_tokens or 0,
+            "cacheRead": row.cache_read_tokens or 0,
+            "cacheWrite": row.cache_write_tokens or 0,
+        }
+        resolved_cost_cfg = _resolve_cost_config(price_catalog, row.provider, row.model_id)
+        resolved_provider = row.provider
+        resolved_model_id = row.model_id
+        if not resolved_cost_cfg:
+            fallback_provider = row.current_model_provider
+            fallback_model = row.current_model_name
+            resolved_cost_cfg = _resolve_cost_config(price_catalog, fallback_provider, fallback_model)
+            if resolved_cost_cfg:
+                resolved_provider = fallback_provider or resolved_provider
+                resolved_model_id = fallback_model or resolved_model_id
+
+        row_cost, cost_method = _compute_cost_with_method(row_tokens, resolved_cost_cfg)
+        priced = bool(resolved_cost_cfg)
+        if not priced:
+            unknown_cost_tokens += int(row_tokens["total"] or 0)
+            unknown_cost_models += 1
+        total_cost += row_cost
+        cost_breakdown.append(
+            {
+                "provider": row.provider or "unknown",
+                "modelId": row.model_id or "unknown",
+                "messages": row.count or 0,
+                "tokens": row_tokens,
+                "priced": priced,
+                "costMethod": cost_method,
+                "resolvedProvider": resolved_provider or "unknown",
+                "resolvedModelId": resolved_model_id or "unknown",
+                "estimated_cost": round(row_cost, 6),
+            }
+        )
+
+    return {
+        "tokens": tokens,
+        "cost": round(total_cost, 6),
+        "estimatedTokens": estimated_tokens,
+        "costUnknownTokens": unknown_cost_tokens,
+        "costUnknownModels": unknown_cost_models,
+        "costBreakdown": cost_breakdown,
+    }
+
+
+async def _get_runtime_budget_setting(
+    db: AsyncSession,
+    platform: str,
+    *,
+    create: bool,
+    now: datetime,
+) -> RuntimeBudgetSetting | None:
+    setting = await db.get(RuntimeBudgetSetting, platform)
+    if setting is None and create:
+        setting = RuntimeBudgetSetting(
+            platform=platform,
+            max_cost=None,
+            period_value=24,
+            period_unit="hour",
+            period_start_at=now,
+            updated_at=now,
+        )
+        db.add(setting)
+        await db.flush()
+    return setting
+
+
+async def get_runtime_budget_status_payload(
+    db: AsyncSession,
+    platform: str,
+    *,
+    create: bool = True,
+    now: datetime | None = None,
+) -> dict:
+    normalized_platform = _normalize_runtime_budget_platform(platform)
+    current_time = _ensure_utc(now or datetime.now(timezone.utc))
+    setting = await _get_runtime_budget_setting(
+        db,
+        normalized_platform,
+        create=create,
+        now=current_time,
+    )
+    if setting is None:
+        setting = RuntimeBudgetSetting(
+            platform=normalized_platform,
+            max_cost=None,
+            period_value=24,
+            period_unit="hour",
+            period_start_at=current_time,
+            updated_at=current_time,
+        )
+
+    period_end = _budget_period_end(setting)
+    if current_time >= period_end:
+        setting.period_start_at = current_time
+        setting.updated_at = current_time
+        if create:
+            await db.flush()
+        period_end = _budget_period_end(setting)
+
+    config = _read_openclaw_config()
+    price_catalog = _build_price_catalog(config)
+    cost_summary = await _compute_runtime_cost_summary(
+        db,
+        price_catalog=price_catalog,
+        platform=normalized_platform,
+        start_at=_ensure_utc(setting.period_start_at),
+        end_at=period_end,
+    )
+    current_cost = float(cost_summary["cost"])
+    max_cost = setting.max_cost if setting.max_cost and setting.max_cost > 0 else None
+    budget_percent = min(100.0, (current_cost / max_cost) * 100.0) if max_cost else 0.0
+    over_limit = bool(max_cost and current_cost >= max_cost)
+    remaining_ms = max(0, int((period_end - current_time).total_seconds() * 1000))
+
+    return {
+        "platform": normalized_platform,
+        "maxCost": max_cost,
+        "periodValue": setting.period_value,
+        "periodUnit": setting.period_unit,
+        "periodStartAt": _ensure_utc(setting.period_start_at).isoformat(),
+        "periodEndAt": period_end.isoformat(),
+        "updatedAt": _ensure_utc(setting.updated_at).isoformat(),
+        "currentCost": current_cost,
+        "budgetUsed": current_cost,
+        "budgetPercent": budget_percent,
+        "overLimit": over_limit,
+        "remainingMs": remaining_ms,
+        "estimatedTokens": cost_summary["estimatedTokens"],
+        "costUnknownTokens": cost_summary["costUnknownTokens"],
+        "costUnknownModels": cost_summary["costUnknownModels"],
+        "costBreakdown": cost_summary["costBreakdown"],
+    }
+
+
+def runtime_budget_exceeded_detail(status: dict) -> dict:
+    return {
+        "reason": "budget_exceeded",
+        "platform": status["platform"],
+        "currentCost": status["currentCost"],
+        "maxCost": status["maxCost"],
+        "resetAt": status["periodEndAt"],
+    }
+
+
+@router.get("/runtime-budgets")
+async def list_runtime_budgets(db: AsyncSession = Depends(get_db)):
+    """Return backend-owned budget status for each RuntimeGuard platform."""
+    return {
+        "budgets": [
+            await get_runtime_budget_status_payload(db, platform)
+            for platform in RUNTIME_BUDGET_PLATFORMS
+        ]
+    }
+
+
+@router.put("/runtime-budgets/{platform}")
+async def update_runtime_budget(
+    platform: str,
+    payload: RuntimeBudgetUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update one runtime platform budget and start a fresh server-side period."""
+    normalized_platform = _normalize_runtime_budget_platform(platform)
+    if payload.maxCost is not None and payload.maxCost <= 0:
+        raise HTTPException(status_code=422, detail="maxCost must be greater than 0")
+
+    now = datetime.now(timezone.utc)
+    setting = await _get_runtime_budget_setting(
+        db,
+        normalized_platform,
+        create=True,
+        now=now,
+    )
+    if setting is None:
+        raise HTTPException(status_code=500, detail="Failed to create runtime budget setting")
+
+    setting.max_cost = float(payload.maxCost) if payload.maxCost is not None else None
+    setting.period_value = payload.periodValue
+    setting.period_unit = payload.periodUnit
+    setting.period_start_at = now
+    setting.updated_at = now
+    await db.flush()
+
+    return await get_runtime_budget_status_payload(
+        db,
+        normalized_platform,
+        create=True,
+        now=now,
+    )
+
+
 @router.get("/dashboard")
 async def get_dashboard(
     platform: str | None = Query(None, description="Filter by runtime platform"),
@@ -473,20 +803,12 @@ async def get_dashboard(
         )
     ).scalar_one() or 0
 
-    token_row = (await db.execute(
-        apply_runtime_filters(
-            select(
-                func.sum(Message.total_tokens).label("total"),
-                func.sum(Message.input_tokens).label("input"),
-                func.sum(Message.output_tokens).label("output"),
-                func.sum(Message.cache_read_tokens).label("cache_read"),
-                func.sum(Message.cache_write_tokens).label("cache_write"),
-            ).where(Message.role == "assistant"),
-            Message,
-            platform=platform,
-            instance_id=instance_id,
-        )
-    )).one()
+    cost_summary = await _compute_runtime_cost_summary(
+        db,
+        price_catalog=price_catalog,
+        platform=platform,
+        instance_id=instance_id,
+    )
 
     yesterday = datetime.now(timezone.utc) - timedelta(hours=24)
     active_24h = (await db.execute(
@@ -498,13 +820,7 @@ async def get_dashboard(
         )
     )).scalar_one() or 0
 
-    tokens = {
-        "total": token_row.total or 0,
-        "input": token_row.input or 0,
-        "output": token_row.output or 0,
-        "cacheRead": token_row.cache_read or 0,
-        "cacheWrite": token_row.cache_write or 0,
-    }
+    tokens = cost_summary["tokens"]
 
     if selected_instance and selected_instance.platform != "openclaw":
         _non_oc_provider = str(selected_instance.meta.get("provider") or "")
@@ -523,91 +839,6 @@ async def get_dashboard(
         }
     else:
         model_info = _get_model_info(config)
-    grouped_stmt = (
-        select(
-            Message.provider,
-            Message.model_id,
-            Session.current_model_provider,
-            Session.current_model_name,
-            func.count(Message.id).label("count"),
-            func.sum(Message.total_tokens).label("total_tokens"),
-            func.sum(Message.input_tokens).label("input_tokens"),
-            func.sum(Message.output_tokens).label("output_tokens"),
-            func.sum(Message.cache_read_tokens).label("cache_read_tokens"),
-            func.sum(Message.cache_write_tokens).label("cache_write_tokens"),
-        )
-        .join(Session, Message.session_id == Session.session_id, isouter=True)
-        .where(Message.role == "assistant")
-        .group_by(
-            Message.provider,
-            Message.model_id,
-            Session.current_model_provider,
-            Session.current_model_name,
-        )
-    )
-    grouped_stmt = apply_runtime_filters(
-        grouped_stmt,
-        Message,
-        platform=platform,
-        instance_id=instance_id,
-    )
-    grouped_rows = (await db.execute(grouped_stmt)).all()
-
-    estimated_tokens = 0
-    estimated_stmt = apply_runtime_filters(
-        select(Message.total_tokens, Message.raw_entry).where(Message.role == "assistant"),
-        Message,
-        platform=platform,
-        instance_id=instance_id,
-    )
-    for row in (await db.execute(estimated_stmt)).all():
-        meta = row.raw_entry.get("_xsafeclaw_usage") if isinstance(row.raw_entry, dict) else None
-        if isinstance(meta, dict) and bool(meta.get("estimated")):
-            estimated_tokens += int(row.total_tokens or 0)
-
-    cost_breakdown = []
-    unknown_cost_tokens = 0
-    unknown_cost_models = 0
-    total_cost = 0.0
-    for row in grouped_rows:
-        row_tokens = {
-            "total": row.total_tokens or 0,
-            "input": row.input_tokens or 0,
-            "output": row.output_tokens or 0,
-            "cacheRead": row.cache_read_tokens or 0,
-            "cacheWrite": row.cache_write_tokens or 0,
-        }
-        resolved_cost_cfg = _resolve_cost_config(price_catalog, row.provider, row.model_id)
-        resolved_provider = row.provider
-        resolved_model_id = row.model_id
-        if not resolved_cost_cfg:
-            fallback_provider = row.current_model_provider
-            fallback_model = row.current_model_name
-            resolved_cost_cfg = _resolve_cost_config(price_catalog, fallback_provider, fallback_model)
-            if resolved_cost_cfg:
-                resolved_provider = fallback_provider or resolved_provider
-                resolved_model_id = fallback_model or resolved_model_id
-
-        row_cost, cost_method = _compute_cost_with_method(row_tokens, resolved_cost_cfg)
-        priced = bool(resolved_cost_cfg)
-        if not priced:
-            unknown_cost_tokens += int(row_tokens["total"] or 0)
-            unknown_cost_models += 1
-        total_cost += row_cost
-        cost_breakdown.append(
-            {
-                "provider": row.provider or "unknown",
-                "modelId": row.model_id or "unknown",
-                "messages": row.count or 0,
-                "tokens": row_tokens,
-                "priced": priced,
-                "costMethod": cost_method,
-                "resolvedProvider": resolved_provider or "unknown",
-                "resolvedModelId": resolved_model_id or "unknown",
-                "estimated_cost": round(row_cost, 6),
-            }
-        )
-
     channels = _get_channels_info(config) if selected_instance and selected_instance.platform == "openclaw" else []
 
     model_stats_stmt = (
@@ -651,11 +882,11 @@ async def get_dashboard(
         },
         "toolCalls": tool_call_count,
         "tokens": tokens,
-        "cost": round(total_cost, 6),
-        "estimatedTokens": estimated_tokens,
-        "costUnknownTokens": unknown_cost_tokens,
-        "costUnknownModels": unknown_cost_models,
-        "costBreakdown": cost_breakdown,
+        "cost": cost_summary["cost"],
+        "estimatedTokens": cost_summary["estimatedTokens"],
+        "costUnknownTokens": cost_summary["costUnknownTokens"],
+        "costUnknownModels": cost_summary["costUnknownModels"],
+        "costBreakdown": cost_summary["costBreakdown"],
         "channels": channels,
         "model": model_info,
         "models": models,

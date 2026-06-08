@@ -38,26 +38,22 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  budgetAPI,
   chatAPI,
   guardAPI,
   sessionsAPI,
-  statsAPI,
   systemAPI,
+  type BudgetPeriodUnit,
   type GuardPendingApproval,
   type GuardRuntimeObservation,
+  type RuntimeBudgetPlatform,
+  type RuntimeBudgetStatus,
   type RuntimeInstance,
   type RuntimeSessionRecord,
 } from '../services/api';
 import MarkdownMessage from '../components/MarkdownMessage';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
-import {
-  getBudgetStatus,
-  loadBudgetSettings,
-  saveBudgetSettings,
-  type BudgetPeriodUnit,
-  type BudgetSettings,
-} from '../utils/budgetControl';
 import {
   buildActiveTimelineRows,
   getActiveApprovalCards,
@@ -88,6 +84,7 @@ import './RuntimeGuardConsole.css';
 
 type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
 type RuntimePlatform = RuntimeInstance['platform'];
+type RuntimeBudgetStatusMap = Record<RuntimeBudgetPlatform, RuntimeBudgetStatus>;
 type GuardMode = 'Off' | 'On';
 export type RuntimeGuardSession = {
   sessionKey: string;
@@ -119,7 +116,7 @@ const APPROVAL_POLL_INTERVAL_MS = 3000;
 
 const agentDefinitions: Array<{
   name: AgentName;
-  platform: RuntimePlatform;
+  platform: RuntimeBudgetPlatform;
   defaultStatus: 'Running' | 'Idle';
   className: string;
 }> = [
@@ -129,6 +126,55 @@ const agentDefinitions: Array<{
 ];
 
 const sessionHistoryFilters: SessionHistoryAgentFilter[] = ['All', 'OpenClaw', 'Hermes', 'Nanobot'];
+const runtimeBudgetPlatforms: RuntimeBudgetPlatform[] = ['openclaw', 'hermes', 'nanobot'];
+const DEFAULT_BUDGET_PERIOD_MS = 24 * 60 * 60 * 1000;
+
+function defaultRuntimeBudgetStatus(platform: RuntimeBudgetPlatform, now = Date.now()): RuntimeBudgetStatus {
+  return {
+    platform,
+    maxCost: null,
+    periodValue: 24,
+    periodUnit: 'hour',
+    periodStartAt: new Date(now).toISOString(),
+    periodEndAt: new Date(now + DEFAULT_BUDGET_PERIOD_MS).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    currentCost: 0,
+    budgetUsed: 0,
+    budgetPercent: 0,
+    overLimit: false,
+    remainingMs: DEFAULT_BUDGET_PERIOD_MS,
+    estimatedTokens: 0,
+    costUnknownTokens: 0,
+    costUnknownModels: 0,
+    costBreakdown: [],
+  };
+}
+
+function defaultRuntimeBudgetStatusMap(now = Date.now()): RuntimeBudgetStatusMap {
+  return {
+    openclaw: defaultRuntimeBudgetStatus('openclaw', now),
+    hermes: defaultRuntimeBudgetStatus('hermes', now),
+    nanobot: defaultRuntimeBudgetStatus('nanobot', now),
+  };
+}
+
+function runtimeBudgetStatusMapFromList(items: RuntimeBudgetStatus[]): RuntimeBudgetStatusMap {
+  const next = defaultRuntimeBudgetStatusMap();
+  for (const item of items) {
+    if (runtimeBudgetPlatforms.includes(item.platform)) {
+      next[item.platform] = item;
+    }
+  }
+  return next;
+}
+
+function runtimeBudgetRemainingMs(status: RuntimeBudgetStatus, now = Date.now()): number {
+  const endMs = Date.parse(status.periodEndAt);
+  if (Number.isFinite(endMs)) {
+    return Math.max(0, endMs - now);
+  }
+  return Math.max(0, Number(status.remainingMs) || 0);
+}
 
 const toolPermissionOptions: RuntimeGuardToolPermission[] = ['Allowed', 'Guard', 'Asked'];
 
@@ -432,6 +478,14 @@ async function responseErrorMessage(response: Response): Promise<string> {
     try {
       const data = JSON.parse(text);
       const detail = data?.detail;
+      if (detail?.reason === 'budget_exceeded') {
+        const platform = normalizeRuntimePlatform(detail.platform);
+        const resetAtMs = Date.parse(String(detail.resetAt || ''));
+        const resetText = Number.isFinite(resetAtMs)
+          ? ` Resets in ${formatBudgetRefreshTime(resetAtMs - Date.now())}.`
+          : '';
+        return `${platformToAgent(platform)} budget reached.${resetText}`;
+      }
       if (typeof detail === 'string' && detail.trim()) return detail;
       if (detail) return JSON.stringify(detail);
     } catch {
@@ -1254,12 +1308,13 @@ export default function RuntimeGuardConsole() {
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [guardModeSyncing, setGuardModeSyncing] = useState(false);
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
-  const [budgetSettings, setBudgetSettings] = useState<BudgetSettings>(() => loadBudgetSettings());
+  const [runtimeBudgetStatuses, setRuntimeBudgetStatuses] = useState<RuntimeBudgetStatusMap>(() => defaultRuntimeBudgetStatusMap());
+  const [selectedBudgetPlatform, setSelectedBudgetPlatform] = useState<RuntimeBudgetPlatform>('openclaw');
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
   const [budgetAmountInput, setBudgetAmountInput] = useState('');
   const [budgetPeriodInput, setBudgetPeriodInput] = useState('');
   const [budgetPeriodUnit, setBudgetPeriodUnit] = useState<BudgetPeriodUnit>('hour');
-  const [dashboardCost, setDashboardCost] = useState(3.21);
+  const [budgetSaving, setBudgetSaving] = useState(false);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const [layoutFit, setLayoutFit] = useState({
     scale: 1,
@@ -1312,6 +1367,17 @@ export default function RuntimeGuardConsole() {
     () => (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled),
     [runtimeInstancesQuery.data?.instances],
   );
+  const budgetPlatformOptions = useMemo(
+    () => agentDefinitions.filter(agent => {
+      const installed = installedAgents[agent.name];
+      if (installed === true) return true;
+      if (installed === false) return false;
+      if (installProbeFailed) return true;
+      return availableInstances.some(instance => instance.platform === agent.platform);
+    }),
+    [availableInstances, installProbeFailed, installedAgents],
+  );
+  const activeBudgetPlatform = (activeSession?.platform ?? agentToPlatform(selectedAgent)) as RuntimeBudgetPlatform;
   const sidebarTools = useMemo(() => ([
     ...configurableTools.map(tool => {
       const permission = toolPermissions[tool.id];
@@ -1367,6 +1433,18 @@ export default function RuntimeGuardConsole() {
   useEffect(() => {
     saveRuntimeGuardDrafts(draftBySessionKey);
   }, [draftBySessionKey]);
+
+  useEffect(() => {
+    if (budgetPlatformOptions.length > 0 && !budgetPlatformOptions.some(option => option.platform === selectedBudgetPlatform)) {
+      setSelectedBudgetPlatform(budgetPlatformOptions[0].platform);
+    }
+  }, [budgetPlatformOptions, selectedBudgetPlatform]);
+
+  useEffect(() => {
+    if (budgetPlatformOptions.some(option => option.platform === activeBudgetPlatform)) {
+      setSelectedBudgetPlatform(activeBudgetPlatform);
+    }
+  }, [activeBudgetPlatform, activeSessionKey, budgetPlatformOptions]);
 
   const fetchSessionHistory = useCallback(async (showLoading = false): Promise<RuntimeGuardSession[] | null> => {
     if (showLoading) setSessionHistoryLoading(true);
@@ -1442,27 +1520,24 @@ export default function RuntimeGuardConsole() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const pullDashboardCost = async () => {
-      try {
-        const { data } = await statsAPI.dashboard();
-        const nextCost = Number(data?.cost);
-        if (!cancelled && Number.isFinite(nextCost) && nextCost >= 0) {
-          setDashboardCost(nextCost);
-        }
-      } catch {
-        // Keep the visual fallback when stats are temporarily unavailable.
-      }
-    };
-
-    pullDashboardCost();
-    const timer = window.setInterval(pullDashboardCost, 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+  const refreshRuntimeBudgets = useCallback(async (): Promise<RuntimeBudgetStatusMap | null> => {
+    try {
+      const { data } = await budgetAPI.listRuntimeBudgets();
+      const next = runtimeBudgetStatusMapFromList(data.budgets ?? []);
+      setRuntimeBudgetStatuses(next);
+      return next;
+    } catch {
+      return null;
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshRuntimeBudgets();
+    const timer = window.setInterval(() => {
+      void refreshRuntimeBudgets();
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [refreshRuntimeBudgets]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowTs(Date.now()), 30_000);
@@ -1556,29 +1631,25 @@ export default function RuntimeGuardConsole() {
     }),
     [installProbeFailed, installedAgents],
   );
-  const budgetStatus = useMemo(
-    () => getBudgetStatus(budgetSettings, dashboardCost, nowTs),
-    [budgetSettings, dashboardCost, nowTs],
-  );
+  const budgetStatus = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
+  const activeBudgetStatus = runtimeBudgetStatuses[activeBudgetPlatform] ?? defaultRuntimeBudgetStatus(activeBudgetPlatform);
   const {
-    budgetLimit,
     budgetUsed,
     budgetPercent,
-    budgetOverLimit,
-    budgetRemainingMs,
   } = budgetStatus;
-  const budgetConfigured = Boolean(budgetLimit);
-  const budgetDisplayCost = budgetConfigured ? budgetUsed : dashboardCost;
+  const budgetLimit = budgetStatus.maxCost;
+  const budgetRemainingMs = runtimeBudgetRemainingMs(budgetStatus, nowTs);
+  const selectedBudgetOverLimit = budgetStatus.overLimit;
+  const budgetOverLimit = activeBudgetStatus.overLimit;
+  const activeBudgetRemainingMs = runtimeBudgetRemainingMs(activeBudgetStatus, nowTs);
+  const budgetConfigured = budgetLimit !== null;
+  const budgetDisplayCost = budgetConfigured ? budgetUsed : budgetStatus.currentCost;
   const budgetBarPercent = budgetConfigured ? Math.max(4, budgetPercent) : 0;
+  const selectedBudgetAgentName = agentDefinitions.find(agent => agent.platform === selectedBudgetPlatform)?.name ?? 'Runtime';
+  const activeBudgetAgentName = agentDefinitions.find(agent => agent.platform === activeBudgetPlatform)?.name ?? 'Runtime';
   const budgetResetText = budgetConfigured
-    ? `额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`
-    : '24h total cost';
-
-  useEffect(() => {
-    if (!budgetStatus.settingsRolled) return;
-    setBudgetSettings(budgetStatus.settings);
-    saveBudgetSettings(budgetStatus.settings);
-  }, [budgetStatus]);
+    ? `Resets in ${formatBudgetRefreshTime(budgetRemainingMs)}`
+    : `${selectedBudgetAgentName} total cost`;
 
   const showToast = useCallback((message: string, timeout = 2600) => {
     setPlaceholder(message);
@@ -1694,49 +1765,63 @@ export default function RuntimeGuardConsole() {
     showToast(`${agent} is not installed. Open Setup to install it.`);
   }, [showToast]);
 
+  useEffect(() => {
+    if (!budgetModalOpen) return;
+    const status = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
+    setBudgetAmountInput(status.maxCost ? String(status.maxCost) : '');
+    setBudgetPeriodInput(status.maxCost && status.periodValue ? String(status.periodValue) : '');
+    setBudgetPeriodUnit(status.periodUnit === 'day' ? 'day' : 'hour');
+  }, [budgetModalOpen, runtimeBudgetStatuses, selectedBudgetPlatform]);
+
   const openBudgetModal = () => {
     setBudgetAmountInput(budgetLimit ? String(budgetLimit) : '');
-    setBudgetPeriodInput(budgetLimit && budgetSettings.periodValue ? String(budgetSettings.periodValue) : '');
-    setBudgetPeriodUnit(budgetSettings.periodUnit === 'day' ? 'day' : 'hour');
+    setBudgetPeriodInput(budgetLimit && budgetStatus.periodValue ? String(budgetStatus.periodValue) : '');
+    setBudgetPeriodUnit(budgetStatus.periodUnit === 'day' ? 'day' : 'hour');
     setBudgetModalOpen(true);
   };
 
-  const saveBudgetLimit = () => {
+  const saveBudgetLimit = async () => {
     const maxCost = Number(budgetAmountInput);
     const periodValue = Number(budgetPeriodInput);
     if (!Number.isFinite(maxCost) || maxCost <= 0 || !Number.isFinite(periodValue) || periodValue <= 0) return;
 
-    const now = Date.now();
-    const next: BudgetSettings = {
-      maxCost,
-      periodValue,
-      periodUnit: budgetPeriodUnit,
-      periodStartAt: now,
-      baselineCost: dashboardCost,
-      updatedAt: now,
-    };
-    setBudgetSettings(next);
-    setNowTs(now);
-    saveBudgetSettings(next);
-    setBudgetModalOpen(false);
+    setBudgetSaving(true);
+    try {
+      const { data } = await budgetAPI.updateRuntimeBudget(selectedBudgetPlatform, {
+        maxCost,
+        periodValue,
+        periodUnit: budgetPeriodUnit,
+      });
+      setRuntimeBudgetStatuses(current => ({ ...current, [selectedBudgetPlatform]: data }));
+      setNowTs(Date.now());
+      setBudgetModalOpen(false);
+    } catch {
+      showToast(`Failed to save ${selectedBudgetAgentName} budget.`);
+    } finally {
+      setBudgetSaving(false);
+    }
   };
 
-  const clearBudgetLimit = () => {
-    const now = Date.now();
-    const next: BudgetSettings = {
-      maxCost: null,
-      periodValue: budgetSettings.periodValue || 24,
-      periodUnit: budgetSettings.periodUnit || 'hour',
-      periodStartAt: now,
-      baselineCost: dashboardCost,
-      updatedAt: now,
-    };
-    setBudgetSettings(next);
-    setNowTs(now);
-    saveBudgetSettings(next);
-    setBudgetAmountInput('');
-    setBudgetPeriodInput('');
-    setBudgetModalOpen(false);
+  const clearBudgetLimit = async () => {
+    const periodValue = budgetStatus.periodValue || 24;
+    const periodUnit = budgetStatus.periodUnit || 'hour';
+    setBudgetSaving(true);
+    try {
+      const { data } = await budgetAPI.updateRuntimeBudget(selectedBudgetPlatform, {
+        maxCost: null,
+        periodValue,
+        periodUnit,
+      });
+      setRuntimeBudgetStatuses(current => ({ ...current, [selectedBudgetPlatform]: data }));
+      setNowTs(Date.now());
+      setBudgetAmountInput('');
+      setBudgetPeriodInput('');
+      setBudgetModalOpen(false);
+    } catch {
+      showToast(`Failed to clear ${selectedBudgetAgentName} budget.`);
+    } finally {
+      setBudgetSaving(false);
+    }
   };
 
   const findRuntimeForAgent = useCallback((agent: AgentName): RuntimeInstance | null => {
@@ -1963,7 +2048,7 @@ export default function RuntimeGuardConsole() {
     if (!text || activeSending || inFlightKeysRef.current.has(originalKey)) return;
 
     if (budgetOverLimit) {
-      showToast(`已达到最大用量，额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`);
+      showToast(`${activeBudgetAgentName} budget reached. Resets in ${formatBudgetRefreshTime(activeBudgetRemainingMs)}.`);
       return;
     }
 
@@ -2022,6 +2107,9 @@ export default function RuntimeGuardConsole() {
       });
 
       if (!response.ok || !response.body) {
+        if (response.status === 402) {
+          void refreshRuntimeBudgets();
+        }
         throw new Error(await responseErrorMessage(response));
       }
 
@@ -2203,6 +2291,7 @@ export default function RuntimeGuardConsole() {
             : message
         )),
       }));
+      void refreshRuntimeBudgets();
     } catch (err: any) {
       setMessageMap(prev => ({
         ...prev,
@@ -2261,7 +2350,19 @@ export default function RuntimeGuardConsole() {
             </button>
             <div className="rg-budget-modal-kicker">BUDGET LIMIT</div>
             <h2 id="rg-budget-modal-title">Set runtime budget</h2>
-            <p>Set a spending limit for this browser session. Leave either field blank to only show the 24h total cost.</p>
+            <p>Set a server-side spending limit for the selected runtime period.</p>
+            <label className="rg-budget-runtime-picker">
+              <span>Runtime</span>
+              <select
+                aria-label="Budget runtime"
+                onChange={(event) => setSelectedBudgetPlatform(event.target.value as RuntimeBudgetPlatform)}
+                value={selectedBudgetPlatform}
+              >
+                {budgetPlatformOptions.map(agent => (
+                  <option key={agent.platform} value={agent.platform}>{agent.name}</option>
+                ))}
+              </select>
+            </label>
             <div className="rg-budget-sentence">
               <input
                 aria-label="Maximum USD usage"
@@ -2294,22 +2395,24 @@ export default function RuntimeGuardConsole() {
               </select>
             </div>
             <div className="rg-budget-modal-preview">
-              Current cost: {formatMoney(dashboardCost)}
+              Current {selectedBudgetAgentName} period cost: {formatMoney(budgetStatus.currentCost)}
             </div>
             <div className="rg-budget-modal-actions">
-              <button type="button" className="rg-budget-clear" onClick={clearBudgetLimit}>Clear</button>
+              <button type="button" className="rg-budget-clear" disabled={budgetSaving} onClick={() => void clearBudgetLimit()}>Clear</button>
               <button
                 type="button"
                 className="rg-budget-save"
                 disabled={
+                  budgetSaving
+                  ||
                   !Number.isFinite(Number(budgetAmountInput))
                   || Number(budgetAmountInput) <= 0
                   || !Number.isFinite(Number(budgetPeriodInput))
                   || Number(budgetPeriodInput) <= 0
                 }
-                onClick={saveBudgetLimit}
+                onClick={() => void saveBudgetLimit()}
               >
-                Save
+                {budgetSaving ? 'Saving' : 'Save'}
               </button>
             </div>
           </div>
@@ -2438,13 +2541,13 @@ export default function RuntimeGuardConsole() {
           })}
         </section>
 
-        <button className={`rg-budget ${budgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
-          <div className="rg-budget-title">BUDGET</div>
+        <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
+          <div className="rg-budget-title">BUDGET - {selectedBudgetAgentName}</div>
           <div className="rg-budget-amount">{formatMoney(budgetDisplayCost)}</div>
           {budgetConfigured && <div className="rg-budget-total">/ {formatMoney(budgetLimit ?? 0)}</div>}
           <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
           <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
-          <div className="rg-budget-reset">{budgetOverLimit ? '已达到最大用量' : budgetResetText}</div>
+          <div className="rg-budget-reset">{selectedBudgetOverLimit ? `${selectedBudgetAgentName} budget reached` : budgetResetText}</div>
         </button>
 
         <section className="rg-user">
@@ -2591,20 +2694,20 @@ export default function RuntimeGuardConsole() {
                   onCompositionEnd={() => setIsComposing(false)}
                   onCompositionStart={() => setIsComposing(true)}
                   onKeyDown={handleInputKeyDown}
-                  placeholder={budgetOverLimit ? '已达到最大用量' : `Ask ${activeAgent} ...`}
+                  placeholder={budgetOverLimit ? `${activeBudgetAgentName} budget reached` : `Ask ${activeAgent} ...`}
                   rows={2}
                   value={activeDraft}
                 />
                 <span className="rg-command-shortcuts">
                   {budgetOverLimit
-                    ? `额度将在${formatBudgetRefreshTime(budgetRemainingMs)}后刷新`
+                    ? `Resets in ${formatBudgetRefreshTime(activeBudgetRemainingMs)}`
                     : 'Enter Send    Shift Enter New Line'}
                 </span>
                 <button
                   disabled={budgetOverLimit || activeSending || !activeDraft.trim()}
                   onClick={handleSend}
                   type="button"
-                  title={budgetOverLimit ? '已达到最大用量' : 'Send message'}
+                  title={budgetOverLimit ? `${activeBudgetAgentName} budget reached` : 'Send message'}
                 >
                   {activeSending ? <Loader2 className="is-spinning" /> : <Send />}
                 </button>

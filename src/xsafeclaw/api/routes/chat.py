@@ -30,6 +30,7 @@ from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
 from ...services.nanobot_trace_tailer import NanobotJsonlTraceTailer
 from ...services.openclaw_trace_tailer import OpenClawJsonlTraceTailer
 from ..runtime_helpers import resolve_instance, serialize_instance
+from .stats import get_runtime_budget_status_payload, runtime_budget_exceeded_detail
 
 # ── Per-instance path helpers (was: module-level platform switch) ─────────
 # Historically this module froze ``_SESSIONS_DIR`` / ``_SESSIONS_JSON`` /
@@ -1574,6 +1575,13 @@ def _runtime_guard_markdown_system_prompt(base_prompt: str, *, enabled: bool) ->
     return f"{base}\n\n---\n\n{_RUNTIME_GUARD_MARKDOWN_OUTPUT_INSTRUCTION}"
 
 
+async def _assert_runtime_budget_allows(platform: str) -> None:
+    async with get_db_context() as db:
+        status = await get_runtime_budget_status_payload(db, platform, create=False)
+    if status.get("overLimit"):
+        raise HTTPException(status_code=402, detail=runtime_budget_exceeded_detail(status))
+
+
 def _normalize_trace_token(value: object) -> str:
     return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
 
@@ -3012,6 +3020,7 @@ async def send_message(request: SendMessageRequest):
     instance, local_session_key, public_session_key = await _resolve_chat_runtime(
         session_key=request.session_key,
     )
+    await _assert_runtime_budget_allows(instance.platform)
     markdown_context_enabled = _is_runtime_guard_context(request.client_context)
     runtime_message = _runtime_guard_markdown_user_message(
         request.message,
@@ -3175,6 +3184,7 @@ async def send_message_stream(request: SendMessageRequest):
     instance, local_session_key, public_session_key = await _resolve_chat_runtime(
         session_key=request.session_key,
     )
+    await _assert_runtime_budget_allows(instance.platform)
     markdown_context_enabled = _is_runtime_guard_context(request.client_context)
     runtime_message = _runtime_guard_markdown_user_message(
         request.message,
