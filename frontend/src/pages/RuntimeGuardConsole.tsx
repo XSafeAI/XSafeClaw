@@ -1646,11 +1646,6 @@ export default function RuntimeGuardConsole() {
   const budgetDisplayCost = budgetConfigured ? budgetUsed : budgetStatus.currentCost;
   const budgetDisplayCostText = formatMoney(budgetDisplayCost);
   const budgetLimitText = budgetLimit !== null ? formatMoney(budgetLimit) : '';
-  const budgetAmountDensityClass = budgetDisplayCostText.length >= 10
-    ? 'is-compact'
-    : budgetDisplayCostText.length >= 8
-      ? 'is-tight'
-      : '';
   const budgetBarPercent = budgetConfigured ? Math.max(4, budgetPercent) : 0;
   const selectedBudgetAgentName = agentDefinitions.find(agent => agent.platform === selectedBudgetPlatform)?.name ?? 'Runtime';
   const activeBudgetAgentName = agentDefinitions.find(agent => agent.platform === activeBudgetPlatform)?.name ?? 'Runtime';
@@ -2550,13 +2545,18 @@ export default function RuntimeGuardConsole() {
 
         <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
           <div className="rg-budget-title">BUDGET - {selectedBudgetAgentName}</div>
-          <div className={`rg-budget-amount ${budgetAmountDensityClass}`}>{budgetDisplayCostText}</div>
-          {budgetConfigured && (
-            <div className="rg-budget-limit-row">
-              <span>Limit</span>
-              <strong>{budgetLimitText}</strong>
+          <div className="rg-budget-metrics">
+            <div className="rg-budget-metric-row">
+              <span>Spent</span>
+              <strong className="rg-budget-metric-value is-spent">{budgetDisplayCostText}</strong>
             </div>
-          )}
+            {budgetConfigured && (
+              <div className="rg-budget-metric-row">
+                <span>Limit</span>
+                <strong className="rg-budget-metric-value is-limit">{budgetLimitText}</strong>
+              </div>
+            )}
+          </div>
           <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
           <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
           <div className="rg-budget-reset">{selectedBudgetOverLimit ? `${selectedBudgetAgentName} budget reached` : budgetResetText}</div>

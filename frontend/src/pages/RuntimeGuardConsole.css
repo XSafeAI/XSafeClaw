@@ -349,7 +349,7 @@
   top: 407px;
   left: 12px;
   width: 136px;
-  height: 83px;
+  height: 92px;
   border: 1px solid #13232e;
   border-radius: 6px;
   background: #09131b;
@@ -376,70 +376,76 @@
   position: absolute;
   top: 9px;
   left: 8px;
+  right: 8px;
   color: #61717c;
   font-size: 8px;
   font-weight: 600;
-}
-
-.rg-budget-amount {
-  position: absolute;
-  top: 24px;
-  left: 8px;
-  width: 120px;
-  color: #e8f1f6;
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 22px;
-  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.rg-budget-amount.is-tight {
-  top: 26px;
-  font-size: 17px;
-}
-
-.rg-budget-amount.is-compact {
-  top: 28px;
-  font-size: 14px;
-}
-
-.rg-budget-limit-row {
+.rg-budget-metrics {
   position: absolute;
-  top: 48px;
+  top: 25px;
   right: 8px;
   left: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.rg-budget-metric-row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 5px;
+  gap: 8px;
+  min-width: 0;
+  height: 13px;
   color: #71818b;
-  font-size: 7px;
-  line-height: 8px;
+  font-size: 7.5px;
+  line-height: 11px;
   white-space: nowrap;
 }
 
-.rg-budget-limit-row span {
+.rg-budget-metric-row span {
   flex: 0 0 auto;
   color: #61717c;
   font-weight: 600;
   text-transform: uppercase;
 }
 
-.rg-budget-limit-row strong {
+.rg-budget-metric-value {
   min-width: 0;
   overflow: hidden;
-  color: #93a3ad;
-  font-weight: 500;
+  color: #d6e0e7;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 13px;
   text-align: right;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rg-budget-metric-value.is-spent {
+  color: #e8f1f6;
+  font-size: 13px;
+}
+
+.rg-budget-metric-value.is-limit {
+  color: #c0cbd3;
+  font-size: 10.5px;
+}
+
+.rg-budget.is-over-limit .rg-budget-metric-value.is-spent {
+  color: #f0d55e;
 }
 
 .rg-budget-bar {
   position: absolute;
-  top: 60px;
+  top: 66px;
   left: 8px;
-  width: 104px;
+  right: 33px;
   height: 5px;
   border-radius: 3px;
   background: #13232e;
@@ -459,17 +465,19 @@
 
 .rg-budget-percent {
   position: absolute;
-  top: 56px;
-  left: 114px;
+  top: 62px;
+  right: 8px;
+  width: 25px;
   color: #6f7e88;
   font-size: 7px;
+  text-align: right;
 }
 
 .rg-budget-reset {
   position: absolute;
-  top: 70px;
+  top: 78px;
   left: 8px;
-  width: 120px;
+  right: 8px;
   color: #6f7e88;
   font-size: 7px;
   overflow: hidden;
