@@ -83,10 +83,11 @@ import {
 } from './runtimeGuardToolPolicy';
 import './RuntimeGuardConsole.css';
 
-type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
+export type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
 type RuntimePlatform = RuntimeInstance['platform'];
 type RuntimeBudgetStatusMap = Record<RuntimeBudgetPlatform, RuntimeBudgetStatus>;
 type GuardMode = 'Off' | 'On';
+type AgentStatus = 'Running' | 'Idle' | 'Not installed';
 export type RuntimeGuardSession = {
   sessionKey: string;
   historySessionId?: string;
@@ -103,7 +104,7 @@ export type RuntimeGuardSession = {
 type InstallMap = Record<AgentName, boolean | null>;
 type AgentDisplay = {
   name: AgentName;
-  status: 'Running' | 'Idle' | 'Not installed';
+  status: AgentStatus;
   className: string;
   installed: boolean;
 };
@@ -118,12 +119,11 @@ const APPROVAL_POLL_INTERVAL_MS = 3000;
 const agentDefinitions: Array<{
   name: AgentName;
   platform: RuntimeBudgetPlatform;
-  defaultStatus: 'Running' | 'Idle';
   className: string;
 }> = [
-  { name: 'OpenClaw', platform: 'openclaw', defaultStatus: 'Running', className: 'agent-openclaw' },
-  { name: 'Hermes', platform: 'hermes', defaultStatus: 'Idle', className: 'agent-hermes' },
-  { name: 'Nanobot', platform: 'nanobot', defaultStatus: 'Idle', className: 'agent-nanobot' },
+  { name: 'OpenClaw', platform: 'openclaw', className: 'agent-openclaw' },
+  { name: 'Hermes', platform: 'hermes', className: 'agent-hermes' },
+  { name: 'Nanobot', platform: 'nanobot', className: 'agent-nanobot' },
 ];
 
 const sessionHistoryFilters: SessionHistoryAgentFilter[] = ['All', 'OpenClaw', 'Hermes', 'Nanobot'];
@@ -539,6 +539,32 @@ function sessionCreatedAtMs(session: RuntimeGuardSession): number {
 
 function sortSessionsNewestFirst(sessions: RuntimeGuardSession[]): RuntimeGuardSession[] {
   return [...sessions].sort((left, right) => sessionCreatedAtMs(right) - sessionCreatedAtMs(left));
+}
+
+export function runtimeGuardSessionIsRunning(
+  session: RuntimeGuardSession,
+  messageMap: Record<string, ChatMessage[]>,
+  sendingMap: Record<string, boolean>,
+): boolean {
+  if (sendingMap[session.sessionKey]) return true;
+  return (messageMap[session.sessionKey] ?? []).some(message => (
+    Boolean(message.pending) || Boolean(message.result_pending)
+  ));
+}
+
+export function runtimeGuardAgentStatus(
+  agentName: AgentName,
+  installed: boolean,
+  sessions: RuntimeGuardSession[],
+  messageMap: Record<string, ChatMessage[]>,
+  sendingMap: Record<string, boolean>,
+): AgentStatus {
+  if (!installed) return 'Not installed';
+  return sessions.some(session => (
+    session.agent === agentName && runtimeGuardSessionIsRunning(session, messageMap, sendingMap)
+  ))
+    ? 'Running'
+    : 'Idle';
 }
 
 function titleFromUserMessage(input: string): string {
@@ -1638,14 +1664,17 @@ export default function RuntimeGuardConsole() {
     () => agentDefinitions.map(agent => {
       const installed = installedAgents[agent.name];
       const probeUnknown = installed === null || installProbeFailed;
+      const inferredInstalled = probeUnknown
+        ? availableInstances.some(instance => instance.platform === agent.platform) || installed !== false
+        : Boolean(installed);
       return {
         name: agent.name,
         className: agent.className,
-        installed: probeUnknown ? true : installed,
-        status: probeUnknown ? agent.defaultStatus : installed ? agent.defaultStatus : 'Not installed',
+        installed: inferredInstalled,
+        status: runtimeGuardAgentStatus(agent.name, inferredInstalled, sessions, messageMap, sendingMap),
       };
     }),
-    [installProbeFailed, installedAgents],
+    [availableInstances, installProbeFailed, installedAgents, messageMap, sendingMap, sessions],
   );
   const budgetStatus = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
   const activeBudgetStatus = runtimeBudgetStatuses[activeBudgetPlatform] ?? defaultRuntimeBudgetStatus(activeBudgetPlatform);

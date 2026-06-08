@@ -10,10 +10,12 @@ import {
   ToolsViewAllModal,
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
+  runtimeGuardAgentStatus,
   runtimeSessionRecordToRuntimeGuardSession,
   type BlockedModalRange,
   type RuntimeGuardSession,
 } from './RuntimeGuardConsole';
+import type { ChatMessage } from '../stores/chatStreamStore';
 import type { RecentBlockedItem } from './runtimeGuardBlocked';
 import type { MiddleApprovalCard } from './runtimeGuardApproval';
 import {
@@ -261,6 +263,72 @@ describe('SessionHistoryViewAllModal', () => {
 
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('runtimeGuardAgentStatus', () => {
+  const openclawSession: RuntimeGuardSession = {
+    sessionKey: 'session-openclaw',
+    agent: 'OpenClaw',
+    platform: 'openclaw',
+    instanceId: 'openclaw-1',
+    title: 'OpenClaw session',
+    createdAt: '2026-06-05T06:32:00.000Z',
+    status: 'ready',
+  };
+  const hermesSession: RuntimeGuardSession = {
+    sessionKey: 'session-hermes',
+    agent: 'Hermes',
+    platform: 'hermes',
+    instanceId: 'hermes-1',
+    title: 'Hermes session',
+    createdAt: '2026-06-05T06:33:00.000Z',
+    status: 'ready',
+  };
+  const pendingAssistant: ChatMessage = {
+    id: 'pending-assistant',
+    role: 'assistant',
+    content: '',
+    timestamp: new Date('2026-06-05T06:34:00.000Z'),
+    pending: true,
+  };
+  const pendingTool: ChatMessage = {
+    id: 'pending-tool',
+    role: 'tool_call',
+    content: 'terminal',
+    timestamp: new Date('2026-06-05T06:35:00.000Z'),
+    result_pending: true,
+  };
+
+  it('shows Not installed when the framework is unavailable', () => {
+    expect(runtimeGuardAgentStatus('OpenClaw', false, [openclawSession], {}, {})).toBe('Not installed');
+  });
+
+  it('shows Idle when installed sessions are not actively running', () => {
+    expect(runtimeGuardAgentStatus('OpenClaw', true, [openclawSession], {}, {})).toBe('Idle');
+    expect(runtimeGuardAgentStatus('OpenClaw', true, [openclawSession], {
+      [openclawSession.sessionKey]: [{
+        id: 'done',
+        role: 'assistant',
+        content: 'done',
+        timestamp: new Date('2026-06-05T06:36:00.000Z'),
+      }],
+    }, {})).toBe('Idle');
+  });
+
+  it('shows Running only for agents with an active sending or pending session', () => {
+    expect(runtimeGuardAgentStatus('OpenClaw', true, [openclawSession, hermesSession], {}, {
+      [openclawSession.sessionKey]: true,
+    })).toBe('Running');
+    expect(runtimeGuardAgentStatus('Hermes', true, [openclawSession, hermesSession], {}, {
+      [openclawSession.sessionKey]: true,
+    })).toBe('Idle');
+    expect(runtimeGuardAgentStatus('Hermes', true, [openclawSession, hermesSession], {
+      [hermesSession.sessionKey]: [pendingAssistant],
+    }, {})).toBe('Running');
+    expect(runtimeGuardAgentStatus('Hermes', true, [openclawSession, hermesSession], {
+      [hermesSession.sessionKey]: [pendingTool],
+    }, {})).toBe('Running');
   });
 });
 
