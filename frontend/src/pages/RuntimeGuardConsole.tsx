@@ -1644,6 +1644,13 @@ export default function RuntimeGuardConsole() {
   const activeBudgetRemainingMs = runtimeBudgetRemainingMs(activeBudgetStatus, nowTs);
   const budgetConfigured = budgetLimit !== null;
   const budgetDisplayCost = budgetConfigured ? budgetUsed : budgetStatus.currentCost;
+  const budgetDisplayCostText = formatMoney(budgetDisplayCost);
+  const budgetLimitText = budgetLimit !== null ? formatMoney(budgetLimit) : '';
+  const budgetAmountDensityClass = budgetDisplayCostText.length >= 10
+    ? 'is-compact'
+    : budgetDisplayCostText.length >= 8
+      ? 'is-tight'
+      : '';
   const budgetBarPercent = budgetConfigured ? Math.max(4, budgetPercent) : 0;
   const selectedBudgetAgentName = agentDefinitions.find(agent => agent.platform === selectedBudgetPlatform)?.name ?? 'Runtime';
   const activeBudgetAgentName = agentDefinitions.find(agent => agent.platform === activeBudgetPlatform)?.name ?? 'Runtime';
@@ -2543,8 +2550,13 @@ export default function RuntimeGuardConsole() {
 
         <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
           <div className="rg-budget-title">BUDGET - {selectedBudgetAgentName}</div>
-          <div className="rg-budget-amount">{formatMoney(budgetDisplayCost)}</div>
-          {budgetConfigured && <div className="rg-budget-total">/ {formatMoney(budgetLimit ?? 0)}</div>}
+          <div className={`rg-budget-amount ${budgetAmountDensityClass}`}>{budgetDisplayCostText}</div>
+          {budgetConfigured && (
+            <div className="rg-budget-limit-row">
+              <span>Limit</span>
+              <strong>{budgetLimitText}</strong>
+            </div>
+          )}
           <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
           <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
           <div className="rg-budget-reset">{selectedBudgetOverLimit ? `${selectedBudgetAgentName} budget reached` : budgetResetText}</div>

@@ -383,24 +383,61 @@
 
 .rg-budget-amount {
   position: absolute;
-  top: 25px;
+  top: 24px;
   left: 8px;
+  width: 120px;
   color: #e8f1f6;
   font-size: 20px;
   font-weight: 600;
+  line-height: 22px;
+  letter-spacing: 0;
+  white-space: nowrap;
 }
 
-.rg-budget-total {
+.rg-budget-amount.is-tight {
+  top: 26px;
+  font-size: 17px;
+}
+
+.rg-budget-amount.is-compact {
+  top: 28px;
+  font-size: 14px;
+}
+
+.rg-budget-limit-row {
   position: absolute;
-  top: 36px;
-  left: 62px;
+  top: 48px;
+  right: 8px;
+  left: 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 5px;
   color: #71818b;
-  font-size: 8px;
+  font-size: 7px;
+  line-height: 8px;
+  white-space: nowrap;
+}
+
+.rg-budget-limit-row span {
+  flex: 0 0 auto;
+  color: #61717c;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.rg-budget-limit-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #93a3ad;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
 }
 
 .rg-budget-bar {
   position: absolute;
-  top: 55px;
+  top: 60px;
   left: 8px;
   width: 104px;
   height: 5px;
@@ -422,7 +459,7 @@
 
 .rg-budget-percent {
   position: absolute;
-  top: 51px;
+  top: 56px;
   left: 114px;
   color: #6f7e88;
   font-size: 7px;
@@ -430,7 +467,7 @@
 
 .rg-budget-reset {
   position: absolute;
-  top: 68px;
+  top: 70px;
   left: 8px;
   width: 120px;
   color: #6f7e88;
