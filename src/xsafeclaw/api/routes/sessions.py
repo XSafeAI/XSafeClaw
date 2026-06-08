@@ -4,11 +4,11 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
-from ...models import Message, Session, ToolCall
+from ...models import DeletedSessionTombstone, Message, Session, ToolCall, utc_now
 from ..runtime_helpers import apply_runtime_filters
 
 router = APIRouter()
@@ -68,6 +68,62 @@ def _infer_runtime_identity(session: Session) -> tuple[str, str]:
     return platform, instance_id
 
 
+def _session_source_id(session: Session) -> str:
+    return session.source_session_id or session.session_id
+
+
+def _not_tombstoned_clause():
+    return ~(
+        select(DeletedSessionTombstone.id)
+        .where(
+            or_(
+                DeletedSessionTombstone.session_id == Session.session_id,
+                (
+                    (DeletedSessionTombstone.platform == Session.platform)
+                    & (DeletedSessionTombstone.instance_id == Session.instance_id)
+                    & (
+                        DeletedSessionTombstone.source_session_id
+                        == func.coalesce(Session.source_session_id, Session.session_id)
+                    )
+                ),
+            )
+        )
+        .exists()
+    )
+
+
+async def _upsert_deleted_session_tombstone(
+    db: AsyncSession,
+    session: Session,
+) -> None:
+    platform, instance_id = _infer_runtime_identity(session)
+    source_session_id = _session_source_id(session)
+    result = await db.execute(
+        select(DeletedSessionTombstone)
+        .where(DeletedSessionTombstone.platform == platform)
+        .where(DeletedSessionTombstone.instance_id == instance_id)
+        .where(DeletedSessionTombstone.source_session_id == source_session_id)
+    )
+    tombstone = result.scalar_one_or_none()
+    if tombstone is None:
+        db.add(
+            DeletedSessionTombstone(
+                platform=platform,
+                instance_id=instance_id,
+                source_session_id=source_session_id,
+                session_id=session.session_id,
+                session_key=session.session_key,
+                jsonl_file_path=session.jsonl_file_path,
+            )
+        )
+        return
+
+    tombstone.session_id = session.session_id
+    tombstone.session_key = session.session_key
+    tombstone.jsonl_file_path = session.jsonl_file_path
+    tombstone.deleted_at = utc_now()
+
+
 def _to_session_response(
     session: Session,
     *,
@@ -104,6 +160,7 @@ async def list_sessions(
 ):
     """List all sessions with pagination."""
     base_stmt = apply_runtime_filters(select(Session), Session, platform=platform, instance_id=instance_id)
+    base_stmt = base_stmt.where(_not_tombstoned_clause())
 
     count_stmt = select(func.count()).select_from(base_stmt.subquery())
     total_result = await db.execute(count_stmt)
@@ -154,7 +211,7 @@ async def get_session(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a specific session by ID."""
-    stmt = select(Session).where(Session.session_id == session_id)
+    stmt = select(Session).where(Session.session_id == session_id).where(_not_tombstoned_clause())
     result = await db.execute(stmt)
     session = result.scalar_one_or_none()
 
@@ -236,7 +293,7 @@ async def get_session_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """Get all messages for a specific session with pagination."""
-    session_stmt = select(Session).where(Session.session_id == session_id)
+    session_stmt = select(Session).where(Session.session_id == session_id).where(_not_tombstoned_clause())
     session_result = await db.execute(session_stmt)
     session = session_result.scalar_one_or_none()
     if not session:
@@ -311,6 +368,7 @@ async def delete_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    await _upsert_deleted_session_tombstone(db, session)
     await db.delete(session)
     await db.commit()
     return {"message": f"Session {session_id} deleted successfully"}

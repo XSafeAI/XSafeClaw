@@ -1,6 +1,7 @@
 """Database models for SafetyAgent."""
 
 from .base import Base, TimestampMixin, metadata, utc_now
+from .deleted_session_tombstone import DeletedSessionTombstone
 from .event import Event
 from .message import Message
 from .runtime_budget import RuntimeBudgetSetting
@@ -13,6 +14,7 @@ __all__ = [
     "metadata",
     "utc_now",
     "Session",
+    "DeletedSessionTombstone",
     "Message",
     "ToolCall",
     "Event",

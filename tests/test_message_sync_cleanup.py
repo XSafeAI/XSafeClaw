@@ -20,13 +20,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from xsafeclaw import database
+from xsafeclaw.api.routes.sessions import delete_session, get_session, list_sessions
 from xsafeclaw.config import settings
 from xsafeclaw.database import get_db_context, init_db
-from xsafeclaw.models import Message, Session
+from xsafeclaw.models import DeletedSessionTombstone, Message, Session
+from xsafeclaw.runtime import namespace_session_id
 from xsafeclaw.runtime.models import RuntimeInstance, empty_capabilities
+from xsafeclaw.runtime.parsing import ParsedMessage, ParsedSessionBatch, ParsedSessionInfo
 from xsafeclaw.services.event_sync_service import EventSyncService
 from xsafeclaw.services.message_sync_service import RuntimeSyncWorker
 
@@ -253,3 +257,163 @@ async def test_other_instance_rows_are_left_alone(db):
         rows = (await session.execute(select(Session))).scalars().all()
 
     assert [row.session_id for row in rows] == ["other-runtime"]
+
+
+# ─── User-deleted tombstones ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_session_creates_tombstone_and_removes_db_rows(db):
+    """Deleting a JSONL-backed session records a durable tombstone."""
+    instance = _build_instance("openclaw")
+    source_id = "openclaw-deleted-source"
+    session_id = namespace_session_id("openclaw", instance.instance_id, source_id)
+
+    async with get_db_context() as db_session:
+        db_session.add(
+            Session(
+                session_id=session_id,
+                platform="openclaw",
+                instance_id=instance.instance_id,
+                source_session_id=source_id,
+                session_key="openclaw::openclaw-default::chat-deleted",
+                channel="webchat",
+                first_seen_at=_now(),
+                last_activity_at=_now(),
+                jsonl_file_path="/tmp/openclaw/sessions/openclaw-deleted-source.jsonl",
+            )
+        )
+        db_session.add(
+            Message(
+                session_id=session_id,
+                message_id="msg-deleted-user",
+                platform="openclaw",
+                instance_id=instance.instance_id,
+                source_session_id=source_id,
+                role="user",
+                timestamp=_now(),
+                content_text="delete me",
+            )
+        )
+        await db_session.flush()
+
+        response = await delete_session(session_id, db_session)
+
+    assert response["message"] == f"Session {session_id} deleted successfully"
+
+    async with get_db_context() as db_session:
+        sessions = (await db_session.execute(select(Session))).scalars().all()
+        messages = (await db_session.execute(select(Message))).scalars().all()
+        tombstones = (await db_session.execute(select(DeletedSessionTombstone))).scalars().all()
+
+    assert sessions == []
+    assert messages == []
+    assert len(tombstones) == 1
+    assert tombstones[0].platform == "openclaw"
+    assert tombstones[0].instance_id == instance.instance_id
+    assert tombstones[0].source_session_id == source_id
+    assert tombstones[0].session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_tombstoned_session_row_is_hidden_from_session_api(db):
+    """A tombstone wins even if a racing sync leaves a Session row behind."""
+    instance = _build_instance("openclaw")
+    source_id = "openclaw-hidden-source"
+    session_id = namespace_session_id("openclaw", instance.instance_id, source_id)
+
+    async with get_db_context() as db_session:
+        db_session.add(
+            Session(
+                session_id=session_id,
+                platform="openclaw",
+                instance_id=instance.instance_id,
+                source_session_id=source_id,
+                session_key="openclaw::openclaw-default::chat-hidden",
+                channel="webchat",
+                first_seen_at=_now(),
+                last_activity_at=_now(),
+                jsonl_file_path="/tmp/openclaw/sessions/openclaw-hidden-source.jsonl",
+            )
+        )
+        db_session.add(
+            DeletedSessionTombstone(
+                platform="openclaw",
+                instance_id=instance.instance_id,
+                source_session_id=source_id,
+                session_id=session_id,
+            )
+        )
+        await db_session.flush()
+
+        list_response = await list_sessions(
+            page=1,
+            page_size=20,
+            platform=None,
+            instance_id=None,
+            db=db_session,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await get_session(session_id, db_session)
+
+    assert list_response.total == 0
+    assert list_response.sessions == []
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_tombstoned_jsonl_session_is_not_reimported(db, tmp_path):
+    """A deleted JSONL-backed session stays deleted while the source file remains."""
+    instance = _build_instance("openclaw")
+    worker = _build_worker(instance)
+    source_id = "openclaw-reimport-source"
+    session_id = namespace_session_id("openclaw", instance.instance_id, source_id)
+    jsonl_path = tmp_path / f"{source_id}.jsonl"
+    jsonl_path.write_text("", encoding="utf-8")
+    parsed_batch = ParsedSessionBatch(
+        session=ParsedSessionInfo(
+            source_session_id=source_id,
+            session_key=source_id,
+            first_seen_at=_now(),
+            last_activity_at=_now(),
+            jsonl_file_path=str(jsonl_path),
+        ),
+        messages=[
+            ParsedMessage(
+                source_message_id="msg-1",
+                source_parent_message_id=None,
+                role="user",
+                timestamp=_now(),
+                content_text="this should not come back",
+            )
+        ],
+        total_lines=1,
+    )
+
+    async def fake_parse_file(file_path, start_line):
+        assert file_path == jsonl_path
+        assert start_line == 0
+        return parsed_batch
+
+    worker._parse_file = fake_parse_file  # type: ignore[method-assign]
+
+    async with get_db_context() as db_session:
+        db_session.add(
+            DeletedSessionTombstone(
+                platform="openclaw",
+                instance_id=instance.instance_id,
+                source_session_id=source_id,
+                session_id=session_id,
+                jsonl_file_path=str(jsonl_path),
+            )
+        )
+
+    await worker._sync_file(jsonl_path, full_sync=True)
+
+    async with get_db_context() as db_session:
+        sessions = (await db_session.execute(select(Session))).scalars().all()
+        messages = (await db_session.execute(select(Message))).scalars().all()
+
+    assert sessions == []
+    assert messages == []
+    assert worker._sync_positions[str(jsonl_path)] == 1

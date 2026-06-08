@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db_context
-from ..models import Event, Message, Session, ToolCall
+from ..models import DeletedSessionTombstone, Event, Message, Session, ToolCall
 from ..runtime import (
     RuntimeInstance,
     RuntimeRegistry,
@@ -205,6 +205,20 @@ class RuntimeSyncWorker:
         await db.execute(delete(Message).where(Message.session_id == session_id))
         await db.execute(delete(Session).where(Session.session_id == session_id))
 
+    async def _is_session_tombstoned(
+        self,
+        db: AsyncSession,
+        source_session_id: str,
+    ) -> bool:
+        result = await db.execute(
+            select(DeletedSessionTombstone.id)
+            .where(DeletedSessionTombstone.platform == self.instance.platform)
+            .where(DeletedSessionTombstone.instance_id == self.instance.instance_id)
+            .where(DeletedSessionTombstone.source_session_id == source_session_id)
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
     def _queue_file_sync(self, path: Path, *, full_sync: bool) -> None:
         loop = asyncio.get_running_loop()
         file_path_str = str(path)
@@ -296,6 +310,17 @@ class RuntimeSyncWorker:
         self._file_to_source_session[str(file_path)] = batch.session.source_session_id
 
         async with get_db_context() as db:
+            if await self._is_session_tombstoned(db, batch.session.source_session_id):
+                internal_session_id = namespace_session_id(
+                    self.instance.platform,
+                    self.instance.instance_id,
+                    batch.session.source_session_id,
+                )
+                await self._delete_session_data_by_internal_id(db, internal_session_id)
+                self._sync_positions[str(file_path)] = batch.total_lines
+                self._pending_event_sync.discard(internal_session_id)
+                return
+
             internal_session_id = await self._ensure_session(db, batch.session)
             session_model_provider, session_model_name = _resolve_session_model_defaults(
                 batch.session.current_model_provider,
