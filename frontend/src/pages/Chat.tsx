@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
+﻿import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Send, Loader2, Bot, Plus, RotateCcw, Trash2, MessageSquare, Clock,
@@ -17,6 +17,7 @@ import {
   loadBudgetSettings,
   saveBudgetSettings,
 } from '../utils/budgetControl';
+import { getSessionListVisibleCount, SESSION_LIST_ROW_ESTIMATE_PX } from '../utils/sessionListLimit';
 
 declare global {
   interface Window {
@@ -65,6 +66,53 @@ function loadStoredSessions(): StoredSession[] {
 
 function saveStoredSessions(sessions: StoredSession[]) {
   localStorage.setItem(LS_KEY, JSON.stringify(sessions));
+}
+
+function normalizeDiscoveredSession(raw: any): StoredSession | null {
+  const key = String(raw?.key || '').trim();
+  if (!key) return null;
+  const fallbackLabel = key.split('::').pop() || key;
+  return {
+    key,
+    label: String(raw?.label || fallbackLabel).trim() || fallbackLabel,
+    createdAt: String(raw?.created_at || raw?.last_activity_at || new Date().toISOString()),
+    instanceId: raw?.instance_id ? String(raw.instance_id) : undefined,
+    platform: raw?.platform ? String(raw.platform) : undefined,
+    displayName: raw?.display_name ? String(raw.display_name) : undefined,
+    model: raw?.model ? String(raw.model) : undefined,
+    autoTitlePending: Boolean(raw?.auto_title_pending),
+  };
+}
+
+function mergeDiscoveredSessions(current: StoredSession[], discovered: StoredSession[]): StoredSession[] {
+  if (discovered.length === 0) return current;
+  const currentByKey = new Map(current.map(session => [session.key, session]));
+  const seen = new Set<string>();
+  const merged: StoredSession[] = [];
+
+  for (const remote of discovered) {
+    if (seen.has(remote.key)) continue;
+    seen.add(remote.key);
+    const local = currentByKey.get(remote.key);
+    if (!local) {
+      merged.push(remote);
+      continue;
+    }
+    merged.push({
+      ...local,
+      createdAt: local.createdAt || remote.createdAt,
+      instanceId: remote.instanceId ?? local.instanceId,
+      platform: remote.platform ?? local.platform,
+      displayName: remote.displayName ?? local.displayName,
+      model: remote.model ?? local.model,
+      autoTitlePending: local.autoTitlePending ?? remote.autoTitlePending,
+    });
+  }
+
+  for (const local of current) {
+    if (!seen.has(local.key)) merged.push(local);
+  }
+  return merged;
 }
 
 /* ==================== Helpers ==================== */
@@ -369,6 +417,8 @@ export default function Chat() {
   const [editingSessionLabel, setEditingSessionLabel] = useState('');
 
   const [guardOn, setGuardOn] = useState(true);
+  const [sessionListExpanded, setSessionListExpanded] = useState(false);
+  const [sessionListVisibleCount, setSessionListVisibleCount] = useState(1);
 
   // §45: cross-session Hermes-switch hint.  When the user picks a session
   // whose bound Hermes model differs from the previously-active session's
@@ -398,6 +448,8 @@ export default function Chat() {
   const [budgetBlockRemainingMs, setBudgetBlockRemainingMs] = useState(0);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const sessionListViewportRef = useRef<HTMLDivElement>(null);
+  const sessionListRowRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const speechRecRef = useRef<any>(null);
@@ -429,6 +481,12 @@ export default function Chat() {
 
   const activeSession = activeKey ? (sessions.find(item => item.key === activeKey) ?? null) : null;
   const activeMessages: ChatMessage[] = activeKey ? (messageMap[activeKey] ?? []) : [];
+  const displayedSessions = useMemo(
+    () => sessionListExpanded ? sessions : sessions.slice(0, sessionListVisibleCount),
+    [sessionListExpanded, sessionListVisibleCount, sessions],
+  );
+  const hiddenSessionCount = Math.max(0, sessions.length - sessionListVisibleCount);
+  const shouldShowSessionListToggle = sessions.length > sessionListVisibleCount;
   const availableInstances = (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled);
   const selectedInstance = availableInstances.find(instance => instance.instance_id === selectedInstanceId) ?? null;
   const activeInstance = activeSession?.instanceId
@@ -451,6 +509,67 @@ export default function Chat() {
   useEffect(() => {
     saveStoredSessions(sessions);
   }, [sessions]);
+
+  const syncDiscoveredSessions = useCallback(async () => {
+    try {
+      const res = await chatAPI.listSessions();
+      const discovered = (res.data.sessions ?? [])
+        .map(normalizeDiscoveredSession)
+        .filter((session): session is StoredSession => Boolean(session));
+      if (discovered.length === 0) return;
+      setSessions(prev => mergeDiscoveredSessions(prev, discovered));
+      setActiveKey(current => current ?? discovered[0]?.key ?? null);
+    } catch {
+      // Local-only sessions still work when the backend index is temporarily unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      if (cancelled) return;
+      await syncDiscoveredSessions();
+    };
+    sync();
+    window.addEventListener('focus', sync);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', sync);
+    };
+  }, [syncDiscoveredSessions]);
+
+  useEffect(() => {
+    const node = sessionListViewportRef.current;
+    if (!node) return;
+    let frame = 0;
+
+    const updateVisibleCount = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const measuredRowHeight = sessionListRowRef.current?.getBoundingClientRect().height
+          || SESSION_LIST_ROW_ESTIMATE_PX;
+        setSessionListVisibleCount(
+          getSessionListVisibleCount(node.clientHeight, measuredRowHeight + 2),
+        );
+      });
+    };
+
+    updateVisibleCount();
+    const observer = new ResizeObserver(updateVisibleCount);
+    observer.observe(node);
+    window.addEventListener('resize', updateVisibleCount);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener('resize', updateVisibleCount);
+    };
+  }, [sessions.length]);
+
+  useEffect(() => {
+    if (sessions.length <= sessionListVisibleCount) {
+      setSessionListExpanded(false);
+    }
+  }, [sessionListVisibleCount, sessions.length]);
 
   // Auto-scroll
   useEffect(() => {
@@ -1514,20 +1633,26 @@ export default function Chat() {
               {t.chat.sessions.replace('{n}', String(sessions.length))}
             </p>
           </div>
-          <div className="flex-1 overflow-y-auto py-2 space-y-0.5 px-2">
+          <div
+            ref={sessionListViewportRef}
+            className={`flex-1 py-2 space-y-0.5 px-2 ${
+              sessionListExpanded ? 'overflow-y-auto' : 'overflow-hidden'
+            }`}
+          >
             {sessions.length === 0 ? (
               <div className="text-center py-10">
                 <MessageSquare className="w-6 h-6 text-text-muted mx-auto mb-2" />
                 <p className="text-[11px] text-text-muted">{t.chat.noSessions}</p>
               </div>
             ) : (
-              sessions.map(s => {
+              displayedSessions.map((s, index) => {
                 const isActive = s.key === activeKey;
                 const msgCount = (messageMap[s.key] ?? []).filter(m => !m.pending).length;
                 const isLoading = loadingHistory === s.key;
                 return (
                   <div
                     key={s.key}
+                    ref={index === 0 ? sessionListRowRef : undefined}
                     onClick={() => handleSelectSession(s.key)}
                     className={`group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${
                       isActive
@@ -1609,6 +1734,22 @@ export default function Chat() {
               })
             )}
           </div>
+          {shouldShowSessionListToggle && (
+            <div className="flex-shrink-0 border-t border-border bg-surface-1 px-2 py-2">
+              <button
+                type="button"
+                onClick={() => setSessionListExpanded(prev => !prev)}
+                title={sessionListExpanded
+                  ? t.chat.collapseSessions
+                  : t.chat.hiddenSessions.replace('{n}', String(hiddenSessionCount))}
+                className="w-full rounded-lg border border-border bg-surface-0/80 px-3 py-2 text-[12px] font-medium text-text-secondary hover:border-accent/40 hover:text-text-primary hover:bg-surface-2 transition-colors"
+              >
+                {sessionListExpanded
+                  ? t.chat.collapseSessions
+                  : t.chat.showAllSessions.replace('{n}', String(sessions.length))}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Main chat area */}

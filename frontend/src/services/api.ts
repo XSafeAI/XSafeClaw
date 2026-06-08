@@ -524,6 +524,21 @@ export const chatAPI = {
   startSession: (data?: { instance_id?: string; label?: string | null; model_override?: string | null; provider_override?: string | null }) =>
     api.post<{ session_key: string; status: string; instance_id: string; platform: string; instance?: RuntimeInstance }>('/chat/start-session', data ?? {}),
 
+  listSessions: () =>
+    api.get<{
+      sessions: Array<{
+        key: string;
+        label?: string | null;
+        created_at?: string | null;
+        last_activity_at?: string | null;
+        instance_id?: string | null;
+        platform?: string | null;
+        display_name?: string | null;
+        model?: string | null;
+        auto_title_pending?: boolean | null;
+      }>;
+    }>('/chat/sessions'),
+
   sendMessage: (sessionKey: string, message: string) =>
     api.post<{
       run_id: string;
