@@ -56,6 +56,7 @@ import { useRuntimeInstances } from '../hooks/useAPI';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
 import {
   buildActiveTimelineRows,
+  buildTimelineScrollKey,
   getActiveApprovalCards,
   upsertMiddleApprovalCards,
   type ApprovalDecision,
@@ -1360,6 +1361,10 @@ export default function RuntimeGuardConsole() {
   const activeTimelineRows = useMemo(() => {
     return buildActiveTimelineRows(activeMessages, activeApprovalCards);
   }, [activeApprovalCards, activeMessages]);
+  const activeTimelineScrollKey = useMemo(
+    () => buildTimelineScrollKey(activeTimelineRows),
+    [activeTimelineRows],
+  );
   const visibleSessionHistoryItems = useMemo(
     () => mergeSessionHistorySessions(sessionHistoryItems, sessions),
     [sessionHistoryItems, sessions],
@@ -1553,8 +1558,11 @@ export default function RuntimeGuardConsole() {
   }, []);
 
   useEffect(() => {
-    taskScrollRef.current?.scrollTo({ top: taskScrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [activeSessionKey, activeMessages.length, activeTimelineRows.length]);
+    const frame = window.requestAnimationFrame(() => {
+      taskScrollRef.current?.scrollTo({ top: taskScrollRef.current.scrollHeight, behavior: 'smooth' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionKey, activeTimelineScrollKey]);
 
   useEffect(() => {
     if (!activeSessionKey) return;

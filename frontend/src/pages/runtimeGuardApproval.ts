@@ -83,10 +83,35 @@ export function approvalStatusFromItem(item: GuardPendingApproval): MiddleApprov
 
 export function sortMiddleApprovalCards(cards: MiddleApprovalCard[]): MiddleApprovalCard[] {
   return [...cards].sort((left, right) => {
-    const byCreated = Number(left.createdAt || 0) - Number(right.createdAt || 0);
+    const byCreated = approvalCreatedAtSeconds(left) - approvalCreatedAtSeconds(right);
     if (byCreated !== 0) return byCreated;
     return left.id.localeCompare(right.id);
   });
+}
+
+function finiteNumber(value: unknown): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function approvalCreatedAtSeconds(card: MiddleApprovalCard): number {
+  const createdAt = finiteNumber(card.createdAt);
+  if (createdAt > 0) return createdAt;
+  const itemCreatedAt = finiteNumber(card.item.created_at);
+  if (itemCreatedAt > 0) return itemCreatedAt;
+  const updatedAt = finiteNumber(card.updatedAt);
+  return updatedAt > 0 ? updatedAt / 1000 : 0;
+}
+
+function approvalCreatedAtMs(card: MiddleApprovalCard): number {
+  return approvalCreatedAtSeconds(card) * 1000;
+}
+
+function messageTimestampMs(message: ChatMessage): number {
+  const timestamp = message.timestamp instanceof Date
+    ? message.timestamp.getTime()
+    : new Date(message.timestamp).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 export function upsertMiddleApprovalCards(
@@ -147,16 +172,49 @@ export function buildActiveTimelineRows(
   activeApprovalCards: MiddleApprovalCard[],
 ): TimelineRow[] {
   const rows: TimelineRow[] = [];
-  let approvalsInjected = false;
+  const approvals = sortMiddleApprovalCards(activeApprovalCards);
+  let approvalIndex = 0;
+
   for (const message of activeMessages) {
-    if (!approvalsInjected && message.role === 'assistant' && message.pending) {
-      activeApprovalCards.forEach(card => rows.push({ type: 'approval', card }));
-      approvalsInjected = true;
+    const messageMs = messageTimestampMs(message);
+    while (
+      approvalIndex < approvals.length
+      && approvalCreatedAtMs(approvals[approvalIndex]) < messageMs
+    ) {
+      rows.push({ type: 'approval', card: approvals[approvalIndex] });
+      approvalIndex += 1;
     }
     rows.push({ type: 'message', message });
   }
-  if (!approvalsInjected) {
-    activeApprovalCards.forEach(card => rows.push({ type: 'approval', card }));
+
+  while (approvalIndex < approvals.length) {
+    rows.push({ type: 'approval', card: approvals[approvalIndex] });
+    approvalIndex += 1;
   }
+
   return rows;
+}
+
+export function buildTimelineScrollKey(rows: TimelineRow[]): string {
+  return rows.map(row => {
+    if (row.type === 'approval') {
+      return [
+        'a',
+        row.card.id,
+        approvalCreatedAtSeconds(row.card),
+      ].join(':');
+    }
+
+    const message = row.message;
+    return [
+      'm',
+      message.id,
+      messageTimestampMs(message),
+      message.role,
+      message.pending ? 1 : 0,
+      message.result_pending ? 1 : 0,
+      message.is_error ? 1 : 0,
+      message.content.length,
+    ].join(':');
+  }).join('|');
 }
