@@ -118,6 +118,11 @@ const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
 const RUNTIME_GUARD_DRAFTS_KEY = 'xsafeclaw:runtime-guard:drafts';
 const APPROVAL_POLL_INTERVAL_MS = 3000;
 const BUILD_TIME_XSAFECLAW_VERSION = import.meta.env.VITE_XSAFECLAW_VERSION || null;
+const RUNTIME_GUARD_DESIGN_HEIGHT = 570;
+const RUNTIME_GUARD_LEFT_WIDTH = 156;
+const RUNTIME_GUARD_RIGHT_WIDTH = 207;
+const RUNTIME_GUARD_MIN_MAIN_WIDTH = 280;
+const RUNTIME_GUARD_TOP_GAP = 38;
 
 const agentDefinitions: Array<{
   name: AgentName;
@@ -1700,10 +1705,10 @@ export default function RuntimeGuardConsole() {
 
   useEffect(() => {
     const updateLayoutFit = () => {
-      const scale = window.innerHeight / 570;
-      const leftWidth = 156 * scale;
-      const rightWidth = 207 * scale;
-      const mainWidth = Math.max(window.innerWidth - leftWidth - rightWidth, 280 * scale);
+      const scale = window.innerHeight / RUNTIME_GUARD_DESIGN_HEIGHT;
+      const leftWidth = RUNTIME_GUARD_LEFT_WIDTH * scale;
+      const rightWidth = RUNTIME_GUARD_RIGHT_WIDTH * scale;
+      const mainWidth = Math.max(window.innerWidth - leftWidth - rightWidth, RUNTIME_GUARD_MIN_MAIN_WIDTH * scale);
 
       setLayoutFit({
         scale,
@@ -2759,14 +2764,40 @@ export default function RuntimeGuardConsole() {
     height: layoutFit.height,
     '--rg-scale': layoutFit.scale,
   } as CSSProperties;
+  const topShelfStyle = {
+    left: layoutFit.leftWidth,
+    width: layoutFit.mainWidth + layoutFit.rightWidth,
+    height: RUNTIME_GUARD_TOP_GAP * layoutFit.scale,
+  } as CSSProperties;
   const runtimeGuardPageStyle = {
     '--rg-scale': layoutFit.scale,
+    '--rg-top-gap': `${RUNTIME_GUARD_TOP_GAP}px`,
+    '--rg-top-gap-px': `${RUNTIME_GUARD_TOP_GAP * layoutFit.scale}px`,
   } as CSSProperties;
   const xsafeclawVersionLabel = formatVersionLabel(xsafeclawVersion);
 
   return (
     <div className="runtime-guard-page" style={runtimeGuardPageStyle}>
       {placeholder && <div className="rg-toast">{placeholder}</div>}
+      <div className="rg-runtime-top-shelf" style={topShelfStyle} aria-hidden="true" />
+      <div className="rg-top-utilities" aria-label={copy.sidebar.topUtilitiesAria}>
+        <button
+          className="rg-top-utility"
+          onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}
+          type="button"
+        >
+          <Globe2 />
+          <span>{copy.sidebar.languageToggle}</span>
+        </button>
+        <button className="rg-top-utility rg-top-town" onClick={() => navigate('/agent-town')} type="button">
+          <Bot />
+          <span>{copy.sidebar.agentTown}</span>
+        </button>
+        <button className="rg-top-utility rg-top-user" type="button" aria-disabled="true">
+          <User />
+          <span>{copy.sidebar.userInfo}</span>
+        </button>
+      </div>
       {newTaskModalOpen && (
         <NewTaskModal
           agentOptions={newTaskAgentOptions}
@@ -2974,25 +3005,21 @@ export default function RuntimeGuardConsole() {
           })}
         </section>
 
-        <button
-          className="rg-nav-card rg-language-card"
-          onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}
-          type="button"
-        >
-          <span>{copy.sidebar.languageToggle}</span>
-        </button>
-
-        <button className="rg-nav-card rg-town-card" onClick={() => navigate('/agent-town')} type="button">
-          <span>{copy.sidebar.agentTown}</span>
-        </button>
-
-        <button className="rg-nav-card rg-asset-card" onClick={() => navigate('/assets')} type="button">
-          <span>{copy.sidebar.assetShield}</span>
-        </button>
-
-        <button className="rg-nav-card rg-risk-card" onClick={() => navigate('/risk-test')} type="button">
-          <span>{copy.sidebar.riskTest}</span>
-        </button>
+        <section className="rg-safety-links">
+          <div className="rg-section-title">
+            <span>{copy.sidebar.safetyTools}</span>
+          </div>
+          <button className="rg-safety-row" onClick={() => navigate('/assets')} style={{ top: 20 }} type="button">
+            <Shield />
+            <span>{copy.sidebar.assetShield}</span>
+            <ChevronRight />
+          </button>
+          <button className="rg-safety-row" onClick={() => navigate('/risk-test')} style={{ top: 48 }} type="button">
+            <AlertTriangle />
+            <span>{copy.sidebar.riskTest}</span>
+            <ChevronRight />
+          </button>
+        </section>
 
         <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
           <div className="rg-budget-title">{copy.sidebar.budget} - {selectedBudgetAgentName}</div>
@@ -3296,10 +3323,6 @@ export default function RuntimeGuardConsole() {
             )}
           </section>
         </aside>
-      </div>
-      <div className="rg-version">
-        <span>{xsafeclawVersionLabel}</span>
-        <Shield />
       </div>
     </div>
   );
