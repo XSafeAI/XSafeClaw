@@ -2245,7 +2245,9 @@ _SMART_AGENT_NAME_TO_PLATFORM = {
     name: platform for platform, name in _SMART_AGENT_PLATFORM_TO_NAME.items()
 }
 _SMART_ROUTER_SOURCE_PLATFORMS = ("openclaw", "hermes")
+_SMART_ROUTER_MAX_ATTEMPTS = 5
 _SMART_ROUTER_TIMEOUT_S = 35.0
+_SMART_ROUTER_FALLBACK_SOURCE = "deterministic_fallback"
 _SMART_ROUTING_FAILURE_MESSAGE = (
     "Smart routing failed. Please choose an available agent manually."
 )
@@ -2364,21 +2366,24 @@ def _build_smart_router_prompt(
     message: str,
     candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
 ) -> str:
-    allowed_agents = [
+    candidate_options = [
         {
+            "id": chr(ord("A") + index),
             "agent": agent_name,
             "platform": instance.platform,
             "displayName": instance.display_name,
         }
-        for agent_name, instance in candidates
+        for index, (agent_name, instance) in enumerate(candidates)
     ]
+    valid_ids = ", ".join(option["id"] for option in candidate_options)
     return (
         "You are XSafeClaw's silent Agent router.\n"
         "Choose exactly one Agent framework for the user's request.\n"
-        "You must choose only from the allowed_agents list below.\n"
-        "Return strict JSON only, with no markdown, no prose, and no extra keys.\n"
-        "Schema: {\"agent\":\"<one of allowed agent names>\"}\n\n"
-        f"allowed_agents:\n{json.dumps(allowed_agents, ensure_ascii=False)}\n\n"
+        "You must choose only from the candidate_options list below.\n"
+        f"Reply with exactly one candidate id only: {valid_ids}.\n"
+        "Do not return JSON, markdown, prose, explanations, or the agent name.\n"
+        "If several candidates seem possible, choose the single best available id.\n\n"
+        f"candidate_options:\n{json.dumps(candidate_options, ensure_ascii=False)}\n\n"
         f"user_request:\n{message[:4000]}"
     )
 
@@ -2395,26 +2400,82 @@ def _strip_json_code_fence(text: str) -> str:
 def _parse_smart_router_agent(
     raw_output: str,
     allowed_agents: set[str],
+    candidate_ids: dict[str, Literal["OpenClaw", "Hermes", "Nanobot"]] | None = None,
 ) -> Literal["OpenClaw", "Hermes", "Nanobot"]:
-    try:
-        payload = json.loads(_strip_json_code_fence(raw_output))
-    except Exception as exc:
-        raise ValueError("router output is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("router output is not a JSON object")
-    if set(payload.keys()) != {"agent"}:
-        raise ValueError("router output has unexpected keys")
-    raw_agent = payload.get("agent")
-    if not isinstance(raw_agent, str):
-        raise ValueError("router output missing agent")
-    normalized = raw_agent.strip()
-    exact = next((agent for agent in allowed_agents if agent == normalized), "")
-    if not exact:
+    def normalize_agent(raw_agent: str) -> str:
+        normalized = raw_agent.strip()
+        exact = next((agent for agent in allowed_agents if agent == normalized), "")
+        if exact:
+            return exact
         lower = normalized.lower()
-        exact = next((agent for agent in allowed_agents if agent.lower() == lower), "")
+        return next((agent for agent in allowed_agents if agent.lower() == lower), "")
+
+    def normalize_candidate_id(raw_id: str) -> str:
+        if not candidate_ids:
+            return ""
+        candidate_id = raw_id.strip().upper()
+        return candidate_ids.get(candidate_id, "")
+
+    stripped = _strip_json_code_fence(raw_output)
+    first_line = next((line.strip() for line in stripped.splitlines() if line.strip()), "")
+    first_line = first_line.strip(" \t\r\n\"'`.,;:：()[]{}")
+    try:
+        payload = json.loads(stripped)
+    except Exception:
+        payload = None
+
+    raw_agent = ""
+    raw_candidate_id = ""
+    if isinstance(payload, dict):
+        candidate = payload.get("id") or payload.get("choice") or payload.get("candidate")
+        if isinstance(candidate, str):
+            raw_candidate_id = candidate
+        candidate = payload.get("agent")
+        if isinstance(candidate, str):
+            raw_agent = candidate
+    elif isinstance(payload, str):
+        raw_agent = payload
+
+    exact = normalize_candidate_id(raw_candidate_id) if raw_candidate_id else ""
+    if not exact and candidate_ids:
+        candidate_id_patterns = [
+            r"^([A-Z])$",
+            r"^(?:answer|choice|candidate|option|id)\s*[:：-]?\s*([A-Z])\b",
+            r"\b(?:choose|pick|select|selected|recommend)\s+(?:option\s+)?([A-Z])\b",
+            r"\boption\s+([A-Z])\b",
+        ]
+        for pattern in candidate_id_patterns:
+            match = re.search(pattern, first_line, flags=re.IGNORECASE)
+            if not match:
+                continue
+            exact = normalize_candidate_id(match.group(1))
+            if exact:
+                break
+
+    if not exact and raw_agent:
+        exact = normalize_agent(raw_agent)
+    if not exact:
+        first_line_agent = normalize_agent(first_line)
+        if first_line_agent:
+            exact = first_line_agent
+    if not exact:
+        mentions = [
+            agent for agent in allowed_agents
+            if re.search(rf"\b{re.escape(agent)}\b", stripped, re.IGNORECASE)
+        ]
+        if len(mentions) == 1:
+            exact = mentions[0]
     if exact not in _SMART_AGENT_NAMES:
         raise ValueError("router output selected unavailable agent")
     return exact  # type: ignore[return-value]
+
+
+def _fallback_smart_router_agent(
+    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
+) -> tuple[Literal["OpenClaw", "Hermes", "Nanobot"], str]:
+    if not candidates:
+        raise _smart_routing_exception(503)
+    return candidates[0][0], _SMART_ROUTER_FALLBACK_SOURCE
 
 
 async def _route_smart_agent(
@@ -2424,13 +2485,23 @@ async def _route_smart_agent(
     instances: list[RuntimeInstance],
 ) -> tuple[Literal["OpenClaw", "Hermes", "Nanobot"], str]:
     allowed_agents = {agent_name for agent_name, _ in candidates}
+    candidate_ids = {
+        chr(ord("A") + index): agent_name
+        for index, (agent_name, _) in enumerate(candidates)
+    }
     prompt = _build_smart_router_prompt(message, candidates)
     sources = _smart_router_source_instances(instances)
     if not sources:
-        raise _smart_routing_exception(503)
+        print(
+            "[smart-router] no router source available; "
+            f"falling back to {candidates[0][0]}"
+        )
+        return _fallback_smart_router_agent(candidates)
 
     last_error: Exception | None = None
-    for source in sources:
+    for attempt_index in range(_SMART_ROUTER_MAX_ATTEMPTS):
+        source = sources[attempt_index % len(sources)]
+        attempt_number = attempt_index + 1
         try:
             raw = await asyncio.wait_for(
                 call_runtime_model_prompt(
@@ -2445,21 +2516,28 @@ async def _route_smart_agent(
             last_error = exc if isinstance(exc, Exception) else Exception(str(exc))
             print(
                 "[smart-router] router source failed "
+                f"attempt={attempt_number}/{_SMART_ROUTER_MAX_ATTEMPTS} "
                 f"platform={source.platform} instance={source.instance_id}: {last_error}"
             )
             continue
 
         try:
-            return _parse_smart_router_agent(raw, allowed_agents), source.platform
+            return _parse_smart_router_agent(raw, allowed_agents, candidate_ids), source.platform
         except ValueError as exc:
             print(
                 "[smart-router] invalid router output "
+                f"attempt={attempt_number}/{_SMART_ROUTER_MAX_ATTEMPTS} "
                 f"platform={source.platform} instance={source.instance_id}: {exc}; "
                 f"allowed={sorted(allowed_agents)} raw={raw!r}"
             )
-            raise _smart_routing_exception(502) from exc
+            last_error = exc
+            continue
 
-    raise _smart_routing_exception(502) from last_error
+    print(
+        "[smart-router] all router sources failed or returned invalid output; "
+        f"falling back to {candidates[0][0]} last_error={last_error}"
+    )
+    return _fallback_smart_router_agent(candidates)
 
 
 class ImageAttachment(BaseModel):

@@ -147,6 +147,45 @@ async def test_smart_start_routes_multiple_agents_with_openclaw_source(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_smart_start_accepts_candidate_id_output(monkeypatch):
+    openclaw = _runtime("openclaw")
+    hermes = _runtime("hermes")
+    nanobot = _runtime("nanobot")
+    captured: dict[str, object] = {}
+
+    async def fake_list_instances():
+        return [openclaw, hermes, nanobot]
+
+    async def fake_budget_allows(_platform: str):
+        return True
+
+    async def fake_router(prompt: str, *, platform: str, instance_id: str, max_tokens: int):
+        captured["prompt"] = prompt
+        return "B"
+
+    async def fake_create(request):
+        captured["request"] = request
+        return _response(hermes)
+
+    monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
+    monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
+    monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fake_create)
+
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="review this codebase")
+    )
+
+    request = captured["request"]
+    assert isinstance(request, chat_routes.StartSessionRequest)
+    assert '"id": "A"' in str(captured["prompt"])
+    assert '"id": "B"' in str(captured["prompt"])
+    assert request.instance_id == "hermes-default"
+    assert response.selected_agent == "Hermes"
+    assert response.router_source == "openclaw"
+
+
+@pytest.mark.asyncio
 async def test_smart_start_uses_hermes_source_when_openclaw_router_fails(monkeypatch):
     openclaw = _runtime("openclaw")
     hermes = _runtime("hermes")
@@ -184,9 +223,10 @@ async def test_smart_start_uses_hermes_source_when_openclaw_router_fails(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_smart_start_rejects_router_agent_outside_candidates_without_exposing_name(monkeypatch):
+async def test_smart_start_falls_back_when_router_agent_outside_candidates(monkeypatch):
     openclaw = _runtime("openclaw")
     hermes = _runtime("hermes")
+    captured: dict[str, object] = {}
 
     async def fake_list_instances():
         return [openclaw, hermes]
@@ -197,25 +237,158 @@ async def test_smart_start_rejects_router_agent_outside_candidates_without_expos
     async def fake_router(*_args, **_kwargs):
         return json.dumps({"agent": "Nanobot"})
 
-    async def fail_create(*_args, **_kwargs):
-        raise AssertionError("invalid router output must not create a session")
+    async def fake_create(request):
+        captured["request"] = request
+        return _response(openclaw)
 
     monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
     monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
     monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
-    monkeypatch.setattr(chat_routes, "_create_chat_session", fail_create)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fake_create)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await chat_routes.smart_start_session(
-            chat_routes.SmartStartSessionRequest(message="run a safe check")
-        )
-
-    detail_text = json.dumps(exc_info.value.detail)
-    assert exc_info.value.status_code == 502
-    assert "Nanobot" not in detail_text
-    assert exc_info.value.detail["message"] == (
-        "Smart routing failed. Please choose an available agent manually."
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="run a safe check")
     )
+
+    request = captured["request"]
+    assert isinstance(request, chat_routes.StartSessionRequest)
+    assert request.instance_id == "openclaw-default"
+    assert response.selected_agent == "OpenClaw"
+    assert response.router_source == "deterministic_fallback"
+
+
+@pytest.mark.asyncio
+async def test_smart_start_falls_back_when_all_router_sources_fail(monkeypatch):
+    openclaw = _runtime("openclaw")
+    hermes = _runtime("hermes")
+    calls: list[str] = []
+
+    async def fake_list_instances():
+        return [openclaw, hermes]
+
+    async def fake_budget_allows(_platform: str):
+        return True
+
+    async def fake_router(_prompt: str, *, platform: str, instance_id: str, max_tokens: int):
+        _ = instance_id, max_tokens
+        calls.append(platform)
+        raise RuntimeError("router model unavailable")
+
+    async def fake_create(request):
+        assert request.instance_id == "openclaw-default"
+        return _response(openclaw)
+
+    monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
+    monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
+    monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fake_create)
+
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="inspect terminal safety")
+    )
+
+    assert calls == ["openclaw", "hermes", "openclaw", "hermes", "openclaw"]
+    assert response.selected_agent == "OpenClaw"
+    assert response.router_source == "deterministic_fallback"
+
+
+@pytest.mark.asyncio
+async def test_smart_start_uses_fifth_router_attempt_when_it_succeeds(monkeypatch):
+    openclaw = _runtime("openclaw")
+    hermes = _runtime("hermes")
+    calls: list[str] = []
+
+    async def fake_list_instances():
+        return [openclaw, hermes]
+
+    async def fake_budget_allows(_platform: str):
+        return True
+
+    async def fake_router(_prompt: str, *, platform: str, instance_id: str, max_tokens: int):
+        _ = instance_id, max_tokens
+        calls.append(platform)
+        if len(calls) < 5:
+            return "Nanobot"
+        return "B"
+
+    async def fake_create(request):
+        assert request.instance_id == "hermes-default"
+        return _response(hermes)
+
+    monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
+    monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
+    monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fake_create)
+
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="review this codebase")
+    )
+
+    assert calls == ["openclaw", "hermes", "openclaw", "hermes", "openclaw"]
+    assert response.selected_agent == "Hermes"
+    assert response.router_source == "openclaw"
+
+
+@pytest.mark.asyncio
+async def test_smart_start_accepts_plain_text_router_output(monkeypatch):
+    openclaw = _runtime("openclaw")
+    hermes = _runtime("hermes")
+
+    async def fake_list_instances():
+        return [openclaw, hermes]
+
+    async def fake_budget_allows(_platform: str):
+        return True
+
+    async def fake_router(*_args, **_kwargs):
+        return "I recommend Hermes for this request."
+
+    async def fake_create(request):
+        assert request.instance_id == "hermes-default"
+        return _response(hermes)
+
+    monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
+    monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
+    monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fake_create)
+
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="review this codebase")
+    )
+
+    assert response.selected_agent == "Hermes"
+    assert response.router_source == "openclaw"
+
+
+@pytest.mark.asyncio
+async def test_smart_start_accepts_candidate_id_inside_sentence(monkeypatch):
+    openclaw = _runtime("openclaw")
+    hermes = _runtime("hermes")
+
+    async def fake_list_instances():
+        return [openclaw, hermes]
+
+    async def fake_budget_allows(_platform: str):
+        return True
+
+    async def fake_router(*_args, **_kwargs):
+        return "I choose option B."
+
+    async def fake_create(request):
+        assert request.instance_id == "hermes-default"
+        return _response(hermes)
+
+    monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
+    monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
+    monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fake_create)
+
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="review this codebase")
+    )
+
+    assert response.selected_agent == "Hermes"
+    assert response.router_source == "openclaw"
 
 
 @pytest.mark.asyncio
