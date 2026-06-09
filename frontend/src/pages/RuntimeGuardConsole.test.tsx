@@ -26,6 +26,7 @@ import RuntimeGuardConsole, {
   runtimeGuardAgentStatus,
   runtimeGuardStartSessionPayload,
   runtimeSessionRecordToRuntimeGuardSession,
+  titleFromUserMessage,
   type NewTaskAgentOption,
   type BlockedModalRange,
   type RuntimeGuardSession,
@@ -244,6 +245,14 @@ describe('AgentIconBadge', () => {
     expect(container.querySelector('.rg-agent-badge[data-agent="OpenClaw"]')).toHaveClass('agent-openclaw');
     expect(container.querySelector('.rg-agent-badge[data-agent="Hermes"]')).toHaveClass('agent-hermes');
     expect(container.querySelector('.rg-agent-badge[data-agent="Nanobot"]')).toHaveClass('agent-nanobot');
+  });
+});
+
+describe('titleFromUserMessage', () => {
+  it('falls back when the title model returns explanation text', () => {
+    const modelExplanation = '我们需根据用户请求生成UI标题。用户请求是中文：“帮我查一下上海今天的天气怎么样？” 规则要求使用同一种语言。';
+
+    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('帮我查一下上海今天的天气怎么样？');
   });
 });
 

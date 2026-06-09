@@ -518,8 +518,46 @@ async def call_runtime_model_prompt(
     return _extract_text_content(data.get("content"))
 
 
+_RUNTIME_TITLE_EXPLANATION_PATTERNS = [
+    re.compile(r"^(we|i)\s+(need|should|must|will)\b.*\b(title|ui title|user request)\b", re.IGNORECASE),
+    re.compile(r"\b(user request|rules?|instruction)\b.*\b(title|ui title)\b", re.IGNORECASE),
+    re.compile(r"^(the\s+)?title\s+(should|can|would|is)\b", re.IGNORECASE),
+    re.compile(r"^(analysis|reasoning)\s*[:：]", re.IGNORECASE),
+    re.compile(r"^(\u6211\u4eec)?\u9700\u8981?.*(\u7528\u6237\u8bf7\u6c42|UI\s*\u6807\u9898|\u6807\u9898)", re.IGNORECASE),
+    re.compile(r"^\u6839\u636e.*(\u7528\u6237\u8bf7\u6c42|\u6807\u9898)", re.IGNORECASE),
+    re.compile(r"\u7528\u6237\u8bf7\u6c42\u662f.*\u6807\u9898", re.IGNORECASE),
+]
+
+
+def _extract_runtime_title_candidate(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+
+    fenced = re.sub(r"^```(?:json|text|markdown)?\s*", "", text, flags=re.IGNORECASE)
+    fenced = re.sub(r"\s*```$", "", fenced).strip()
+    try:
+        parsed = json.loads(fenced)
+    except Exception:
+        return text
+
+    if isinstance(parsed, dict):
+        for key in ("title", "summary", "\u6807\u9898"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(parsed, str) and parsed.strip():
+        return parsed.strip()
+    return text
+
+
+def _is_runtime_title_explanation(title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(title or "")).strip()
+    return bool(normalized) and any(pattern.search(normalized) for pattern in _RUNTIME_TITLE_EXPLANATION_PATTERNS)
+
+
 def clean_runtime_session_title(raw: str, fallback: str = "New session") -> str:
-    title = str(raw or "").strip()
+    title = _extract_runtime_title_candidate(raw)
     title = re.sub(r"^```(?:text|markdown)?\s*", "", title, flags=re.IGNORECASE)
     title = title.replace("```", "").strip()
     title = next((line.strip() for line in title.splitlines() if line.strip()), "")
@@ -528,6 +566,8 @@ def clean_runtime_session_title(raw: str, fallback: str = "New session") -> str:
     title = title.strip(" \t\r\n\"'`“”‘’")
     title = re.sub(r"\s+", " ", title).strip()
     title = title.rstrip(".。")
+    if _is_runtime_title_explanation(title):
+        title = ""
     if not title:
         title = fallback.strip() or "New session"
     if len(title) > 48:
@@ -549,11 +589,11 @@ async def summarize_runtime_request_title(
     fallback = clean_runtime_session_title(truncated_request)
     prompt = (
         "Create a short UI title for this agent session.\n"
-        "Rules:\n"
+        "Return strict JSON only: {\"title\":\"<short title>\"}\n"
+        "Rules for title:\n"
         "- Use the same language as the user's request.\n"
-        "- Return exactly one concise sentence or phrase.\n"
         "- Keep it under 12 words.\n"
-        "- Do not include quotes, markdown, prefixes, or explanations.\n\n"
+        "- Do not include markdown, prefixes, explanations, reasoning, or rule restatement.\n\n"
         f"User request:\n{truncated_request}"
     )
     raw_title = await call_runtime_model_prompt(

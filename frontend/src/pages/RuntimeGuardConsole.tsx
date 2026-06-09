@@ -513,7 +513,7 @@ function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
           platform,
           instanceId: typeof item?.instanceId === 'string' ? item.instanceId : '',
           displayName: typeof item?.displayName === 'string' ? item.displayName : undefined,
-          title: typeof item?.title === 'string' && item.title.trim() ? item.title : agent,
+          title: titleFromUserMessage(typeof item?.title === 'string' ? item.title : '', agent) || agent,
           createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
           lastActivityAt: typeof item?.lastActivityAt === 'string' ? item.lastActivityAt : undefined,
           status: item?.status === 'error' ? 'error' : 'ready',
@@ -662,10 +662,28 @@ export function runtimeGuardStartSessionPayload(runtime: RuntimeInstance): {
   return payload;
 }
 
-function titleFromUserMessage(input: string): string {
+const runtimeTitleExplanationPatterns = [
+  /^(we|i)\s+(need|should|must|will)\b.*\b(title|ui title|user request)\b/i,
+  /\b(user request|rules?|instruction)\b.*\b(title|ui title)\b/i,
+  /^(the\s+)?title\s+(should|can|would|is)\b/i,
+  /^(analysis|reasoning)\s*[:：]/i,
+  /^(\u6211\u4eec)?\u9700\u8981?.*(\u7528\u6237\u8bf7\u6c42|UI\s*\u6807\u9898|\u6807\u9898)/i,
+  /^\u6839\u636e.*(\u7528\u6237\u8bf7\u6c42|\u6807\u9898)/i,
+  /\u7528\u6237\u8bf7\u6c42\u662f.*\u6807\u9898/i,
+];
+
+function runtimeTitleLooksLikeExplanation(input: string): boolean {
   const cleaned = input.replace(/\s+/g, ' ').trim();
-  if (!cleaned) return '';
-  return cleaned.length > 48 ? `${cleaned.slice(0, 48).trimEnd()}...` : cleaned;
+  return Boolean(cleaned) && runtimeTitleExplanationPatterns.some(pattern => pattern.test(cleaned));
+}
+
+export function titleFromUserMessage(input: string, fallback = ''): string {
+  const cleaned = input.replace(/\s+/g, ' ').trim();
+  const safeTitle = cleaned && !runtimeTitleLooksLikeExplanation(cleaned)
+    ? cleaned
+    : fallback.replace(/\s+/g, ' ').trim();
+  if (!safeTitle) return '';
+  return safeTitle.length > 48 ? `${safeTitle.slice(0, 48).trimEnd()}...` : safeTitle;
 }
 
 function extractMessageText(msg: any): string {
@@ -2422,8 +2440,8 @@ export default function RuntimeGuardConsole() {
     )));
   }, []);
 
-  const applySessionTitle = useCallback((sessionKey: string, title: string) => {
-    const nextTitle = titleFromUserMessage(title);
+  const applySessionTitle = useCallback((sessionKey: string, title: string, fallback = '') => {
+    const nextTitle = titleFromUserMessage(title, fallback);
     if (!nextTitle) return;
     setSessions(current => current.map(session => (
       session.sessionKey === sessionKey
@@ -2470,7 +2488,7 @@ export default function RuntimeGuardConsole() {
         instance_id: titleInstanceId,
       })
         .then(({ data }) => {
-          applySessionTitle(key, data.title);
+          applySessionTitle(key, data.title, text);
         })
         .catch(() => {
           applySessionTitle(key, text);
