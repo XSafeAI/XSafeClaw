@@ -255,7 +255,7 @@ export default function Assets() {
   const softScanIdRef = useRef<string | null>(cacheGet(CACHE_KEYS.softScanId));
   const softPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  /* --- Safety Check --- */
+  /* --- Permission View --- */
   const [safetyPath, setSafetyPath] = useState('');
   const [safetyOp, setSafetyOp] = useState<string>('delete');
   const [safetyChecking, setSafetyChecking] = useState(false);
@@ -388,7 +388,7 @@ export default function Assets() {
     finally { setHwLoading(false); }
   }, []);
 
-  // Auto-trigger one hardware scan when users enter Asset Shield page.
+  // Auto-trigger one hardware scan when users enter File Protection page.
   useEffect(() => {
     void loadHardware();
   }, [loadHardware]);
@@ -468,7 +468,7 @@ export default function Assets() {
     } catch (err: any) { alert(err.response?.data?.detail || 'Failed'); setSoftScanning(false); }
   }, [startSoftPolling]);
 
-  /* --- Safety Check --- */
+  /* --- Permission View --- */
   const runSafetyCheck = useCallback(async () => {
     if (!safetyPath.trim()) return;
     setSafetyChecking(true);
@@ -967,7 +967,7 @@ export default function Assets() {
           </div>
         )}
 
-        {/* ========== Safety Check Tab ========== */}
+        {/* ========== Permission View Tab ========== */}
         {activeTab === 'safety' && (
           <div className="grid grid-cols-2 gap-6">
             {/* Left: input */}
