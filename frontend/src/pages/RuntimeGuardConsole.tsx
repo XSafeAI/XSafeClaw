@@ -1885,13 +1885,19 @@ export default function RuntimeGuardConsole() {
       .sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0)),
     [approvalItems],
   );
-  const approvalCount = useMemo(
-    () => unresolvedApprovalItems.length,
-    [unresolvedApprovalItems.length],
+  const activeUnresolvedApprovalItems = useMemo(
+    () => activeApprovalCards
+      .filter(card => !card.item.resolved && card.status === 'pending')
+      .map(card => card.item),
+    [activeApprovalCards],
+  );
+  const activeApprovalCount = useMemo(
+    () => activeUnresolvedApprovalItems.length,
+    [activeUnresolvedApprovalItems.length],
   );
   const visibleApprovals = useMemo(
-    () => unresolvedApprovalItems.slice(0, 2),
-    [unresolvedApprovalItems],
+    () => activeUnresolvedApprovalItems.slice(0, 2),
+    [activeUnresolvedApprovalItems],
   );
   const allBlockedItems = useMemo(
     () => mergeBlockedItems(approvalItems, blockedObservations),
@@ -3174,7 +3180,7 @@ export default function RuntimeGuardConsole() {
           <section className="rg-approval-center">
             <div className="rg-card-head rg-approval-head">
               <span>{copy.approvals.panelTitle}</span>
-              <span className="rg-count">{approvalCount}</span>
+              <span className="rg-count">{activeApprovalCount}</span>
               <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>{copy.sidebar.viewAll}</button>
             </div>
             {visibleApprovals.length > 0 ? (

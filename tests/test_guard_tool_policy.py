@@ -177,6 +177,42 @@ async def test_ask_policy_creates_pending_in_guard_on(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_pending_tool_call_reuses_existing_approval(monkeypatch):
+    guard_service.save_tool_policies({"shell": "ask"})
+
+    async def fail_guard_model(*_args, **_kwargs):
+        raise AssertionError("guard model should not be called for ask policy")
+
+    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
+
+    first = asyncio.create_task(
+        guard_service.check_tool_call(
+            "exec",
+            {"command": "echo duplicate"},
+            "session-duplicate",
+            platform="hermes",
+            messages=[],
+        )
+    )
+    second = asyncio.create_task(
+        guard_service.check_tool_call(
+            "exec",
+            {"command": "echo duplicate"},
+            "session-duplicate",
+            platform="hermes",
+            messages=[],
+        )
+    )
+    pending = await _wait_for_pending()
+
+    assert len(guard_service.get_all_pending()) == 1
+
+    guard_service.resolve_pending(pending.id, "approved")
+    assert await first == {"action": "allow"}
+    assert await second == {"action": "allow"}
+
+
+@pytest.mark.asyncio
 async def test_guard_policy_degrades_to_ask_when_guard_off(monkeypatch):
     guard_service.save_tool_policies({"shell": "guard"})
     guard_service._guard_enabled = False

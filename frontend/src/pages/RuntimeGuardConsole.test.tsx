@@ -167,6 +167,14 @@ function mockRuntimeGuardApis() {
     },
   } as any);
 
+  vi.spyOn(chatAPI, 'getHistory').mockResolvedValue({
+    data: {
+      session_key: 'created-session',
+      messages: [],
+      instance_id: 'runtime-openclaw',
+      platform: 'openclaw',
+    },
+  } as any);
   vi.spyOn(systemAPI, 'instances').mockResolvedValue({
     data: {
       instances: [
@@ -374,6 +382,59 @@ describe('NewTaskModal', () => {
     });
     expect(screen.queryByText('Nanobot is not available')).toBeNull();
     expect(startSessionSpy).not.toHaveBeenCalled();
+  });
+
+  it('previews only active-session approvals in the right approval panel', async () => {
+    mockRuntimeGuardApis();
+    const activeSessionKey = 'openclaw::runtime-openclaw::active-session';
+    const otherSessionKey = 'openclaw::runtime-openclaw::other-session';
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
+      {
+        sessionKey: activeSessionKey,
+        agent: 'OpenClaw',
+        platform: 'openclaw',
+        instanceId: 'runtime-openclaw',
+        title: 'Active',
+        createdAt: '2026-06-09T00:00:00.000Z',
+        status: 'ready',
+      },
+      {
+        sessionKey: otherSessionKey,
+        agent: 'OpenClaw',
+        platform: 'openclaw',
+        instanceId: 'runtime-openclaw',
+        title: 'Other',
+        createdAt: '2026-06-08T00:00:00.000Z',
+        status: 'ready',
+      },
+    ]));
+    vi.mocked(guardAPI.pending).mockResolvedValue({
+      data: [
+        approval({
+          id: 'approval-active',
+          session_key: activeSessionKey,
+          instance_id: 'runtime-openclaw',
+          params: { command: 'active-session-command' },
+          created_at: 1710000002,
+        }),
+        approval({
+          id: 'approval-other',
+          session_key: otherSessionKey,
+          instance_id: 'runtime-openclaw',
+          params: { command: 'other-session-command' },
+          created_at: 1710000003,
+        }),
+      ],
+    } as any);
+
+    const { container } = renderRuntimeGuardConsole();
+    const panel = container.querySelector('.rg-approval-center') as HTMLElement;
+
+    await waitFor(() => {
+      expect(within(panel).getByText('active-session-command')).toBeTruthy();
+    });
+    expect(within(panel).queryByText('other-session-command')).toBeNull();
+    expect(panel.querySelector('.rg-count')?.textContent).toBe('1');
   });
 });
 

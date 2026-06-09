@@ -1188,6 +1188,39 @@ _observations: dict[str, RuntimeToolObservation] = {}
 _PENDING_TIMEOUT = 300  # 5 minutes max wait
 _MAX_OBSERVATIONS = 500
 
+
+def _pending_params_key(params: dict[str, Any]) -> str:
+    try:
+        return json.dumps(params or {}, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return str(params or {})
+
+
+def _find_matching_unresolved_pending(
+    *,
+    platform: str,
+    instance_id: str,
+    session_key: str,
+    tool_name: str,
+    params: dict[str, Any],
+) -> PendingApproval | None:
+    params_key = _pending_params_key(params)
+    for pending in _pending.values():
+        if pending.resolved:
+            continue
+        if pending.platform != platform:
+            continue
+        if pending.instance_id != instance_id:
+            continue
+        if pending.session_key != session_key:
+            continue
+        if pending.tool_name != tool_name:
+            continue
+        if _pending_params_key(pending.params) != params_key:
+            continue
+        return pending
+    return None
+
 _guard_enabled: bool = True
 _DENYLIST_FILE = settings.data_dir / "denylist.json"
 _DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1444,31 +1477,41 @@ async def _await_pending_approval(
     failure_mode: str | None = None,
     real_world_harm: str | None = None,
 ) -> tuple[dict[str, Any], PendingApproval]:
-    pending_id = str(uuid.uuid4())
-    pending = PendingApproval(
-        id=pending_id,
+    pending = _find_matching_unresolved_pending(
         platform=platform,
         instance_id=instance_id,
-        guard_mode=guard_mode,
         session_key=session_key,
         tool_name=tool_name,
         params=params,
-        guard_verdict=guard_verdict,
-        guard_raw=guard_raw,
-        session_context=session_context[-4000:] if session_context else "",
-        risk_source=risk_source,
-        failure_mode=failure_mode,
-        real_world_harm=real_world_harm,
-        created_at=time.time(),
     )
-    _pending[pending_id] = pending
+    if pending is None:
+        pending_id = str(uuid.uuid4())
+        pending = PendingApproval(
+            id=pending_id,
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=guard_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            guard_verdict=guard_verdict,
+            guard_raw=guard_raw,
+            session_context=session_context[-4000:] if session_context else "",
+            risk_source=risk_source,
+            failure_mode=failure_mode,
+            real_world_harm=real_world_harm,
+            created_at=time.time(),
+        )
+        _pending[pending_id] = pending
 
     try:
         await asyncio.wait_for(pending._event.wait(), timeout=_PENDING_TIMEOUT)
     except TimeoutError:
-        pending.resolved = True
-        pending.resolution = "rejected"
-        pending.resolved_at = time.time()
+        if not pending.resolved:
+            pending.resolved = True
+            pending.resolution = "rejected"
+            pending.resolved_at = time.time()
+            pending._event.set()
         return {"action": "block", "reason": _GUARD_BLOCK_REASON}, pending
 
     if pending.resolution == "approved":

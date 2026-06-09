@@ -74,6 +74,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -81,6 +84,7 @@ logger = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 310
 EVENT_TIMEOUT_SECONDS = 2.0
+SESSION_CONTEXT_TTL_SECONDS = 120.0
 
 _HERMES_WORKSPACE = Path(
     os.environ.get("SAFECLAW_WORKSPACE")
@@ -89,6 +93,89 @@ _HERMES_WORKSPACE = Path(
 
 _SAFETY_BLOCK_BEGIN = "<!-- xsafeclaw:safety-block:begin v1 -->"
 _SAFETY_BLOCK_END = "<!-- xsafeclaw:safety-block:end -->"
+_CURRENT_SESSION_ID: ContextVar[str] = ContextVar(
+    "xsafeclaw_hermes_session_id",
+    default="",
+)
+_SESSION_CONTEXT_LOCK = threading.Lock()
+_SESSION_ID_BY_TASK_ID: dict[str, tuple[str, float]] = {}
+_RECENT_SESSION_IDS: dict[str, float] = {}
+
+
+def _cleanup_session_context(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    expired_tasks = [
+        task_id
+        for task_id, (_, seen_at) in _SESSION_ID_BY_TASK_ID.items()
+        if current - seen_at > SESSION_CONTEXT_TTL_SECONDS
+    ]
+    for task_id in expired_tasks:
+        _SESSION_ID_BY_TASK_ID.pop(task_id, None)
+
+    expired_sessions = [
+        session_id
+        for session_id, seen_at in _RECENT_SESSION_IDS.items()
+        if current - seen_at > SESSION_CONTEXT_TTL_SECONDS
+    ]
+    for session_id in expired_sessions:
+        _RECENT_SESSION_IDS.pop(session_id, None)
+
+
+def _remember_session_context(session_id: str = "", task_id: str = "") -> str:
+    """Remember Hermes's real chat session id for later tool hooks.
+
+    Some Hermes versions call ``pre_tool_call`` with only ``task_id`` even
+    though ``pre_llm_call`` receives the chat ``session_id`` earlier in the
+    same turn.  Treating a per-task id as the chat session id gives XSafeClaw
+    an empty trajectory and a UI key that does not match RuntimeGuard's tab.
+    This small cache lets tool hooks recover the real session id when Hermes
+    omits it.
+    """
+    normalized_session = str(session_id or "").strip()
+    normalized_task = str(task_id or "").strip()
+    if not normalized_session:
+        return ""
+
+    _CURRENT_SESSION_ID.set(normalized_session)
+    now = time.monotonic()
+    with _SESSION_CONTEXT_LOCK:
+        _cleanup_session_context(now)
+        _RECENT_SESSION_IDS[normalized_session] = now
+        if normalized_task:
+            _SESSION_ID_BY_TASK_ID[normalized_task] = (normalized_session, now)
+    return normalized_session
+
+
+def _resolve_session_context(session_id: str = "", task_id: str = "") -> str:
+    """Return the best Hermes chat session id available to this hook."""
+    normalized_session = str(session_id or "").strip()
+    normalized_task = str(task_id or "").strip()
+    if normalized_session:
+        return _remember_session_context(normalized_session, normalized_task)
+
+    now = time.monotonic()
+    with _SESSION_CONTEXT_LOCK:
+        _cleanup_session_context(now)
+        if normalized_task:
+            mapped = _SESSION_ID_BY_TASK_ID.get(normalized_task)
+            if mapped:
+                session_from_task, seen_at = mapped
+                if now - seen_at <= SESSION_CONTEXT_TTL_SECONDS:
+                    return session_from_task
+
+        context_session = str(_CURRENT_SESSION_ID.get("") or "").strip()
+        if context_session and context_session in _RECENT_SESSION_IDS:
+            return context_session
+
+        recent = [
+            remembered_session
+            for remembered_session, seen_at in _RECENT_SESSION_IDS.items()
+            if now - seen_at <= SESSION_CONTEXT_TTL_SECONDS
+        ]
+        if len(recent) == 1:
+            return recent[0]
+
+    return normalized_task
 
 
 def _get_base_url() -> str:
@@ -320,8 +407,9 @@ def _pre_tool_call_handler(
       session key already arrives encoded).
     """
     tool_check_url = f"{_get_base_url()}/api/guard/tool-check"
+    resolved_session_id = _resolve_session_context(session_id=session_id, task_id=task_id)
     bare_session_key, encoded_session_key = _encode_session_key(
-        session_id=session_id,
+        session_id=resolved_session_id,
         task_id=task_id,
     )
 
@@ -442,7 +530,11 @@ def _post_tool_call_handler(
     **kwargs: Any,
 ) -> None:
     """Best-effort post-tool telemetry; does not affect tool execution."""
-    _, encoded_session_key = _encode_session_key(session_id=session_id, task_id=task_id)
+    resolved_session_id = _resolve_session_context(session_id=session_id, task_id=task_id)
+    _, encoded_session_key = _encode_session_key(
+        session_id=resolved_session_id,
+        task_id=task_id,
+    )
     result_text = str(result or "")
     is_error = False
     if isinstance(result, dict):
@@ -471,10 +563,12 @@ def _post_tool_call_handler(
 
 def _pre_llm_trace_handler(
     session_id: str = "",
+    task_id: str = "",
     is_first_turn: bool = False,
     **kwargs: Any,
 ) -> None:
-    _, encoded_session_key = _encode_session_key(session_id=session_id)
+    resolved_session_id = _remember_session_context(session_id=session_id, task_id=task_id)
+    _, encoded_session_key = _encode_session_key(session_id=resolved_session_id)
     if not encoded_session_key:
         return None
     _publish_event(
@@ -498,11 +592,13 @@ def _pre_llm_trace_handler(
 
 def _post_llm_trace_handler(
     session_id: str = "",
+    task_id: str = "",
     assistant_response: str = "",
     conversation_history: Any = None,
     **kwargs: Any,
 ) -> None:
-    _, encoded_session_key = _encode_session_key(session_id=session_id)
+    resolved_session_id = _remember_session_context(session_id=session_id, task_id=task_id)
+    _, encoded_session_key = _encode_session_key(session_id=resolved_session_id)
     if not encoded_session_key:
         return None
     reasoning_summary, reasoning_chars = _extract_reasoning_summary(conversation_history)
