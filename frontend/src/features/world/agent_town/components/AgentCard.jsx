@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { guardAPI } from '../../../../services/api';
 import { CHAR_BASE, USE_AGENT_TOWN_MOCK, formatAgentDisplayName } from '../config/constants';
 import { buildMockAssistantReply, buildMockHistory } from '../data/mockData';
+import {
+  getToolDisclosureSummary,
+  isNearScrollBottom,
+  shouldAutoScrollConversation,
+} from './conversationPanelUtils';
 
 function pickActiveShowcaseMode(seed) {
   let hash = 0;
@@ -279,13 +284,10 @@ function previewToolPayload(value, limit) {
 }
 
 function AgentDialogToolMessage({ msg }) {
+  const [expanded, setExpanded] = useState(false);
   const argsPreview = previewToolPayload(msg.args || msg.content || '', TOOL_ARGS_PREVIEW_LIMIT);
   const resultPreview = msg.result_pending ? 'Running...' : previewToolPayload(msg.result, TOOL_RESULT_PREVIEW_LIMIT);
-  const metaTag = msg.result_pending
-    ? 'RUNNING'
-    : msg.is_error
-      ? 'ERROR'
-      : 'TOOL';
+  const summary = getToolDisclosureSummary(msg);
   const metaClass = msg.result_pending
     ? 'agent-dialog-tag-tool-running'
     : msg.is_error
@@ -293,15 +295,20 @@ function AgentDialogToolMessage({ msg }) {
       : 'agent-dialog-tag-tool';
 
   return (
-    <div className="agent-dialog-item agent-dialog-item-tool">
-      <div className="agent-dialog-meta">
-        <div className="agent-dialog-meta-main">
-          <span className={`agent-dialog-tag ${metaClass}`}>{metaTag}</span>
-          <span className="agent-dialog-tool-name">{msg.tool_name || 'unknown'}</span>
-        </div>
+    <div className={`agent-dialog-item agent-dialog-item-tool ${expanded ? 'agent-dialog-item-tool-expanded' : ''}`}>
+      <button
+        type="button"
+        className="agent-dialog-tool-summary"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <span className={`agent-dialog-tag ${metaClass}`}>{summary.label}</span>
+        <span className="agent-dialog-tool-summary-title">{summary.title}</span>
+        <span className="agent-dialog-tool-summary-hint">{expanded ? '收起' : summary.detailHint}</span>
         <span className="agent-dialog-time">{fmtTime(msg.timestamp)}</span>
-      </div>
-      {(argsPreview || resultPreview) ? (
+        <span className={`agent-dialog-tool-chevron ${expanded ? 'agent-dialog-tool-chevron-open' : ''}`}>›</span>
+      </button>
+      {expanded && (argsPreview || resultPreview) ? (
         <div className="agent-dialog-tool-payload">
           {argsPreview ? (
             <div className="agent-dialog-tool-row agent-dialog-tool-row-call">
@@ -555,7 +562,10 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [sending, setSending] = useState(false);
   const [isComposing, setIsComposing] = useState(false);
+  const dialogLogRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const lastDialogAgentIdRef = useRef('');
+  const shouldStickToBottomRef = useRef(true);
   const textareaRef = useRef(null);
   const streamControllerRef = useRef(null);
   const stopRequestedRef = useRef(false);
@@ -783,9 +793,37 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
     [sessionKey],
   );
 
+  const handleDialogLogScroll = useCallback(() => {
+    shouldStickToBottomRef.current = isNearScrollBottom(dialogLogRef.current);
+  }, []);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [displayMessages.length, sending]);
+    const agentId = agent?.id || sessionKey || '';
+    const agentChanged = lastDialogAgentIdRef.current !== agentId;
+    if (agentChanged) {
+      lastDialogAgentIdRef.current = agentId;
+      shouldStickToBottomRef.current = true;
+    }
+
+    if (!shouldAutoScrollConversation({
+      agentChanged,
+      wasPinnedToBottom: shouldStickToBottomRef.current,
+    })) {
+      return undefined;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const log = dialogLogRef.current;
+      if (log) {
+        log.scrollTop = log.scrollHeight;
+        shouldStickToBottomRef.current = true;
+      } else {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [agent?.id, displayMessages.length, sending, sessionKey]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1310,7 +1348,11 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
               </div>
             </div>
 
-            <div className="agent-dialog-log">
+            <div
+              className="agent-dialog-log"
+              ref={dialogLogRef}
+              onScroll={handleDialogLogScroll}
+            >
               {loadingHistory ? (
                 <div className="agent-dialog-empty">Syncing full session history...</div>
               ) : displayMessages.length === 0 ? (

@@ -10,18 +10,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import settings
-from ...database import get_db_context
+from ...database import get_db, get_db_context
 from ...gateway_client import GatewayClient
 from ...hermes_client import HermesClient
 from ...models import Message, Session
 from ...nanobot_gateway_client import NanobotGatewayClient
-from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_session_key
+from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_session_key, namespace_session_id
 from ...runtime.usage import attach_usage_metadata, normalize_usage
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
@@ -95,6 +96,49 @@ _AVAILABLE_MODELS_CLI_TIMEOUT = 25
 _AVAILABLE_MODELS_CACHE_TTL = 30.0
 _AVAILABLE_MODELS_FAILURE_TTL = 5.0
 _HERMES_STREAM_KEEPALIVE_INTERVAL_S = 20.0
+
+_SENDER_METADATA_PREAMBLE_RE = re.compile(
+    r"^\s*Sender\s+\(untrusted metadata\):\s*",
+    re.IGNORECASE,
+)
+_HISTORY_TIMESTAMP_PREFIX_RE = re.compile(
+    r"^\s*\[[^\]]*\d{4}-\d{2}-\d{2}[^\]]*\]\s*",
+)
+_HISTORY_MESSAGE_ID_SUFFIX_RE = re.compile(
+    r"\n?\[message_id:[^\]]*\]\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_leading_json_object(text: str) -> str:
+    """Remove one leading JSON object and return the remaining text."""
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return text
+    try:
+        _, end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return text
+    return stripped[end:].lstrip()
+
+
+def _clean_history_user_text(text: str) -> str:
+    """Normalize stored user messages for UI history display."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+
+    if _SENDER_METADATA_PREAMBLE_RE.match(cleaned):
+        cleaned = _SENDER_METADATA_PREAMBLE_RE.sub("", cleaned, count=1).lstrip()
+        if cleaned.startswith("```"):
+            fence_end = cleaned.find("```", 3)
+            cleaned = cleaned[fence_end + 3 :].lstrip() if fence_end >= 0 else ""
+        else:
+            cleaned = _strip_leading_json_object(cleaned)
+
+    cleaned = _HISTORY_TIMESTAMP_PREFIX_RE.sub("", cleaned, count=1)
+    cleaned = _HISTORY_MESSAGE_ID_SUFFIX_RE.sub("", cleaned)
+    return cleaned.strip()
 _GATEWAY_CONNECT_RETRY_ATTEMPTS = 6
 _GATEWAY_CONNECT_RETRY_DELAY_S = 1.0
 # Exponential backoff used specifically after we trigger a runtime autostart.
@@ -1144,8 +1188,6 @@ def _read_history_from_jsonl(
     if not jsonl_path.exists():
         return []
 
-    import re
-
     messages = []
     pending_tool_calls: dict[str, dict] = {}
     queued_tool_calls: list[dict] = []
@@ -1192,9 +1234,7 @@ def _read_history_from_jsonl(
                     if isinstance(b, dict) and b.get("type") == "text"
                 ) if isinstance(content, list) else "")
                 text = _strip_runtime_guard_markdown_instruction(text)
-                text = re.sub(r"^\[[^\]]*\d{4}-\d{2}-\d{2}[^\]]*\]\s*", "", text)
-                text = re.sub(r"\n\[message_id:[^\]]*\]", "", text)
-                text = text.strip()
+                text = _clean_history_user_text(text)
                 if text:
                     messages.append({"role": "user", "content": text, "timestamp": timestamp, "id": entry_id})
 
@@ -1830,7 +1870,11 @@ async def _read_history_from_db_fallback(
                 }
             )
             continue
-        text = (msg.content_text or "").strip()
+        text = (
+            _clean_history_user_text(msg.content_text or "")
+            if msg.role == "user"
+            else (msg.content_text or "").strip()
+        )
         if not text:
             continue
         messages.append(
@@ -1887,6 +1931,150 @@ def _apply_history_content_limit(
                 item["content"] = _truncate_history_text(item.get("content"), max_chars=max_content_chars)
         bounded.append(item)
     return bounded
+
+
+def _infer_db_session_runtime(session: Session) -> tuple[str, str]:
+    platform = str(session.platform or "").strip().lower() or "openclaw"
+    instance_id = str(session.instance_id or "").strip() or f"{platform}-default"
+    for candidate in (session.session_key, session.session_id):
+        decoded_platform, decoded_instance_id, _ = decode_chat_session_key(str(candidate or ""))
+        if decoded_platform:
+            return decoded_platform, decoded_instance_id or instance_id
+    return platform, instance_id
+
+
+def _local_key_from_session_key(value: str, *, platform: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    decoded_platform, _, local_key = decode_chat_session_key(raw)
+    if decoded_platform:
+        return local_key
+    if platform == "openclaw" and raw.startswith("agent:main:"):
+        return raw.split(":", 2)[2]
+    return raw
+
+
+def _encode_chat_key_parts(platform: str, instance_id: str, local_key: str) -> str:
+    return "::".join([platform, instance_id, local_key])
+
+
+async def _load_chat_session_store_keys() -> dict[str, str]:
+    """Return DB session/source IDs mapped to frontend-openable chat keys."""
+    try:
+        instances = await list_instances()
+    except Exception:
+        instances = []
+
+    index: dict[str, str] = {}
+    for instance in instances:
+        sessions_json = _sessions_json_for(instance)
+        if not sessions_json.exists():
+            continue
+        try:
+            raw = json.loads(sessions_json.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+
+        for stored_key, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            source_session_id = str(entry.get("sessionId") or entry.get("session_id") or "").strip()
+            if not source_session_id:
+                continue
+            local_key = _local_key_from_session_key(str(stored_key), platform=instance.platform)
+            if not local_key:
+                continue
+            public_key = encode_chat_session_key(instance, local_key)
+            namespaced_id = namespace_session_id(
+                instance.platform,
+                instance.instance_id,
+                source_session_id,
+            )
+            index[namespaced_id] = public_key
+            index[source_session_id] = public_key
+    return index
+
+
+def _chat_session_key_for_db_session(
+    session: Session,
+    session_store_keys: dict[str, str],
+) -> str:
+    if session.session_id in session_store_keys:
+        return session_store_keys[session.session_id]
+    if session.source_session_id and session.source_session_id in session_store_keys:
+        return session_store_keys[session.source_session_id]
+
+    platform, instance_id = _infer_db_session_runtime(session)
+    raw = session.session_key or session.source_session_id or session.session_id
+    local_key = _local_key_from_session_key(str(raw or ""), platform=platform)
+    if not local_key:
+        return ""
+    return _encode_chat_key_parts(platform, instance_id, local_key)
+
+
+def _platform_display_name(platform: str, instance_id: str) -> str:
+    if platform == "nanobot":
+        return "Nanobot"
+    if platform == "hermes":
+        return "Hermes"
+    if platform == "openclaw":
+        return "OpenClaw"
+    return instance_id or platform or "Agent"
+
+
+def _chat_session_summary_from_db(
+    session: Session,
+    *,
+    session_store_keys: dict[str, str],
+) -> dict | None:
+    key = _chat_session_key_for_db_session(session, session_store_keys)
+    if not key:
+        return None
+    platform, instance_id = _infer_db_session_runtime(session)
+    display_name = _platform_display_name(platform, instance_id)
+    _, _, local_key = decode_chat_session_key(key)
+    model = str(session.current_model_name or "").strip() or None
+    label_suffix = local_key[-8:] if local_key else (session.session_id or "")[-8:]
+    return {
+        "key": key,
+        "label": f"{display_name} {label_suffix}".strip(),
+        "created_at": (session.first_seen_at or session.created_at).isoformat(),
+        "last_activity_at": (
+            session.last_activity_at or session.updated_at or session.first_seen_at
+        ).isoformat(),
+        "instance_id": instance_id,
+        "platform": platform,
+        "display_name": display_name,
+        "model": model,
+        "auto_title_pending": False,
+    }
+
+
+def _chat_session_summary_from_active_key(
+    key: str,
+    *,
+    instances_by_id: dict[str, RuntimeInstance],
+) -> dict | None:
+    platform, instance_id, local_key = decode_chat_session_key(key)
+    if not platform or not instance_id or not local_key:
+        return None
+    instance = instances_by_id.get(instance_id)
+    display_name = instance.display_name if instance else _platform_display_name(platform, instance_id)
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "key": key,
+        "label": f"{display_name} {local_key[-8:]}".strip(),
+        "created_at": now,
+        "last_activity_at": now,
+        "instance_id": instance_id,
+        "platform": platform,
+        "display_name": display_name,
+        "model": None,
+        "auto_title_pending": False,
+    }
 
 
 router = APIRouter()
@@ -3970,6 +4158,49 @@ async def transcribe_clean(request: TranscribeCleanRequest):
                     await client.disconnect()
                 except Exception:
                     pass
+
+
+@router.get("/sessions")
+async def list_chat_sessions(
+    limit: int = Query(100, ge=1, le=200, description="Maximum chat sessions to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List backend-known chat sessions that the standalone /chat UI can open."""
+    session_store_keys = await _load_chat_session_store_keys()
+    result = await db.execute(
+        select(Session)
+        .where(Session.deleted_at.is_(None))
+        .order_by(Session.last_activity_at.desc().nullslast(), Session.updated_at.desc())
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+
+    sessions: list[dict] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        item = _chat_session_summary_from_db(row, session_store_keys=session_store_keys)
+        if not item or item["key"] in seen_keys:
+            continue
+        sessions.append(item)
+        seen_keys.add(item["key"])
+
+    try:
+        instances = await list_instances()
+    except Exception:
+        instances = []
+    instances_by_id = {instance.instance_id: instance for instance in instances}
+    active_keys = list(_gateway_sessions.keys()) + list(_nanobot_gateway_sessions.keys())
+    for key in active_keys:
+        if key in seen_keys:
+            continue
+        item = _chat_session_summary_from_active_key(key, instances_by_id=instances_by_id)
+        if not item:
+            continue
+        sessions.append(item)
+        seen_keys.add(key)
+
+    sessions.sort(key=lambda item: item.get("last_activity_at") or "", reverse=True)
+    return {"sessions": sessions[:limit]}
 
 
 @router.get("/history")
