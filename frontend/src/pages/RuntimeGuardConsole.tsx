@@ -89,7 +89,6 @@ type RuntimePlatform = RuntimeInstance['platform'];
 type RuntimeBudgetStatusMap = Record<RuntimeBudgetPlatform, RuntimeBudgetStatus>;
 type GuardMode = 'Off' | 'On';
 type AgentStatus = 'Running' | 'Idle' | 'Not installed';
-export type NewTaskAgentOption = AgentName | 'smart';
 export type RuntimeGuardSession = {
   sessionKey: string;
   historySessionId?: string;
@@ -232,12 +231,16 @@ function guardStatusRowLabel(label: string, copy: RuntimeGuardCopy): string {
   if (label === 'File System') return copy.guardStatus.fileSystem;
   if (label === 'Browser') return copy.guardStatus.browser;
   if (label === 'Network/Git') return copy.guardStatus.networkGit;
+  if (label === 'Prompt Injection') return copy.guardStatus.promptInjection;
+  if (label === 'Data Leakage') return copy.guardStatus.dataLeakage;
+  if (label === 'Tool Call') return copy.guardStatus.toolCall;
+  if (label === 'Skill Injection') return copy.guardStatus.skillInjection;
   return label;
 }
 
 function guardStatusRowStatus(status: string, copy: RuntimeGuardCopy): string {
-  if (status === 'on') return copy.guardStatus.on.toLowerCase();
-  if (status === 'off') return copy.guardStatus.off.toLowerCase();
+  if (status === 'on') return copy.guardStatus.on;
+  if (status === 'off') return copy.guardStatus.off;
   if (status === 'Clear') return copy.guardStatus.clear;
   const waiting = status.match(/^(\d+) waiting$/);
   if (waiting) return rgText(copy.guardStatus.waiting, { count: waiting[1] });
@@ -252,13 +255,10 @@ function guardStatusRowStatus(status: string, copy: RuntimeGuardCopy): string {
     .join('/');
 }
 
-export function newTaskOptionsFromAgents(agents: Array<{ name: AgentName; available?: boolean; installed?: boolean }>): NewTaskAgentOption[] {
-  const availableAgents = agents.filter(agent => agent.available ?? agent.installed).map(agent => agent.name);
-  if (availableAgents.length === 0) return [];
-  return [
-    ...availableAgents,
-    'smart',
-  ];
+function guardScoreTone(score: number): 'green' | 'orange' | 'red' {
+  if (score >= 90) return 'green';
+  if (score >= 80) return 'orange';
+  return 'red';
 }
 
 const configurableTools: Array<{
@@ -869,8 +869,17 @@ function StatusDot({ tone }: { tone: GuardStatusRowTone | 'mcp' }) {
 
 function formatMoney(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '$0.00';
-  if (value < 0.01) return `$${value.toFixed(4)}`;
   return `$${value.toFixed(2)}`;
+}
+
+function formatBudgetInputValue(value: number | null | undefined): string {
+  if (!Number.isFinite(Number(value)) || Number(value) <= 0) return '';
+  return (Math.round(Number(value) * 100) / 100).toFixed(2).replace(/\.?0+$/, '');
+}
+
+function sanitizeBudgetAmountInput(value: string): string | null {
+  const normalized = value.replace(',', '.');
+  return /^\d*(?:\.\d{0,2})?$/.test(normalized) ? normalized : null;
 }
 
 function formatVersionLabel(version: string | null): string {
@@ -1073,19 +1082,13 @@ function useRuntimeGuardModalEscape(onClose: () => void) {
 }
 
 export function NewTaskModal({
-  agentOptions,
-  selectedAgent,
   request,
-  onAgentChange,
   onRequestChange,
   onCreate,
   onClose,
   creating = false,
 }: {
-  agentOptions: NewTaskAgentOption[];
-  selectedAgent: NewTaskAgentOption;
   request: string;
-  onAgentChange: (agent: NewTaskAgentOption) => void;
   onRequestChange: (request: string) => void;
   onCreate: () => void;
   onClose: () => void;
@@ -1094,9 +1097,7 @@ export function NewTaskModal({
   const { t } = useI18n();
   const copy = t.runtimeGuard;
   useRuntimeGuardModalEscape(onClose);
-  const hasAvailableAgents = agentOptions.length > 0;
-  const createDisabled = creating || !hasAvailableAgents || !request.trim();
-  const selectValue = hasAvailableAgents ? selectedAgent : 'no_available_agents';
+  const createDisabled = creating || !request.trim();
 
   return (
     <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -1106,33 +1107,19 @@ export function NewTaskModal({
         <button className="rg-modal-close" type="button" title={copy.newTask.closeTitle} onClick={onClose}>
           <X />
         </button>
-        <div className="rg-new-task-modal-controls">
-          <label className="rg-new-task-agent-field">
-            <span>{copy.newTask.agent}</span>
-            <select
-              aria-label={copy.newTask.agentAria}
-              disabled={!hasAvailableAgents || creating}
-              onChange={event => onAgentChange(event.target.value as NewTaskAgentOption)}
-              value={selectValue}
-            >
-              {hasAvailableAgents
-                ? agentOptions.map(option => (
-                  <option key={option} value={option}>{option}</option>
-                ))
-                : <option value="no_available_agents">{copy.newTask.noAvailableAgents}</option>}
-            </select>
-          </label>
+        <p className="rg-new-task-smart-hint">{copy.newTask.smartHint}</p>
+        <div className="rg-new-task-request-shell">
+          <textarea
+            aria-label={copy.newTask.requestAria}
+            className="rg-new-task-request"
+            onChange={event => onRequestChange(event.target.value)}
+            placeholder={copy.newTask.requestPlaceholder}
+            value={request}
+          />
           <button className="rg-new-task-create" disabled={createDisabled} onClick={onCreate} type="button">
             {creating ? copy.newTask.creating : copy.newTask.create}
           </button>
         </div>
-        <textarea
-          aria-label={copy.newTask.requestAria}
-          className="rg-new-task-request"
-          onChange={event => onRequestChange(event.target.value)}
-          placeholder={copy.newTask.requestPlaceholder}
-          value={request}
-        />
       </div>
     </div>
   );
@@ -1574,7 +1561,6 @@ export default function RuntimeGuardConsole() {
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null);
   const [creatingAgent, setCreatingAgent] = useState<AgentName | null>(null);
   const [newTaskModalOpen, setNewTaskModalOpen] = useState(false);
-  const [newTaskAgent, setNewTaskAgent] = useState<NewTaskAgentOption>('smart');
   const [newTaskRequest, setNewTaskRequest] = useState('');
   const [newTaskCreating, setNewTaskCreating] = useState(false);
   const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
@@ -1593,7 +1579,6 @@ export default function RuntimeGuardConsole() {
   const [guardModeSyncing, setGuardModeSyncing] = useState(false);
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
   const [runtimeBudgetStatuses, setRuntimeBudgetStatuses] = useState<RuntimeBudgetStatusMap>(() => defaultRuntimeBudgetStatusMap());
-  const [runtimeBudgetsLoaded, setRuntimeBudgetsLoaded] = useState(false);
   const [selectedBudgetPlatform, setSelectedBudgetPlatform] = useState<RuntimeBudgetPlatform>('openclaw');
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
   const [budgetAmountInput, setBudgetAmountInput] = useState('');
@@ -1825,7 +1810,6 @@ export default function RuntimeGuardConsole() {
       const { data } = await budgetAPI.listRuntimeBudgets();
       const next = runtimeBudgetStatusMapFromList(data.budgets ?? []);
       setRuntimeBudgetStatuses(next);
-      setRuntimeBudgetsLoaded(true);
       return next;
     } catch {
       return null;
@@ -1941,35 +1925,6 @@ export default function RuntimeGuardConsole() {
     }),
     [availableInstances, installProbeFailed, installedAgents, messageMap, sendingMap, sessions],
   );
-  const newTaskAgentAvailability = useMemo(
-    () => agents.map(agent => {
-      const runtime = findRuntimeForAgentInInstances(agent.name, availableInstances);
-      const platform = agentToPlatform(agent.name) as RuntimeBudgetPlatform;
-      const budgetStatus = runtimeBudgetStatuses[platform] ?? defaultRuntimeBudgetStatus(platform);
-      return {
-        name: agent.name,
-        available: Boolean(
-          agent.installed
-          && runtimeBudgetsLoaded
-          && runtime
-          && !runtimeUnavailableMessage(runtime)
-          && !budgetStatus.overLimit
-        ),
-      };
-    }),
-    [agents, availableInstances, runtimeBudgetStatuses, runtimeBudgetsLoaded],
-  );
-  const newTaskAgentOptions = useMemo(
-    () => newTaskOptionsFromAgents(newTaskAgentAvailability),
-    [newTaskAgentAvailability],
-  );
-  useEffect(() => {
-    if (!newTaskModalOpen) return;
-    if (!newTaskAgentOptions.includes(newTaskAgent)) {
-      setNewTaskAgent('smart');
-    }
-  }, [newTaskAgent, newTaskAgentOptions, newTaskModalOpen]);
-
   const budgetStatus = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
   const activeBudgetStatus = runtimeBudgetStatuses[activeBudgetPlatform] ?? defaultRuntimeBudgetStatus(activeBudgetPlatform);
   const {
@@ -2109,13 +2064,13 @@ export default function RuntimeGuardConsole() {
   useEffect(() => {
     if (!budgetModalOpen) return;
     const status = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
-    setBudgetAmountInput(status.maxCost ? String(status.maxCost) : '');
+    setBudgetAmountInput(formatBudgetInputValue(status.maxCost));
     setBudgetPeriodInput(status.maxCost && status.periodValue ? String(status.periodValue) : '');
     setBudgetPeriodUnit(status.periodUnit === 'day' ? 'day' : 'hour');
   }, [budgetModalOpen, runtimeBudgetStatuses, selectedBudgetPlatform]);
 
   const openBudgetModal = () => {
-    setBudgetAmountInput(budgetLimit ? String(budgetLimit) : '');
+    setBudgetAmountInput(formatBudgetInputValue(budgetLimit));
     setBudgetPeriodInput(budgetLimit && budgetStatus.periodValue ? String(budgetStatus.periodValue) : '');
     setBudgetPeriodUnit(budgetStatus.periodUnit === 'day' ? 'day' : 'hour');
     setBudgetModalOpen(true);
@@ -2125,11 +2080,12 @@ export default function RuntimeGuardConsole() {
     const maxCost = Number(budgetAmountInput);
     const periodValue = Number(budgetPeriodInput);
     if (!Number.isFinite(maxCost) || maxCost <= 0 || !Number.isFinite(periodValue) || periodValue <= 0) return;
+    const roundedMaxCost = Math.round(maxCost * 100) / 100;
 
     setBudgetSaving(true);
     try {
       const { data } = await budgetAPI.updateRuntimeBudget(selectedBudgetPlatform, {
-        maxCost,
+        maxCost: roundedMaxCost,
         periodValue,
         periodUnit: budgetPeriodUnit,
       });
@@ -2248,14 +2204,12 @@ export default function RuntimeGuardConsole() {
   };
 
   const openNewTaskModal = () => {
-    setNewTaskAgent('smart');
     setNewTaskRequest('');
     setNewTaskModalOpen(true);
   };
 
   const closeNewTaskModal = () => {
     setNewTaskModalOpen(false);
-    setNewTaskAgent('smart');
     setNewTaskRequest('');
   };
 
@@ -2263,54 +2217,18 @@ export default function RuntimeGuardConsole() {
     const requestText = newTaskRequest.trim();
     if (newTaskCreating || creatingAgent || !requestText) return;
 
-    if (newTaskAgent !== 'smart' && !newTaskAgentOptions.includes(newTaskAgent)) {
-      showToast(rgText(copy.toasts.noAvailableAgent, { agent: newTaskAgent }));
-      setNewTaskAgent('smart');
-      return;
-    }
-
     setNewTaskCreating(true);
     try {
-      let createdSession: RuntimeGuardSession | null = null;
-      if (newTaskAgent === 'smart') {
-        const res = await chatAPI.smartStartSession({ message: requestText });
-        const platform = normalizeRuntimePlatform(res.data.platform);
-        const agent = platformToAgent(platform);
-        createdSession = addCreatedRuntimeSession(agent, res.data, findRuntimeForAgent(agent));
-      } else {
-        const runtime = findRuntimeForAgent(newTaskAgent);
-        if (!runtime) {
-          showToast(rgText(copy.toasts.noEnabledRuntime, { agent: newTaskAgent }));
-          return;
-        }
-        const unavailable = runtimeUnavailableMessage(runtime, copy);
-        if (unavailable) {
-          showToast(unavailable);
-          return;
-        }
-        const latestBudgets = await refreshRuntimeBudgets();
-        const latestBudgetStatus = latestBudgets?.[agentToPlatform(newTaskAgent) as RuntimeBudgetPlatform]
-          ?? runtimeBudgetStatuses[agentToPlatform(newTaskAgent) as RuntimeBudgetPlatform];
-        if (latestBudgetStatus?.overLimit) {
-          showToast(rgText(copy.toasts.budgetReached, { agent: newTaskAgent }));
-          setNewTaskAgent('smart');
-          return;
-        }
-        setCreatingAgent(newTaskAgent);
-        const res = await chatAPI.startSession(runtimeGuardStartSessionPayload(runtime));
-        createdSession = addCreatedRuntimeSession(newTaskAgent, res.data, runtime);
-      }
+      const res = await chatAPI.smartStartSession({ message: requestText });
+      const platform = normalizeRuntimePlatform(res.data.platform);
+      const agent = platformToAgent(platform);
+      const createdSession = addCreatedRuntimeSession(agent, res.data, findRuntimeForAgent(agent));
       closeNewTaskModal();
       if (createdSession) {
         void sendMessageForSession(createdSession, requestText);
       }
-    } catch (err: any) {
-      if (newTaskAgent === 'smart') {
-        showToast(copy.toasts.smartFailed);
-      } else {
-        const detail = String(err?.response?.data?.detail || err?.message || copy.toasts.failedCreateSession);
-        showToast(detail);
-      }
+    } catch {
+      showToast(copy.toasts.smartFailed);
     } finally {
       setNewTaskCreating(false);
       setCreatingAgent(null);
@@ -2794,16 +2712,15 @@ export default function RuntimeGuardConsole() {
           <span>{copy.sidebar.agentTown}</span>
         </button>
         <button className="rg-top-utility rg-top-user" type="button" aria-disabled="true">
-          <User />
+          <span className="rg-top-user-icon" aria-hidden="true">
+            <img src="/user-icon.png" alt="" />
+          </span>
           <span>{copy.sidebar.userInfo}</span>
         </button>
       </div>
       {newTaskModalOpen && (
         <NewTaskModal
-          agentOptions={newTaskAgentOptions}
-          selectedAgent={newTaskAgent}
           request={newTaskRequest}
-          onAgentChange={setNewTaskAgent}
           onRequestChange={setNewTaskRequest}
           onCreate={() => void createNewTask()}
           onClose={closeNewTaskModal}
@@ -2834,10 +2751,14 @@ export default function RuntimeGuardConsole() {
                 aria-label={copy.budgetModal.maximumUsageAria}
                 inputMode="decimal"
                 min="0"
-                onChange={(event) => setBudgetAmountInput(event.target.value)}
+                onChange={(event) => {
+                  const nextValue = sanitizeBudgetAmountInput(event.target.value);
+                  if (nextValue !== null) setBudgetAmountInput(nextValue);
+                }}
+                pattern="^\d*(?:\.\d{0,2})?$"
                 placeholder="__"
                 step="0.01"
-                type="number"
+                type="text"
                 value={budgetAmountInput}
               />
               <span>{copy.budgetModal.usd}</span>
@@ -3022,17 +2943,14 @@ export default function RuntimeGuardConsole() {
         </section>
 
         <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
-          <div className="rg-budget-title">{copy.sidebar.budget} - {selectedBudgetAgentName}</div>
-          <div className="rg-budget-metrics">
-            <div className="rg-budget-metric-row">
-              <span>{copy.sidebar.spent}</span>
-              <strong className="rg-budget-metric-value is-spent">{budgetDisplayCostText}</strong>
-            </div>
+          <div className="rg-budget-title">{copy.sidebar.budget}</div>
+          <div className="rg-budget-amount-line">
+            <strong className="rg-budget-used">{budgetDisplayCostText}</strong>
             {budgetConfigured && (
-              <div className="rg-budget-metric-row">
-                <span>{copy.sidebar.limit}</span>
-                <strong className="rg-budget-metric-value is-limit">{budgetLimitText}</strong>
-              </div>
+              <>
+                <span className="rg-budget-slash">/</span>
+                <span className="rg-budget-limit">{budgetLimitText}</span>
+              </>
             )}
           </div>
           <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
@@ -3288,7 +3206,7 @@ export default function RuntimeGuardConsole() {
                 {guardSummaryDisplay(guardStatusSummary.label, copy)}
               </span>
             </div>
-            <div className={`rg-score-ring rg-score-${guardStatusSummary.tone}`}>
+            <div className={`rg-score-ring rg-score-${guardScoreTone(guardStatusSummary.score)}`}>
               <strong>{guardStatusSummary.score}</strong>
               <span>/100</span>
             </div>

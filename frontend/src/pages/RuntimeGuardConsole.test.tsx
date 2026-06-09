@@ -21,13 +21,11 @@ import RuntimeGuardConsole, {
   SessionHistoryViewAllModal,
   ToolsViewAllModal,
   mergeSessionHistorySessions,
-  newTaskOptionsFromAgents,
   promoteRuntimeGuardSession,
   runtimeGuardAgentStatus,
   runtimeGuardStartSessionPayload,
   runtimeSessionRecordToRuntimeGuardSession,
   titleFromUserMessage,
-  type NewTaskAgentOption,
   type BlockedModalRange,
   type RuntimeGuardSession,
 } from './RuntimeGuardConsole';
@@ -257,32 +255,15 @@ describe('titleFromUserMessage', () => {
 });
 
 describe('NewTaskModal', () => {
-  it('builds options from available agents and appends smart only when an agent is available', () => {
-    expect(newTaskOptionsFromAgents([
-      { name: 'OpenClaw', available: true },
-      { name: 'Hermes', available: false },
-      { name: 'Nanobot', available: true },
-    ])).toEqual(['OpenClaw', 'Nanobot', 'smart']);
-    expect(newTaskOptionsFromAgents([
-      { name: 'OpenClaw', available: false },
-      { name: 'Hermes', available: false },
-      { name: 'Nanobot', available: false },
-    ])).toEqual([]);
-  });
-
-  it('renders the agent picker, request box, and create control', () => {
+  it('renders the smart hint, request box, and bottom-right create control', () => {
     const onCreate = vi.fn();
     const onClose = vi.fn();
 
     function Harness() {
-      const [agent, setAgent] = useState<NewTaskAgentOption>('smart');
       const [request, setRequest] = useState('');
       return (
         <NewTaskModal
-          agentOptions={['OpenClaw', 'Nanobot', 'smart']}
-          selectedAgent={agent}
           request={request}
-          onAgentChange={setAgent}
           onRequestChange={setRequest}
           onCreate={onCreate}
           onClose={onClose}
@@ -293,14 +274,11 @@ describe('NewTaskModal', () => {
     render(<Harness />);
 
     expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
-    const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
-    expect(Array.from(select.options).map(option => option.value)).toEqual(['OpenClaw', 'Nanobot', 'smart']);
-    expect(select.value).toBe('smart');
-
-    fireEvent.change(select, { target: { value: 'OpenClaw' } });
-    expect(select.value).toBe('OpenClaw');
+    expect(screen.queryByLabelText('New task agent')).toBeNull();
+    expect(screen.getByText('Automatically uses the most suitable agent for the task.')).toBeTruthy();
 
     const createButton = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement;
+    expect(createButton.className).toContain('rg-new-task-create');
     expect(createButton.disabled).toBe(true);
 
     const textarea = screen.getByLabelText('New task request') as HTMLTextAreaElement;
@@ -315,29 +293,6 @@ describe('NewTaskModal', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('shows a disabled no-agent picker when no agent is available', () => {
-    const onCreate = vi.fn();
-    render(
-      <NewTaskModal
-        agentOptions={[]}
-        selectedAgent="smart"
-        request="Plan a task"
-        onAgentChange={vi.fn()}
-        onRequestChange={vi.fn()}
-        onCreate={onCreate}
-        onClose={vi.fn()}
-      />,
-    );
-
-    const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
-    expect(select.disabled).toBe(true);
-    expect(Array.from(select.options).map(option => option.textContent)).toEqual(['No available agents']);
-    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
-    expect(onCreate).not.toHaveBeenCalled();
-  });
-
   it('opens from the left New Task card and routes smart create through the smart API', async () => {
     const { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
     renderRuntimeGuardConsole();
@@ -345,9 +300,7 @@ describe('NewTaskModal', () => {
     fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
 
     expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
-    await waitFor(() => {
-      expect((screen.getByLabelText('New task agent') as HTMLSelectElement).value).toBe('smart');
-    });
+    expect(screen.queryByLabelText('New task agent')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Create a safe scan task' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -368,8 +321,8 @@ describe('NewTaskModal', () => {
     });
   });
 
-  it('only shows currently available agents plus smart in the New Task picker', async () => {
-    mockRuntimeGuardApis();
+  it('does not show agent options even when only some agents are available', async () => {
+    const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
     vi.mocked(budgetAPI.listRuntimeBudgets).mockResolvedValue({
       data: {
         budgets: [
@@ -384,49 +337,17 @@ describe('NewTaskModal', () => {
     fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
 
     await waitFor(() => {
-      const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
-      expect(Array.from(select.options).map(option => option.value)).toEqual(['OpenClaw', 'smart']);
+      expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
     });
-  });
+    expect(screen.queryByLabelText('New task agent')).toBeNull();
 
-  it('creates a concrete agent session with the existing start-session API', async () => {
-    const { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
-    const { container } = renderRuntimeGuardConsole();
-
-    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
-    await waitFor(() => {
-      const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
-      expect(Array.from(select.options).map(option => option.value)).toContain('OpenClaw');
-    });
-    fireEvent.change(screen.getByLabelText('New task agent'), { target: { value: 'OpenClaw' } });
-    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Start an OpenClaw task' } });
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Start an automatically routed task' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
-      expect(startSessionSpy).toHaveBeenCalledWith({
-        instance_id: 'runtime-openclaw',
-        label_mode: 'server_timestamp',
-      });
+      expect(smartStartSessionSpy).toHaveBeenCalledWith({ message: 'Start an automatically routed task' });
     });
-    expect(smartStartSessionSpy).not.toHaveBeenCalled();
-    await waitFor(() => {
-      expect(sendMessageStreamSpy).toHaveBeenCalledWith('/api/chat/send-message-stream', expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          session_key: 'created-session',
-          message: 'Start an OpenClaw task',
-          client_context: 'runtime_guard',
-        }),
-      }));
-    });
-
-    await waitFor(() => {
-      const sidebarBadge = container.querySelector('.rg-agent-row .rg-agent-badge[data-agent="OpenClaw"]');
-      const tabBadge = container.querySelector('.rg-chat-tab .rg-agent-badge[data-agent="OpenClaw"]');
-      expect(sidebarBadge).toHaveClass('agent-openclaw');
-      expect(tabBadge).toHaveClass('agent-openclaw');
-      expect(tabBadge).toHaveClass('rg-agent-badge-compact');
-    });
+    expect(startSessionSpy).not.toHaveBeenCalled();
   });
 
   it('shows a uniform smart failure toast without exposing router output', async () => {
@@ -444,9 +365,7 @@ describe('NewTaskModal', () => {
     renderRuntimeGuardConsole();
 
     fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
-    await waitFor(() => {
-      expect((screen.getByLabelText('New task agent') as HTMLSelectElement).value).toBe('smart');
-    });
+    expect(screen.queryByLabelText('New task agent')).toBeNull();
     fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Create a smart task' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
@@ -466,7 +385,8 @@ describe('RuntimeGuardConsole i18n', () => {
     expect(screen.getByText('New Task')).toBeTruthy();
     expect(screen.getByText('Chinese')).toBeTruthy();
 
-    fireEvent.click(screen.getByText(/^BUDGET - OpenClaw$/).closest('button') as HTMLElement);
+    expect(screen.getByText('$0.00')).toBeTruthy();
+    fireEvent.click(screen.getByText(/^BUDGET$/).closest('button') as HTMLElement);
     expect(screen.getByRole('option', { name: 'Hour' })).toBeTruthy();
     expect(screen.getByRole('option', { name: 'Day' })).toBeTruthy();
 
@@ -830,7 +750,7 @@ describe('ToolsViewAllModal', () => {
     ]).score).toBe(77);
   });
 
-  it('builds Guard Status rows from current tool settings', () => {
+  it('builds Guard Status display rows from guard mode', () => {
     const rows = buildGuardStatusRows('Off', {
       shell: 'Allowed',
       fileSystem: 'Asked',
@@ -840,12 +760,10 @@ describe('ToolsViewAllModal', () => {
     }, 2);
 
     expect(rows).toEqual([
-      { label: 'Guard Mode', status: 'off', tone: 'warning' },
-      { label: 'Pending', status: '2 waiting', tone: 'warning' },
-      { label: 'Shell', status: 'Allow', tone: 'success' },
-      { label: 'File System', status: 'Ask', tone: 'asked' },
-      { label: 'Browser', status: 'Allow', tone: 'success' },
-      { label: 'Network/Git', status: 'Guard/Allow', tone: 'warning' },
+      { label: 'Prompt Injection', status: 'off', tone: 'muted' },
+      { label: 'Data Leakage', status: 'off', tone: 'muted' },
+      { label: 'Tool Call', status: 'off', tone: 'muted' },
+      { label: 'Skill Injection', status: 'off', tone: 'muted' },
     ]);
   });
 

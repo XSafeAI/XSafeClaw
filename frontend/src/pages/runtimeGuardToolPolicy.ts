@@ -81,12 +81,6 @@ export function runtimeGuardToolPermissionLabel(permission: RuntimeGuardToolPerm
   return 'Guard';
 }
 
-function toolPermissionTone(permission: RuntimeGuardToolPermission): GuardStatusRowTone {
-  if (permission === 'Allowed') return 'success';
-  if (permission === 'Asked') return 'asked';
-  return 'warning';
-}
-
 export function toolPermissionsFromPolicies(
   policies: Partial<GuardToolPolicies> | null | undefined,
 ): RuntimeGuardToolPermissions {
@@ -131,48 +125,16 @@ export function calculateGuardStatusSummary(
 
 export function buildGuardStatusRows(
   guardMode: RuntimeGuardMode,
-  permissions: RuntimeGuardToolPermissions,
-  pendingCount: number,
+  _permissions: RuntimeGuardToolPermissions,
+  _pendingCount: number,
 ): GuardStatusRow[] {
-  const networkLabel = runtimeGuardToolPermissionLabel(permissions.network);
-  const gitLabel = runtimeGuardToolPermissionLabel(permissions.git);
-  const networkGitStatus = networkLabel === gitLabel ? networkLabel : `${networkLabel}/${gitLabel}`;
-  const networkGitTone = permissions.network === 'Guard' || permissions.git === 'Guard'
-    ? 'warning'
-    : permissions.network === 'Asked' || permissions.git === 'Asked'
-      ? 'asked'
-      : 'success';
+  const status = guardMode === 'On' ? 'on' : 'off';
+  const tone: GuardStatusRowTone = guardMode === 'On' ? 'success' : 'muted';
 
   return [
-    {
-      label: 'Guard Mode',
-      status: guardMode === 'On' ? 'on' : 'off',
-      tone: guardMode === 'On' ? 'success' : 'warning',
-    },
-    {
-      label: 'Pending',
-      status: pendingCount > 0 ? `${pendingCount} waiting` : 'Clear',
-      tone: pendingCount > 0 ? 'warning' : 'success',
-    },
-    {
-      label: 'Shell',
-      status: runtimeGuardToolPermissionLabel(permissions.shell),
-      tone: toolPermissionTone(permissions.shell),
-    },
-    {
-      label: 'File System',
-      status: runtimeGuardToolPermissionLabel(permissions.fileSystem),
-      tone: toolPermissionTone(permissions.fileSystem),
-    },
-    {
-      label: 'Browser',
-      status: runtimeGuardToolPermissionLabel(permissions.browser),
-      tone: toolPermissionTone(permissions.browser),
-    },
-    {
-      label: 'Network/Git',
-      status: networkGitStatus,
-      tone: networkGitTone,
-    },
+    { label: 'Prompt Injection', status, tone },
+    { label: 'Data Leakage', status, tone },
+    { label: 'Tool Call', status, tone },
+    { label: 'Skill Injection', status, tone },
   ];
 }
