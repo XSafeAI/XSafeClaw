@@ -1635,7 +1635,7 @@ function HermesConfigureFlow({ initialStatus }: { initialStatus: HermesStatusSna
                 </button>
                 <button
                   type="button"
-                  onClick={() => window.location.replace('/runtime-guard-console')}
+                  onClick={() => window.location.replace('/backend')}
                   className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all border border-violet-500/40 text-violet-300 hover:bg-violet-500/10"
                 >
                   <Activity className="w-4 h-4" /> {(t.configure as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
@@ -2641,7 +2641,7 @@ export default function Configure() {
                 className="flex items-center gap-2 px-6 py-3 bg-accent hover:bg-accent/90 text-white font-semibold rounded-xl transition-all shadow-lg shadow-accent/25">
                 <MapPin className="w-4 h-4" /> {(t.configure as any).enterTown || t.configure.enterAgentValley} <ChevronRight className="w-4 h-4" />
               </button>
-              <button onClick={() => window.location.replace('/runtime-guard-console')}
+              <button onClick={() => window.location.replace('/backend')}
                 className="flex items-center gap-2 px-6 py-3 rounded-xl font-semibold transition-all border border-accent/40 text-accent hover:bg-accent/10">
                 <Activity className="w-4 h-4" /> {(t.configure as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />
               </button>

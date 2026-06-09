@@ -1,10 +1,21 @@
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+function readXSafeClawVersion() {
+  const pyproject = readFileSync(resolve(__dirname, '../pyproject.toml'), 'utf8')
+  return pyproject.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? ''
+}
+
+const xsafeclawVersion = readXSafeClawVersion()
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    'import.meta.env.VITE_XSAFECLAW_VERSION': JSON.stringify(xsafeclawVersion),
+  },
   build: {
     outDir: '../src/xsafeclaw/static',
     emptyOutDir: true,

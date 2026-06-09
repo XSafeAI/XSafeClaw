@@ -25,12 +25,16 @@ from ...runtime import RuntimeInstance, decode_chat_session_key, encode_chat_ses
 from ...runtime.usage import attach_usage_metadata, normalize_usage
 from ...risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule_text
 from ...services.event_sync_service import EventSyncService
-from ...services.guard_service import GUARD_REJECTION_MARKER, summarize_runtime_request_title
+from ...services.guard_service import (
+    GUARD_REJECTION_MARKER,
+    call_runtime_model_prompt,
+    summarize_runtime_request_title,
+)
 from ...services.hermes_event_bridge import hermes_event_bridge
 from ...services.hermes_safety_prompt import load_hermes_safety_system_prompt
 from ...services.nanobot_trace_tailer import NanobotJsonlTraceTailer
 from ...services.openclaw_trace_tailer import OpenClawJsonlTraceTailer
-from ..runtime_helpers import resolve_instance, serialize_instance
+from ..runtime_helpers import list_instances, resolve_instance, serialize_instance
 from .stats import get_runtime_budget_status_payload, runtime_budget_exceeded_detail
 
 # ── Per-instance path helpers (was: module-level platform switch) ─────────
@@ -2216,10 +2220,35 @@ class StartSessionRequest(BaseModel):
     provider_override: str | None = None
 
 
+class SmartStartSessionRequest(BaseModel):
+    message: str = Field(..., description="User request used only for smart routing")
+
+
+class SmartStartSessionResponse(StartSessionResponse):
+    selected_agent: Literal["OpenClaw", "Hermes", "Nanobot"]
+    smart: bool = True
+    router_source: str | None = None
+
+
 _TIMESTAMP_LABEL_AGENT_NAMES = {
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
 }
+
+_SMART_AGENT_NAMES = ("OpenClaw", "Hermes", "Nanobot")
+_SMART_AGENT_PLATFORM_TO_NAME = {
+    "openclaw": "OpenClaw",
+    "hermes": "Hermes",
+    "nanobot": "Nanobot",
+}
+_SMART_AGENT_NAME_TO_PLATFORM = {
+    name: platform for platform, name in _SMART_AGENT_PLATFORM_TO_NAME.items()
+}
+_SMART_ROUTER_SOURCE_PLATFORMS = ("openclaw", "hermes")
+_SMART_ROUTER_TIMEOUT_S = 35.0
+_SMART_ROUTING_FAILURE_MESSAGE = (
+    "Smart routing failed. Please choose an available agent manually."
+)
 
 
 def _start_session_runtime_label(
@@ -2231,6 +2260,206 @@ def _start_session_runtime_label(
         if agent_name:
             return f"{agent_name} {datetime.now().strftime('%y:%m:%d:%H:%M:%S')}"
     return body.label
+
+
+def _smart_routing_exception(status_code: int = 503) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "reason": "smart_routing_failed",
+            "message": _SMART_ROUTING_FAILURE_MESSAGE,
+        },
+    )
+
+
+def _smart_start_label_mode(instance: RuntimeInstance) -> Literal["server_timestamp"] | None:
+    if instance.platform in {"openclaw", "hermes"}:
+        return "server_timestamp"
+    return None
+
+
+def _smart_runtime_supports_chat(instance: RuntimeInstance) -> bool:
+    return bool((instance.capabilities or {}).get("chat"))
+
+
+def _smart_runtime_unavailable_reason(instance: RuntimeInstance) -> str:
+    if not instance.enabled:
+        return "disabled"
+    if not _smart_runtime_supports_chat(instance):
+        return "chat_not_supported"
+    if instance.platform == "nanobot" and instance.health_status != "healthy":
+        return "gateway_unavailable"
+    if instance.platform in {"openclaw", "hermes"} and instance.health_status == "unreachable":
+        return "runtime_unreachable"
+    return ""
+
+
+def _smart_pick_platform_instance(
+    instances: list[RuntimeInstance],
+    platform: str,
+) -> RuntimeInstance | None:
+    candidates = [
+        instance for instance in instances
+        if instance.platform == platform and instance.enabled
+    ]
+    return next((instance for instance in candidates if instance.is_default), None) or (
+        candidates[0] if candidates else None
+    )
+
+
+async def _smart_runtime_budget_allows(platform: str) -> bool:
+    async with get_db_context() as db:
+        status = await get_runtime_budget_status_payload(db, platform, create=False)
+    return not bool(status.get("overLimit"))
+
+
+async def _smart_available_agent_candidates(
+    instances: list[RuntimeInstance] | None = None,
+) -> list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]]:
+    known_instances = instances if instances is not None else await list_instances()
+    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]] = []
+    for platform in ("openclaw", "hermes", "nanobot"):
+        instance = _smart_pick_platform_instance(known_instances, platform)
+        if instance is None:
+            continue
+        reason = _smart_runtime_unavailable_reason(instance)
+        if reason:
+            print(
+                "[smart-router] excluding runtime "
+                f"platform={platform} instance={instance.instance_id} reason={reason}"
+            )
+            continue
+        if not await _smart_runtime_budget_allows(platform):
+            print(
+                "[smart-router] excluding runtime "
+                f"platform={platform} instance={instance.instance_id} reason=budget_exceeded"
+            )
+            continue
+        agent_name = _SMART_AGENT_PLATFORM_TO_NAME.get(platform)
+        if agent_name in _SMART_AGENT_NAMES:
+            candidates.append((agent_name, instance))  # type: ignore[arg-type]
+    return candidates
+
+
+def _smart_router_source_instances(
+    instances: list[RuntimeInstance],
+) -> list[RuntimeInstance]:
+    sources: list[RuntimeInstance] = []
+    for platform in _SMART_ROUTER_SOURCE_PLATFORMS:
+        instance = _smart_pick_platform_instance(instances, platform)
+        if instance is None:
+            continue
+        reason = _smart_runtime_unavailable_reason(instance)
+        if reason:
+            print(
+                "[smart-router] skipping router source "
+                f"platform={platform} instance={instance.instance_id} reason={reason}"
+            )
+            continue
+        sources.append(instance)
+    return sources
+
+
+def _build_smart_router_prompt(
+    message: str,
+    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
+) -> str:
+    allowed_agents = [
+        {
+            "agent": agent_name,
+            "platform": instance.platform,
+            "displayName": instance.display_name,
+        }
+        for agent_name, instance in candidates
+    ]
+    return (
+        "You are XSafeClaw's silent Agent router.\n"
+        "Choose exactly one Agent framework for the user's request.\n"
+        "You must choose only from the allowed_agents list below.\n"
+        "Return strict JSON only, with no markdown, no prose, and no extra keys.\n"
+        "Schema: {\"agent\":\"<one of allowed agent names>\"}\n\n"
+        f"allowed_agents:\n{json.dumps(allowed_agents, ensure_ascii=False)}\n\n"
+        f"user_request:\n{message[:4000]}"
+    )
+
+
+def _strip_json_code_fence(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped.startswith("```"):
+        return stripped
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def _parse_smart_router_agent(
+    raw_output: str,
+    allowed_agents: set[str],
+) -> Literal["OpenClaw", "Hermes", "Nanobot"]:
+    try:
+        payload = json.loads(_strip_json_code_fence(raw_output))
+    except Exception as exc:
+        raise ValueError("router output is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("router output is not a JSON object")
+    if set(payload.keys()) != {"agent"}:
+        raise ValueError("router output has unexpected keys")
+    raw_agent = payload.get("agent")
+    if not isinstance(raw_agent, str):
+        raise ValueError("router output missing agent")
+    normalized = raw_agent.strip()
+    exact = next((agent for agent in allowed_agents if agent == normalized), "")
+    if not exact:
+        lower = normalized.lower()
+        exact = next((agent for agent in allowed_agents if agent.lower() == lower), "")
+    if exact not in _SMART_AGENT_NAMES:
+        raise ValueError("router output selected unavailable agent")
+    return exact  # type: ignore[return-value]
+
+
+async def _route_smart_agent(
+    message: str,
+    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
+    *,
+    instances: list[RuntimeInstance],
+) -> tuple[Literal["OpenClaw", "Hermes", "Nanobot"], str]:
+    allowed_agents = {agent_name for agent_name, _ in candidates}
+    prompt = _build_smart_router_prompt(message, candidates)
+    sources = _smart_router_source_instances(instances)
+    if not sources:
+        raise _smart_routing_exception(503)
+
+    last_error: Exception | None = None
+    for source in sources:
+        try:
+            raw = await asyncio.wait_for(
+                call_runtime_model_prompt(
+                    prompt,
+                    platform=source.platform,
+                    instance_id=source.instance_id,
+                    max_tokens=64,
+                ),
+                timeout=_SMART_ROUTER_TIMEOUT_S,
+            )
+        except Exception as exc:
+            last_error = exc if isinstance(exc, Exception) else Exception(str(exc))
+            print(
+                "[smart-router] router source failed "
+                f"platform={source.platform} instance={source.instance_id}: {last_error}"
+            )
+            continue
+
+        try:
+            return _parse_smart_router_agent(raw, allowed_agents), source.platform
+        except ValueError as exc:
+            print(
+                "[smart-router] invalid router output "
+                f"platform={source.platform} instance={source.instance_id}: {exc}; "
+                f"allowed={sorted(allowed_agents)} raw={raw!r}"
+            )
+            raise _smart_routing_exception(502) from exc
+
+    raise _smart_routing_exception(502) from last_error
 
 
 class ImageAttachment(BaseModel):
@@ -2876,8 +3105,7 @@ async def _persist_hermes_trace_events(
 
 # --------------- Endpoints ---------------
 
-@router.post("/start-session", response_model=StartSessionResponse)
-async def start_session(request: StartSessionRequest | None = None):
+async def _create_chat_session(request: StartSessionRequest | None = None) -> StartSessionResponse:
     """
     Create a new runtime chat session.
     Returns a session_key for subsequent send-message calls.
@@ -2990,6 +3218,71 @@ async def start_session(request: StartSessionRequest | None = None):
         instance_id=instance.instance_id,
         platform=instance.platform,
         instance=serialize_instance(instance),
+    )
+
+
+@router.post("/start-session", response_model=StartSessionResponse)
+async def start_session(request: StartSessionRequest | None = None):
+    return await _create_chat_session(request)
+
+
+@router.post("/smart-start-session", response_model=SmartStartSessionResponse)
+async def smart_start_session(request: SmartStartSessionRequest):
+    """
+    Create a RuntimeGuard session via the silent smart Agent router.
+
+    The router prompt is UI-only: it never writes to runtime chat history, never
+    appears in the timeline, and the selected Agent is still validated against
+    the server-side availability set before any session is created.
+    """
+    message = re.sub(r"\s+", " ", str(request.message or "")).strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    instances = await list_instances()
+    candidates = await _smart_available_agent_candidates(instances)
+    if not candidates:
+        raise _smart_routing_exception(503)
+
+    if len(candidates) == 1:
+        selected_agent, selected_instance = candidates[0]
+        router_source = None
+    else:
+        selected_agent, router_source = await _route_smart_agent(
+            message,
+            candidates,
+            instances=instances,
+        )
+        selected_platform = _SMART_AGENT_NAME_TO_PLATFORM.get(selected_agent)
+        selected_instance = next(
+            (
+                instance for agent_name, instance in candidates
+                if agent_name == selected_agent and instance.platform == selected_platform
+            ),
+            None,
+        )
+        if selected_instance is None:
+            print(
+                "[smart-router] validated agent missing from candidates "
+                f"agent={selected_agent} platform={selected_platform}"
+            )
+            raise _smart_routing_exception(502)
+
+    session = await _create_chat_session(
+        StartSessionRequest(
+            instance_id=selected_instance.instance_id,
+            label_mode=_smart_start_label_mode(selected_instance),
+        )
+    )
+    return SmartStartSessionResponse(
+        session_key=session.session_key,
+        status=session.status,
+        instance_id=session.instance_id,
+        platform=session.platform,
+        instance=session.instance,
+        selected_agent=selected_agent,
+        smart=True,
+        router_source=router_source,
     )
 
 

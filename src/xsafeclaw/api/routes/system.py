@@ -64,6 +64,20 @@ except ImportError:
 
 router = APIRouter()
 
+
+def _xsafeclaw_package_version() -> str:
+    try:
+        return importlib_metadata.version("xsafeclaw")
+    except importlib_metadata.PackageNotFoundError:
+        for parent in Path(__file__).resolve().parents:
+            pyproject = parent / "pyproject.toml"
+            if not pyproject.is_file():
+                continue
+            match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.MULTILINE)
+            if match:
+                return match.group(1)
+        return "0.0.0"
+
 # OpenClaw paths on the same machine as this API process.
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
@@ -1125,10 +1139,7 @@ async def get_install_status():
         config_exists=config_exists,
     )
 
-    try:
-        xsafeclaw_version = importlib_metadata.version("xsafeclaw")
-    except importlib_metadata.PackageNotFoundError:
-        xsafeclaw_version = None
+    xsafeclaw_version = _xsafeclaw_package_version()
 
     return {
         "xsafeclaw_version": xsafeclaw_version,

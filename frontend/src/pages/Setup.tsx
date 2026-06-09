@@ -253,7 +253,7 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              window.location.replace('/runtime-guard-console');
+              window.location.replace('/backend');
             }}
             className="flex items-center justify-center gap-1.5 py-2 rounded-xl font-medium text-[12px] transition-all border border-blue-500/30 text-blue-300 hover:bg-blue-500/10"
           >

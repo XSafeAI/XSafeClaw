@@ -46,7 +46,7 @@ export default function Layout() {
     icon: LucideIcon;
     desc: string;
   }> = [
-    { name: '返回对话页面',              href: '/runtime-guard-console', icon: ShieldCheck, desc: 'Runtime Guard' },
+    { name: '返回对话页面',              href: '/backend', icon: ShieldCheck, desc: 'Runtime Guard' },
     { name: t.layout.agentTown,       href: '/agent-valley',     icon: Activity,      desc: t.layout.agentTownDesc },
     { name: t.layout.clawMonitor,     href: '/monitor',          icon: Monitor,        desc: t.layout.descMonitor },
     { name: t.layout.safeChat,        href: '/chat',             icon: MessageSquare,  desc: t.layout.descChat },

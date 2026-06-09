@@ -1421,7 +1421,7 @@ export default function NanobotConfigure() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => window.location.replace('/runtime-guard-console')}
+                      onClick={() => window.location.replace('/backend')}
                       className="flex items-center justify-center gap-2 px-6 py-3 border border-accent/40 bg-surface-0 text-accent hover:bg-accent/10 font-semibold rounded-xl transition-all"
                     >
                       <Activity className="w-4 h-4" /> {(labels as any).enterBackendMonitor || 'Enter Backend Monitor'} <ChevronRight className="w-4 h-4" />

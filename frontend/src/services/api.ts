@@ -157,6 +157,34 @@ export interface UpdateRuntimeBudgetPayload {
   periodUnit: BudgetPeriodUnit;
 }
 
+export type RuntimeBudgetAgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
+
+export interface StartSessionPayload {
+  instance_id?: string;
+  label?: string | null;
+  label_mode?: 'server_timestamp' | null;
+  model_override?: string | null;
+  provider_override?: string | null;
+}
+
+export interface StartSessionResponse {
+  session_key: string;
+  status: string;
+  instance_id: string;
+  platform: RuntimeInstance['platform'];
+  instance?: RuntimeInstance;
+}
+
+export interface SmartStartSessionPayload {
+  message: string;
+}
+
+export interface SmartStartSessionResponse extends StartSessionResponse {
+  selected_agent: RuntimeBudgetAgentName;
+  smart: boolean;
+  router_source?: string | null;
+}
+
 export interface RuntimeInstanceCapabilitiesResponse {
   instance_id: string;
   platform: 'openclaw' | 'nanobot' | 'hermes';
@@ -577,14 +605,11 @@ export const redteamAPI = {
 
 // Chat API (direct OpenClaw gateway session)
 export const chatAPI = {
-  startSession: (data?: {
-    instance_id?: string;
-    label?: string | null;
-    label_mode?: 'server_timestamp' | null;
-    model_override?: string | null;
-    provider_override?: string | null;
-  }) =>
-    api.post<{ session_key: string; status: string; instance_id: string; platform: string; instance?: RuntimeInstance }>('/chat/start-session', data ?? {}),
+  startSession: (data?: StartSessionPayload) =>
+    api.post<StartSessionResponse>('/chat/start-session', data ?? {}),
+
+  smartStartSession: (data: SmartStartSessionPayload) =>
+    api.post<SmartStartSessionResponse>('/chat/smart-start-session', data),
 
   sendMessage: (sessionKey: string, message: string) =>
     api.post<{

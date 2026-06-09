@@ -72,7 +72,7 @@ export default function Home() {
           icon={Users}
           title={t.home.agentDashboard}
           description={t.home.agentDashboardDesc}
-          onClick={() => navigate('/runtime-guard-console')}
+          onClick={() => navigate('/backend')}
         />
       </div>
 

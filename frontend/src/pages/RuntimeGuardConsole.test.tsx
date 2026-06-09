@@ -1,18 +1,32 @@
-import { useState } from 'react';
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
-import type { GuardPendingApproval } from '../services/api';
+import { useState, type ReactNode } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  budgetAPI,
+  chatAPI,
+  guardAPI,
+  sessionsAPI,
+  systemAPI,
+  type GuardPendingApproval,
+} from '../services/api';
+import { I18nProvider } from '../i18n';
+import RuntimeGuardConsole, {
+  AgentIconBadge,
   ApprovalViewAllModal,
   BlockedViewAllModal,
   InlineApprovalCard,
+  NewTaskModal,
   SessionHistoryViewAllModal,
   ToolsViewAllModal,
   mergeSessionHistorySessions,
+  newTaskOptionsFromAgents,
   promoteRuntimeGuardSession,
   runtimeGuardAgentStatus,
   runtimeGuardStartSessionPayload,
   runtimeSessionRecordToRuntimeGuardSession,
+  type NewTaskAgentOption,
   type BlockedModalRange,
   type RuntimeGuardSession,
 } from './RuntimeGuardConsole';
@@ -28,6 +42,27 @@ import {
   toolPoliciesFromPermissions,
   type RuntimeGuardToolPermissions,
 } from './runtimeGuardToolPolicy';
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  window.localStorage.clear();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  window.localStorage.clear();
+});
+
+function I18nTestWrapper({ children }: { children: ReactNode }) {
+  return <I18nProvider>{children}</I18nProvider>;
+}
+
+function render(ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof rtlRender>[1]) {
+  if (!window.localStorage.getItem('xsafeclaw:locale')) {
+    window.localStorage.setItem('xsafeclaw:locale', 'en');
+  }
+  return rtlRender(ui, { wrapper: I18nTestWrapper, ...options });
+}
 
 function approval(overrides: Partial<GuardPendingApproval> = {}): GuardPendingApproval {
   return {
@@ -64,6 +99,359 @@ function middleCard(overrides: Partial<MiddleApprovalCard> = {}): MiddleApproval
     ...overrides,
   };
 }
+
+function runtimeInstance(overrides: Partial<RuntimeInstance> = {}): RuntimeInstance {
+  return {
+    instance_id: 'runtime-openclaw',
+    platform: 'openclaw',
+    display_name: 'OpenClaw',
+    config_path: null,
+    workspace_path: null,
+    sessions_path: null,
+    serve_base_url: null,
+    gateway_base_url: null,
+    discovery_mode: 'auto',
+    enabled: true,
+    is_default: true,
+    capabilities: {},
+    attach_state: 'chat_ready',
+    health_status: 'healthy',
+    meta: {},
+    ...overrides,
+  };
+}
+
+function runtimeBudgetStatus(platform: 'openclaw' | 'hermes' | 'nanobot', overLimit = false) {
+  return {
+    platform,
+    maxCost: overLimit ? 0.01 : null,
+    periodValue: 24,
+    periodUnit: 'hour',
+    periodStartAt: '2026-06-09T00:00:00.000Z',
+    periodEndAt: '2026-06-10T00:00:00.000Z',
+    updatedAt: '2026-06-09T00:00:00.000Z',
+    currentCost: overLimit ? 0.01 : 0,
+    budgetUsed: overLimit ? 0.01 : 0,
+    budgetPercent: overLimit ? 100 : 0,
+    overLimit,
+    remainingMs: 86_400_000,
+    estimatedTokens: 0,
+    costUnknownTokens: 0,
+    costUnknownModels: 0,
+    costBreakdown: [],
+  };
+}
+
+function mockRuntimeGuardApis() {
+  const startSessionSpy = vi.spyOn(chatAPI, 'startSession').mockResolvedValue({
+    data: {
+      session_key: 'created-session',
+      status: 'ready',
+      instance_id: 'runtime-openclaw',
+      platform: 'openclaw',
+    },
+  } as any);
+  const smartStartSessionSpy = vi.spyOn(chatAPI, 'smartStartSession').mockResolvedValue({
+    data: {
+      session_key: 'smart-created-session',
+      status: 'ready',
+      instance_id: 'runtime-openclaw',
+      platform: 'openclaw',
+      selected_agent: 'OpenClaw',
+      smart: true,
+    },
+  } as any);
+
+  vi.spyOn(systemAPI, 'instances').mockResolvedValue({
+    data: {
+      instances: [
+        runtimeInstance(),
+        runtimeInstance({
+          instance_id: 'runtime-nanobot',
+          platform: 'nanobot',
+          display_name: 'Nanobot',
+        }),
+      ],
+      total: 2,
+    },
+  } as any);
+  vi.spyOn(systemAPI, 'installStatus').mockResolvedValue({
+    data: {
+      openclaw_installed: true,
+      hermes_installed: false,
+      nanobot_installed: true,
+      xsafeclaw_version: '1.0.9',
+    },
+  } as any);
+  vi.spyOn(sessionsAPI, 'listRuntime').mockResolvedValue({ data: { sessions: [] } } as any);
+  vi.spyOn(budgetAPI, 'listRuntimeBudgets').mockResolvedValue({ data: { budgets: [] } } as any);
+  vi.spyOn(guardAPI, 'pending').mockResolvedValue({ data: [] } as any);
+  vi.spyOn(guardAPI, 'observations').mockResolvedValue({ data: [] } as any);
+  vi.spyOn(guardAPI, 'getEnabled').mockResolvedValue({ data: { enabled: false } } as any);
+  vi.spyOn(guardAPI, 'toolPolicies').mockResolvedValue({
+    data: {
+      policies: {
+        shell: 'guard',
+        file_system: 'guard',
+        browser: 'guard',
+        network: 'guard',
+        git: 'guard',
+      },
+    },
+  } as any);
+
+  return { startSessionSpy, smartStartSessionSpy };
+}
+
+function renderRuntimeGuardConsole() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        refetchOnWindowFocus: false,
+      },
+      mutations: {
+        retry: false,
+      },
+    },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/backend']}>
+        <RuntimeGuardConsole />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe('AgentIconBadge', () => {
+  it('uses the shared visual class for each runtime agent', () => {
+    const { container } = render(
+      <>
+        <AgentIconBadge agent="OpenClaw" />
+        <AgentIconBadge agent="Hermes" />
+        <AgentIconBadge agent="Nanobot" />
+      </>,
+    );
+
+    expect(container.querySelector('.rg-agent-badge[data-agent="OpenClaw"]')).toHaveClass('agent-openclaw');
+    expect(container.querySelector('.rg-agent-badge[data-agent="Hermes"]')).toHaveClass('agent-hermes');
+    expect(container.querySelector('.rg-agent-badge[data-agent="Nanobot"]')).toHaveClass('agent-nanobot');
+  });
+});
+
+describe('NewTaskModal', () => {
+  it('builds options from available agents and appends smart only when an agent is available', () => {
+    expect(newTaskOptionsFromAgents([
+      { name: 'OpenClaw', available: true },
+      { name: 'Hermes', available: false },
+      { name: 'Nanobot', available: true },
+    ])).toEqual(['OpenClaw', 'Nanobot', 'smart']);
+    expect(newTaskOptionsFromAgents([
+      { name: 'OpenClaw', available: false },
+      { name: 'Hermes', available: false },
+      { name: 'Nanobot', available: false },
+    ])).toEqual([]);
+  });
+
+  it('renders the agent picker, request box, and create control', () => {
+    const onCreate = vi.fn();
+    const onClose = vi.fn();
+
+    function Harness() {
+      const [agent, setAgent] = useState<NewTaskAgentOption>('smart');
+      const [request, setRequest] = useState('');
+      return (
+        <NewTaskModal
+          agentOptions={['OpenClaw', 'Nanobot', 'smart']}
+          selectedAgent={agent}
+          request={request}
+          onAgentChange={setAgent}
+          onRequestChange={setRequest}
+          onCreate={onCreate}
+          onClose={onClose}
+        />
+      );
+    }
+
+    render(<Harness />);
+
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
+    const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
+    expect(Array.from(select.options).map(option => option.value)).toEqual(['OpenClaw', 'Nanobot', 'smart']);
+    expect(select.value).toBe('smart');
+
+    fireEvent.change(select, { target: { value: 'OpenClaw' } });
+    expect(select.value).toBe('OpenClaw');
+
+    const createButton = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement;
+    expect(createButton.disabled).toBe(true);
+
+    const textarea = screen.getByLabelText('New task request') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Please inspect risky files' } });
+    expect(textarea.value).toBe('Please inspect risky files');
+    expect(createButton.disabled).toBe(false);
+
+    fireEvent.click(createButton);
+    expect(onCreate).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTitle('Close new task'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a disabled no-agent picker when no agent is available', () => {
+    const onCreate = vi.fn();
+    render(
+      <NewTaskModal
+        agentOptions={[]}
+        selectedAgent="smart"
+        request="Plan a task"
+        onAgentChange={vi.fn()}
+        onRequestChange={vi.fn()}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    expect(Array.from(select.options).map(option => option.textContent)).toEqual(['No available agents']);
+    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('opens from the left New Task card and routes smart create through the smart API', async () => {
+    const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
+    renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
+    await waitFor(() => {
+      expect((screen.getByLabelText('New task agent') as HTMLSelectElement).value).toBe('smart');
+    });
+
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Create a safe scan task' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(smartStartSessionSpy).toHaveBeenCalledWith({ message: 'Create a safe scan task' });
+    });
+    expect(startSessionSpy).not.toHaveBeenCalled();
+  });
+
+  it('only shows currently available agents plus smart in the New Task picker', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(budgetAPI.listRuntimeBudgets).mockResolvedValue({
+      data: {
+        budgets: [
+          runtimeBudgetStatus('openclaw', false),
+          runtimeBudgetStatus('hermes', false),
+          runtimeBudgetStatus('nanobot', true),
+        ],
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+
+    await waitFor(() => {
+      const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
+      expect(Array.from(select.options).map(option => option.value)).toEqual(['OpenClaw', 'smart']);
+    });
+  });
+
+  it('creates a concrete agent session with the existing start-session API', async () => {
+    const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
+    const { container } = renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+    await waitFor(() => {
+      const select = screen.getByLabelText('New task agent') as HTMLSelectElement;
+      expect(Array.from(select.options).map(option => option.value)).toContain('OpenClaw');
+    });
+    fireEvent.change(screen.getByLabelText('New task agent'), { target: { value: 'OpenClaw' } });
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Start an OpenClaw task' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(startSessionSpy).toHaveBeenCalledWith({
+        instance_id: 'runtime-openclaw',
+        label_mode: 'server_timestamp',
+      });
+    });
+    expect(smartStartSessionSpy).not.toHaveBeenCalled();
+
+    await waitFor(() => {
+      const sidebarBadge = container.querySelector('.rg-agent-row .rg-agent-badge[data-agent="OpenClaw"]');
+      const tabBadge = container.querySelector('.rg-chat-tab .rg-agent-badge[data-agent="OpenClaw"]');
+      expect(sidebarBadge).toHaveClass('agent-openclaw');
+      expect(tabBadge).toHaveClass('agent-openclaw');
+      expect(tabBadge).toHaveClass('rg-agent-badge-compact');
+    });
+  });
+
+  it('shows a uniform smart failure toast without exposing router output', async () => {
+    const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
+    smartStartSessionSpy.mockRejectedValueOnce({
+      response: {
+        data: {
+          detail: {
+            reason: 'smart_routing_failed',
+            message: 'Nanobot is not available',
+          },
+        },
+      },
+    });
+    renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+    await waitFor(() => {
+      expect((screen.getByLabelText('New task agent') as HTMLSelectElement).value).toBe('smart');
+    });
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Create a smart task' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Smart routing failed. Please choose an available agent manually.')).toBeTruthy();
+    });
+    expect(screen.queryByText('Nanobot is not available')).toBeNull();
+    expect(startSessionSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('RuntimeGuardConsole i18n', () => {
+  it('toggles the shared locale from the Language card and localizes budget units', async () => {
+    mockRuntimeGuardApis();
+    renderRuntimeGuardConsole();
+
+    expect(screen.getByText('New Task')).toBeTruthy();
+    expect(screen.getByText('Chinese')).toBeTruthy();
+
+    fireEvent.click(screen.getByText(/^BUDGET - OpenClaw$/).closest('button') as HTMLElement);
+    expect(screen.getByRole('option', { name: 'Hour' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Day' })).toBeTruthy();
+
+    fireEvent.click(screen.getByText('Chinese').closest('button') as HTMLElement);
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem('xsafeclaw:locale')).toBe('zh');
+      expect(screen.getByText('新建任务')).toBeTruthy();
+      expect(screen.getByText('工具权限')).toBeTruthy();
+      expect(screen.getByRole('option', { name: '小时' })).toBeTruthy();
+      expect(screen.getByRole('option', { name: '天' })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText('EN').closest('button') as HTMLElement);
+    await waitFor(() => {
+      expect(window.localStorage.getItem('xsafeclaw:locale')).toBe('en');
+      expect(screen.getByText('New Task')).toBeTruthy();
+    });
+  });
+});
 
 describe('InlineApprovalCard', () => {
   it('renders as a timeline row with timestamp, icon, request details, and actions', () => {
@@ -192,6 +580,7 @@ describe('SessionHistoryViewAllModal', () => {
     );
 
     expect(screen.getByRole('dialog', { name: 'Session history' })).toBeTruthy();
+    expect(screen.queryByText('SESSION HISTORY')).toBeNull();
     expect(screen.getByText('Fix login bug and add rate limit')).toBeTruthy();
     expect(screen.getByText('Review protected file access')).toBeTruthy();
     expect(screen.getByText('Active')).toBeTruthy();
@@ -416,7 +805,7 @@ describe('ToolsViewAllModal', () => {
     }, 2);
 
     expect(rows).toEqual([
-      { label: 'Guard Mode', status: 'Ask fallback', tone: 'warning' },
+      { label: 'Guard Mode', status: 'off', tone: 'warning' },
       { label: 'Pending', status: '2 waiting', tone: 'warning' },
       { label: 'Shell', status: 'Allow', tone: 'success' },
       { label: 'File System', status: 'Ask', tone: 'asked' },
@@ -476,6 +865,8 @@ describe('ToolsViewAllModal', () => {
 
     render(<Harness />);
 
+    expect(screen.getByRole('dialog', { name: 'Tool permissions' })).toBeTruthy();
+    expect(screen.queryByText('TOOLS')).toBeNull();
     expect(document.querySelectorAll('.rg-tool-permission-mark')).toHaveLength(5);
 
     const shellGroup = screen.getByRole('group', { name: 'Shell permission' });
@@ -557,7 +948,8 @@ describe('ApprovalViewAllModal', () => {
 
     expect(decisions).toEqual([{ id: 'approval-2', resolution: 'rejected' }]);
     expect(screen.queryByText('cmd-two')).toBeNull();
-    expect(screen.getByRole('dialog', { name: 'Pending approvals' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: 'Human approvals' })).toBeTruthy();
+    expect(screen.queryByText('APPROVAL CENTER')).toBeNull();
     expect(container.querySelectorAll('.rg-approval-item.is-modal')).toHaveLength(2);
   });
 
@@ -661,7 +1053,9 @@ describe('BlockedViewAllModal', () => {
     expect(screen.getByText('Reason: Deletes files recursively')).toBeTruthy();
     expect(screen.getByText('Impact: May delete important project data')).toBeTruthy();
 
-    fireEvent.mouseDown(screen.getByRole('dialog', { name: 'Blocked events' }));
+    expect(screen.queryByText('RECENT BLOCKED')).toBeNull();
+
+    fireEvent.mouseDown(screen.getByRole('dialog', { name: 'Blocked actions' }));
     expect(onClose).not.toHaveBeenCalled();
 
     fireEvent.mouseDown(container.querySelector('.rg-modal-backdrop') as HTMLElement);

@@ -20,15 +20,15 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Cpu,
   FolderOpen,
   GitBranch,
   Globe2,
-  Hexagon,
   Loader2,
   Lock,
   Network,
+  Route,
   Send,
-  Settings,
   Shield,
   Terminal,
   Trash2,
@@ -49,10 +49,12 @@ import {
   type RuntimeBudgetPlatform,
   type RuntimeBudgetStatus,
   type RuntimeInstance,
+  type StartSessionResponse,
   type RuntimeSessionRecord,
 } from '../services/api';
 import MarkdownMessage from '../components/MarkdownMessage';
 import { useRuntimeInstances } from '../hooks/useAPI';
+import { useI18n } from '../i18n';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
 import {
   buildActiveTimelineRows,
@@ -73,7 +75,6 @@ import {
   buildGuardStatusRows,
   calculateGuardStatusSummary,
   defaultToolPermissions,
-  runtimeGuardToolPermissionLabel,
   toolPermissionsFromPolicies,
   toolPoliciesFromPermissions,
   type GuardStatusRowTone,
@@ -88,6 +89,7 @@ type RuntimePlatform = RuntimeInstance['platform'];
 type RuntimeBudgetStatusMap = Record<RuntimeBudgetPlatform, RuntimeBudgetStatus>;
 type GuardMode = 'Off' | 'On';
 type AgentStatus = 'Running' | 'Idle' | 'Not installed';
+export type NewTaskAgentOption = AgentName | 'smart';
 export type RuntimeGuardSession = {
   sessionKey: string;
   historySessionId?: string;
@@ -115,6 +117,7 @@ export type BlockedModalRange = '24h' | '7d' | 'all';
 const RUNTIME_GUARD_SESSIONS_KEY = 'xsafeclaw:runtime-guard:sessions';
 const RUNTIME_GUARD_DRAFTS_KEY = 'xsafeclaw:runtime-guard:drafts';
 const APPROVAL_POLL_INTERVAL_MS = 3000;
+const BUILD_TIME_XSAFECLAW_VERSION = import.meta.env.VITE_XSAFECLAW_VERSION || null;
 
 const agentDefinitions: Array<{
   name: AgentName;
@@ -178,6 +181,80 @@ function runtimeBudgetRemainingMs(status: RuntimeBudgetStatus, now = Date.now())
 }
 
 const toolPermissionOptions: RuntimeGuardToolPermission[] = ['Allowed', 'Guard', 'Asked'];
+type RuntimeGuardCopy = ReturnType<typeof useI18n>['t']['runtimeGuard'];
+
+function rgText(template: string, values: Record<string, string | number> = {}): string {
+  return Object.entries(values).reduce(
+    (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+    template,
+  );
+}
+
+function toolDisplayName(toolId: RuntimeGuardToolId, copy: RuntimeGuardCopy): string {
+  return copy.toolsModal.toolNames[toolId];
+}
+
+function permissionDisplayLabel(permission: RuntimeGuardToolPermission, copy: RuntimeGuardCopy): string {
+  if (permission === 'Allowed') return copy.toolsModal.permissions.allow;
+  if (permission === 'Asked') return copy.toolsModal.permissions.ask;
+  return copy.toolsModal.permissions.guard;
+}
+
+function agentStatusDisplay(status: AgentStatus, copy: RuntimeGuardCopy): string {
+  if (status === 'Running') return copy.agentStatus.running;
+  if (status === 'Not installed') return copy.agentStatus.notInstalled;
+  return copy.agentStatus.idle;
+}
+
+function sessionStatusDisplay(status: ReturnType<typeof sessionHistoryStatus>, copy: RuntimeGuardCopy): string {
+  if (status === 'Active') return copy.sessionHistory.active;
+  if (status === 'Blocked') return copy.sessionHistory.blockedStatus;
+  return copy.sessionHistory.idle;
+}
+
+function guardSummaryDisplay(label: string, copy: RuntimeGuardCopy): string {
+  if (label === 'Manual') return copy.guardStatus.manual;
+  if (label === 'Secure') return copy.guardStatus.secure;
+  if (label === 'Guarded') return copy.guardStatus.guarded;
+  if (label === 'Review') return copy.guardStatus.review;
+  return label;
+}
+
+function guardStatusRowLabel(label: string, copy: RuntimeGuardCopy): string {
+  if (label === 'Guard Mode') return copy.guardStatus.guardMode;
+  if (label === 'Pending') return copy.guardStatus.pending;
+  if (label === 'Shell') return copy.guardStatus.shell;
+  if (label === 'File System') return copy.guardStatus.fileSystem;
+  if (label === 'Browser') return copy.guardStatus.browser;
+  if (label === 'Network/Git') return copy.guardStatus.networkGit;
+  return label;
+}
+
+function guardStatusRowStatus(status: string, copy: RuntimeGuardCopy): string {
+  if (status === 'on') return copy.guardStatus.on.toLowerCase();
+  if (status === 'off') return copy.guardStatus.off.toLowerCase();
+  if (status === 'Clear') return copy.guardStatus.clear;
+  const waiting = status.match(/^(\d+) waiting$/);
+  if (waiting) return rgText(copy.guardStatus.waiting, { count: waiting[1] });
+  return status
+    .split('/')
+    .map(part => {
+      if (part === 'Allow') return copy.toolsModal.permissions.allow;
+      if (part === 'Ask') return copy.toolsModal.permissions.ask;
+      if (part === 'Guard') return copy.toolsModal.permissions.guard;
+      return part;
+    })
+    .join('/');
+}
+
+export function newTaskOptionsFromAgents(agents: Array<{ name: AgentName; available?: boolean; installed?: boolean }>): NewTaskAgentOption[] {
+  const availableAgents = agents.filter(agent => agent.available ?? agent.installed).map(agent => agent.name);
+  if (availableAgents.length === 0) return [];
+  return [
+    ...availableAgents,
+    'smart',
+  ];
+}
 
 const configurableTools: Array<{
   id: RuntimeGuardToolId;
@@ -471,7 +548,7 @@ function saveRuntimeGuardDrafts(drafts: Record<string, string>) {
   localStorage.setItem(RUNTIME_GUARD_DRAFTS_KEY, JSON.stringify(drafts));
 }
 
-async function responseErrorMessage(response: Response): Promise<string> {
+async function responseErrorMessage(response: Response, copy: RuntimeGuardCopy): Promise<string> {
   const fallback = `HTTP ${response.status}`;
   try {
     const text = await response.text();
@@ -482,10 +559,13 @@ async function responseErrorMessage(response: Response): Promise<string> {
       if (detail?.reason === 'budget_exceeded') {
         const platform = normalizeRuntimePlatform(detail.platform);
         const resetAtMs = Date.parse(String(detail.resetAt || ''));
-        const resetText = Number.isFinite(resetAtMs)
-          ? ` Resets in ${formatBudgetRefreshTime(resetAtMs - Date.now())}.`
-          : '';
-        return `${platformToAgent(platform)} budget reached.${resetText}`;
+        if (Number.isFinite(resetAtMs)) {
+          return rgText(copy.toasts.budgetReachedWithReset, {
+            agent: platformToAgent(platform),
+            time: formatBudgetRefreshTime(resetAtMs - Date.now(), copy),
+          });
+        }
+        return rgText(copy.toasts.budgetReached, { agent: platformToAgent(platform) });
       }
       if (typeof detail === 'string' && detail.trim()) return detail;
       if (detail) return JSON.stringify(detail);
@@ -502,10 +582,12 @@ function formatTime(value: Date) {
   return value.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-function formatSessionStart(iso: string) {
+function formatSessionStart(iso: string, copy: RuntimeGuardCopy) {
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return 'Started just now';
-  return `Started ${date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+  if (Number.isNaN(date.getTime())) return copy.time.startedJustNow;
+  return rgText(copy.time.startedAt, {
+    time: date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }),
+  });
 }
 
 function formatSessionHistoryTime(iso: string): string {
@@ -614,10 +696,39 @@ function agentToPlatform(agent: AgentName): RuntimePlatform {
   return agentDefinitions.find(item => item.name === agent)?.platform ?? 'openclaw';
 }
 
-function agentIcon(agent: AgentName) {
-  if (agent === 'OpenClaw') return <Zap />;
-  if (agent === 'Hermes') return <Bot />;
-  return <Hexagon />;
+function findRuntimeForAgentInInstances(agent: AgentName, instances: RuntimeInstance[]): RuntimeInstance | null {
+  const platform = agentToPlatform(agent);
+  return instances.find(instance => instance.platform === platform && instance.is_default)
+    ?? instances.find(instance => instance.platform === platform)
+    ?? null;
+}
+
+function agentIconComponent(agent: AgentName): LucideIcon {
+  if (agent === 'OpenClaw') return Zap;
+  if (agent === 'Hermes') return Route;
+  return Cpu;
+}
+
+function agentClassName(agent: AgentName): string {
+  return agentDefinitions.find(item => item.name === agent)?.className ?? 'agent-openclaw';
+}
+
+export function AgentIconBadge({
+  agent,
+  size = 'default',
+}: {
+  agent: AgentName;
+  size?: 'default' | 'compact';
+}) {
+  const Icon = agentIconComponent(agent);
+  return (
+    <span
+      className={`rg-agent-badge rg-agent-badge-${size} ${agentClassName(agent)}`}
+      data-agent={agent}
+    >
+      <Icon />
+    </span>
+  );
 }
 
 function toolPermissionTone(permission: RuntimeGuardToolPermission): 'success' | 'warning' | 'asked' {
@@ -626,23 +737,25 @@ function toolPermissionTone(permission: RuntimeGuardToolPermission): 'success' |
   return 'asked';
 }
 
-function toolPermissionButtonLabel(permission: RuntimeGuardToolPermission): string {
-  return runtimeGuardToolPermissionLabel(permission);
+function toolPermissionButtonLabel(permission: RuntimeGuardToolPermission, copy: RuntimeGuardCopy): string {
+  return permissionDisplayLabel(permission, copy);
 }
 
-function runtimeUnavailableMessage(instance: RuntimeInstance) {
+function runtimeUnavailableMessage(instance: RuntimeInstance, copy?: RuntimeGuardCopy) {
   if (instance.platform === 'nanobot' && instance.health_status !== 'healthy') {
-    return `${instance.display_name || 'Nanobot'} gateway offline.`;
+    const name = instance.display_name || 'Nanobot';
+    return copy ? rgText(copy.toasts.gatewayOffline, { name }) : `${name} gateway offline.`;
   }
   if ((instance.platform === 'openclaw' || instance.platform === 'hermes') && instance.health_status === 'unreachable') {
-    return `${instance.display_name || instance.platform} is unreachable.`;
+    const name = instance.display_name || instance.platform;
+    return copy ? rgText(copy.toasts.runtimeUnreachable, { name }) : `${name} is unreachable.`;
   }
   return '';
 }
 
-function approvalStatusLabel(status: MiddleApprovalStatus): string {
-  if (status === 'approved') return 'Allowed';
-  if (status === 'rejected') return 'Denied';
+function approvalStatusLabel(status: MiddleApprovalStatus, copy: RuntimeGuardCopy): string {
+  if (status === 'approved') return copy.approvals.allowed;
+  if (status === 'rejected') return copy.approvals.denied;
   return '';
 }
 
@@ -739,19 +852,19 @@ function formatMoney(value: number): string {
 
 function formatVersionLabel(version: string | null): string {
   const trimmed = version?.trim();
-  if (!trimmed) return 'v--';
-  return trimmed.toLowerCase().startsWith('v') ? trimmed : `v${trimmed}`;
+  if (!trimmed) return 'V--';
+  return trimmed.toLowerCase().startsWith('v') ? `V${trimmed.slice(1)}` : `V${trimmed}`;
 }
 
-function formatBudgetRefreshTime(remainingMs: number): string {
+function formatBudgetRefreshTime(remainingMs: number, copy: RuntimeGuardCopy): string {
   const clamped = Math.max(0, remainingMs);
   const totalMinutes = Math.ceil(clamped / 60_000);
   const days = Math.floor(totalMinutes / (24 * 60));
   const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
   const minutes = totalMinutes % 60;
-  if (days > 0) return `${days}天${hours}小时`;
-  if (hours > 0) return `${hours}小时${minutes}分钟`;
-  return `${minutes}分钟`;
+  if (days > 0) return rgText(copy.time.daysHours, { days, hours });
+  if (hours > 0) return rgText(copy.time.hoursMinutes, { hours, minutes });
+  return rgText(copy.time.minutes, { minutes });
 }
 
 function formatApprovalTime(createdAt: number): string {
@@ -794,27 +907,29 @@ function ApprovalCard({
   onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
   modal?: boolean;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   const riskTone = item.guard_verdict === 'unsafe' ? 'high' : 'medium';
-  const risk = riskTone === 'high' ? 'High Risk' : 'Medium Risk';
+  const risk = riskTone === 'high' ? copy.approvals.highRisk : copy.approvals.mediumRisk;
   const content = previewApprovalParams(item.params);
   const cardClass = modal ? 'is-modal' : slotIndex === 0 ? 'rg-approval-shell' : 'rg-approval-file';
 
   return (
     <div className={`rg-approval-item ${cardClass}`}>
-      <div className="rg-approval-title">{item.tool_name || 'Tool Call'}</div>
+      <div className="rg-approval-title">{item.tool_name || copy.approvals.toolCall}</div>
       <div className={`rg-risk-text rg-risk-${riskTone}`}>{risk}</div>
       <div className="rg-code-strip">
         <span>{content}</span>
       </div>
-      <div className="rg-meta rg-meta-by">By: {approvalByline(item)}</div>
-      <div className="rg-meta rg-meta-time">Time: {formatApprovalTime(item.created_at)}</div>
+      <div className="rg-meta rg-meta-by">{rgText(copy.approvals.by, { value: approvalByline(item) })}</div>
+      <div className="rg-meta rg-meta-time">{rgText(copy.approvals.time, { value: formatApprovalTime(item.created_at) })}</div>
       <button
         className="rg-small-action rg-small-deny"
         disabled={resolving}
         onClick={() => onDecision(item, 'rejected')}
         type="button"
       >
-        Deny
+        {copy.approvals.deny}
       </button>
       <button
         className="rg-small-action rg-small-allow"
@@ -822,7 +937,7 @@ function ApprovalCard({
         onClick={() => onDecision(item, 'approved')}
         type="button"
       >
-        Allow
+        {copy.approvals.allow}
       </button>
     </div>
   );
@@ -837,20 +952,23 @@ export function InlineApprovalCard({
   resolving: boolean;
   onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   const item = card.item;
   const isPending = card.status === 'pending';
   const riskTone = item.guard_verdict === 'unsafe' ? 'high' : 'medium';
-  const risk = riskTone === 'high' ? 'High Risk' : 'Medium Risk';
-  const statusText = isPending ? risk : approvalStatusLabel(card.status);
+  const risk = riskTone === 'high' ? copy.approvals.highRisk : copy.approvals.mediumRisk;
+  const statusText = isPending ? risk : approvalStatusLabel(card.status, copy);
   const statusClass = isPending ? `rg-risk-${riskTone}` : '';
   const cardStateClass = card.status === 'pending'
     ? 'is-pending'
     : card.status === 'approved'
       ? 'is-approved'
       : 'is-denied';
+  const fallbackToolName = item.tool_name || copy.approvals.toolCall;
   const requestTitle = item.tool_name && /\brequest$/i.test(item.tool_name)
     ? item.tool_name
-    : `${item.tool_name || 'Tool Call'} Request`;
+    : rgText(copy.approvals.requestTitle, { tool: fallbackToolName });
   const content = previewApprovalParams(item.params);
   const reason = item.failure_mode || item.risk_source;
   const impact = item.real_world_harm;
@@ -866,8 +984,8 @@ export function InlineApprovalCard({
           <div className={`rg-command-risk ${statusClass}`}>{statusText}</div>
           <pre className="rg-command-code">{content}</pre>
           <div className="rg-command-reason">
-            {reason && <span>Reason: {reason}</span>}
-            {impact && <span>Impact: {impact}</span>}
+            {reason && <span>{rgText(copy.approvals.reason, { value: reason })}</span>}
+            {impact && <span>{rgText(copy.approvals.impact, { value: impact })}</span>}
           </div>
           {isPending && (
             <div className="rg-command-actions">
@@ -877,7 +995,7 @@ export function InlineApprovalCard({
                 onClick={() => onDecision(item, 'rejected')}
                 type="button"
               >
-                Deny
+                {copy.approvals.deny}
               </button>
               <button
                 className="rg-always"
@@ -885,7 +1003,7 @@ export function InlineApprovalCard({
                 onClick={() => onDecision(item, 'approved')}
                 type="button"
               >
-                Allow
+                {copy.approvals.allow}
               </button>
             </div>
           )}
@@ -899,8 +1017,8 @@ function blockedByline(item: RecentBlockedItem): string {
   return item.instanceId ? `${item.platform} / ${item.instanceId}` : item.platform;
 }
 
-function blockedSourceLabel(source: RecentBlockedSource): string {
-  return source === 'approval' ? 'Approval' : 'Observation';
+function blockedSourceLabel(source: RecentBlockedSource, copy: RuntimeGuardCopy): string {
+  return source === 'approval' ? copy.blockedActions.approval : copy.blockedActions.observation;
 }
 
 function filterBlockedItemsByRange(
@@ -931,6 +1049,72 @@ function useRuntimeGuardModalEscape(onClose: () => void) {
   }, [onClose]);
 }
 
+export function NewTaskModal({
+  agentOptions,
+  selectedAgent,
+  request,
+  onAgentChange,
+  onRequestChange,
+  onCreate,
+  onClose,
+  creating = false,
+}: {
+  agentOptions: NewTaskAgentOption[];
+  selectedAgent: NewTaskAgentOption;
+  request: string;
+  onAgentChange: (agent: NewTaskAgentOption) => void;
+  onRequestChange: (request: string) => void;
+  onCreate: () => void;
+  onClose: () => void;
+  creating?: boolean;
+}) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
+  useRuntimeGuardModalEscape(onClose);
+  const hasAvailableAgents = agentOptions.length > 0;
+  const createDisabled = creating || !hasAvailableAgents || !request.trim();
+  const selectValue = hasAvailableAgents ? selectedAgent : 'no_available_agents';
+
+  return (
+    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div className="rg-list-modal rg-new-task-modal" role="dialog" aria-modal="true" aria-label={copy.newTask.dialogLabel} onMouseDown={(event) => event.stopPropagation()}>
+        <button className="rg-modal-close" type="button" title={copy.newTask.closeTitle} onClick={onClose}>
+          <X />
+        </button>
+        <div className="rg-new-task-modal-controls">
+          <label className="rg-new-task-agent-field">
+            <span>{copy.newTask.agent}</span>
+            <select
+              aria-label={copy.newTask.agentAria}
+              disabled={!hasAvailableAgents || creating}
+              onChange={event => onAgentChange(event.target.value as NewTaskAgentOption)}
+              value={selectValue}
+            >
+              {hasAvailableAgents
+                ? agentOptions.map(option => (
+                  <option key={option} value={option}>{option}</option>
+                ))
+                : <option value="no_available_agents">{copy.newTask.noAvailableAgents}</option>}
+            </select>
+          </label>
+          <button className="rg-new-task-create" disabled={createDisabled} onClick={onCreate} type="button">
+            {creating ? copy.newTask.creating : copy.newTask.create}
+          </button>
+        </div>
+        <textarea
+          aria-label={copy.newTask.requestAria}
+          className="rg-new-task-request"
+          onChange={event => onRequestChange(event.target.value)}
+          placeholder={copy.newTask.requestPlaceholder}
+          value={request}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function SessionHistoryViewAllModal({
   sessions,
   loading,
@@ -950,6 +1134,8 @@ export function SessionHistoryViewAllModal({
   onDeleteSession: (session: RuntimeGuardSession) => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   const [searchQuery, setSearchQuery] = useState('');
   const [agentFilter, setAgentFilter] = useState<SessionHistoryAgentFilter>('All');
   useRuntimeGuardModalEscape(onClose);
@@ -965,21 +1151,25 @@ export function SessionHistoryViewAllModal({
       if (event.target === event.currentTarget) onClose();
     }}>
       <div className="rg-list-modal rg-session-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-session-modal-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="rg-modal-close" type="button" title="Close session history" onClick={onClose}>
+        <button className="rg-modal-close" type="button" title={copy.sessionHistory.closeTitle} onClick={onClose}>
           <X />
         </button>
-        <div className="rg-list-modal-kicker">SESSION HISTORY</div>
-        <h2 id="rg-session-modal-title">Session history</h2>
-        <div className="rg-list-modal-subtitle">{filteredSessions.length} session{filteredSessions.length === 1 ? '' : 's'}</div>
+        <h2 id="rg-session-modal-title">{copy.sessionHistory.title}</h2>
+        <div className="rg-list-modal-subtitle">
+          {rgText(copy.sessionHistory.sessionCount, {
+            count: filteredSessions.length,
+            suffix: filteredSessions.length === 1 ? '' : 's',
+          })}
+        </div>
         <div className="rg-session-modal-controls">
           <input
-            aria-label="Search session history"
+            aria-label={copy.sessionHistory.searchAria}
             onChange={event => setSearchQuery(event.target.value)}
-            placeholder="Search sessions..."
+            placeholder={copy.sessionHistory.searchPlaceholder}
             type="search"
             value={searchQuery}
           />
-          <div className="rg-session-agent-tabs" role="group" aria-label="Session agent filter">
+          <div className="rg-session-agent-tabs" role="group" aria-label={copy.sessionHistory.filterAria}>
             {sessionHistoryFilters.map(filter => (
               <button
                 aria-pressed={agentFilter === filter}
@@ -1017,28 +1207,31 @@ export function SessionHistoryViewAllModal({
                     type="button"
                   >
                     <span className="rg-session-modal-time">{formatSessionHistoryTime(session.createdAt)}</span>
-                    <span className="rg-session-modal-agent">{agentIcon(session.agent)} {session.agent}</span>
+                    <span className="rg-session-modal-agent">
+                      <AgentIconBadge agent={session.agent} size="compact" />
+                      {session.agent}
+                    </span>
                     <span className="rg-session-modal-title">
                       <strong>{session.title}</strong>
                       <em>{session.displayName || session.instanceId || session.platform}</em>
                     </span>
                     <span className="rg-session-modal-stats">
-                      <span>Events {messages.length}</span>
-                      <span>Blocked {blockedCount}</span>
-                      <span>Pending {pendingApprovals}</span>
+                      <span>{rgText(copy.sessionHistory.events, { count: messages.length })}</span>
+                      <span>{rgText(copy.sessionHistory.blocked, { count: blockedCount })}</span>
+                      <span>{rgText(copy.sessionHistory.pending, { count: pendingApprovals })}</span>
                     </span>
                     <span className="rg-session-modal-status">
                       <StatusDot tone={statusTone} />
-                      {status}
+                      {sessionStatusDisplay(status, copy)}
                     </span>
                   </button>
                   <button
                     className="rg-session-modal-delete"
                     onClick={() => {
-                      const confirmed = window.confirm(`Delete session "${session.title}" from history? This cannot be undone.`);
+                      const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: session.title }));
                       if (confirmed) onDeleteSession(session);
                     }}
-                    title={`Delete ${session.title}`}
+                    title={rgText(copy.sessionHistory.deleteTitle, { title: session.title })}
                     type="button"
                   >
                     <Trash2 />
@@ -1048,7 +1241,11 @@ export function SessionHistoryViewAllModal({
             })
           ) : (
             <div className="rg-list-empty">
-              {loading && sessions.length === 0 ? 'Loading session history...' : sessions.length === 0 ? 'No session history' : 'No sessions match this filter'}
+              {loading && sessions.length === 0
+                ? copy.sessionHistory.loading
+                : sessions.length === 0
+                  ? copy.sessionHistory.empty
+                  : copy.sessionHistory.noMatch}
             </div>
           )}
         </div>
@@ -1066,6 +1263,8 @@ export function ToolsViewAllModal({
   onPermissionChange: (toolId: RuntimeGuardToolId, permission: RuntimeGuardToolPermission) => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   useRuntimeGuardModalEscape(onClose);
 
   return (
@@ -1073,20 +1272,20 @@ export function ToolsViewAllModal({
       if (event.target === event.currentTarget) onClose();
     }}>
       <div className="rg-list-modal rg-tools-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-tools-modal-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="rg-modal-close" type="button" title="Close tool permissions" onClick={onClose}>
+        <button className="rg-modal-close" type="button" title={copy.toolsModal.closeTitle} onClick={onClose}>
           <X />
         </button>
-        <div className="rg-list-modal-kicker">TOOLS</div>
-        <h2 id="rg-tools-modal-title">Tool permissions</h2>
+        <h2 id="rg-tools-modal-title">{copy.toolsModal.title}</h2>
         <div className="rg-list-modal-scroll rg-tools-modal-scroll">
           {configurableTools.map(tool => {
             const ToolIcon = tool.icon;
             const permission = permissions[tool.id];
+            const toolName = toolDisplayName(tool.id, copy);
             return (
               <article className="rg-tool-permission-row" key={tool.id}>
                 <span className="rg-tool-permission-mark"><ToolIcon /></span>
-                <strong>{tool.name}</strong>
-                <div className="rg-permission-segment" role="group" aria-label={`${tool.name} permission`}>
+                <strong>{toolName}</strong>
+                <div className="rg-permission-segment" role="group" aria-label={rgText(copy.toolsModal.permissionAria, { tool: toolName })}>
                   {toolPermissionOptions.map(option => (
                     <button
                       aria-pressed={permission === option}
@@ -1095,7 +1294,7 @@ export function ToolsViewAllModal({
                       onClick={() => onPermissionChange(tool.id, option)}
                       type="button"
                     >
-                      {toolPermissionButtonLabel(option)}
+                      {toolPermissionButtonLabel(option, copy)}
                     </button>
                   ))}
                 </div>
@@ -1121,6 +1320,8 @@ export function ApprovalViewAllModal({
   onDecision: (item: GuardPendingApproval, resolution: ApprovalDecision) => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   useRuntimeGuardModalEscape(onClose);
 
   return (
@@ -1128,12 +1329,16 @@ export function ApprovalViewAllModal({
       if (event.target === event.currentTarget) onClose();
     }}>
       <div className="rg-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-approval-modal-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="rg-modal-close" type="button" title="Close approvals" onClick={onClose}>
+        <button className="rg-modal-close" type="button" title={copy.approvals.closeTitle} onClick={onClose}>
           <X />
         </button>
-        <div className="rg-list-modal-kicker">APPROVAL CENTER</div>
-        <h2 id="rg-approval-modal-title">Pending approvals</h2>
-        <div className="rg-list-modal-subtitle">{items.length} pending request{items.length === 1 ? '' : 's'}</div>
+        <h2 id="rg-approval-modal-title">{copy.approvals.title}</h2>
+        <div className="rg-list-modal-subtitle">
+          {rgText(copy.approvals.pendingCount, {
+            count: items.length,
+            suffix: items.length === 1 ? '' : 's',
+          })}
+        </div>
         <div className="rg-list-modal-scroll">
           {items.length > 0 ? (
             items.map((item, index) => (
@@ -1148,7 +1353,7 @@ export function ApprovalViewAllModal({
             ))
           ) : (
             <div className="rg-list-empty">
-              {loading ? 'Loading approvals...' : 'No pending approvals'}
+              {loading ? copy.approvals.loading : copy.approvals.empty}
             </div>
           )}
         </div>
@@ -1172,13 +1377,15 @@ export function BlockedViewAllModal({
   onRangeChange: (range: BlockedModalRange) => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   useRuntimeGuardModalEscape(onClose);
 
   const filteredItems = filterBlockedItemsByRange(items, range, nowMs);
   const rangeOptions: Array<{ value: BlockedModalRange; label: string }> = [
     { value: '24h', label: '24h' },
     { value: '7d', label: '7d' },
-    { value: 'all', label: 'All' },
+    { value: 'all', label: copy.blockedActions.all },
   ];
 
   return (
@@ -1186,12 +1393,11 @@ export function BlockedViewAllModal({
       if (event.target === event.currentTarget) onClose();
     }}>
       <div className="rg-list-modal rg-blocked-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-blocked-modal-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="rg-modal-close" type="button" title="Close blocked events" onClick={onClose}>
+        <button className="rg-modal-close" type="button" title={copy.blockedActions.closeTitle} onClick={onClose}>
           <X />
         </button>
-        <div className="rg-list-modal-kicker">RECENT BLOCKED</div>
-        <h2 id="rg-blocked-modal-title">Blocked events</h2>
-        <div className="rg-range-tabs" role="tablist" aria-label="Blocked time range">
+        <h2 id="rg-blocked-modal-title">{copy.blockedActions.title}</h2>
+        <div className="rg-range-tabs" role="tablist" aria-label={copy.blockedActions.rangeAria}>
           {rangeOptions.map(option => (
             <button
               aria-pressed={range === option.value}
@@ -1210,22 +1416,22 @@ export function BlockedViewAllModal({
               <article className="rg-block-detail-card" key={item.id}>
                 <div className="rg-block-detail-head">
                   <span>{formatApprovalTime(item.timestamp)}</span>
-                  <strong>Blocked</strong>
-                  <em>{blockedSourceLabel(item.source)}</em>
+                  <strong>{copy.blockedActions.blocked}</strong>
+                  <em>{blockedSourceLabel(item.source, copy)}</em>
                 </div>
                 <div className="rg-block-detail-title">{item.toolName}</div>
                 <code>{previewApprovalParams(item.params)}</code>
                 <div className="rg-block-detail-meta">
-                  <span>By: {blockedByline(item)}</span>
-                  {item.sessionKey && <span>Session: {item.sessionKey}</span>}
-                  {item.reason && <span>Reason: {item.reason}</span>}
-                  {item.impact && <span>Impact: {item.impact}</span>}
+                  <span>{rgText(copy.blockedActions.by, { value: blockedByline(item) })}</span>
+                  {item.sessionKey && <span>{rgText(copy.blockedActions.session, { value: item.sessionKey })}</span>}
+                  {item.reason && <span>{rgText(copy.blockedActions.reason, { value: item.reason })}</span>}
+                  {item.impact && <span>{rgText(copy.blockedActions.impact, { value: item.impact })}</span>}
                 </div>
               </article>
             ))
           ) : (
             <div className="rg-list-empty">
-              {loading && items.length === 0 ? 'Loading blocked...' : 'No blocked events in this range'}
+              {loading && items.length === 0 ? copy.blockedActions.loading : copy.blockedActions.emptyRange}
             </div>
           )}
         </div>
@@ -1243,6 +1449,8 @@ function TimelineMessage({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
   const time = formatTime(msg.timestamp);
 
   if (msg.role === 'tool_call') {
@@ -1305,7 +1513,7 @@ function TimelineMessage({
       <span className="rg-stream-time">{time}</span>
       {isUser ? <User className="rg-stream-icon" /> : isError ? <AlertTriangle className="rg-stream-icon" /> : <Bot className="rg-stream-icon" />}
       <div className="rg-stream-body">
-        <span className="rg-stream-title">{isUser ? 'You' : isError ? 'Runtime error' : 'Assistant'}</span>
+        <span className="rg-stream-title">{isUser ? copy.main.you : isError ? copy.main.runtimeError : copy.main.assistant}</span>
         {msg.pending && !msg.content ? (
           <span className="rg-stream-pending"><i /><i /><i /></span>
         ) : !isUser && !isError ? (
@@ -1319,6 +1527,8 @@ function TimelineMessage({
 }
 
 export default function RuntimeGuardConsole() {
+  const { t, locale, setLocale } = useI18n();
+  const copy = t.runtimeGuard;
   const navigate = useNavigate();
   const runtimeInstancesQuery = useRuntimeInstances();
   const subscribeToChatStore = useCallback((listener: () => void) => chatStreamStore.subscribe(listener), []);
@@ -1331,7 +1541,7 @@ export default function RuntimeGuardConsole() {
     Nanobot: null,
   });
   const [installProbeFailed, setInstallProbeFailed] = useState(false);
-  const [xsafeclawVersion, setXsafeclawVersion] = useState<string | null>(null);
+  const [xsafeclawVersion, setXsafeclawVersion] = useState<string | null>(BUILD_TIME_XSAFECLAW_VERSION);
   const [sessions, setSessions] = useState<RuntimeGuardSession[]>(() => loadRuntimeGuardSessions());
   const [activeSessionId, setActiveSessionId] = useState(() => loadRuntimeGuardSessions()[0]?.sessionKey ?? '');
   const [sessionHistoryItems, setSessionHistoryItems] = useState<RuntimeGuardSession[]>([]);
@@ -1340,6 +1550,10 @@ export default function RuntimeGuardConsole() {
   const [draftBySessionKey, setDraftBySessionKey] = useState<Record<string, string>>(() => loadRuntimeGuardDrafts());
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null);
   const [creatingAgent, setCreatingAgent] = useState<AgentName | null>(null);
+  const [newTaskModalOpen, setNewTaskModalOpen] = useState(false);
+  const [newTaskAgent, setNewTaskAgent] = useState<NewTaskAgentOption>('smart');
+  const [newTaskRequest, setNewTaskRequest] = useState('');
+  const [newTaskCreating, setNewTaskCreating] = useState(false);
   const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
   const [isComposing, setIsComposing] = useState(false);
   const [approvalItems, setApprovalItems] = useState<GuardPendingApproval[]>([]);
@@ -1356,11 +1570,21 @@ export default function RuntimeGuardConsole() {
   const [guardModeSyncing, setGuardModeSyncing] = useState(false);
   const [autoApprovalOpen, setAutoApprovalOpen] = useState(false);
   const [runtimeBudgetStatuses, setRuntimeBudgetStatuses] = useState<RuntimeBudgetStatusMap>(() => defaultRuntimeBudgetStatusMap());
+  const [runtimeBudgetsLoaded, setRuntimeBudgetsLoaded] = useState(false);
   const [selectedBudgetPlatform, setSelectedBudgetPlatform] = useState<RuntimeBudgetPlatform>('openclaw');
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
   const [budgetAmountInput, setBudgetAmountInput] = useState('');
   const [budgetPeriodInput, setBudgetPeriodInput] = useState('');
   const [budgetPeriodUnit, setBudgetPeriodUnit] = useState<BudgetPeriodUnit>('hour');
+
+  useEffect(() => {
+    const previousTitle = document.title;
+    document.title = 'backend';
+
+    return () => {
+      document.title = previousTitle;
+    };
+  }, []);
   const [budgetSaving, setBudgetSaving] = useState(false);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const [layoutFit, setLayoutFit] = useState({
@@ -1434,11 +1658,12 @@ export default function RuntimeGuardConsole() {
       const permission = toolPermissions[tool.id];
       return {
         ...tool,
-        status: runtimeGuardToolPermissionLabel(permission),
+        name: toolDisplayName(tool.id, copy),
+        status: permissionDisplayLabel(permission, copy),
         tone: toolPermissionTone(permission),
       };
     }).filter(tool => tool.id === 'shell' || tool.id === 'fileSystem' || tool.id === 'browser'),
-  ]), [toolPermissions]);
+  ]), [copy, toolPermissions]);
   const updateToolPermission = useCallback((toolId: RuntimeGuardToolId, permission: RuntimeGuardToolPermission) => {
     if (toolPermissions[toolId] === permission) return;
     const previousPermissions = toolPermissions;
@@ -1559,7 +1784,7 @@ export default function RuntimeGuardConsole() {
           Hermes: Boolean(res.data.hermes_installed),
           Nanobot: Boolean(res.data.nanobot_installed),
         });
-        setXsafeclawVersion(res.data.xsafeclaw_version ?? null);
+        setXsafeclawVersion(res.data.xsafeclaw_version ?? BUILD_TIME_XSAFECLAW_VERSION);
         setInstallProbeFailed(false);
       })
       .catch(() => {
@@ -1577,6 +1802,7 @@ export default function RuntimeGuardConsole() {
       const { data } = await budgetAPI.listRuntimeBudgets();
       const next = runtimeBudgetStatusMapFromList(data.budgets ?? []);
       setRuntimeBudgetStatuses(next);
+      setRuntimeBudgetsLoaded(true);
       return next;
     } catch {
       return null;
@@ -1598,7 +1824,10 @@ export default function RuntimeGuardConsole() {
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      taskScrollRef.current?.scrollTo({ top: taskScrollRef.current.scrollHeight, behavior: 'smooth' });
+      const scrollNode = taskScrollRef.current;
+      if (scrollNode && typeof scrollNode.scrollTo === 'function') {
+        scrollNode.scrollTo({ top: scrollNode.scrollHeight, behavior: 'smooth' });
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activeSessionKey, activeTimelineScrollKey]);
@@ -1689,6 +1918,35 @@ export default function RuntimeGuardConsole() {
     }),
     [availableInstances, installProbeFailed, installedAgents, messageMap, sendingMap, sessions],
   );
+  const newTaskAgentAvailability = useMemo(
+    () => agents.map(agent => {
+      const runtime = findRuntimeForAgentInInstances(agent.name, availableInstances);
+      const platform = agentToPlatform(agent.name) as RuntimeBudgetPlatform;
+      const budgetStatus = runtimeBudgetStatuses[platform] ?? defaultRuntimeBudgetStatus(platform);
+      return {
+        name: agent.name,
+        available: Boolean(
+          agent.installed
+          && runtimeBudgetsLoaded
+          && runtime
+          && !runtimeUnavailableMessage(runtime)
+          && !budgetStatus.overLimit
+        ),
+      };
+    }),
+    [agents, availableInstances, runtimeBudgetStatuses, runtimeBudgetsLoaded],
+  );
+  const newTaskAgentOptions = useMemo(
+    () => newTaskOptionsFromAgents(newTaskAgentAvailability),
+    [newTaskAgentAvailability],
+  );
+  useEffect(() => {
+    if (!newTaskModalOpen) return;
+    if (!newTaskAgentOptions.includes(newTaskAgent)) {
+      setNewTaskAgent('smart');
+    }
+  }, [newTaskAgent, newTaskAgentOptions, newTaskModalOpen]);
+
   const budgetStatus = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
   const activeBudgetStatus = runtimeBudgetStatuses[activeBudgetPlatform] ?? defaultRuntimeBudgetStatus(activeBudgetPlatform);
   const {
@@ -1705,11 +1963,11 @@ export default function RuntimeGuardConsole() {
   const budgetDisplayCostText = formatMoney(budgetDisplayCost);
   const budgetLimitText = budgetLimit !== null ? formatMoney(budgetLimit) : '';
   const budgetBarPercent = budgetConfigured ? Math.max(4, budgetPercent) : 0;
-  const selectedBudgetAgentName = agentDefinitions.find(agent => agent.platform === selectedBudgetPlatform)?.name ?? 'Runtime';
-  const activeBudgetAgentName = agentDefinitions.find(agent => agent.platform === activeBudgetPlatform)?.name ?? 'Runtime';
+  const selectedBudgetAgentName = agentDefinitions.find(agent => agent.platform === selectedBudgetPlatform)?.name ?? copy.sidebar.runtimeFallback;
+  const activeBudgetAgentName = agentDefinitions.find(agent => agent.platform === activeBudgetPlatform)?.name ?? copy.sidebar.runtimeFallback;
   const budgetResetText = budgetConfigured
-    ? `Resets in ${formatBudgetRefreshTime(budgetRemainingMs)}`
-    : `${selectedBudgetAgentName} total cost`;
+    ? rgText(copy.sidebar.resetsIn, { time: formatBudgetRefreshTime(budgetRemainingMs, copy) })
+    : rgText(copy.sidebar.totalCost, { agent: selectedBudgetAgentName });
 
   const showToast = useCallback((message: string, timeout = 2600) => {
     setPlaceholder(message);
@@ -1781,12 +2039,12 @@ export default function RuntimeGuardConsole() {
         if (!cancelled) setGuardMode(res.data.enabled ? 'On' : 'Off');
       })
       .catch(() => {
-        if (!cancelled) showToast('Failed to load Guard mode.');
+        if (!cancelled) showToast(copy.toasts.failedLoadGuardMode);
       });
     return () => {
       cancelled = true;
     };
-  }, [showToast]);
+  }, [copy, showToast]);
 
   const resolveApproval = async (item: GuardPendingApproval, resolution: ApprovalDecision) => {
     if (resolvingApprovalId) return;
@@ -1812,9 +2070,9 @@ export default function RuntimeGuardConsole() {
           preferredSessionKey: activeSession?.sessionKey,
         });
       } else if (status === 404) {
-        showToast('Approval request is no longer available.');
+        showToast(copy.toasts.approvalGone);
       } else {
-        showToast(`Failed to ${resolution === 'approved' ? 'allow' : 'deny'} approval.`);
+        showToast(resolution === 'approved' ? copy.toasts.failedApprovalAllow : copy.toasts.failedApprovalDeny);
       }
     } finally {
       setResolvingApprovalId(null);
@@ -1822,8 +2080,8 @@ export default function RuntimeGuardConsole() {
   };
 
   const showInstallHint = useCallback((agent: AgentName) => {
-    showToast(`${agent} is not installed. Open Setup to install it.`);
-  }, [showToast]);
+    showToast(rgText(copy.toasts.installHint, { agent }));
+  }, [copy, showToast]);
 
   useEffect(() => {
     if (!budgetModalOpen) return;
@@ -1856,7 +2114,7 @@ export default function RuntimeGuardConsole() {
       setNowTs(Date.now());
       setBudgetModalOpen(false);
     } catch {
-      showToast(`Failed to save ${selectedBudgetAgentName} budget.`);
+      showToast(rgText(copy.toasts.failedSaveBudget, { agent: selectedBudgetAgentName }));
     } finally {
       setBudgetSaving(false);
     }
@@ -1878,18 +2136,45 @@ export default function RuntimeGuardConsole() {
       setBudgetPeriodInput('');
       setBudgetModalOpen(false);
     } catch {
-      showToast(`Failed to clear ${selectedBudgetAgentName} budget.`);
+      showToast(rgText(copy.toasts.failedClearBudget, { agent: selectedBudgetAgentName }));
     } finally {
       setBudgetSaving(false);
     }
   };
 
   const findRuntimeForAgent = useCallback((agent: AgentName): RuntimeInstance | null => {
-    const platform = agentToPlatform(agent);
-    return availableInstances.find(instance => instance.platform === platform && instance.is_default)
-      ?? availableInstances.find(instance => instance.platform === platform)
-      ?? null;
+    return findRuntimeForAgentInInstances(agent, availableInstances);
   }, [availableInstances]);
+
+  const addCreatedRuntimeSession = useCallback((
+    agent: AgentName,
+    data: StartSessionResponse,
+    fallbackRuntime?: RuntimeInstance | null,
+  ) => {
+    const platform = normalizeRuntimePlatform(data.platform);
+    const sameAgentCount = sessions.filter(session => session.agent === agent).length + 1;
+    const label = sameAgentCount === 1 ? agent : `${agent} ${sameAgentCount}`;
+    const session: RuntimeGuardSession = {
+      sessionKey: data.session_key,
+      agent,
+      platform,
+      instanceId: data.instance_id,
+      displayName: data.instance?.display_name || fallbackRuntime?.display_name,
+      title: label,
+      createdAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      status: 'ready',
+      autoTitlePending: true,
+    };
+
+    setSessions(current => [session, ...current]);
+    setSessionHistoryItems(current => sortSessionsNewestFirst([session, ...current.filter(item => item.sessionKey !== session.sessionKey)]));
+    setMessageMap(prev => ({ ...prev, [session.sessionKey]: [] }));
+    setDraftBySessionKey(current => ({ ...current, [session.sessionKey]: current[session.sessionKey] ?? '' }));
+    setActiveSessionId(session.sessionKey);
+    setSelectedAgent(agent);
+    return session;
+  }, [sessions, setMessageMap]);
 
   const openSession = useCallback(async (agent: AgentName, installed = true) => {
     if (creatingAgent) return;
@@ -1898,17 +2183,17 @@ export default function RuntimeGuardConsole() {
       return;
     }
     if (runtimeInstancesQuery.isLoading) {
-      showToast('Runtime instances are still loading.');
+      showToast(copy.toasts.runtimeInstancesLoading);
       return;
     }
 
     const runtime = findRuntimeForAgent(agent);
     if (!runtime) {
-      showToast(`No enabled ${agent} runtime found. Open Setup to configure it.`);
+      showToast(rgText(copy.toasts.noEnabledRuntime, { agent }));
       return;
     }
 
-    const unavailable = runtimeUnavailableMessage(runtime);
+    const unavailable = runtimeUnavailableMessage(runtime, copy);
     if (unavailable) {
       showToast(unavailable);
       return;
@@ -1917,45 +2202,92 @@ export default function RuntimeGuardConsole() {
     setCreatingAgent(agent);
     setSelectedAgent(agent);
     try {
-      const sameAgentCount = sessions.filter(session => session.agent === agent).length + 1;
-      const label = sameAgentCount === 1 ? agent : `${agent} ${sameAgentCount}`;
       const res = await chatAPI.startSession(runtimeGuardStartSessionPayload(runtime));
-      const session: RuntimeGuardSession = {
-        sessionKey: res.data.session_key,
-        agent,
-        platform: res.data.platform as RuntimePlatform,
-        instanceId: res.data.instance_id,
-        displayName: res.data.instance?.display_name || runtime.display_name,
-        title: label,
-        createdAt: new Date().toISOString(),
-        lastActivityAt: new Date().toISOString(),
-        status: 'ready',
-        autoTitlePending: true,
-      };
-
-      setSessions(current => [session, ...current]);
-      setSessionHistoryItems(current => sortSessionsNewestFirst([session, ...current.filter(item => item.sessionKey !== session.sessionKey)]));
-      setMessageMap(prev => ({ ...prev, [session.sessionKey]: [] }));
-      setDraftBySessionKey(current => ({ ...current, [session.sessionKey]: current[session.sessionKey] ?? '' }));
-      setActiveSessionId(session.sessionKey);
+      addCreatedRuntimeSession(agent, res.data, runtime);
     } catch (err: any) {
-      const detail = String(err?.response?.data?.detail || err?.message || 'Failed to create session.');
+      const detail = String(err?.response?.data?.detail || err?.message || copy.toasts.failedCreateSession);
       showToast(detail);
     } finally {
       setCreatingAgent(null);
     }
   }, [
     creatingAgent,
+    addCreatedRuntimeSession,
     findRuntimeForAgent,
+    copy,
     runtimeInstancesQuery.isLoading,
-    sessions,
-    setMessageMap,
     showInstallHint,
     showToast,
   ]);
 
   const openSelectedAgentSession = () => {
     openSession(selectedAgent, agents.find(agent => agent.name === selectedAgent)?.installed ?? true);
+  };
+
+  const openNewTaskModal = () => {
+    setNewTaskAgent('smart');
+    setNewTaskRequest('');
+    setNewTaskModalOpen(true);
+  };
+
+  const closeNewTaskModal = () => {
+    setNewTaskModalOpen(false);
+    setNewTaskAgent('smart');
+    setNewTaskRequest('');
+  };
+
+  const createNewTask = async () => {
+    const requestText = newTaskRequest.trim();
+    if (newTaskCreating || creatingAgent || !requestText) return;
+
+    if (newTaskAgent !== 'smart' && !newTaskAgentOptions.includes(newTaskAgent)) {
+      showToast(rgText(copy.toasts.noAvailableAgent, { agent: newTaskAgent }));
+      setNewTaskAgent('smart');
+      return;
+    }
+
+    setNewTaskCreating(true);
+    try {
+      if (newTaskAgent === 'smart') {
+        const res = await chatAPI.smartStartSession({ message: requestText });
+        const platform = normalizeRuntimePlatform(res.data.platform);
+        const agent = platformToAgent(platform);
+        addCreatedRuntimeSession(agent, res.data, findRuntimeForAgent(agent));
+      } else {
+        const runtime = findRuntimeForAgent(newTaskAgent);
+        if (!runtime) {
+          showToast(rgText(copy.toasts.noEnabledRuntime, { agent: newTaskAgent }));
+          return;
+        }
+        const unavailable = runtimeUnavailableMessage(runtime, copy);
+        if (unavailable) {
+          showToast(unavailable);
+          return;
+        }
+        const latestBudgets = await refreshRuntimeBudgets();
+        const latestBudgetStatus = latestBudgets?.[agentToPlatform(newTaskAgent) as RuntimeBudgetPlatform]
+          ?? runtimeBudgetStatuses[agentToPlatform(newTaskAgent) as RuntimeBudgetPlatform];
+        if (latestBudgetStatus?.overLimit) {
+          showToast(rgText(copy.toasts.budgetReached, { agent: newTaskAgent }));
+          setNewTaskAgent('smart');
+          return;
+        }
+        setCreatingAgent(newTaskAgent);
+        const res = await chatAPI.startSession(runtimeGuardStartSessionPayload(runtime));
+        addCreatedRuntimeSession(newTaskAgent, res.data, runtime);
+      }
+      closeNewTaskModal();
+    } catch (err: any) {
+      if (newTaskAgent === 'smart') {
+        showToast(copy.toasts.smartFailed);
+      } else {
+        const detail = String(err?.response?.data?.detail || err?.message || copy.toasts.failedCreateSession);
+        showToast(detail);
+      }
+    } finally {
+      setNewTaskCreating(false);
+      setCreatingAgent(null);
+    }
   };
 
   const applyGuardMode = async (mode: GuardMode) => {
@@ -1972,7 +2304,7 @@ export default function RuntimeGuardConsole() {
       setGuardMode(res.data.enabled ? 'On' : 'Off');
     } catch {
       setGuardMode(previous);
-      showToast('Failed to update Guard mode.');
+      showToast(copy.toasts.failedUpdateGuardMode);
     } finally {
       setGuardModeSyncing(false);
     }
@@ -2108,7 +2440,10 @@ export default function RuntimeGuardConsole() {
     if (!text || activeSending || inFlightKeysRef.current.has(originalKey)) return;
 
     if (budgetOverLimit) {
-      showToast(`${activeBudgetAgentName} budget reached. Resets in ${formatBudgetRefreshTime(activeBudgetRemainingMs)}.`);
+      showToast(rgText(copy.toasts.budgetReachedWithReset, {
+        agent: activeBudgetAgentName,
+        time: formatBudgetRefreshTime(activeBudgetRemainingMs, copy),
+      }));
       return;
     }
 
@@ -2170,7 +2505,7 @@ export default function RuntimeGuardConsole() {
         if (response.status === 402) {
           void refreshRuntimeBudgets();
         }
-        throw new Error(await responseErrorMessage(response));
+        throw new Error(await responseErrorMessage(response, copy));
       }
 
       const reader = response.body.getReader();
@@ -2403,19 +2738,29 @@ export default function RuntimeGuardConsole() {
   return (
     <div className="runtime-guard-page" style={runtimeGuardPageStyle}>
       {placeholder && <div className="rg-toast">{placeholder}</div>}
+      {newTaskModalOpen && (
+        <NewTaskModal
+          agentOptions={newTaskAgentOptions}
+          selectedAgent={newTaskAgent}
+          request={newTaskRequest}
+          onAgentChange={setNewTaskAgent}
+          onRequestChange={setNewTaskRequest}
+          onCreate={() => void createNewTask()}
+          onClose={closeNewTaskModal}
+          creating={newTaskCreating}
+        />
+      )}
       {budgetModalOpen && (
         <div className="rg-modal-backdrop" role="presentation">
           <div className="rg-budget-modal" role="dialog" aria-modal="true" aria-labelledby="rg-budget-modal-title">
-            <button className="rg-modal-close" type="button" title="Close budget settings" onClick={() => setBudgetModalOpen(false)}>
+            <button className="rg-modal-close" type="button" title={copy.budgetModal.closeTitle} onClick={() => setBudgetModalOpen(false)}>
               <X />
             </button>
-            <div className="rg-budget-modal-kicker">BUDGET LIMIT</div>
-            <h2 id="rg-budget-modal-title">Set runtime budget</h2>
-            <p>Set a server-side spending limit for the selected runtime period.</p>
+            <h2 id="rg-budget-modal-title">{copy.budgetModal.title}</h2>
             <label className="rg-budget-runtime-picker">
-              <span>Runtime</span>
+              <span>{copy.budgetModal.runtime}</span>
               <select
-                aria-label="Budget runtime"
+                aria-label={copy.budgetModal.runtimeAria}
                 onChange={(event) => setSelectedBudgetPlatform(event.target.value as RuntimeBudgetPlatform)}
                 value={selectedBudgetPlatform}
               >
@@ -2426,7 +2771,7 @@ export default function RuntimeGuardConsole() {
             </label>
             <div className="rg-budget-sentence">
               <input
-                aria-label="Maximum USD usage"
+                aria-label={copy.budgetModal.maximumUsageAria}
                 inputMode="decimal"
                 min="0"
                 onChange={(event) => setBudgetAmountInput(event.target.value)}
@@ -2435,9 +2780,9 @@ export default function RuntimeGuardConsole() {
                 type="number"
                 value={budgetAmountInput}
               />
-              <span>USD</span>
+              <span>{copy.budgetModal.usd}</span>
               <input
-                aria-label="Budget refresh interval"
+                aria-label={copy.budgetModal.refreshIntervalAria}
                 inputMode="numeric"
                 min="1"
                 onChange={(event) => setBudgetPeriodInput(event.target.value)}
@@ -2447,19 +2792,22 @@ export default function RuntimeGuardConsole() {
                 value={budgetPeriodInput}
               />
               <select
-                aria-label="Budget interval unit"
+                aria-label={copy.budgetModal.intervalUnitAria}
                 onChange={(event) => setBudgetPeriodUnit(event.target.value as BudgetPeriodUnit)}
                 value={budgetPeriodUnit}
               >
-                <option value="hour">小时</option>
-                <option value="day">天</option>
+                <option value="hour">{copy.budgetModal.unitHour}</option>
+                <option value="day">{copy.budgetModal.unitDay}</option>
               </select>
             </div>
             <div className="rg-budget-modal-preview">
-              Current {selectedBudgetAgentName} period cost: {formatMoney(budgetStatus.currentCost)}
+              {rgText(copy.budgetModal.currentCost, {
+                agent: selectedBudgetAgentName,
+                cost: formatMoney(budgetStatus.currentCost),
+              })}
             </div>
             <div className="rg-budget-modal-actions">
-              <button type="button" className="rg-budget-clear" disabled={budgetSaving} onClick={() => void clearBudgetLimit()}>Clear</button>
+              <button type="button" className="rg-budget-clear" disabled={budgetSaving} onClick={() => void clearBudgetLimit()}>{copy.budgetModal.clear}</button>
               <button
                 type="button"
                 className="rg-budget-save"
@@ -2473,7 +2821,7 @@ export default function RuntimeGuardConsole() {
                 }
                 onClick={() => void saveBudgetLimit()}
               >
-                {budgetSaving ? 'Saving' : 'Save'}
+                {budgetSaving ? copy.budgetModal.saving : copy.budgetModal.save}
               </button>
             </div>
           </div>
@@ -2521,27 +2869,28 @@ export default function RuntimeGuardConsole() {
       <aside className="rg-sidebar">
         <div className="rg-brand">
           <span className="rg-brand-name">XSafeClaw</span>
-          <span className="rg-pro">PRO</span>
-          <span className="rg-subtitle">AI Runtime Guard</span>
+          <span className="rg-pro">{xsafeclawVersionLabel}</span>
+          <span className="rg-subtitle">{copy.brandSubtitle}</span>
         </div>
 
-        <button className="rg-new-task" onClick={openSelectedAgentSession} type="button" disabled={Boolean(creatingAgent)}>
+        <button className="rg-new-task" onClick={openNewTaskModal} type="button">
           <span>+</span>
-          <span>New Task</span>
-          <span className="rg-shortcut">Cmd N</span>
+          <span>{copy.sidebar.newTask}</span>
         </button>
 
         <section className="rg-agents">
           <div className="rg-section-title">
-            <span>AGENTS</span>
-            <button type="button" title="Go to setup" onClick={() => navigate('/setup')}>+</button>
+            <span>{copy.sidebar.agents}</span>
+            <button type="button" title={copy.sidebar.setupTitle} onClick={() => navigate('/setup')}>+</button>
           </div>
           {agents.map((agent, index) => (
             <div
               className={`rg-agent-row ${selectedAgent === agent.name ? 'is-selected' : ''} ${!agent.installed ? 'is-uninstalled' : ''}`}
               key={agent.name}
               aria-disabled={!agent.installed}
-              title={agent.installed ? `${agent.name} runtime` : `${agent.name} is not installed`}
+              title={agent.installed
+                ? rgText(copy.sidebar.runtimeTitle, { agent: agent.name })
+                : rgText(copy.sidebar.notInstalledTitle, { agent: agent.name })}
               onClick={() => {
                 if (!agent.installed) {
                   showInstallHint(agent.name);
@@ -2551,12 +2900,12 @@ export default function RuntimeGuardConsole() {
               }}
               style={{ top: 18 + index * 36 }}
             >
-              <span className={`rg-agent-mark ${agent.className}`}>{agentIcon(agent.name)}</span>
+              <AgentIconBadge agent={agent.name} />
               <span className="rg-agent-copy">
                 <span className="rg-agent-name">{agent.name}</span>
                 <span className="rg-agent-state">
                   <StatusDot tone={agent.status === 'Running' ? 'success' : agent.installed ? 'muted' : 'warning'} />
-                  {agent.status}
+                  {agentStatusDisplay(agent.status, copy)}
                 </span>
               </span>
               <button
@@ -2573,7 +2922,7 @@ export default function RuntimeGuardConsole() {
                 }}
                 type="button"
               >
-                {agent.installed ? creatingAgent === agent.name ? '...' : 'Open' : 'Setup'} <ChevronRight />
+                {agent.installed ? creatingAgent === agent.name ? '...' : copy.sidebar.open : copy.sidebar.setup} <ChevronRight />
               </button>
             </div>
           ))}
@@ -2581,8 +2930,8 @@ export default function RuntimeGuardConsole() {
 
         <section className="rg-tools">
           <div className="rg-tools-title">
-            <span>TOOLS</span>
-            <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>View All</button>
+            <span>{copy.sidebar.toolPermission}</span>
+            <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>{copy.sidebar.viewAll}</button>
           </div>
           {sidebarTools.map((tool, index) => {
             const ToolIcon = tool.icon;
@@ -2596,34 +2945,47 @@ export default function RuntimeGuardConsole() {
           })}
         </section>
 
+        <button
+          className="rg-nav-card rg-language-card"
+          onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}
+          type="button"
+        >
+          <span>{copy.sidebar.languageToggle}</span>
+        </button>
+
+        <button className="rg-nav-card rg-town-card" onClick={() => navigate('/agent-town')} type="button">
+          <span>{copy.sidebar.agentTown}</span>
+        </button>
+
+        <button className="rg-nav-card rg-asset-card" onClick={() => navigate('/assets')} type="button">
+          <span>{copy.sidebar.assetShield}</span>
+        </button>
+
+        <button className="rg-nav-card rg-risk-card" onClick={() => navigate('/risk-test')} type="button">
+          <span>{copy.sidebar.riskTest}</span>
+        </button>
+
         <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
-          <div className="rg-budget-title">BUDGET - {selectedBudgetAgentName}</div>
+          <div className="rg-budget-title">{copy.sidebar.budget} - {selectedBudgetAgentName}</div>
           <div className="rg-budget-metrics">
             <div className="rg-budget-metric-row">
-              <span>Spent</span>
+              <span>{copy.sidebar.spent}</span>
               <strong className="rg-budget-metric-value is-spent">{budgetDisplayCostText}</strong>
             </div>
             {budgetConfigured && (
               <div className="rg-budget-metric-row">
-                <span>Limit</span>
+                <span>{copy.sidebar.limit}</span>
                 <strong className="rg-budget-metric-value is-limit">{budgetLimitText}</strong>
               </div>
             )}
           </div>
           <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
           <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
-          <div className="rg-budget-reset">{selectedBudgetOverLimit ? `${selectedBudgetAgentName} budget reached` : budgetResetText}</div>
+          <div className="rg-budget-reset">
+            {selectedBudgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: selectedBudgetAgentName }) : budgetResetText}
+          </div>
         </button>
 
-        <section className="rg-user">
-          <span className="rg-avatar"><User /></span>
-          <span>XClaw User</span>
-          <ChevronDown />
-        </section>
-
-        <div className="rg-bottom-icons">
-          <button type="button" title="Open monitor" onClick={() => navigate('/monitor')}><Settings /></button>
-        </div>
       </aside>
       </div>
 
@@ -2642,14 +3004,14 @@ export default function RuntimeGuardConsole() {
                 type="button"
               >
                 <span className="rg-chat-tab-agent">
-                  {agentIcon(session.agent)}
+                  <AgentIconBadge agent={session.agent} size="compact" />
                 </span>
                 <span className="rg-chat-tab-title">{session.title}</span>
                 <span
                   className="rg-chat-tab-close"
                   role="button"
                   tabIndex={0}
-                  title="Close session"
+                  title={copy.main.closeSessionTitle}
                   onClick={(event) => {
                     event.stopPropagation();
                     closeSession(session.sessionKey);
@@ -2671,11 +3033,11 @@ export default function RuntimeGuardConsole() {
         </div>
 
         <section className="rg-task-title">
-          <h1>{activeSession ? activeSession.title : '暂无会话内容'}</h1>
+          <h1>{activeSession ? activeSession.title : copy.main.noSessionTitle}</h1>
           <p>
             {activeSession
-              ? `${formatSessionStart(activeSession.createdAt)}  -  ${activeSession.displayName || activeSession.agent}  -  ${activeSession.platform}  -  ${activeSession.instanceId || 'runtime'}`
-              : '使用 New Task、+ 或 Agent Open 创建真实会话'}
+              ? `${formatSessionStart(activeSession.createdAt, copy)}  -  ${activeSession.displayName || activeSession.agent}  -  ${activeSession.platform}  -  ${activeSession.instanceId || copy.main.runtimeFallback}`
+              : copy.main.noSessionHint}
           </p>
         </section>
 
@@ -2689,10 +3051,10 @@ export default function RuntimeGuardConsole() {
               onClick={() => setAutoApprovalOpen(open => !open)}
               type="button"
             >
-              <Lock /> Guard: {guardModeSyncing ? 'Updating' : guardMode} <ChevronDown />
+              <Lock /> {copy.guardStatus.guard}: {guardModeSyncing ? copy.guardStatus.updating : guardMode === 'On' ? copy.guardStatus.on : copy.guardStatus.off} <ChevronDown />
             </button>
             {autoApprovalOpen && (
-              <div className="rg-auto-approval-menu" role="listbox" aria-label="Guard mode">
+              <div className="rg-auto-approval-menu" role="listbox" aria-label={copy.guardStatus.modeAria}>
                 {(['Off', 'On'] as const).map(mode => (
                   <button
                     className={mode === guardMode ? 'is-selected' : ''}
@@ -2703,7 +3065,7 @@ export default function RuntimeGuardConsole() {
                     aria-selected={mode === guardMode}
                     type="button"
                   >
-                    <span>{mode}</span>
+                    <span>{mode === 'On' ? copy.guardStatus.on : copy.guardStatus.off}</span>
                     {mode === guardMode && <Check />}
                   </button>
                 ))}
@@ -2715,19 +3077,19 @@ export default function RuntimeGuardConsole() {
         <section className="rg-task-panel">
           {!activeSession ? (
             <div className="rg-empty-task">
-              <strong>暂无会话内容</strong>
-              <span>点击 New Task、+ 或 Agent Open 创建真实会话。</span>
+              <strong>{copy.main.noSessionTitle}</strong>
+              <span>{copy.main.noSessionHintShort}</span>
             </div>
           ) : (
             <>
               <div className="rg-task-scroll" ref={taskScrollRef}>
                 {loadingHistory === activeSession.sessionKey ? (
-                  <div className="rg-loading-history"><Loader2 className="is-spinning" /> Loading history...</div>
+                  <div className="rg-loading-history"><Loader2 className="is-spinning" /> {copy.main.loadingHistory}</div>
                 ) : activeMessages.length === 0 && activeApprovalCards.length === 0 ? (
                   <div className="rg-session-empty">
                     <Bot />
-                    <strong>{activeSession.agent} session ready</strong>
-                    <span>发送第一条消息后，assistant、tool 和 trace 事件会显示在这里。</span>
+                    <strong>{rgText(copy.main.sessionReady, { agent: activeSession.agent })}</strong>
+                    <span>{copy.main.sessionReadyHint}</span>
                   </div>
                 ) : (
                   activeTimelineRows.map(row => (
@@ -2753,26 +3115,28 @@ export default function RuntimeGuardConsole() {
               <div className={`rg-command-input ${budgetOverLimit ? 'is-budget-blocked' : ''}`}>
                 <textarea
                   ref={textareaRef}
-                  aria-label={`Ask ${activeAgent}`}
+                  aria-label={rgText(copy.main.askAria, { agent: activeAgent })}
                   disabled={budgetOverLimit || activeSending}
                   onChange={(event) => updateActiveDraft(event.target.value)}
                   onCompositionEnd={() => setIsComposing(false)}
                   onCompositionStart={() => setIsComposing(true)}
                   onKeyDown={handleInputKeyDown}
-                  placeholder={budgetOverLimit ? `${activeBudgetAgentName} budget reached` : `Ask ${activeAgent} ...`}
+                  placeholder={budgetOverLimit
+                    ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName })
+                    : rgText(copy.main.askPlaceholder, { agent: activeAgent })}
                   rows={2}
                   value={activeDraft}
                 />
                 <span className="rg-command-shortcuts">
                   {budgetOverLimit
-                    ? `Resets in ${formatBudgetRefreshTime(activeBudgetRemainingMs)}`
-                    : 'Enter Send    Shift Enter New Line'}
+                    ? rgText(copy.sidebar.resetsIn, { time: formatBudgetRefreshTime(activeBudgetRemainingMs, copy) })
+                    : copy.main.shortcuts}
                 </span>
                 <button
                   disabled={budgetOverLimit || activeSending || !activeDraft.trim()}
                   onClick={handleSend}
                   type="button"
-                  title={budgetOverLimit ? `${activeBudgetAgentName} budget reached` : 'Send message'}
+                  title={budgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName }) : copy.main.sendTitle}
                 >
                   {activeSending ? <Loader2 className="is-spinning" /> : <Send />}
                 </button>
@@ -2783,10 +3147,10 @@ export default function RuntimeGuardConsole() {
 
         <footer className="rg-statusbar">
           <StatusDot tone="success" />
-          <span className="rg-status-active">Runtime Guard Active</span>
-          <span>Events: {activeMessages.length}</span>
-          <span>Blocked: {activeMessages.filter(message => message.role === 'error').length}</span>
-          <span>Warnings: {activeMessages.filter(message => message.role === 'trace' && message.trace_type?.includes('approval')).length}</span>
+          <span className="rg-status-active">{copy.main.statusActive}</span>
+          <span>{copy.main.events}: {activeMessages.length}</span>
+          <span>{copy.main.blocked}: {activeMessages.filter(message => message.role === 'error').length}</span>
+          <span>{copy.main.warnings}: {activeMessages.filter(message => message.role === 'trace' && message.trace_type?.includes('approval')).length}</span>
         </footer>
 
       </main>
@@ -2794,7 +3158,7 @@ export default function RuntimeGuardConsole() {
       <div className="rg-right-scale" style={rightScaleStyle}>
         <section className="rg-session-history">
           <div className="rg-card-head rg-session-history-head">
-            <span>SESSION HISTORY</span>
+            <span>{copy.sessionHistory.title.toUpperCase()}</span>
             <button
               type="button"
               onClick={() => {
@@ -2802,7 +3166,7 @@ export default function RuntimeGuardConsole() {
                 setActiveRuntimeGuardModal('sessions');
               }}
             >
-              View All
+              {copy.sidebar.viewAll}
             </button>
           </div>
           <div className="rg-session-history-list">
@@ -2821,13 +3185,13 @@ export default function RuntimeGuardConsole() {
                       <strong>{session.agent}</strong>
                       <span>{session.title}</span>
                     </div>
-                    <em className={status === 'Active' ? 'is-active' : ''}>{status}</em>
+                    <em className={status === 'Active' ? 'is-active' : ''}>{sessionStatusDisplay(status, copy)}</em>
                   </button>
                 );
               })
             ) : (
               <div className="rg-session-history-empty">
-                {sessionHistoryLoading ? 'Loading history...' : 'No session history'}
+                {sessionHistoryLoading ? copy.main.loadingHistory : copy.sessionHistory.empty}
               </div>
             )}
           </div>
@@ -2835,9 +3199,9 @@ export default function RuntimeGuardConsole() {
         <aside className="rg-right-panel">
           <section className="rg-approval-center">
             <div className="rg-card-head rg-approval-head">
-              <span>APPROVAL CENTER</span>
+              <span>{copy.approvals.panelTitle}</span>
               <span className="rg-count">{approvalCount}</span>
-              <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>View All</button>
+              <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>{copy.sidebar.viewAll}</button>
             </div>
             {visibleApprovals.length > 0 ? (
               visibleApprovals.map((item, index) => (
@@ -2851,21 +3215,21 @@ export default function RuntimeGuardConsole() {
               ))
             ) : (
               <div className="rg-approval-empty">
-                {approvalLoading ? 'Loading approvals...' : 'No pending approvals'}
+                {approvalLoading ? copy.approvals.loading : copy.approvals.empty}
               </div>
             )}
           </section>
 
           <section className="rg-guard-status">
             <div className="rg-card-head">
-              <span>GUARD STATUS</span>
+              <span>{copy.guardStatus.title}</span>
               <span className={`rg-secure rg-status-${guardStatusSummary.tone}`}>
                 {guardStatusSummary.tone === 'attention'
                   ? <AlertTriangle />
                   : guardStatusSummary.tone === 'off'
                     ? <Lock />
                     : <Check />}
-                {guardStatusSummary.label}
+                {guardSummaryDisplay(guardStatusSummary.label, copy)}
               </span>
             </div>
             <div className={`rg-score-ring rg-score-${guardStatusSummary.tone}`}>
@@ -2876,8 +3240,8 @@ export default function RuntimeGuardConsole() {
               {guardStatusRows.map(({ label, status, tone }) => (
                 <div className="rg-guard-row" key={label}>
                   <StatusDot tone={tone} />
-                  <span>{label}</span>
-                  <strong className={`rg-tool-${tone}`}>{status}</strong>
+                  <span>{guardStatusRowLabel(label, copy)}</span>
+                  <strong className={`rg-tool-${tone}`}>{guardStatusRowStatus(status, copy)}</strong>
                 </div>
               ))}
             </div>
@@ -2885,20 +3249,20 @@ export default function RuntimeGuardConsole() {
 
           <section className="rg-recent-blocked">
             <div className="rg-card-head rg-recent-head">
-              <span>RECENT BLOCKED</span>
-              <button type="button" onClick={() => setActiveRuntimeGuardModal('blocked')}>View All</button>
+              <span>{copy.blockedActions.title.toUpperCase()}</span>
+              <button type="button" onClick={() => setActiveRuntimeGuardModal('blocked')}>{copy.sidebar.viewAll}</button>
             </div>
             {recentBlockedItems.length > 0 ? (
               recentBlockedItems.map((item, index) => (
                 <div className="rg-block-row" key={item.id} style={{ top: 28 + index * 16 }}>
                   <span>{formatBlockedTime(item.timestamp)}</span>
-                  <strong>Blocked</strong>
+                  <strong>{copy.blockedActions.blocked}</strong>
                   <span>{blockedDisplayText(item)}</span>
                 </div>
               ))
             ) : (
               <div className="rg-block-empty">
-                {blockedLoading ? 'Loading blocked...' : 'No recent blocked'}
+                {blockedLoading ? copy.blockedActions.loading : copy.blockedActions.emptyRecent}
               </div>
             )}
           </section>

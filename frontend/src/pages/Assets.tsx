@@ -15,6 +15,7 @@ import {
   type SoftwareItem,
 } from '../services/api';
 import { useI18n } from '../i18n';
+import { useNavigate } from 'react-router-dom';
 
 /* ==================== Types ==================== */
 interface HardwareInfo {
@@ -186,6 +187,7 @@ function cacheDel(key: string) {
 /* ==================== Main Page ==================== */
 export default function Assets() {
   const { t } = useI18n();
+  const navigate = useNavigate();
 
   const tabItems = [
     { id: 'scan' as const, name: t.assets.tabs.files, icon: FolderOpen },
@@ -542,11 +544,23 @@ export default function Assets() {
       {/* ===== Header ===== */}
       <div className="border-b border-border">
         <div className="px-8 py-6">
-          <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold text-text-primary">{t.assets.title}</h1>
-            <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">{t.common.active}</span>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-4">
+                <h1 className="text-xl font-bold text-text-primary">{t.assets.title}</h1>
+                <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">{t.common.active}</span>
+              </div>
+              <p className="text-[13px] text-text-muted mt-2">{t.assets.subtitle}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/backend')}
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface-1 px-3.5 py-2 text-[12px] font-semibold text-text-secondary transition-all hover:border-accent/40 hover:bg-accent/10 hover:text-accent"
+            >
+              <ShieldCheck className="h-4 w-4" />
+              {t.assets.backToRuntimeGuard}
+            </button>
           </div>
-          <p className="text-[13px] text-text-muted mt-2">{t.assets.subtitle}</p>
         </div>
         <div className="px-8 flex items-center gap-1">
           {tabItems.map((tab) => {

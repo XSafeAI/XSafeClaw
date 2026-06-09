@@ -23,6 +23,7 @@ import {
   type RiskTestStyleItem,
 } from '../services/api';
 import { useI18n } from '../i18n';
+import { useNavigate } from 'react-router-dom';
 
 function Card({
   children,
@@ -76,6 +77,7 @@ const stateTone: Record<string, string> = {
 
 export default function RiskTest() {
   const { t, locale } = useI18n();
+  const navigate = useNavigate();
   const [intent, setIntent] = useState('');
   const [styles, setStyles] = useState<RiskTestStyleItem[]>([]);
   const [examples, setExamples] = useState<RiskTestExampleItem[]>([]);
@@ -302,16 +304,28 @@ export default function RiskTest() {
     <div className="min-h-screen">
       <div className="border-b border-border">
         <div className="px-8 py-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-xl font-bold text-text-primary">{t.riskTest.title}</h1>
-            <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
-              {t.common.active}
-            </span>
-            <span className="text-[11px] font-semibold border border-accent/30 bg-accent/10 text-accent px-3 py-1 rounded-full uppercase tracking-wider">
-              {t.riskTest.dryRunBadge}
-            </span>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex flex-wrap items-center gap-3">
+                <h1 className="text-xl font-bold text-text-primary">{t.riskTest.title}</h1>
+                <span className="text-[11px] font-semibold border border-success/40 text-success px-3 py-1 rounded-full uppercase tracking-wider">
+                  {t.common.active}
+                </span>
+                <span className="text-[11px] font-semibold border border-accent/30 bg-accent/10 text-accent px-3 py-1 rounded-full uppercase tracking-wider">
+                  {t.riskTest.dryRunBadge}
+                </span>
+              </div>
+              <p className="mt-2 max-w-4xl text-[13px] text-text-muted">{t.riskTest.subtitle}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/backend')}
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface-1 px-3.5 py-2 text-[12px] font-semibold text-text-secondary transition-all hover:border-accent/40 hover:bg-accent/10 hover:text-accent"
+            >
+              <ShieldCheck className="h-4 w-4" />
+              {t.riskTest.backToRuntimeGuard}
+            </button>
           </div>
-          <p className="mt-2 max-w-4xl text-[13px] text-text-muted">{t.riskTest.subtitle}</p>
         </div>
       </div>
 

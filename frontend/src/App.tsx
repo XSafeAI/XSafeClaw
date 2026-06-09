@@ -53,10 +53,12 @@ const EXEMPT_PATHS = [
   '/hermes_configure',
   '/nanobot_configure',
   '/configure_select',
+  '/backend',
   '/runtime-guard-console',
 ];
 
 const FRONTEND_ONLY_PATHS = [
+  '/backend',
   '/runtime-guard-console',
 ];
 
@@ -137,13 +139,14 @@ function AppRoutes() {
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />
       <Route path="/world" element={<World />} />
-      <Route path="/runtime-guard-console" element={<RuntimeGuardConsole />} />
+      <Route path="/backend" element={<RuntimeGuardConsole />} />
+      <Route path="/runtime-guard-console" element={<Navigate to="/backend" replace />} />
+      <Route path="/assets" element={<Assets />} />
+      <Route path="/risk-test" element={<RiskTest />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to="/agent-valley" replace />} />
         <Route path="/monitor" element={<Monitor />} />
         <Route path="/instances" element={<Navigate to="/agent-valley" replace />} />
-        <Route path="/assets" element={<Assets />} />
-        <Route path="/risk-test" element={<RiskTest />} />
         <Route path="/safety-rehearsal" element={<RiskScanner />} />
         <Route path="/chat" element={<Chat />} />
       </Route>

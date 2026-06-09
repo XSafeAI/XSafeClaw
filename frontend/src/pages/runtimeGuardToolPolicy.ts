@@ -146,7 +146,7 @@ export function buildGuardStatusRows(
   return [
     {
       label: 'Guard Mode',
-      status: guardMode === 'On' ? 'Model On' : 'Ask fallback',
+      status: guardMode === 'On' ? 'on' : 'off',
       tone: guardMode === 'On' ? 'success' : 'warning',
     },
     {
