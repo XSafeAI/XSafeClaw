@@ -577,7 +577,13 @@ export const redteamAPI = {
 
 // Chat API (direct OpenClaw gateway session)
 export const chatAPI = {
-  startSession: (data?: { instance_id?: string; label?: string | null; model_override?: string | null; provider_override?: string | null }) =>
+  startSession: (data?: {
+    instance_id?: string;
+    label?: string | null;
+    label_mode?: 'server_timestamp' | null;
+    model_override?: string | null;
+    provider_override?: string | null;
+  }) =>
     api.post<{ session_key: string; status: string; instance_id: string; platform: string; instance?: RuntimeInstance }>('/chat/start-session', data ?? {}),
 
   sendMessage: (sessionKey: string, message: string) =>

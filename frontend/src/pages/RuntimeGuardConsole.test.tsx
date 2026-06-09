@@ -11,11 +11,13 @@ import {
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
   runtimeGuardAgentStatus,
+  runtimeGuardStartSessionPayload,
   runtimeSessionRecordToRuntimeGuardSession,
   type BlockedModalRange,
   type RuntimeGuardSession,
 } from './RuntimeGuardConsole';
 import type { ChatMessage } from '../stores/chatStreamStore';
+import type { RuntimeInstance } from '../services/api';
 import type { RecentBlockedItem } from './runtimeGuardBlocked';
 import type { MiddleApprovalCard } from './runtimeGuardApproval';
 import {
@@ -329,6 +331,48 @@ describe('runtimeGuardAgentStatus', () => {
     expect(runtimeGuardAgentStatus('Hermes', true, [openclawSession, hermesSession], {
       [hermesSession.sessionKey]: [pendingTool],
     }, {})).toBe('Running');
+  });
+});
+
+describe('runtimeGuardStartSessionPayload', () => {
+  const baseRuntime = {
+    instance_id: 'runtime-1',
+    display_name: 'Runtime',
+    config_path: null,
+    workspace_path: null,
+    sessions_path: null,
+    serve_base_url: null,
+    gateway_base_url: null,
+    discovery_mode: 'auto' as const,
+    enabled: true,
+    is_default: false,
+    capabilities: {},
+    attach_state: 'chat_ready',
+    health_status: 'healthy',
+    meta: {},
+  };
+
+  it('requests server timestamp labels for OpenClaw and Hermes only', () => {
+    expect(runtimeGuardStartSessionPayload({
+      ...baseRuntime,
+      platform: 'openclaw',
+    } as RuntimeInstance)).toEqual({
+      instance_id: 'runtime-1',
+      label_mode: 'server_timestamp',
+    });
+    expect(runtimeGuardStartSessionPayload({
+      ...baseRuntime,
+      platform: 'hermes',
+    } as RuntimeInstance)).toEqual({
+      instance_id: 'runtime-1',
+      label_mode: 'server_timestamp',
+    });
+    expect(runtimeGuardStartSessionPayload({
+      ...baseRuntime,
+      platform: 'nanobot',
+    } as RuntimeInstance)).toEqual({
+      instance_id: 'runtime-1',
+    });
   });
 });
 

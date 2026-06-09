@@ -567,6 +567,19 @@ export function runtimeGuardAgentStatus(
     : 'Idle';
 }
 
+export function runtimeGuardStartSessionPayload(runtime: RuntimeInstance): {
+  instance_id: string;
+  label_mode?: 'server_timestamp';
+} {
+  const payload: { instance_id: string; label_mode?: 'server_timestamp' } = {
+    instance_id: runtime.instance_id,
+  };
+  if (runtime.platform === 'openclaw' || runtime.platform === 'hermes') {
+    payload.label_mode = 'server_timestamp';
+  }
+  return payload;
+}
+
 function titleFromUserMessage(input: string): string {
   const cleaned = input.replace(/\s+/g, ' ').trim();
   if (!cleaned) return '';
@@ -1906,7 +1919,7 @@ export default function RuntimeGuardConsole() {
     try {
       const sameAgentCount = sessions.filter(session => session.agent === agent).length + 1;
       const label = sameAgentCount === 1 ? agent : `${agent} ${sameAgentCount}`;
-      const res = await chatAPI.startSession({ instance_id: runtime.instance_id, label });
+      const res = await chatAPI.startSession(runtimeGuardStartSessionPayload(runtime));
       const session: RuntimeGuardSession = {
         sessionKey: res.data.session_key,
         agent,

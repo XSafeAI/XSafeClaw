@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -2210,8 +2211,26 @@ class ModelReadinessResponse(BaseModel):
 class StartSessionRequest(BaseModel):
     instance_id: str | None = None
     label: str | None = None
+    label_mode: Literal["server_timestamp"] | None = None
     model_override: str | None = None
     provider_override: str | None = None
+
+
+_TIMESTAMP_LABEL_AGENT_NAMES = {
+    "openclaw": "OpenClaw",
+    "hermes": "Hermes",
+}
+
+
+def _start_session_runtime_label(
+    body: StartSessionRequest,
+    instance: RuntimeInstance,
+) -> str | None:
+    if body.label_mode == "server_timestamp":
+        agent_name = _TIMESTAMP_LABEL_AGENT_NAMES.get(instance.platform)
+        if agent_name:
+            return f"{agent_name} {datetime.now().strftime('%y:%m:%d:%H:%M:%S')}"
+    return body.label
 
 
 class ImageAttachment(BaseModel):
@@ -2892,12 +2911,13 @@ async def start_session(request: StartSessionRequest | None = None):
     initial_model = body.model_override
     if initial_model and body.provider_override and "/" not in initial_model:
         initial_model = f"{body.provider_override.rstrip('/')}/{initial_model.lstrip('/')}"
+    runtime_label = _start_session_runtime_label(body, instance)
 
-    if body.model_override or body.provider_override or body.label:
+    if body.model_override or body.provider_override or runtime_label:
         try:
             await client.patch_session(
                 local_session_key,
-                label=body.label,
+                label=runtime_label,
                 model=initial_model,
                 provider_override=body.provider_override if not initial_model else None,
                 verbose_level="on",
@@ -2905,7 +2925,7 @@ async def start_session(request: StartSessionRequest | None = None):
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to initialize session model override: {exc}",
+                detail=f"Failed to initialize session metadata: {exc}",
             ) from exc
     else:
         await client.enable_verbose(local_session_key)
