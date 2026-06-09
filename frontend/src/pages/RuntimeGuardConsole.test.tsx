@@ -143,6 +143,12 @@ function runtimeBudgetStatus(platform: 'openclaw' | 'hermes' | 'nanobot', overLi
 }
 
 function mockRuntimeGuardApis() {
+  const sendMessageStreamSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => (
+    new Response('data: {"type":"final","text":"Task created"}\n\ndata: [DONE]\n\n', {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+  ) as any);
   const startSessionSpy = vi.spyOn(chatAPI, 'startSession').mockResolvedValue({
     data: {
       session_key: 'created-session',
@@ -200,7 +206,7 @@ function mockRuntimeGuardApis() {
     },
   } as any);
 
-  return { startSessionSpy, smartStartSessionSpy };
+  return { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy };
 }
 
 function renderRuntimeGuardConsole() {
@@ -324,7 +330,7 @@ describe('NewTaskModal', () => {
   });
 
   it('opens from the left New Task card and routes smart create through the smart API', async () => {
-    const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
+    const { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
     renderRuntimeGuardConsole();
 
     fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
@@ -341,6 +347,16 @@ describe('NewTaskModal', () => {
       expect(smartStartSessionSpy).toHaveBeenCalledWith({ message: 'Create a safe scan task' });
     });
     expect(startSessionSpy).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith('/api/chat/send-message-stream', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          session_key: 'smart-created-session',
+          message: 'Create a safe scan task',
+          client_context: 'runtime_guard',
+        }),
+      }));
+    });
   });
 
   it('only shows currently available agents plus smart in the New Task picker', async () => {
@@ -365,7 +381,7 @@ describe('NewTaskModal', () => {
   });
 
   it('creates a concrete agent session with the existing start-session API', async () => {
-    const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
+    const { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
     const { container } = renderRuntimeGuardConsole();
 
     fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
@@ -384,6 +400,16 @@ describe('NewTaskModal', () => {
       });
     });
     expect(smartStartSessionSpy).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith('/api/chat/send-message-stream', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          session_key: 'created-session',
+          message: 'Start an OpenClaw task',
+          client_context: 'runtime_guard',
+        }),
+      }));
+    });
 
     await waitFor(() => {
       const sidebarBadge = container.querySelector('.rg-agent-row .rg-agent-badge[data-agent="OpenClaw"]');

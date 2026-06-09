@@ -2248,11 +2248,12 @@ export default function RuntimeGuardConsole() {
 
     setNewTaskCreating(true);
     try {
+      let createdSession: RuntimeGuardSession | null = null;
       if (newTaskAgent === 'smart') {
         const res = await chatAPI.smartStartSession({ message: requestText });
         const platform = normalizeRuntimePlatform(res.data.platform);
         const agent = platformToAgent(platform);
-        addCreatedRuntimeSession(agent, res.data, findRuntimeForAgent(agent));
+        createdSession = addCreatedRuntimeSession(agent, res.data, findRuntimeForAgent(agent));
       } else {
         const runtime = findRuntimeForAgent(newTaskAgent);
         if (!runtime) {
@@ -2274,9 +2275,12 @@ export default function RuntimeGuardConsole() {
         }
         setCreatingAgent(newTaskAgent);
         const res = await chatAPI.startSession(runtimeGuardStartSessionPayload(runtime));
-        addCreatedRuntimeSession(newTaskAgent, res.data, runtime);
+        createdSession = addCreatedRuntimeSession(newTaskAgent, res.data, runtime);
       }
       closeNewTaskModal();
+      if (createdSession) {
+        void sendMessageForSession(createdSession, requestText);
+      }
     } catch (err: any) {
       if (newTaskAgent === 'smart') {
         showToast(copy.toasts.smartFailed);
@@ -2433,25 +2437,27 @@ export default function RuntimeGuardConsole() {
     )));
   }, []);
 
-  const handleSend = async () => {
-    if (!activeSession) return;
-    const originalKey = activeSession.sessionKey;
-    const text = activeDraft.trim();
-    if (!text || activeSending || inFlightKeysRef.current.has(originalKey)) return;
+  async function sendMessageForSession(session: RuntimeGuardSession, rawText: string) {
+    const originalKey = session.sessionKey;
+    const text = rawText.trim();
+    if (!text || (sendingMap[originalKey] ?? false) || inFlightKeysRef.current.has(originalKey)) return;
 
-    if (budgetOverLimit) {
+    const sessionBudgetPlatform = session.platform as RuntimeBudgetPlatform;
+    const sessionBudgetStatus = runtimeBudgetStatuses[sessionBudgetPlatform] ?? defaultRuntimeBudgetStatus(sessionBudgetPlatform);
+    if (sessionBudgetStatus.overLimit) {
+      const sessionBudgetAgentName = agentDefinitions.find(agent => agent.platform === sessionBudgetPlatform)?.name ?? copy.sidebar.runtimeFallback;
       showToast(rgText(copy.toasts.budgetReachedWithReset, {
-        agent: activeBudgetAgentName,
-        time: formatBudgetRefreshTime(activeBudgetRemainingMs, copy),
+        agent: sessionBudgetAgentName,
+        time: formatBudgetRefreshTime(runtimeBudgetRemainingMs(sessionBudgetStatus, nowTs), copy),
       }));
       return;
     }
 
     let key = originalKey;
-    const streamPlatform = activeSession.platform;
-    const titlePlatform = activeSession.platform;
-    const titleInstanceId = activeSession.instanceId;
-    const shouldGenerateTitle = Boolean(activeSession.autoTitlePending);
+    const streamPlatform = session.platform;
+    const titlePlatform = session.platform;
+    const titleInstanceId = session.instanceId;
+    const shouldGenerateTitle = Boolean(session.autoTitlePending);
     inFlightKeysRef.current.add(key);
     chatStreamStore.setSending(key, true);
     setDraftBySessionKey(current => ({ ...current, [key]: '' }));
@@ -2700,6 +2706,11 @@ export default function RuntimeGuardConsole() {
       chatStreamStore.setSending(key, false);
       inFlightKeysRef.current.delete(key);
     }
+  }
+
+  const handleSend = async () => {
+    if (!activeSession) return;
+    await sendMessageForSession(activeSession, activeDraft);
   };
 
   const handleInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
