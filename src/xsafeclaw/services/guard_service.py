@@ -527,13 +527,13 @@ async def call_runtime_model_prompt(
     return _extract_text_content(data.get("content"))
 
 
-_RUNTIME_TITLE_STRICT_SYSTEM_PROMPT = (
+_RUNTIME_TITLE_DIRECT_SYSTEM_PROMPT = (
     "You are XSafeClaw's silent UI session title generator.\n"
     "This call is only for generating a short RuntimeGuard UI session label.\n"
     "Do not answer the user's request.\n"
     "Do not explain your reasoning, rules, or instructions.\n"
-    "Return strict JSON only: {\"title\":\"...\"}.\n"
-    "Every response must be exactly one JSON object with only the title field.\n"
+    "Return only the summarized title text itself.\n"
+    "Do not return JSON, markdown, quotes, prefixes, or extra words.\n"
     "Use the same language as the user's request.\n"
     "For Chinese requests, the title must be 10 Chinese characters or fewer.\n"
     "For English requests, the title must be 6 words or fewer.\n"
@@ -543,30 +543,30 @@ _RUNTIME_TITLE_STRICT_SYSTEM_PROMPT = (
     "Do not include markdown, prefixes, punctuation-heavy text, or meta phrases.\n"
     "Examples:\n"
     "User request: 帮我查一下今天的天气\n"
-    "Valid JSON response: {\"title\":\"天气查询\"}\n"
+    "Title response: 天气查询\n"
     "User request: 帮我查一下上海今天的天气怎么样\n"
-    "Valid JSON response: {\"title\":\"上海天气查询\"}\n"
+    "Title response: 上海天气查询\n"
     "User request: 今年高考的数学相比去年，哪个更难\n"
-    "Valid JSON response: {\"title\":\"高考数学难度对比\"}\n"
+    "Title response: 高考数学难度对比\n"
     "User request: 分析这个项目的登录 bug 并加限流\n"
-    "Valid JSON response: {\"title\":\"登录限流修复\"}\n"
+    "Title response: 登录限流修复\n"
     "User request: Find today's weather in Shanghai\n"
-    "Valid JSON response: {\"title\":\"Shanghai weather\"}\n"
+    "Title response: Shanghai weather\n"
     "User request: Compare this year's math exam with last year\n"
-    "Valid JSON response: {\"title\":\"Math exam comparison\"}"
+    "Title response: Math exam comparison"
 )
 _RUNTIME_TITLE_REPAIR_SYSTEM_PROMPT = (
     "You are repairing a failed RuntimeGuard UI session label generation.\n"
     "Generate only the short label. Do not answer the user's request.\n"
-    "Preferred format: {\"title\":\"...\"}.\n"
-    "If strict JSON is difficult, return one line in one of these forms: title: ... or 标题：...\n"
-    "Do not explain. Do not include markdown unless it is a fenced JSON object.\n"
+    "Return the summarized title text itself, preferably as one bare line.\n"
+    "If your runtime insists on a key-value line, title: ... or 标题：... is acceptable.\n"
+    "Do not explain. Do not include markdown.\n"
     "Chinese labels must be 10 Chinese characters or fewer. English labels must be 6 words or fewer.\n"
     "Use a concise noun phrase or task phrase, not a question."
 )
 _RUNTIME_TITLE_BARE_SYSTEM_PROMPT = (
     "Return only the final short RuntimeGuard session label.\n"
-    "Do not return JSON unless it is natural for you. A bare one-line title is acceptable.\n"
+    "Return only a bare one-line title.\n"
     "Do not explain, do not answer the request, and do not include bullets.\n"
     "Chinese labels must be 10 Chinese characters or fewer. English labels must be 6 words or fewer.\n"
     "Use a concise noun phrase or task phrase, not a question."
@@ -666,7 +666,7 @@ def _extract_runtime_title_bare_candidate(raw: str) -> str:
 
 def extract_runtime_title_candidate_for_attempt(raw: str, attempt: int) -> str:
     if attempt <= 0:
-        return _extract_runtime_title_json_candidate(raw)
+        return _extract_runtime_title_bare_candidate(raw)
     if attempt == 1:
         return _extract_runtime_title_json_or_key_value_candidate(raw)
     return _extract_runtime_title_bare_candidate(raw)
@@ -808,7 +808,7 @@ def _fallback_runtime_session_title(message: str) -> str:
 
 def runtime_title_system_prompt_for_attempt(attempt: int) -> str:
     if attempt <= 0:
-        return _RUNTIME_TITLE_STRICT_SYSTEM_PROMPT
+        return _RUNTIME_TITLE_DIRECT_SYSTEM_PROMPT
     if attempt == 1:
         return _RUNTIME_TITLE_REPAIR_SYSTEM_PROMPT
     return _RUNTIME_TITLE_BARE_SYSTEM_PROMPT
@@ -820,7 +820,7 @@ def runtime_title_user_prompt_for_attempt(attempt: int, request: str, previous_o
     if attempt == 1:
         return (
             "The previous label output could not be parsed or failed validation.\n"
-            "Return a short title for the user request. JSON is preferred, but title: ... or 标题：... is acceptable.\n"
+            "Return a short title for the user request as one bare line. title: ... or 标题：... is also acceptable.\n"
             f"Previous output:\n{previous_output[:500]}\n\n"
             f"User request:\n{request}"
         )

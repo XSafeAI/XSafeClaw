@@ -27,7 +27,7 @@ def test_clean_runtime_session_title_rejects_model_explanations():
 
 
 @pytest.mark.asyncio
-async def test_summarize_runtime_request_title_accepts_json_title(monkeypatch):
+async def test_summarize_runtime_request_title_accepts_bare_title(monkeypatch):
     async def fake_model_prompt(
         prompt: str,
         *,
@@ -41,14 +41,15 @@ async def test_summarize_runtime_request_title_accepts_json_title(monkeypatch):
         assert "Return strict JSON only" not in prompt
         assert system_prompt is not None
         assert "silent UI session title generator" in system_prompt
-        assert "Return strict JSON only" in system_prompt
-        assert "Valid JSON response" in system_prompt
+        assert "Return strict JSON only" not in system_prompt
+        assert "Return only the summarized title text itself" in system_prompt
+        assert "Title response: 天气查询" in system_prompt
         assert "10 Chinese characters or fewer" in system_prompt
         assert "帮我查一下今天的天气" in system_prompt
         assert "天气查询" in system_prompt
         assert "高考数学难度对比" in system_prompt
         assert "Math exam comparison" in system_prompt
-        return '{"title":"上海天气查询"}'
+        return "上海天气查询"
 
     monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
 
@@ -65,14 +66,16 @@ def test_runtime_title_attempt_prompts_are_distinct():
     prompts = [runtime_title_system_prompt_for_attempt(index) for index in range(3)]
 
     assert len(set(prompts)) == 3
-    assert "Return strict JSON only" in prompts[0]
+    assert "Return only the summarized title text itself" in prompts[0]
+    assert "Return strict JSON only" not in prompts[0]
     assert "title: ..." in prompts[1]
-    assert "bare one-line title is acceptable" in prompts[2]
+    assert "Return only a bare one-line title" in prompts[2]
 
 
 def test_runtime_title_candidate_parsing_gets_more_flexible_by_attempt():
     assert extract_runtime_title_candidate_for_attempt('{"title":"天气查询"}', 0) == "天气查询"
-    assert extract_runtime_title_candidate_for_attempt('{"title":"天气查询","extra":true}', 0) == ""
+    assert extract_runtime_title_candidate_for_attempt("天气查询", 0) == "天气查询"
+    assert extract_runtime_title_candidate_for_attempt('{"title":"天气查询","extra":true}', 0) == "天气查询"
     assert extract_runtime_title_candidate_for_attempt('```json\n{"title":"天气查询"}\n```', 1) == "天气查询"
     assert extract_runtime_title_candidate_for_attempt("title: 天气查询", 1) == "天气查询"
     assert extract_runtime_title_candidate_for_attempt("标题：高考数学难度对比", 1) == "高考数学难度对比"
