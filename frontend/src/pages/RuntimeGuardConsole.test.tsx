@@ -266,21 +266,22 @@ describe('titleFromUserMessage', () => {
   it('falls back when the title model returns explanation text', () => {
     const modelExplanation = '我们需根据用户请求生成UI标题。用户请求是中文：“帮我查一下上海今天的天气怎么样？” 规则要求使用同一种语言。';
 
-    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('上海今天的天气怎么样');
+    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('上海天气查询');
   });
 
   it('compacts raw user requests instead of using them as labels', () => {
     const request = '今年高考数学难度大吗？相比去年，是难了还是简单了？';
 
-    expect(titleFromUserMessage(request, request)).toBe('今年高考数学难度大吗');
-    expect(titleFromUserMessage(request)).toBe('今年高考数学难度大吗');
+    expect(titleFromUserMessage('帮我查一下今天的天气')).toBe('天气查询');
+    expect(titleFromUserMessage(request, request)).toBe('高考数学难度对比');
+    expect(titleFromUserMessage(request)).toBe('高考数学难度对比');
   });
 });
 
 describe('formatRuntimeGuardSessionTitle', () => {
-  it('prefixes generated labels with the owning agent', () => {
-    expect(formatRuntimeGuardSessionTitle({ agent: 'OpenClaw', title: '查询天气' })).toBe('OpenClaw:查询天气');
-    expect(formatRuntimeGuardSessionTitle({ agent: 'Hermes', title: 'Hermes:查询天气' })).toBe('Hermes:查询天气');
+  it('shows generated labels without an agent prefix', () => {
+    expect(formatRuntimeGuardSessionTitle({ agent: 'OpenClaw', title: '查询天气' })).toBe('查询天气');
+    expect(formatRuntimeGuardSessionTitle({ agent: 'Hermes', title: 'Hermes:查询天气' })).toBe('查询天气');
     expect(formatRuntimeGuardSessionTitle({ agent: 'Nanobot', title: 'Nanobot' })).toBe('Nanobot');
   });
 });
@@ -489,8 +490,9 @@ describe('NewTaskModal', () => {
     const { container } = renderRuntimeGuardConsole();
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'OpenClaw:Weather lookup' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Weather lookup' })).toBeTruthy();
     });
+    expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('OpenClaw');
     const meta = container.querySelector('.rg-session-meta')?.textContent ?? '';
     expect(meta).toContain('3 minutes ago workspace:/srv/xsafeclaw/weather');
     expect(meta).not.toContain('OpenClaw Agent');
@@ -756,12 +758,12 @@ describe('SessionHistoryViewAllModal', () => {
       />,
     );
 
-    fireEvent.click(screen.getByTitle('Delete OpenClaw:Fix login bug and add rate limit'));
+    fireEvent.click(screen.getByTitle('Delete Fix login bug and add rate limit'));
     expect(confirmSpy).toHaveBeenCalled();
     expect(onDeleteSession).not.toHaveBeenCalled();
 
     confirmSpy.mockReturnValue(true);
-    fireEvent.click(screen.getByTitle('Delete OpenClaw:Fix login bug and add rate limit'));
+    fireEvent.click(screen.getByTitle('Delete Fix login bug and add rate limit'));
     expect(onDeleteSession).toHaveBeenCalledWith(sessions[0]);
 
     confirmSpy.mockRestore();

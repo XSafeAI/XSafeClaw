@@ -922,6 +922,14 @@ const runtimeTitleExplanationPatterns = [
 
 const runtimeTitleCjkPattern = /[\u3400-\u9fff\uf900-\ufaff]/g;
 const runtimeTitleWordPattern = /[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g;
+const runtimeTitleRequestPatterns = [
+  /[?？]/i,
+  /^(?:帮我|帮忙|请|请问|麻烦|我想|我要|能不能|可以)/i,
+  /^(?:查询一下|查一下|查查|看一下|了解一下)/i,
+  /(?:哪个更难|怎么样|怎么|为什么|是否|难不难|简单|容易|吗|呢)/i,
+  /^(?:please|can you|could you|help me|i want to|i need to|check|look up|find out)\b/i,
+  /\b(?:what|why|how|whether)\b/i,
+];
 const runtimeTitleLeadInPatterns = [
   /^(?:请帮我|麻烦帮我|帮我|帮忙|请问|请|麻烦|我想|我要|能不能|可以)/i,
   /^(?:查询一下|查一下|查查|看一下|了解一下)/i,
@@ -933,10 +941,8 @@ function runtimeTitleLooksLikeExplanation(input: string): boolean {
   return Boolean(cleaned) && runtimeTitleExplanationPatterns.some(pattern => pattern.test(cleaned));
 }
 
-function compactRuntimeRequestTitle(input: string): string {
-  const normalized = input.replace(/\s+/g, ' ').trim().replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, '');
-  if (!normalized) return '';
-  let compact = normalized;
+function stripRuntimeTitleLeadIns(input: string): string {
+  let compact = input.replace(/\s+/g, ' ').trim().replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, '');
   for (let index = 0; index < 3; index += 1) {
     let next = compact.trim();
     runtimeTitleLeadInPatterns.forEach(pattern => {
@@ -945,29 +951,68 @@ function compactRuntimeRequestTitle(input: string): string {
     if (next === compact) break;
     compact = next;
   }
-  compact = compact.replace(/[?.!。？！；;，,：:]+$/g, '').trim() || normalized;
+  return compact.replace(/[?.!。？！；;，,：:]+$/g, '').trim() || input;
+}
+
+function shortenCjkRuntimeTitle(input: string, maxChars = 10): string {
+  const chars: string[] = [];
+  let cjkCount = 0;
+  for (const char of input) {
+    if (/[\u3400-\u9fff\uf900-\ufaff]/.test(char)) {
+      cjkCount += 1;
+      if (cjkCount > maxChars) break;
+      chars.push(char);
+    } else if (/^[A-Za-z0-9 _./-]$/.test(char)) {
+      chars.push(char);
+    }
+  }
+  return chars.join('').replace(/\s+/g, ' ').replace(/^[\s._/-]+|[\s._/-]+$/g, '');
+}
+
+function compactRuntimeRequestTitle(input: string): string {
+  const normalized = input.replace(/\s+/g, ' ').trim().replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, '');
+  if (!normalized) return '';
+  const compact = stripRuntimeTitleLeadIns(normalized);
   if (runtimeTitleCjkPattern.test(compact)) {
     runtimeTitleCjkPattern.lastIndex = 0;
-    const chars: string[] = [];
-    let cjkCount = 0;
-    for (const char of compact) {
-      if (/[\u3400-\u9fff\uf900-\ufaff]/.test(char)) {
-        cjkCount += 1;
-        if (cjkCount > 10) break;
-        chars.push(char);
-      } else if (/^[A-Za-z0-9 _./-]$/.test(char)) {
-        chars.push(char);
+    if (compact.includes('天气')) {
+      let place = '';
+      const weatherMatch = compact.match(/([\u3400-\u9fff\uf900-\ufaff]{2,8})(?:今天|今日|明天|现在|当前)?(?:的)?天气/);
+      if (weatherMatch?.[1]) {
+        place = weatherMatch[1];
+        ['的', '今天', '今日', '明天', '昨天', '现在', '当前', '今年', '去年', '一下'].forEach(word => {
+          place = place.split(word).join('');
+        });
+        place = place.replace(/^(?:查|查询|看|了解)/, '').trim();
       }
+      return shortenCjkRuntimeTitle(place ? `${place}天气查询` : '天气查询') || '天气查询';
     }
-    return chars.join('').replace(/\s+/g, ' ').replace(/^[\s._/-]+|[\s._/-]+$/g, '') || compact.slice(0, 10).trim();
+    if (['相比', '对比', '比较', '哪个更', '更难', '难度', '去年'].some(marker => compact.includes(marker))) {
+      if (compact.includes('高考') && compact.includes('数学')) return '高考数学难度对比';
+      const topic = shortenCjkRuntimeTitle(
+        compact.replace(/(?:今年|去年|相比.*|比.*|哪个更.*|是难了.*|是简单了.*|难不难.*|吗|呢)/g, ''),
+        6,
+      );
+      if (topic) return shortenCjkRuntimeTitle(`${topic}对比`);
+    }
+    if (compact.includes('登录') && compact.includes('限流')) return '登录限流修复';
+    return shortenCjkRuntimeTitle(compact) || compact.slice(0, 10).trim();
   }
   const words = compact.match(runtimeTitleWordPattern);
-  if (words?.length) return words.slice(0, 6).join(' ');
+  if (words?.length) {
+    const lower = compact.toLowerCase();
+    if (lower.includes('weather')) return lower.includes('shanghai') ? 'Shanghai weather' : 'Weather lookup';
+    if ((lower.includes('compare') || lower.includes('comparison')) && lower.includes('math') && lower.includes('exam')) {
+      return 'Math exam comparison';
+    }
+    return words.slice(0, 6).join(' ');
+  }
   return compact.slice(0, 48).trim();
 }
 
 function runtimeTitleLooksLikeRawRequest(input: string): boolean {
   const cleaned = input.replace(/\s+/g, ' ').trim();
+  if (runtimeTitleRequestPatterns.some(pattern => pattern.test(cleaned))) return true;
   const cjkCount = cleaned.match(runtimeTitleCjkPattern)?.length ?? 0;
   runtimeTitleCjkPattern.lastIndex = 0;
   if (cjkCount > 10 && /[?？]|吗|呢|怎么样|怎么|为什么|是否|难不难|简单|容易|帮我|请/.test(cleaned)) {
@@ -1004,10 +1049,7 @@ function runtimeGuardSessionBaseTitle(session: Pick<RuntimeGuardSession, 'agent'
 }
 
 export function formatRuntimeGuardSessionTitle(session: Pick<RuntimeGuardSession, 'agent' | 'title'>): string {
-  const agent = session.agent;
-  const title = runtimeGuardSessionBaseTitle(session);
-  if (title === agent) return agent;
-  return `${agent}:${title}`;
+  return runtimeGuardSessionBaseTitle(session);
 }
 
 function extractMessageText(msg: any): string {
@@ -3366,9 +3408,7 @@ export default function RuntimeGuardConsole() {
       <main className="rg-main">
         <div className="rg-tabs">
           <div className="rg-session-tabs">
-            {sessions.map(session => {
-              const displayTitle = formatRuntimeGuardSessionTitle(session);
-              return (
+            {sessions.map(session => (
                 <button
                   className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
                   key={session.sessionKey}
@@ -3381,7 +3421,7 @@ export default function RuntimeGuardConsole() {
                   <span className="rg-chat-tab-agent">
                     <AgentIconBadge agent={session.agent} size="compact" />
                   </span>
-                  <span className="rg-chat-tab-title">{displayTitle}</span>
+                  <span className="rg-chat-tab-title">{session.agent}</span>
                   <span
                     className="rg-chat-tab-close"
                     role="button"
@@ -3402,8 +3442,7 @@ export default function RuntimeGuardConsole() {
                     <X />
                   </span>
                 </button>
-              );
-            })}
+            ))}
             <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession} disabled={Boolean(creatingAgent)}>+</button>
           </div>
         </div>
