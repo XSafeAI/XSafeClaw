@@ -194,7 +194,7 @@ function mockRuntimeGuardApis() {
       openclaw_installed: true,
       hermes_installed: false,
       nanobot_installed: true,
-      xsafeclaw_version: '1.0.9',
+      xsafeclaw_version: '1.1.0',
     },
   } as any);
   vi.spyOn(sessionsAPI, 'listRuntime').mockResolvedValue({ data: { sessions: [] } } as any);
