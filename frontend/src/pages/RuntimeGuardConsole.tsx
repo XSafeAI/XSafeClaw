@@ -2985,7 +2985,7 @@ export default function RuntimeGuardConsole() {
   } as CSSProperties;
   const rightScaleStyle = {
     left: layoutFit.leftWidth + layoutFit.mainWidth,
-    width: layoutFit.rightWidth,
+    width: layoutFit.rightWidth + RUNTIME_GUARD_RIGHT_EDGE_GUARD,
     height: layoutFit.height,
     '--rg-scale': layoutFit.scale,
   } as CSSProperties;
