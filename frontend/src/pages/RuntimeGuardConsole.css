@@ -579,14 +579,14 @@
 
 .rg-budget-amount-line {
   position: absolute;
-  top: 29px;
+  top: 27px;
   right: 8px;
   left: 8px;
   display: flex;
   align-items: baseline;
   gap: 3px;
   min-width: 0;
-  height: 18px;
+  height: 23px;
   overflow: hidden;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -599,7 +599,7 @@
   color: #e8f1f6;
   font-size: 16px;
   font-weight: 650;
-  line-height: 18px;
+  line-height: 22px;
   text-overflow: ellipsis;
 }
 

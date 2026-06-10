@@ -123,6 +123,8 @@ const RUNTIME_GUARD_LEFT_WIDTH = 156;
 const RUNTIME_GUARD_RIGHT_WIDTH = 207;
 const RUNTIME_GUARD_MIN_MAIN_WIDTH = 280;
 const RUNTIME_GUARD_TOP_GAP = 38;
+const RUNTIME_GUARD_MIN_DESIGN_WIDTH = RUNTIME_GUARD_LEFT_WIDTH + RUNTIME_GUARD_MIN_MAIN_WIDTH + RUNTIME_GUARD_RIGHT_WIDTH;
+const RUNTIME_GUARD_RIGHT_EDGE_GUARD = 2;
 
 const agentDefinitions: Array<{
   name: AgentName;
@@ -1950,10 +1952,13 @@ export default function RuntimeGuardConsole() {
 
   useEffect(() => {
     const updateLayoutFit = () => {
-      const scale = window.innerHeight / RUNTIME_GUARD_DESIGN_HEIGHT;
+      const availableWidth = Math.max(1, window.innerWidth - RUNTIME_GUARD_RIGHT_EDGE_GUARD);
+      const heightScale = window.innerHeight / RUNTIME_GUARD_DESIGN_HEIGHT;
+      const widthScale = availableWidth / RUNTIME_GUARD_MIN_DESIGN_WIDTH;
+      const scale = Math.min(heightScale, widthScale);
       const leftWidth = RUNTIME_GUARD_LEFT_WIDTH * scale;
       const rightWidth = RUNTIME_GUARD_RIGHT_WIDTH * scale;
-      const mainWidth = Math.max(window.innerWidth - leftWidth - rightWidth, RUNTIME_GUARD_MIN_MAIN_WIDTH * scale);
+      const mainWidth = Math.max(availableWidth - leftWidth - rightWidth, RUNTIME_GUARD_MIN_MAIN_WIDTH * scale);
 
       setLayoutFit({
         scale,
