@@ -934,6 +934,24 @@ export function titleFromUserMessage(input: string, fallback = ''): string {
   return safeTitle.length > 48 ? `${safeTitle.slice(0, 48).trimEnd()}...` : safeTitle;
 }
 
+function runtimeGuardSessionBaseTitle(session: Pick<RuntimeGuardSession, 'agent' | 'title'>): string {
+  const agent = session.agent;
+  const title = titleFromUserMessage(session.title, agent) || agent;
+  const prefixed = title.match(/^(OpenClaw|Hermes|Nanobot)\s*[:：]\s*(.*)$/);
+  if (prefixed) {
+    const rest = prefixed[2]?.trim();
+    return rest || prefixed[1];
+  }
+  return title;
+}
+
+export function formatRuntimeGuardSessionTitle(session: Pick<RuntimeGuardSession, 'agent' | 'title'>): string {
+  const agent = session.agent;
+  const title = runtimeGuardSessionBaseTitle(session);
+  if (title === agent) return agent;
+  return `${agent}:${title}`;
+}
+
 function extractMessageText(msg: any): string {
   if (!msg) return '';
   const content = msg.content;
@@ -1450,6 +1468,8 @@ export function SessionHistoryViewAllModal({
           {filteredSessions.length > 0 ? (
             filteredSessions.map(session => {
               const status = sessionHistoryStatus(session, activeSessionId);
+              const displayTitle = formatRuntimeGuardSessionTitle(session);
+              const baseTitle = runtimeGuardSessionBaseTitle(session);
               const messages = messageMap[session.sessionKey] ?? [];
               const pendingApprovals = Object.values(middleApprovalCardsBySession[session.sessionKey] ?? {})
                 .filter(card => card.status === 'pending').length;
@@ -1472,10 +1492,10 @@ export function SessionHistoryViewAllModal({
                     <span className="rg-session-modal-time">{formatSessionHistoryTime(session.createdAt)}</span>
                     <span className="rg-session-modal-agent">
                       <AgentIconBadge agent={session.agent} size="compact" />
-                      {session.agent}
+                      {session.agent}:
                     </span>
                     <span className="rg-session-modal-title">
-                      <strong>{session.title}</strong>
+                      <strong>{baseTitle}</strong>
                       <em>{session.displayName || session.instanceId || session.platform}</em>
                     </span>
                     <span className="rg-session-modal-stats">
@@ -1491,10 +1511,10 @@ export function SessionHistoryViewAllModal({
                   <button
                     className="rg-session-modal-delete"
                     onClick={() => {
-                      const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: session.title }));
+                      const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: displayTitle }));
                       if (confirmed) onDeleteSession(session);
                     }}
-                    title={rgText(copy.sessionHistory.deleteTitle, { title: session.title })}
+                    title={rgText(copy.sessionHistory.deleteTitle, { title: displayTitle })}
                     type="button"
                   >
                     <Trash2 />
@@ -3274,47 +3294,50 @@ export default function RuntimeGuardConsole() {
       <main className="rg-main">
         <div className="rg-tabs">
           <div className="rg-session-tabs">
-            {sessions.map(session => (
-              <button
-                className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
-                key={session.sessionKey}
-                onClick={() => {
-                  setActiveSessionId(session.sessionKey);
-                  setSelectedAgent(session.agent);
-                }}
-                type="button"
-              >
-                <span className="rg-chat-tab-agent">
-                  <AgentIconBadge agent={session.agent} size="compact" />
-                </span>
-                <span className="rg-chat-tab-title">{session.title}</span>
-                <span
-                  className="rg-chat-tab-close"
-                  role="button"
-                  tabIndex={0}
-                  title={copy.main.closeSessionTitle}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    closeSession(session.sessionKey);
+            {sessions.map(session => {
+              const displayTitle = formatRuntimeGuardSessionTitle(session);
+              return (
+                <button
+                  className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
+                  key={session.sessionKey}
+                  onClick={() => {
+                    setActiveSessionId(session.sessionKey);
+                    setSelectedAgent(session.agent);
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
+                  type="button"
+                >
+                  <span className="rg-chat-tab-agent">
+                    <AgentIconBadge agent={session.agent} size="compact" />
+                  </span>
+                  <span className="rg-chat-tab-title">{displayTitle}</span>
+                  <span
+                    className="rg-chat-tab-close"
+                    role="button"
+                    tabIndex={0}
+                    title={copy.main.closeSessionTitle}
+                    onClick={(event) => {
                       event.stopPropagation();
                       closeSession(session.sessionKey);
-                    }
-                  }}
-                >
-                  <X />
-                </span>
-              </button>
-            ))}
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        closeSession(session.sessionKey);
+                      }
+                    }}
+                  >
+                    <X />
+                  </span>
+                </button>
+              );
+            })}
             <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession} disabled={Boolean(creatingAgent)}>+</button>
           </div>
         </div>
 
         <section className="rg-task-title">
-          <h1>{activeSession ? activeSession.title : copy.main.noSessionTitle}</h1>
+          <h1>{activeSession ? formatRuntimeGuardSessionTitle(activeSession) : copy.main.noSessionTitle}</h1>
           <p className="rg-session-meta">
             {activeSession
               ? formatSessionMeta(activeSession, availableInstances, copy, nowTs)
@@ -3454,6 +3477,7 @@ export default function RuntimeGuardConsole() {
             {sessionHistoryPreviewItems.length > 0 ? (
               sessionHistoryPreviewItems.map(session => {
                 const status = sessionHistoryStatus(session, activeSessionId);
+                const baseTitle = runtimeGuardSessionBaseTitle(session);
                 return (
                   <button
                     className="rg-session-history-row"
@@ -3463,8 +3487,8 @@ export default function RuntimeGuardConsole() {
                   >
                     <span className="rg-session-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
                     <div className="rg-session-history-main">
-                      <strong>{session.agent}</strong>
-                      <span>{session.title}</span>
+                      <strong>{session.agent}:</strong>
+                      <span>{baseTitle}</span>
                     </div>
                     <em className={status === 'Active' ? 'is-active' : ''}>{sessionStatusDisplay(status, copy)}</em>
                   </button>

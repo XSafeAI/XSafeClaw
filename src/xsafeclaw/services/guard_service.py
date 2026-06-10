@@ -474,6 +474,7 @@ async def call_runtime_model_prompt(
     platform: str = "openclaw",
     instance_id: str = "",
     max_tokens: int = 128,
+    system_prompt: str | None = None,
 ) -> str:
     """Call the active runtime model with a plain prompt and return text only."""
     model_info = _resolve_guard_model_info(platform=platform, instance_id=instance_id)
@@ -482,10 +483,15 @@ async def call_runtime_model_prompt(
 
     headers = {"Content-Type": "application/json"}
     token_limit = max(16, min(max_tokens, 512))
+    clean_system_prompt = str(system_prompt or "").strip()
     if api_type == "openai-completions":
+        messages = []
+        if clean_system_prompt:
+            messages.append({"role": "system", "content": clean_system_prompt})
+        messages.append({"role": "user", "content": prompt})
         payload = {
             "model": model_info["model"],
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": token_limit,
             "temperature": 0.2,
         }
@@ -498,6 +504,8 @@ async def call_runtime_model_prompt(
             "max_tokens": token_limit,
             "temperature": 0.2,
         }
+        if clean_system_prompt:
+            payload["system"] = clean_system_prompt
         url = f"{base_url}/messages"
         headers["x-api-key"] = model_info["api_key"]
         headers["Authorization"] = f"Bearer {model_info['api_key']}"
@@ -517,6 +525,21 @@ async def call_runtime_model_prompt(
         return _extract_openai_text_response(data)
     return _extract_text_content(data.get("content"))
 
+
+_RUNTIME_TITLE_SYSTEM_PROMPT = (
+    "You are XSafeClaw's silent UI session title generator.\n"
+    "This call is only for generating a short UI session title.\n"
+    "Do not answer the user's request.\n"
+    "Do not explain your reasoning, rules, or instructions.\n"
+    "Return strict JSON only: {\"title\":\"...\"}.\n"
+    "Use the same language as the user's request.\n"
+    "For Chinese requests, the title must be 10 Chinese characters or fewer.\n"
+    "For English requests, the title must be 6 words or fewer.\n"
+    "Do not include markdown, prefixes, punctuation-heavy text, or meta phrases."
+)
+
+_RUNTIME_TITLE_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+_RUNTIME_TITLE_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 
 _RUNTIME_TITLE_EXPLANATION_PATTERNS = [
     re.compile(r"^(we|i)\s+(need|should|must|will)\b.*\b(title|ui title|user request)\b", re.IGNORECASE),
@@ -556,6 +579,17 @@ def _is_runtime_title_explanation(title: str) -> bool:
     return bool(normalized) and any(pattern.search(normalized) for pattern in _RUNTIME_TITLE_EXPLANATION_PATTERNS)
 
 
+def _runtime_title_violates_generated_length(title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not normalized:
+        return False
+    cjk_count = len(_RUNTIME_TITLE_CJK_RE.findall(normalized))
+    if cjk_count:
+        return cjk_count > 10
+    words = _RUNTIME_TITLE_WORD_RE.findall(normalized)
+    return bool(words) and len(words) > 6
+
+
 def clean_runtime_session_title(raw: str, fallback: str = "New session") -> str:
     title = _extract_runtime_title_candidate(raw)
     title = re.sub(r"^```(?:text|markdown)?\s*", "", title, flags=re.IGNORECASE)
@@ -587,22 +621,18 @@ async def summarize_runtime_request_title(
         return "New session"
     truncated_request = request_text[:1600]
     fallback = clean_runtime_session_title(truncated_request)
-    prompt = (
-        "Create a short UI title for this agent session.\n"
-        "Return strict JSON only: {\"title\":\"<short title>\"}\n"
-        "Rules for title:\n"
-        "- Use the same language as the user's request.\n"
-        "- Keep it under 12 words.\n"
-        "- Do not include markdown, prefixes, explanations, reasoning, or rule restatement.\n\n"
-        f"User request:\n{truncated_request}"
-    )
+    prompt = f"User request:\n{truncated_request}"
     raw_title = await call_runtime_model_prompt(
         prompt,
         platform=platform,
         instance_id=instance_id,
         max_tokens=64,
+        system_prompt=_RUNTIME_TITLE_SYSTEM_PROMPT,
     )
-    return clean_runtime_session_title(raw_title, fallback=fallback)
+    title = clean_runtime_session_title(raw_title, fallback=fallback)
+    if title != fallback and _runtime_title_violates_generated_length(title):
+        return fallback
+    return title
 
 
 # ---------------------------------------------------------------------------

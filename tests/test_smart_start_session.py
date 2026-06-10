@@ -114,11 +114,19 @@ async def test_smart_start_routes_multiple_agents_with_openclaw_source(monkeypat
     async def fake_budget_allows(_platform: str):
         return True
 
-    async def fake_router(prompt: str, *, platform: str, instance_id: str, max_tokens: int):
+    async def fake_router(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ):
         captured["prompt"] = prompt
         captured["router_platform"] = platform
         captured["router_instance_id"] = instance_id
         captured["router_max_tokens"] = max_tokens
+        captured["router_system_prompt"] = system_prompt
         return json.dumps({"agent": "Hermes"})
 
     async def fake_create(request):
@@ -138,6 +146,9 @@ async def test_smart_start_routes_multiple_agents_with_openclaw_source(monkeypat
     assert isinstance(request, chat_routes.StartSessionRequest)
     assert captured["router_platform"] == "openclaw"
     assert captured["router_instance_id"] == "openclaw-default"
+    assert "silent Agent router" in str(captured["router_system_prompt"])
+    assert "Do not return JSON" in str(captured["router_system_prompt"])
+    assert "Do not return JSON" not in str(captured["prompt"])
     assert "OpenClaw" in str(captured["prompt"])
     assert "Hermes" in str(captured["prompt"])
     assert request.instance_id == "hermes-default"
@@ -159,8 +170,16 @@ async def test_smart_start_accepts_candidate_id_output(monkeypatch):
     async def fake_budget_allows(_platform: str):
         return True
 
-    async def fake_router(prompt: str, *, platform: str, instance_id: str, max_tokens: int):
+    async def fake_router(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ):
         captured["prompt"] = prompt
+        captured["router_system_prompt"] = system_prompt
         return "B"
 
     async def fake_create(request):
@@ -180,6 +199,7 @@ async def test_smart_start_accepts_candidate_id_output(monkeypatch):
     assert isinstance(request, chat_routes.StartSessionRequest)
     assert '"id": "A"' in str(captured["prompt"])
     assert '"id": "B"' in str(captured["prompt"])
+    assert "Return only one uppercase candidate id" in str(captured["router_system_prompt"])
     assert request.instance_id == "hermes-default"
     assert response.selected_agent == "Hermes"
     assert response.router_source == "openclaw"
@@ -197,8 +217,15 @@ async def test_smart_start_uses_hermes_source_when_openclaw_router_fails(monkeyp
     async def fake_budget_allows(_platform: str):
         return True
 
-    async def fake_router(_prompt: str, *, platform: str, instance_id: str, max_tokens: int):
-        _ = instance_id, max_tokens
+    async def fake_router(
+        _prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ):
+        _ = instance_id, max_tokens, system_prompt
         calls.append(platform)
         if platform == "openclaw":
             raise RuntimeError("router model unavailable")
@@ -269,8 +296,15 @@ async def test_smart_start_falls_back_when_all_router_sources_fail(monkeypatch):
     async def fake_budget_allows(_platform: str):
         return True
 
-    async def fake_router(_prompt: str, *, platform: str, instance_id: str, max_tokens: int):
-        _ = instance_id, max_tokens
+    async def fake_router(
+        _prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ):
+        _ = instance_id, max_tokens, system_prompt
         calls.append(platform)
         raise RuntimeError("router model unavailable")
 
@@ -304,8 +338,15 @@ async def test_smart_start_uses_fifth_router_attempt_when_it_succeeds(monkeypatc
     async def fake_budget_allows(_platform: str):
         return True
 
-    async def fake_router(_prompt: str, *, platform: str, instance_id: str, max_tokens: int):
-        _ = instance_id, max_tokens
+    async def fake_router(
+        _prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ):
+        _ = instance_id, max_tokens, system_prompt
         calls.append(platform)
         if len(calls) < 5:
             return "Nanobot"

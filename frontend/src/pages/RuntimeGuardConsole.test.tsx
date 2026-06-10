@@ -20,6 +20,7 @@ import RuntimeGuardConsole, {
   NewTaskModal,
   SessionHistoryViewAllModal,
   ToolsViewAllModal,
+  formatRuntimeGuardSessionTitle,
   getTimelineAppearance,
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
@@ -263,6 +264,14 @@ describe('titleFromUserMessage', () => {
   });
 });
 
+describe('formatRuntimeGuardSessionTitle', () => {
+  it('prefixes generated labels with the owning agent', () => {
+    expect(formatRuntimeGuardSessionTitle({ agent: 'OpenClaw', title: '查询天气' })).toBe('OpenClaw:查询天气');
+    expect(formatRuntimeGuardSessionTitle({ agent: 'Hermes', title: 'Hermes:查询天气' })).toBe('Hermes:查询天气');
+    expect(formatRuntimeGuardSessionTitle({ agent: 'Nanobot', title: 'Nanobot' })).toBe('Nanobot');
+  });
+});
+
 describe('NewTaskModal', () => {
   it('renders the smart hint, request box, and bottom-right create control', () => {
     const onCreate = vi.fn();
@@ -455,7 +464,7 @@ describe('NewTaskModal', () => {
     const { container } = renderRuntimeGuardConsole();
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Weather lookup' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'OpenClaw:Weather lookup' })).toBeTruthy();
     });
     const meta = container.querySelector('.rg-session-meta')?.textContent ?? '';
     expect(meta).toContain('3 minutes ago workspace:/srv/xsafeclaw/weather');
@@ -722,12 +731,12 @@ describe('SessionHistoryViewAllModal', () => {
       />,
     );
 
-    fireEvent.click(screen.getByTitle('Delete Fix login bug and add rate limit'));
+    fireEvent.click(screen.getByTitle('Delete OpenClaw:Fix login bug and add rate limit'));
     expect(confirmSpy).toHaveBeenCalled();
     expect(onDeleteSession).not.toHaveBeenCalled();
 
     confirmSpy.mockReturnValue(true);
-    fireEvent.click(screen.getByTitle('Delete Fix login bug and add rate limit'));
+    fireEvent.click(screen.getByTitle('Delete OpenClaw:Fix login bug and add rate limit'));
     expect(onDeleteSession).toHaveBeenCalledWith(sessions[0]);
 
     confirmSpy.mockRestore();

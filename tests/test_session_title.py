@@ -23,8 +23,19 @@ def test_clean_runtime_session_title_rejects_model_explanations():
 
 @pytest.mark.asyncio
 async def test_summarize_runtime_request_title_accepts_json_title(monkeypatch):
-    async def fake_model_prompt(prompt: str, *, platform: str, instance_id: str, max_tokens: int) -> str:
-        assert 'Return strict JSON only' in prompt
+    async def fake_model_prompt(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ) -> str:
+        assert "Return strict JSON only" not in prompt
+        assert system_prompt is not None
+        assert "silent UI session title generator" in system_prompt
+        assert "Return strict JSON only" in system_prompt
+        assert "10 Chinese characters or fewer" in system_prompt
         return '{"title":"查询上海今日天气"}'
 
     monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
@@ -40,7 +51,15 @@ async def test_summarize_runtime_request_title_accepts_json_title(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_runtime_request_title_falls_back_when_model_explains(monkeypatch):
-    async def fake_model_prompt(prompt: str, *, platform: str, instance_id: str, max_tokens: int) -> str:
+    async def fake_model_prompt(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ) -> str:
+        assert system_prompt is not None
         return "我们需根据用户请求生成UI标题。用户请求是中文：“帮我查一下上海今天的天气怎么样？” 规则要求使用同一种语言。"
 
     monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
@@ -52,6 +71,30 @@ async def test_summarize_runtime_request_title_falls_back_when_model_explains(mo
     )
 
     assert title == "帮我查一下上海今天的天气怎么样？"
+
+
+@pytest.mark.asyncio
+async def test_summarize_runtime_request_title_falls_back_when_generated_title_is_too_long(monkeypatch):
+    async def fake_model_prompt(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ) -> str:
+        assert system_prompt is not None
+        return '{"title":"帮我查询上海今天详细天气预报情况"}'
+
+    monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
+
+    title = await summarize_runtime_request_title(
+        "帮我查天气",
+        platform="openclaw",
+        instance_id="openclaw-main",
+    )
+
+    assert title == "帮我查天气"
 
 
 def test_session_title_endpoint_calls_runtime_model_without_chat_history(monkeypatch):

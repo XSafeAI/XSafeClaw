@@ -164,6 +164,119 @@ def test_resolve_guard_model_info_uses_nanobot_runtime_model(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_call_runtime_model_prompt_openai_uses_system_message(monkeypatch):
+    seen: dict[str, object] = {}
+    _install_fake_async_client(
+        monkeypatch,
+        {"choices": [{"message": {"content": "ok"}}]},
+        seen,
+    )
+    monkeypatch.setattr(
+        guard_service,
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
+            "provider": "openai",
+            "model": "gpt-5-mini",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-openai",
+            "api_type": "openai-completions",
+        },
+    )
+
+    result = await guard_service.call_runtime_model_prompt(
+        "User request",
+        platform="openclaw",
+        instance_id="openclaw-default",
+        max_tokens=64,
+        system_prompt="System rules",
+    )
+
+    assert result == "ok"
+    assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+    assert seen["kwargs"] == {"timeout": 30}
+    body = seen["json"]
+    assert isinstance(body, dict)
+    assert body["messages"] == [
+        {"role": "system", "content": "System rules"},
+        {"role": "user", "content": "User request"},
+    ]
+    assert body["max_tokens"] == 64
+    assert body["temperature"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_call_runtime_model_prompt_without_system_prompt_keeps_single_user_message(monkeypatch):
+    seen: dict[str, object] = {}
+    _install_fake_async_client(
+        monkeypatch,
+        {"choices": [{"message": {"content": "ok"}}]},
+        seen,
+    )
+    monkeypatch.setattr(
+        guard_service,
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
+            "provider": "openai",
+            "model": "gpt-5-mini",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-openai",
+            "api_type": "openai-completions",
+        },
+    )
+
+    result = await guard_service.call_runtime_model_prompt(
+        "Plain prompt",
+        platform="openclaw",
+        instance_id="openclaw-default",
+        max_tokens=8,
+    )
+
+    assert result == "ok"
+    body = seen["json"]
+    assert isinstance(body, dict)
+    assert body["messages"] == [{"role": "user", "content": "Plain prompt"}]
+    assert "system" not in body
+    assert body["max_tokens"] == 16
+
+
+@pytest.mark.asyncio
+async def test_call_runtime_model_prompt_anthropic_uses_top_level_system(monkeypatch):
+    seen: dict[str, object] = {}
+    _install_fake_async_client(
+        monkeypatch,
+        {"content": [{"type": "text", "text": "ok"}]},
+        seen,
+    )
+    monkeypatch.setattr(
+        guard_service,
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
+            "provider": "anthropic",
+            "model": "claude-sonnet",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-anthropic",
+            "api_type": "anthropic-messages",
+        },
+    )
+
+    result = await guard_service.call_runtime_model_prompt(
+        "User request",
+        platform="hermes",
+        instance_id="hermes-default",
+        max_tokens=64,
+        system_prompt="System rules",
+    )
+
+    assert result == "ok"
+    body = seen["json"]
+    assert isinstance(body, dict)
+    assert body["system"] == "System rules"
+    assert body["messages"] == [{"role": "user", "content": "User request"}]
+    assert body["max_tokens"] == 64
+    assert body["temperature"] == 0.2
+
+
+@pytest.mark.asyncio
 async def test_call_guard_model_uses_openai_chat_completions(monkeypatch):
     seen: dict[str, object] = {}
     _install_fake_async_client(
