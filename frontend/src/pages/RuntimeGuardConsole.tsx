@@ -3071,6 +3071,7 @@ export default function RuntimeGuardConsole() {
     left: layoutFit.leftWidth,
     width: layoutFit.mainWidth + layoutFit.rightWidth,
     height: RUNTIME_GUARD_TOP_GAP * layoutFit.scale,
+    '--rg-top-shelf-line-width': `${Math.max(0, layoutFit.mainWidth - 11 * layoutFit.scale)}px`,
   } as CSSProperties;
   const runtimeGuardPageStyle = {
     '--rg-scale': layoutFit.scale,

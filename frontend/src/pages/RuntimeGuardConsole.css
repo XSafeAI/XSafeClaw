@@ -43,14 +43,32 @@
   top: 0;
   z-index: 18;
   border-left: 1px solid #0d1821;
-  border-bottom: 1px solid #101f2a;
   background:
     linear-gradient(180deg, rgba(8, 17, 24, 0.98), rgba(5, 12, 17, 0.96)),
     #050c11;
-  box-shadow:
-    inset 0 -1px 0 rgba(66, 91, 108, 0.14),
-    0 1px 0 rgba(0, 0, 0, 0.5);
   pointer-events: none;
+}
+
+.rg-runtime-top-shelf::after,
+.rg-runtime-top-shelf::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: var(--rg-top-shelf-line-width, 100%);
+  pointer-events: none;
+}
+
+.rg-runtime-top-shelf::after {
+  bottom: 0;
+  height: 1px;
+  background: #101f2a;
+  box-shadow: inset 0 -1px 0 rgba(66, 91, 108, 0.14);
+}
+
+.rg-runtime-top-shelf::before {
+  bottom: -1px;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.5);
 }
 
 .rg-left-scale .rg-sidebar,
@@ -541,10 +559,10 @@
 
 .rg-budget {
   position: absolute;
-  top: 452px;
+  top: 446px;
   left: 12px;
   width: 136px;
-  height: 106px;
+  height: 92px;
   border: 1px solid #13232e;
   border-radius: 6px;
   background: #09131b;
@@ -569,14 +587,14 @@
 
 .rg-budget-title {
   position: absolute;
-  top: 11px;
+  top: 12px;
   left: 8px;
   right: 8px;
-  height: 15px;
+  height: 14px;
   color: #61717c;
   font-size: 8px;
   font-weight: 600;
-  line-height: 15px;
+  line-height: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -584,14 +602,14 @@
 
 .rg-budget-amount-line {
   position: absolute;
-  top: 30px;
+  top: 28px;
   right: 8px;
   left: 8px;
   display: flex;
   align-items: center;
   gap: 3px;
   min-width: 0;
-  height: 34px;
+  height: 31px;
   overflow: hidden;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -604,7 +622,7 @@
   color: #e8f1f6;
   font-size: 16px;
   font-weight: 650;
-  line-height: 34px;
+  line-height: 31px;
   text-overflow: ellipsis;
 }
 
@@ -634,7 +652,7 @@
 
 .rg-budget-bar {
   position: absolute;
-  top: 70px;
+  top: 64px;
   left: 8px;
   right: 33px;
   height: 5px;
@@ -656,7 +674,7 @@
 
 .rg-budget-percent {
   position: absolute;
-  top: 66px;
+  top: 60px;
   right: 8px;
   width: 25px;
   color: #6f7e88;
@@ -667,7 +685,7 @@
 
 .rg-budget-reset {
   position: absolute;
-  top: 86px;
+  top: 77px;
   left: 8px;
   right: 8px;
   color: #6f7e88;
