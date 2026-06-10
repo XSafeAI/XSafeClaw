@@ -1038,6 +1038,12 @@ function agentToPlatform(agent: AgentName): RuntimePlatform {
   return agentDefinitions.find(item => item.name === agent)?.platform ?? 'openclaw';
 }
 
+function configureRouteForAgent(agent: AgentName): string {
+  if (agent === 'Hermes') return '/hermes_configure';
+  if (agent === 'Nanobot') return '/nanobot_configure';
+  return '/openclaw_configure';
+}
+
 function findRuntimeForAgentInInstances(agent: AgentName, instances: RuntimeInstance[]): RuntimeInstance | null {
   const platform = agentToPlatform(agent);
   return instances.find(instance => instance.platform === platform && instance.is_default)
@@ -3255,7 +3261,7 @@ export default function RuntimeGuardConsole() {
               key={agent.name}
               aria-disabled={!agent.installed}
               title={agent.installed
-                ? rgText(copy.sidebar.runtimeTitle, { agent: agent.name })
+                ? rgText(copy.sidebar.runtimeConfigureTitle, { agent: agent.name })
                 : rgText(copy.sidebar.notInstalledTitle, { agent: agent.name })}
               onClick={() => {
                 if (!agent.installed) {
@@ -3263,6 +3269,14 @@ export default function RuntimeGuardConsole() {
                   return;
                 }
                 setSelectedAgent(agent.name);
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                if (!agent.installed) {
+                  showInstallHint(agent.name);
+                  return;
+                }
+                navigate(configureRouteForAgent(agent.name));
               }}
               style={{ top: 18 + index * 36 }}
             >

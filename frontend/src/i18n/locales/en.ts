@@ -1000,6 +1000,7 @@ export const en = {
       setup: 'Setup',
       setupTitle: 'Go to setup',
       runtimeTitle: '{agent} runtime',
+      runtimeConfigureTitle: 'Left click to select, right click to configure {agent}',
       notInstalledTitle: '{agent} is not installed',
       budgetReached: '{agent} budget reached',
       totalCost: '{agent} total cost',

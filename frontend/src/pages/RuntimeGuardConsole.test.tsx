@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   budgetAPI,
@@ -235,9 +235,15 @@ function renderRuntimeGuardConsole() {
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={['/backend']}>
         <RuntimeGuardConsole />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <span data-testid="location-path" hidden>{location.pathname}</span>;
 }
 
 describe('AgentIconBadge', () => {
@@ -399,6 +405,18 @@ describe('NewTaskModal', () => {
     });
     expect(screen.queryByText('Nanobot is not available')).toBeNull();
     expect(startSessionSpy).not.toHaveBeenCalled();
+  });
+
+  it('opens the installed agent configure page from the left agent row context menu', async () => {
+    mockRuntimeGuardApis();
+    renderRuntimeGuardConsole();
+
+    const openClawRow = await screen.findByTitle('Left click to select, right click to configure OpenClaw');
+    fireEvent.contextMenu(openClawRow);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('location-path').textContent).toBe('/openclaw_configure');
+    });
   });
 
   it('previews only active-session approvals in the right approval panel', async () => {
