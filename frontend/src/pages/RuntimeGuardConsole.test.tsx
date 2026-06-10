@@ -260,7 +260,14 @@ describe('titleFromUserMessage', () => {
   it('falls back when the title model returns explanation text', () => {
     const modelExplanation = '我们需根据用户请求生成UI标题。用户请求是中文：“帮我查一下上海今天的天气怎么样？” 规则要求使用同一种语言。';
 
-    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('帮我查一下上海今天的天气怎么样？');
+    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('上海今天的天气怎么样');
+  });
+
+  it('compacts raw user requests instead of using them as labels', () => {
+    const request = '今年高考数学难度大吗？相比去年，是难了还是简单了？';
+
+    expect(titleFromUserMessage(request, request)).toBe('今年高考数学难度大吗');
+    expect(titleFromUserMessage(request)).toBe('今年高考数学难度大吗');
   });
 });
 

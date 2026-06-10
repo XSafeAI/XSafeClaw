@@ -30,7 +30,9 @@ async def test_summarize_runtime_request_title_accepts_json_title(monkeypatch):
         instance_id: str,
         max_tokens: int,
         system_prompt: str | None = None,
+        temperature: float = 0.2,
     ) -> str:
+        assert temperature == 0.0
         assert "Return strict JSON only" not in prompt
         assert system_prompt is not None
         assert "silent UI session title generator" in system_prompt
@@ -58,7 +60,9 @@ async def test_summarize_runtime_request_title_falls_back_when_model_explains(mo
         instance_id: str,
         max_tokens: int,
         system_prompt: str | None = None,
+        temperature: float = 0.2,
     ) -> str:
+        assert temperature == 0.0
         assert system_prompt is not None
         return "我们需根据用户请求生成UI标题。用户请求是中文：“帮我查一下上海今天的天气怎么样？” 规则要求使用同一种语言。"
 
@@ -70,7 +74,7 @@ async def test_summarize_runtime_request_title_falls_back_when_model_explains(mo
         instance_id="openclaw-main",
     )
 
-    assert title == "帮我查一下上海今天的天气怎么样？"
+    assert title == "上海今天的天气怎么样"
 
 
 @pytest.mark.asyncio
@@ -82,7 +86,9 @@ async def test_summarize_runtime_request_title_falls_back_when_generated_title_i
         instance_id: str,
         max_tokens: int,
         system_prompt: str | None = None,
+        temperature: float = 0.2,
     ) -> str:
+        assert temperature == 0.0
         assert system_prompt is not None
         return '{"title":"帮我查询上海今天详细天气预报情况"}'
 
@@ -94,7 +100,105 @@ async def test_summarize_runtime_request_title_falls_back_when_generated_title_i
         instance_id="openclaw-main",
     )
 
-    assert title == "帮我查天气"
+    assert title == "查天气"
+
+
+@pytest.mark.asyncio
+async def test_summarize_runtime_request_title_retries_until_valid_title(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_model_prompt(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        _ = platform, instance_id, system_prompt
+        assert temperature == 0.0
+        calls.append(prompt)
+        assert max_tokens == 48
+        if len(calls) == 1:
+            return "我们需根据用户请求生成UI标题。"
+        return '{"title":"高考数学难度"}'
+
+    monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
+
+    title = await summarize_runtime_request_title(
+        "今年高考数学难度大吗？相比去年，是难了还是简单了？",
+        platform="openclaw",
+        instance_id="openclaw-main",
+    )
+
+    assert title == "高考数学难度"
+    assert len(calls) == 2
+    assert "previous output was invalid" in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_summarize_runtime_request_title_retries_after_model_error(monkeypatch):
+    calls = 0
+
+    async def fake_model_prompt(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        nonlocal calls
+        _ = prompt, platform, instance_id, max_tokens, system_prompt
+        assert temperature == 0.0
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary title model failure")
+        return '{"title":"高考难度对比"}'
+
+    monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
+
+    title = await summarize_runtime_request_title(
+        "今年高考数学难度大吗？相比去年，是难了还是简单了？",
+        platform="openclaw",
+        instance_id="openclaw-main",
+    )
+
+    assert title == "高考难度对比"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_summarize_runtime_request_title_falls_back_after_three_invalid_attempts(monkeypatch):
+    calls = 0
+
+    async def fake_model_prompt(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        nonlocal calls
+        _ = prompt, platform, instance_id, max_tokens, system_prompt
+        assert temperature == 0.0
+        calls += 1
+        return '{"title":"今年高考数学难度相比去年是难了还是简单了"}'
+
+    monkeypatch.setattr(guard_service, "call_runtime_model_prompt", fake_model_prompt)
+
+    title = await summarize_runtime_request_title(
+        "今年高考数学难度大吗？相比去年，是难了还是简单了？",
+        platform="openclaw",
+        instance_id="openclaw-main",
+    )
+
+    assert title == "今年高考数学难度大吗"
+    assert calls == 3
 
 
 def test_session_title_endpoint_calls_runtime_model_without_chat_history(monkeypatch):

@@ -920,16 +920,74 @@ const runtimeTitleExplanationPatterns = [
   /\u7528\u6237\u8bf7\u6c42\u662f.*\u6807\u9898/i,
 ];
 
+const runtimeTitleCjkPattern = /[\u3400-\u9fff\uf900-\ufaff]/g;
+const runtimeTitleWordPattern = /[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g;
+const runtimeTitleLeadInPatterns = [
+  /^(?:请帮我|麻烦帮我|帮我|帮忙|请问|请|麻烦|我想|我要|能不能|可以)/i,
+  /^(?:查询一下|查一下|查查|看一下|了解一下)/i,
+  /^(?:please|can you|could you|help me|i want to|i need to|check|look up|find out)\b\s*/i,
+];
+
 function runtimeTitleLooksLikeExplanation(input: string): boolean {
   const cleaned = input.replace(/\s+/g, ' ').trim();
   return Boolean(cleaned) && runtimeTitleExplanationPatterns.some(pattern => pattern.test(cleaned));
 }
 
+function compactRuntimeRequestTitle(input: string): string {
+  const normalized = input.replace(/\s+/g, ' ').trim().replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, '');
+  if (!normalized) return '';
+  let compact = normalized;
+  for (let index = 0; index < 3; index += 1) {
+    let next = compact.trim();
+    runtimeTitleLeadInPatterns.forEach(pattern => {
+      next = next.replace(pattern, '').trim();
+    });
+    if (next === compact) break;
+    compact = next;
+  }
+  compact = compact.replace(/[?.!。？！；;，,：:]+$/g, '').trim() || normalized;
+  if (runtimeTitleCjkPattern.test(compact)) {
+    runtimeTitleCjkPattern.lastIndex = 0;
+    const chars: string[] = [];
+    let cjkCount = 0;
+    for (const char of compact) {
+      if (/[\u3400-\u9fff\uf900-\ufaff]/.test(char)) {
+        cjkCount += 1;
+        if (cjkCount > 10) break;
+        chars.push(char);
+      } else if (/^[A-Za-z0-9 _./-]$/.test(char)) {
+        chars.push(char);
+      }
+    }
+    return chars.join('').replace(/\s+/g, ' ').replace(/^[\s._/-]+|[\s._/-]+$/g, '') || compact.slice(0, 10).trim();
+  }
+  const words = compact.match(runtimeTitleWordPattern);
+  if (words?.length) return words.slice(0, 6).join(' ');
+  return compact.slice(0, 48).trim();
+}
+
+function runtimeTitleLooksLikeRawRequest(input: string): boolean {
+  const cleaned = input.replace(/\s+/g, ' ').trim();
+  const cjkCount = cleaned.match(runtimeTitleCjkPattern)?.length ?? 0;
+  runtimeTitleCjkPattern.lastIndex = 0;
+  if (cjkCount > 10 && /[?？]|吗|呢|怎么样|怎么|为什么|是否|难不难|简单|容易|帮我|请/.test(cleaned)) {
+    return true;
+  }
+  const words = cleaned.match(runtimeTitleWordPattern)?.length ?? 0;
+  return words > 10 && /\?$|\b(can you|could you|please|help me|what|why|how|whether)\b/i.test(cleaned);
+}
+
 export function titleFromUserMessage(input: string, fallback = ''): string {
   const cleaned = input.replace(/\s+/g, ' ').trim();
+  const fallbackCleaned = fallback.replace(/\s+/g, ' ').trim();
+  const compactFallback = compactRuntimeRequestTitle(fallbackCleaned);
   const safeTitle = cleaned && !runtimeTitleLooksLikeExplanation(cleaned)
-    ? cleaned
-    : fallback.replace(/\s+/g, ' ').trim();
+    ? (
+      (fallbackCleaned && cleaned === fallbackCleaned) || runtimeTitleLooksLikeRawRequest(cleaned)
+        ? compactRuntimeRequestTitle(cleaned)
+        : cleaned
+    )
+    : compactFallback || fallbackCleaned;
   if (!safeTitle) return '';
   return safeTitle.length > 48 ? `${safeTitle.slice(0, 48).trimEnd()}...` : safeTitle;
 }
@@ -3257,12 +3315,12 @@ export default function RuntimeGuardConsole() {
           <div className="rg-section-title">
             <span>{copy.sidebar.safetyTools}</span>
           </div>
-          <button className="rg-safety-row" onClick={() => navigate('/assets')} style={{ top: 20 }} type="button">
+          <button className="rg-safety-row" onClick={() => navigate('/assets')} style={{ top: 22 }} type="button">
             <Shield />
             <span>{copy.sidebar.assetShield}</span>
             <ChevronRight />
           </button>
-          <button className="rg-safety-row" onClick={() => navigate('/risk-test')} style={{ top: 48 }} type="button">
+          <button className="rg-safety-row" onClick={() => navigate('/risk-test')} style={{ top: 55 }} type="button">
             <AlertTriangle />
             <span>{copy.sidebar.riskTest}</span>
             <ChevronRight />
