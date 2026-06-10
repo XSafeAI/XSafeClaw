@@ -68,6 +68,8 @@ def test_hermes_events_endpoint_rejects_non_hermes_session_and_accepts_raw(monke
     assert ok.json() == {"ok": True}
     assert recorded[0][0] == "hermes::hermes-default::raw-session"
     assert recorded[0][1]["type"] == "tool_start"
+    assert recorded[0][1]["tool_category"] == "shell"
+    assert recorded[0][1]["timeline_kind"] == "tool_shell"
 
 
 def test_hermes_trace_persist_filter_keeps_thinking_only():
@@ -213,4 +215,8 @@ async def test_send_message_stream_merges_hermes_bridge_and_dedupes_jsonl(monkey
     assert len(planning_traces) == 1
     assert [event.get("phase") for event in persisted_trace_events] == ["planning"]
     assert tool_starts[0]["tool_id"] == "call-1"
+    assert tool_starts[0]["tool_category"] == "shell"
+    assert tool_starts[0]["timeline_kind"] == "tool_shell"
+    assert tool_results[0]["tool_category"] == "shell"
+    assert tool_results[0]["timeline_kind"] == "tool_shell"
     assert events[-1]["type"] == "final"

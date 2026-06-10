@@ -20,6 +20,7 @@ import RuntimeGuardConsole, {
   NewTaskModal,
   SessionHistoryViewAllModal,
   ToolsViewAllModal,
+  getTimelineAppearance,
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
   runtimeGuardAgentStatus,
@@ -436,6 +437,32 @@ describe('NewTaskModal', () => {
     expect(within(panel).queryByText('other-session-command')).toBeNull();
     expect(panel.querySelector('.rg-count')?.textContent).toBe('1');
   });
+
+  it('renders compact active session metadata with relative start and workspace', async () => {
+    mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([{
+      sessionKey: 'openclaw::runtime-openclaw::weather-session',
+      agent: 'OpenClaw',
+      platform: 'openclaw',
+      instanceId: 'runtime-openclaw',
+      displayName: 'OpenClaw Agent',
+      workspacePath: '/srv/xsafeclaw/weather',
+      title: 'Weather lookup',
+      createdAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+      status: 'ready',
+    }]));
+
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Weather lookup' })).toBeTruthy();
+    });
+    const meta = container.querySelector('.rg-session-meta')?.textContent ?? '';
+    expect(meta).toContain('3 minutes ago workspace:/srv/xsafeclaw/weather');
+    expect(meta).not.toContain('OpenClaw Agent');
+    expect(meta).not.toContain('openclaw');
+    expect(meta).not.toContain('runtime-openclaw');
+  });
 });
 
 describe('RuntimeGuardConsole i18n', () => {
@@ -469,6 +496,67 @@ describe('RuntimeGuardConsole i18n', () => {
   });
 });
 
+describe('getTimelineAppearance', () => {
+  function message(overrides: Partial<ChatMessage>): ChatMessage {
+    return {
+      id: 'message-1',
+      role: 'assistant',
+      content: '',
+      timestamp: new Date('2026-06-10T12:00:00.000Z'),
+      ...overrides,
+    };
+  }
+
+  it('maps user, assistant, trace, and runtime error rows', () => {
+    expect(getTimelineAppearance(message({ role: 'user', content: 'hello' })).kind).toBe('user_message');
+    expect(getTimelineAppearance(message({ role: 'assistant', content: 'done' })).kind).toBe('assistant_final');
+    expect(getTimelineAppearance(message({ role: 'trace', trace_phase: 'planning' })).kind).toBe('assistant_thinking');
+    expect(getTimelineAppearance(message({ role: 'error', content: 'boom' })).tone).toBe('red');
+  });
+
+  it.each([
+    ['exec', { command: 'echo hi' }, 'tool_shell', 'green'],
+    ['read_file', { path: 'README.md' }, 'tool_file_read', 'yellow'],
+    ['write_file', { path: 'README.md' }, 'tool_file_write', 'orange'],
+    ['delete_file', { path: 'README.md' }, 'tool_file_delete', 'red'],
+    ['browser_navigate', { url: 'https://example.com' }, 'tool_browser', 'purple'],
+    ['search_web', { q: 'weather' }, 'tool_network', 'cyan'],
+    ['git', { command: 'git status' }, 'tool_git', 'blue'],
+    ['mcp_list_tools', { server: 'github' }, 'tool_mcp', 'purple'],
+    ['custom_tool', { value: 1 }, 'tool_unknown', 'muted'],
+  ])('falls back for legacy %s tool messages', (toolName, args, kind, tone) => {
+    const appearance = getTimelineAppearance(message({
+      role: 'tool_call',
+      tool_name: toolName,
+      args,
+    }));
+
+    expect(appearance.kind).toBe(kind);
+    expect(appearance.tone).toBe(tone);
+  });
+
+  it('prefers backend metadata and marks guard-blocked tools red', () => {
+    const appearance = getTimelineAppearance(message({
+      role: 'tool_call',
+      tool_name: 'exec',
+      args: { command: 'echo hi' },
+      timeline_kind: 'guard_blocked',
+      tool_category: 'shell',
+      tool_action: 'execute',
+      is_error: true,
+    }));
+
+    expect(appearance.kind).toBe('guard_blocked');
+    expect(appearance.tone).toBe('red');
+  });
+
+  it('maps approval state without changing the card identity', () => {
+    expect(getTimelineAppearance(middleCard({ status: 'pending' })).kind).toBe('approval_request');
+    expect(getTimelineAppearance(middleCard({ status: 'approved' })).kind).toBe('approval_allowed');
+    expect(getTimelineAppearance(middleCard({ status: 'rejected' })).kind).toBe('approval_denied');
+  });
+});
+
 describe('InlineApprovalCard', () => {
   it('renders as a timeline row with timestamp, icon, request details, and actions', () => {
     const { container } = render(
@@ -476,6 +564,8 @@ describe('InlineApprovalCard', () => {
     );
 
     expect(container.querySelector('.rg-stream-row')).toBeTruthy();
+    expect(container.querySelector('.rg-stream-row')).toHaveAttribute('data-kind', 'approval_request');
+    expect(container.querySelector('.rg-stream-row')).toHaveAttribute('data-tone', 'yellow');
     expect(container.querySelector('.rg-stream-time')?.textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
     expect(container.querySelector('.rg-stream-icon')).toBeTruthy();
     expect(screen.getByText('Shell Command Request')).toBeTruthy();
@@ -543,7 +633,7 @@ describe('SessionHistoryViewAllModal', () => {
       session_key: 'public-session-1',
       first_seen_at: '2026-06-05T04:00:00.000Z',
       last_activity_at: '2026-06-05T05:00:00.000Z',
-      cwd: null,
+      cwd: '/srv/xsafeclaw/history-workspace',
       current_model_provider: null,
       current_model_name: null,
       total_runs: 2,
@@ -558,6 +648,7 @@ describe('SessionHistoryViewAllModal', () => {
       agent: 'Hermes',
       platform: 'hermes',
       title: 'Hermes real session',
+      workspacePath: '/srv/xsafeclaw/history-workspace',
       lastActivityAt: '2026-06-05T05:00:00.000Z',
     });
 

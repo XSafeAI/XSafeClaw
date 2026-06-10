@@ -96,6 +96,7 @@ export type RuntimeGuardSession = {
   platform: RuntimePlatform;
   instanceId: string;
   displayName?: string;
+  workspacePath?: string;
   title: string;
   createdAt: string;
   lastActivityAt?: string;
@@ -413,6 +414,202 @@ function traceDisplayLabel(msg: ChatMessage): string {
   return 'Thinking';
 }
 
+export type RuntimeTimelineTone = 'blue' | 'green' | 'yellow' | 'orange' | 'purple' | 'cyan' | 'red' | 'muted';
+export type RuntimeTimelineKind =
+  | 'user_message'
+  | 'assistant_final'
+  | 'assistant_thinking'
+  | 'runtime_error'
+  | 'tool_shell'
+  | 'tool_file_read'
+  | 'tool_file_write'
+  | 'tool_file_delete'
+  | 'tool_browser'
+  | 'tool_network'
+  | 'tool_git'
+  | 'tool_mcp'
+  | 'tool_unknown'
+  | 'approval_request'
+  | 'approval_allowed'
+  | 'approval_denied'
+  | 'guard_blocked';
+
+export interface RuntimeTimelineAppearance {
+  kind: RuntimeTimelineKind;
+  tone: RuntimeTimelineTone;
+  title: string;
+  Icon: LucideIcon;
+  statusBadge?: string;
+  cardTone?: RuntimeTimelineTone;
+}
+
+function normalizeTimelineToken(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function coerceToolArgs(args: unknown): Record<string, unknown> {
+  if (args && typeof args === 'object' && !Array.isArray(args)) return args as Record<string, unknown>;
+  if (typeof args === 'string' && args.trim()) {
+    try {
+      const parsed = JSON.parse(args);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      return { raw: args };
+    }
+  }
+  return {};
+}
+
+function firstStringArg(args: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  for (const nestedKey of ['arguments', 'args', 'params', 'input']) {
+    const nested = args[nestedKey];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      const value = firstStringArg(nested as Record<string, unknown>, keys);
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
+function firstShellCommand(command: string): string {
+  const token = command.trim().split(/\s+/)[0] ?? '';
+  return token.replace(/^["']|["']$/g, '').replace(/\\/g, '/').split('/').pop()?.replace(/\.exe$/i, '').toLowerCase() ?? '';
+}
+
+function inferTimelineToolCategory(toolName?: string, args?: unknown): string {
+  const normalized = normalizeTimelineToken(toolName);
+  const params = coerceToolArgs(args);
+  const command = firstStringArg(params, ['command', 'cmd', 'script']);
+  const shellCommand = command ? firstShellCommand(command) : '';
+  if (/^(read|read_file|file_read|view_file|open_file)$/.test(normalized)) return 'file_system';
+  if (/^(write|write_file|file_write|edit|edit_file|file_edit|replace|append|create|create_file|mkdir|copy|move|rename|delete|delete_file|remove|remove_file|rm|rmdir|unlink)$/.test(normalized)) return 'file_system';
+  if (shellCommand === 'git' || normalized === 'git' || normalized.startsWith('git_')) return 'git';
+  if (/^(curl|wget|http|https|httpie|iwr|irm|invoke_webrequest|invoke_restmethod)$/.test(shellCommand)) return 'network';
+  if (/^(web_search|search_web|web_fetch|fetch|http|http_request|request|download|url_fetch|get_url|curl|wget)$/.test(normalized) || normalized.startsWith('web_') || normalized.startsWith('http_')) return 'network';
+  if (normalized === 'browser' || normalized.startsWith('browser_')) return 'browser';
+  if (/^(exec|exec_command|shell|bash|terminal|run_command|execute_command|execute_shell_command|ls|pwd|cat|grep|rg|python|python3|node|npm|pip)$/.test(normalized)) return 'shell';
+  if (normalized === 'mcp' || normalized.startsWith('mcp_')) return 'mcp';
+  return 'unknown';
+}
+
+function inferTimelineToolAction(category: string, toolName?: string, args?: unknown): string {
+  const normalized = normalizeTimelineToken(toolName);
+  const params = coerceToolArgs(args);
+  const command = firstStringArg(params, ['command', 'cmd', 'script']).toLowerCase();
+  if (/^(delete|delete_file|remove|remove_file|rm|rmdir|unlink)$/.test(normalized) || /\b(rm|del|remove-item)\b/.test(command)) return 'delete';
+  if (/^(write|write_file|file_write|append|create|create_file|copy|move|rename|mkdir)$/.test(normalized)) return 'write';
+  if (/^(edit|edit_file|file_edit|replace)$/.test(normalized)) return 'modify';
+  if (/^(read|read_file|file_read|view_file|open_file|ls)$/.test(normalized)) return 'read';
+  if (category === 'browser') {
+    if (normalized.includes('navigate') || normalized.includes('open')) return 'navigate';
+    if (normalized.includes('search')) return 'search';
+    return 'inspect';
+  }
+  if (category === 'network') return 'request';
+  if (category === 'git') return /status|diff|log|show|branch/.test(normalized) ? 'inspect' : 'execute';
+  if (category === 'shell') return 'execute';
+  if (category === 'mcp') return 'request';
+  return 'unknown';
+}
+
+function kindFromToolMetadata(row: Pick<ChatMessage, 'tool_name' | 'args' | 'timeline_kind' | 'tool_category' | 'tool_action'>): RuntimeTimelineKind {
+  const explicitKind = normalizeTimelineToken(row.timeline_kind) as RuntimeTimelineKind;
+  if ([
+    'tool_shell', 'tool_file_read', 'tool_file_write', 'tool_file_delete', 'tool_browser',
+    'tool_network', 'tool_git', 'tool_mcp', 'tool_unknown', 'guard_blocked',
+  ].includes(explicitKind)) {
+    return explicitKind;
+  }
+  const category = normalizeTimelineToken(row.tool_category) || inferTimelineToolCategory(row.tool_name, row.args);
+  const action = normalizeTimelineToken(row.tool_action) || inferTimelineToolAction(category, row.tool_name, row.args);
+  if (category === 'shell') return 'tool_shell';
+  if (category === 'file_system') {
+    if (action === 'read') return 'tool_file_read';
+    if (action === 'delete') return 'tool_file_delete';
+    return 'tool_file_write';
+  }
+  if (category === 'browser') return 'tool_browser';
+  if (category === 'network') return 'tool_network';
+  if (category === 'git') return 'tool_git';
+  if (category === 'mcp') return 'tool_mcp';
+  return 'tool_unknown';
+}
+
+function toolAppearanceForKind(kind: RuntimeTimelineKind, titleFallback = 'Tool'): RuntimeTimelineAppearance {
+  switch (kind) {
+    case 'tool_shell':
+      return { kind, tone: 'green', title: 'Shell', Icon: Terminal };
+    case 'tool_file_read':
+      return { kind, tone: 'yellow', title: 'Read', Icon: FolderOpen };
+    case 'tool_file_write':
+      return { kind, tone: 'orange', title: 'Edit', Icon: FolderOpen };
+    case 'tool_file_delete':
+      return { kind, tone: 'red', title: 'Delete', Icon: Trash2 };
+    case 'tool_browser':
+      return { kind, tone: 'purple', title: 'Browser', Icon: Globe2 };
+    case 'tool_network':
+      return { kind, tone: 'cyan', title: 'Network', Icon: Network };
+    case 'tool_git':
+      return { kind, tone: 'blue', title: 'Git', Icon: GitBranch };
+    case 'tool_mcp':
+      return { kind, tone: 'purple', title: 'MCP', Icon: Wrench };
+    case 'guard_blocked':
+      return { kind, tone: 'red', title: 'Blocked', Icon: AlertCircle, cardTone: 'red' };
+    default:
+      return { kind: 'tool_unknown', tone: 'muted', title: titleFallback, Icon: Wrench };
+  }
+}
+
+function isMiddleApprovalCard(value: unknown): value is MiddleApprovalCard {
+  return Boolean(value && typeof value === 'object' && 'item' in value && 'status' in value);
+}
+
+function isGuardApproval(value: unknown): value is GuardPendingApproval {
+  return Boolean(value && typeof value === 'object' && 'guard_verdict' in value && 'resolved' in value);
+}
+
+export function getTimelineAppearance(
+  row: ChatMessage | MiddleApprovalCard | GuardPendingApproval | GuardRuntimeObservation,
+  copy?: RuntimeGuardCopy,
+): RuntimeTimelineAppearance {
+  if (isMiddleApprovalCard(row)) {
+    if (row.status === 'approved') return { kind: 'approval_allowed', tone: 'green', title: copy?.approvals.allowed ?? 'Allowed', Icon: CheckCircle2, cardTone: 'green' };
+    if (row.status === 'rejected') return { kind: 'approval_denied', tone: 'red', title: copy?.approvals.denied ?? 'Denied', Icon: AlertCircle, cardTone: 'red' };
+    return { kind: 'approval_request', tone: 'yellow', title: copy?.approvals.toolCall ?? 'Tool Call', Icon: AlertTriangle, cardTone: 'yellow' };
+  }
+  if (isGuardApproval(row)) {
+    if (row.resolved && row.resolution === 'approved') return { kind: 'approval_allowed', tone: 'green', title: copy?.approvals.allowed ?? 'Allowed', Icon: CheckCircle2, cardTone: 'green' };
+    if (row.resolved && row.resolution === 'rejected') return { kind: 'approval_denied', tone: 'red', title: copy?.approvals.denied ?? 'Denied', Icon: AlertCircle, cardTone: 'red' };
+    return { kind: 'approval_request', tone: 'yellow', title: copy?.approvals.toolCall ?? 'Tool Call', Icon: AlertTriangle, cardTone: 'yellow' };
+  }
+  if ('action' in row && 'guard_verdict' in row) {
+    const toolRow = {
+      tool_name: row.tool_name,
+      args: row.params,
+      tool_category: row.tool_category ?? undefined,
+      tool_action: row.tool_action ?? undefined,
+      timeline_kind: row.timeline_kind ?? undefined,
+    };
+    const kind = row.timeline_kind === 'guard_blocked' || row.action === 'block'
+      ? 'guard_blocked'
+      : kindFromToolMetadata(toolRow);
+    return kind === 'guard_blocked'
+      ? { kind, tone: 'red', title: 'Blocked', Icon: AlertCircle, cardTone: 'red' }
+      : toolAppearanceForKind(kind);
+  }
+  if (row.role === 'user') return { kind: 'user_message', tone: 'blue', title: copy?.main.you ?? 'You', Icon: User };
+  if (row.role === 'assistant') return { kind: 'assistant_final', tone: 'green', title: copy?.main.assistant ?? 'Assistant', Icon: Bot };
+  if (row.role === 'trace') return { kind: 'assistant_thinking', tone: 'purple', title: traceDisplayLabel(row), Icon: Brain, cardTone: 'purple' };
+  if (row.role === 'error') return { kind: 'runtime_error', tone: 'red', title: copy?.main.runtimeError ?? 'Runtime error', Icon: AlertTriangle, cardTone: 'red' };
+  const kind = kindFromToolMetadata(row);
+  const base = toolAppearanceForKind(kind, row.tool_name || 'Tool');
+  return row.is_error ? { ...base, tone: 'red', Icon: kind === 'guard_blocked' ? AlertCircle : base.Icon } : base;
+}
+
 function isRuntimePlatform(value: unknown): value is RuntimePlatform {
   return value === 'openclaw' || value === 'hermes' || value === 'nanobot';
 }
@@ -458,6 +655,7 @@ export function runtimeSessionRecordToRuntimeGuardSession(
     agent,
     platform,
     instanceId: firstText(record.instance_id),
+    workspacePath: firstText(record.cwd) || undefined,
     title,
     createdAt,
     lastActivityAt,
@@ -481,6 +679,7 @@ export function mergeSessionHistorySessions(
       ...openSession,
       historySessionId: historySession.historySessionId ?? openSession.historySessionId,
       lastActivityAt: historySession.lastActivityAt ?? openSession.lastActivityAt,
+      workspacePath: openSession.workspacePath ?? historySession.workspacePath,
     } : openSession);
   });
   return sortSessionsNewestFirst([...byKey.values()]);
@@ -496,6 +695,7 @@ export function promoteRuntimeGuardSession(
     ...existing,
     historySessionId: existing.historySessionId ?? session.historySessionId,
     lastActivityAt: session.lastActivityAt ?? existing.lastActivityAt,
+    workspacePath: existing.workspacePath ?? session.workspacePath,
   } : session;
   return [front, ...current.filter(item => item.sessionKey !== session.sessionKey)];
 }
@@ -518,6 +718,7 @@ function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
           platform,
           instanceId: typeof item?.instanceId === 'string' ? item.instanceId : '',
           displayName: typeof item?.displayName === 'string' ? item.displayName : undefined,
+          workspacePath: typeof item?.workspacePath === 'string' ? item.workspacePath : undefined,
           title: titleFromUserMessage(typeof item?.title === 'string' ? item.title : '', agent) || agent,
           createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
           lastActivityAt: typeof item?.lastActivityAt === 'string' ? item.lastActivityAt : undefined,
@@ -587,12 +788,52 @@ function formatTime(value: Date) {
   return value.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-function formatSessionStart(iso: string, copy: RuntimeGuardCopy) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return copy.time.startedJustNow;
-  return rgText(copy.time.startedAt, {
-    time: date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }),
+function formatSessionStartAgo(iso: string, copy: RuntimeGuardCopy, nowMs = Date.now()) {
+  const startedMs = Date.parse(iso);
+  if (!Number.isFinite(startedMs)) return copy.time.justNowAgo;
+  const elapsedMinutes = Math.floor(Math.max(0, nowMs - startedMs) / 60_000);
+  if (elapsedMinutes < 1) return copy.time.justNowAgo;
+  if (elapsedMinutes < 60) {
+    return rgText(elapsedMinutes === 1 ? copy.time.minuteAgo : copy.time.minutesAgo, {
+      count: elapsedMinutes,
+    });
+  }
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) {
+    return rgText(elapsedHours === 1 ? copy.time.hourAgo : copy.time.hoursAgo, {
+      count: elapsedHours,
+    });
+  }
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return rgText(elapsedDays === 1 ? copy.time.dayAgo : copy.time.daysAgo, {
+    count: elapsedDays,
   });
+}
+
+function sessionWorkspacePath(
+  session: RuntimeGuardSession,
+  instances: RuntimeInstance[],
+  copy: RuntimeGuardCopy,
+): string {
+  const exactInstance = instances.find(instance => instance.instance_id === session.instanceId);
+  const platformInstance = instances.find(instance => (
+    instance.platform === session.platform && instance.enabled && instance.workspace_path
+  ));
+  return firstText(
+    session.workspacePath,
+    exactInstance?.workspace_path,
+    platformInstance?.workspace_path,
+    copy.time.workspaceUnknown,
+  );
+}
+
+function formatSessionMeta(
+  session: RuntimeGuardSession,
+  instances: RuntimeInstance[],
+  copy: RuntimeGuardCopy,
+  nowMs = Date.now(),
+) {
+  return `${formatSessionStartAgo(session.createdAt, copy, nowMs)} ${copy.time.workspacePrefix}:${sessionWorkspacePath(session, instances, copy)}`;
 }
 
 function formatSessionHistoryTime(iso: string): string {
@@ -824,6 +1065,10 @@ function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | 
       result: raw.result,
       is_error: raw.is_error,
       result_pending: raw.result_pending ?? false,
+      tool_category: raw.tool_category ?? undefined,
+      tool_action: raw.tool_action ?? undefined,
+      timeline_kind: raw.timeline_kind ?? undefined,
+      risk_level: raw.risk_level ?? undefined,
     };
   }
 
@@ -988,6 +1233,8 @@ export function InlineApprovalCard({
   const copy = t.runtimeGuard;
   const item = card.item;
   const isPending = card.status === 'pending';
+  const appearance = getTimelineAppearance(card, copy);
+  const AppearanceIcon = appearance.Icon;
   const riskTone = item.guard_verdict === 'unsafe' ? 'high' : 'medium';
   const risk = riskTone === 'high' ? copy.approvals.highRisk : copy.approvals.mediumRisk;
   const statusText = isPending ? risk : approvalStatusLabel(card.status, copy);
@@ -1006,12 +1253,16 @@ export function InlineApprovalCard({
   const impact = item.real_world_harm;
 
   return (
-    <div className={`rg-stream-row rg-stream-approval ${cardStateClass}`}>
+    <div
+      className={`rg-stream-row rg-stream-approval ${cardStateClass}`}
+      data-kind={appearance.kind}
+      data-tone={appearance.tone}
+    >
       <span className="rg-stream-time">{formatApprovalTime(item.created_at)}</span>
-      <AlertTriangle className="rg-stream-icon rg-approval-timeline-icon" />
+      <AppearanceIcon className="rg-stream-icon rg-approval-timeline-icon" />
       <div className="rg-stream-body">
         <div className={`rg-command-card ${cardStateClass}`}>
-          <AlertTriangle />
+          <AppearanceIcon />
           <div className="rg-command-title">{requestTitle}</div>
           <div className={`rg-command-risk ${statusClass}`}>{statusText}</div>
           <pre className="rg-command-code">{content}</pre>
@@ -1450,7 +1701,7 @@ export function BlockedViewAllModal({
   );
 }
 
-function TimelineMessage({
+export function TimelineMessage({
   msg,
   expanded,
   onToggle,
@@ -1462,18 +1713,24 @@ function TimelineMessage({
   const { t } = useI18n();
   const copy = t.runtimeGuard;
   const time = formatTime(msg.timestamp);
+  const appearance = getTimelineAppearance(msg, copy);
+  const AppearanceIcon = appearance.Icon;
 
   if (msg.role === 'tool_call') {
     const resultText = formatValue(msg.result);
     const argsText = formatValue(msg.args);
     const summary = argsText.replace(/\s+/g, ' ').slice(0, 100);
     return (
-      <div className={`rg-stream-row rg-stream-tool ${msg.is_error ? 'is-error' : ''}`}>
+      <div
+        className={`rg-stream-row rg-stream-tool ${msg.is_error ? 'is-error' : ''}`}
+        data-kind={appearance.kind}
+        data-tone={appearance.tone}
+      >
         <span className="rg-stream-time">{time}</span>
-        <Wrench className="rg-stream-icon" />
+        <AppearanceIcon className="rg-stream-icon" />
         <div className="rg-stream-body">
           <button className="rg-tool-toggle" type="button" onClick={onToggle}>
-            <span className="rg-stream-title">{msg.tool_name || 'tool'}</span>
+            <span className="rg-stream-title">{appearance.title}</span>
             {summary && <code>{summary}</code>}
             {msg.result_pending ? <Loader2 className="rg-stream-state is-spinning" /> : msg.is_error ? <AlertCircle className="rg-stream-state" /> : <CheckCircle2 className="rg-stream-state" />}
             {expanded ? <ChevronDown /> : <ChevronRight />}
@@ -1502,13 +1759,12 @@ function TimelineMessage({
   }
 
   if (msg.role === 'trace') {
-    const label = traceDisplayLabel(msg);
     return (
-      <div className="rg-stream-row rg-stream-trace">
+      <div className="rg-stream-row rg-stream-trace" data-kind={appearance.kind} data-tone={appearance.tone}>
         <span className="rg-stream-time">{time}</span>
-        <Brain className="rg-stream-icon" />
+        <AppearanceIcon className="rg-stream-icon" />
         <div className="rg-stream-body">
-          <span className="rg-stream-title">{label}</span>
+          <span className="rg-stream-title">{appearance.title}</span>
           {msg.trace_summary && <p>{msg.trace_summary}</p>}
           {msg.content && <p>{msg.content}</p>}
         </div>
@@ -1519,11 +1775,15 @@ function TimelineMessage({
   const isUser = msg.role === 'user';
   const isError = msg.role === 'error';
   return (
-    <div className={`rg-stream-row ${isUser ? 'rg-stream-user' : isError ? 'rg-stream-error' : 'rg-stream-assistant'}`}>
+    <div
+      className={`rg-stream-row ${isUser ? 'rg-stream-user' : isError ? 'rg-stream-error' : 'rg-stream-assistant'}`}
+      data-kind={appearance.kind}
+      data-tone={appearance.tone}
+    >
       <span className="rg-stream-time">{time}</span>
-      {isUser ? <User className="rg-stream-icon" /> : isError ? <AlertTriangle className="rg-stream-icon" /> : <Bot className="rg-stream-icon" />}
+      <AppearanceIcon className="rg-stream-icon" />
       <div className="rg-stream-body">
-        <span className="rg-stream-title">{isUser ? copy.main.you : isError ? copy.main.runtimeError : copy.main.assistant}</span>
+        <span className="rg-stream-title">{appearance.title}</span>
         {msg.pending && !msg.content ? (
           <span className="rg-stream-pending"><i /><i /><i /></span>
         ) : !isUser && !isError ? (
@@ -2145,6 +2405,7 @@ export default function RuntimeGuardConsole() {
       platform,
       instanceId: data.instance_id,
       displayName: data.instance?.display_name || fallbackRuntime?.display_name,
+      workspacePath: data.instance?.workspace_path || fallbackRuntime?.workspace_path || undefined,
       title: label,
       createdAt: new Date().toISOString(),
       lastActivityAt: new Date().toISOString(),
@@ -2492,6 +2753,10 @@ export default function RuntimeGuardConsole() {
               phase?: string;
               step?: number;
               summary?: string;
+              tool_category?: string;
+              tool_action?: string;
+              timeline_kind?: string;
+              risk_level?: string;
             };
 
             const appendBeforeAssistant = (message: ChatMessage) => {
@@ -2528,6 +2793,10 @@ export default function RuntimeGuardConsole() {
                 tool_name: chunk.tool_name,
                 args: chunk.args,
                 result_pending: true,
+                tool_category: chunk.tool_category,
+                tool_action: chunk.tool_action,
+                timeline_kind: chunk.timeline_kind,
+                risk_level: chunk.risk_level,
               });
             } else if (chunk.type === 'tool_result') {
               setMessageMap(prev => {
@@ -2537,7 +2806,16 @@ export default function RuntimeGuardConsole() {
                   for (let i = messages.length - 1; i >= 0; i -= 1) {
                     const message = messages[i];
                     if (message.role === 'tool_call' && message.tool_id === chunk.tool_id) {
-                      messages[i] = { ...message, result: chunk.result, is_error: chunk.is_error, result_pending: false };
+                      messages[i] = {
+                        ...message,
+                        result: chunk.result,
+                        is_error: chunk.is_error,
+                        result_pending: false,
+                        tool_category: chunk.tool_category || message.tool_category,
+                        tool_action: chunk.tool_action || message.tool_action,
+                        timeline_kind: chunk.timeline_kind || message.timeline_kind,
+                        risk_level: chunk.risk_level || message.risk_level,
+                      };
                       updated = true;
                       break;
                     }
@@ -2547,7 +2825,16 @@ export default function RuntimeGuardConsole() {
                   for (let i = messages.length - 1; i >= 0; i -= 1) {
                     const message = messages[i];
                     if (message.role === 'tool_call' && message.tool_name === chunk.tool_name && message.result_pending) {
-                      messages[i] = { ...message, result: chunk.result, is_error: chunk.is_error, result_pending: false };
+                      messages[i] = {
+                        ...message,
+                        result: chunk.result,
+                        is_error: chunk.is_error,
+                        result_pending: false,
+                        tool_category: chunk.tool_category || message.tool_category,
+                        tool_action: chunk.tool_action || message.tool_action,
+                        timeline_kind: chunk.timeline_kind || message.timeline_kind,
+                        risk_level: chunk.risk_level || message.risk_level,
+                      };
                       break;
                     }
                   }
@@ -2596,7 +2883,16 @@ export default function RuntimeGuardConsole() {
                     return { ...message, role: 'error' as const, content: blockedText, pending: false };
                   }
                   if (message.role === 'tool_call' && message.result_pending && chunk.tool_name && message.tool_name === chunk.tool_name) {
-                    return { ...message, result: reason || blockedText, is_error: true, result_pending: false };
+                    return {
+                      ...message,
+                      result: reason || blockedText,
+                      is_error: true,
+                      result_pending: false,
+                      tool_category: chunk.tool_category || message.tool_category,
+                      tool_action: chunk.tool_action || message.tool_action,
+                      timeline_kind: chunk.timeline_kind || 'guard_blocked',
+                      risk_level: chunk.risk_level || 'high',
+                    };
                   }
                   return message;
                 }),
@@ -2923,7 +3219,7 @@ export default function RuntimeGuardConsole() {
           {sidebarTools.map((tool, index) => {
             const ToolIcon = tool.icon;
             return (
-              <div className="rg-tool-row" key={tool.name} style={{ top: 20 + index * 23 }}>
+              <div className="rg-tool-row" data-tool={tool.id} key={tool.name} style={{ top: 20 + index * 23 }}>
                 <ToolIcon />
                 <span>{tool.name}</span>
                 <span className={`rg-tool-${tool.tone}`}>{tool.status}</span>
@@ -3014,9 +3310,9 @@ export default function RuntimeGuardConsole() {
 
         <section className="rg-task-title">
           <h1>{activeSession ? activeSession.title : copy.main.noSessionTitle}</h1>
-          <p>
+          <p className="rg-session-meta">
             {activeSession
-              ? `${formatSessionStart(activeSession.createdAt, copy)}  -  ${activeSession.displayName || activeSession.agent}  -  ${activeSession.platform}  -  ${activeSession.instanceId || copy.main.runtimeFallback}`
+              ? formatSessionMeta(activeSession, availableInstances, copy, nowTs)
               : copy.main.noSessionHint}
           </p>
         </section>

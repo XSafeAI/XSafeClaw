@@ -462,10 +462,19 @@
   color: #74838d;
 }
 
+.rg-tool-row[data-tool="shell"] svg { color: #00c879; }
+.rg-tool-row[data-tool="fileSystem"] svg { color: #e1b931; }
+.rg-tool-row[data-tool="browser"] svg { color: #8a6cff; }
+
 .rg-tool-success { color: #00c879; }
 .rg-tool-warning { color: #e1b931; }
 .rg-tool-asked { color: #00a7ff; }
 .rg-tool-muted { color: #74838d; }
+
+.rg-tools .rg-tool-warning,
+.rg-tools .rg-tool-asked {
+  color: #00c879;
+}
 
 .rg-safety-links {
   position: absolute;
@@ -986,6 +995,20 @@
   color: #74838d;
 }
 
+.rg-stream-row[data-tone="blue"] { --rg-stream-accent: #00a7ff; --rg-stream-accent-soft: rgba(0, 167, 255, 0.12); --rg-stream-accent-border: rgba(0, 167, 255, 0.28); }
+.rg-stream-row[data-tone="green"] { --rg-stream-accent: #00c879; --rg-stream-accent-soft: rgba(0, 200, 121, 0.12); --rg-stream-accent-border: rgba(0, 200, 121, 0.28); }
+.rg-stream-row[data-tone="yellow"] { --rg-stream-accent: #e1b931; --rg-stream-accent-soft: rgba(225, 185, 49, 0.12); --rg-stream-accent-border: rgba(225, 185, 49, 0.28); }
+.rg-stream-row[data-tone="orange"] { --rg-stream-accent: #ff9d2e; --rg-stream-accent-soft: rgba(255, 157, 46, 0.12); --rg-stream-accent-border: rgba(255, 157, 46, 0.3); }
+.rg-stream-row[data-tone="purple"] { --rg-stream-accent: #8a6cff; --rg-stream-accent-soft: rgba(138, 108, 255, 0.12); --rg-stream-accent-border: rgba(138, 108, 255, 0.28); }
+.rg-stream-row[data-tone="cyan"] { --rg-stream-accent: #22d3ee; --rg-stream-accent-soft: rgba(34, 211, 238, 0.12); --rg-stream-accent-border: rgba(34, 211, 238, 0.28); }
+.rg-stream-row[data-tone="red"] { --rg-stream-accent: #ff5b5b; --rg-stream-accent-soft: rgba(255, 91, 91, 0.12); --rg-stream-accent-border: rgba(255, 91, 91, 0.3); }
+.rg-stream-row[data-tone="muted"] { --rg-stream-accent: #8e9da7; --rg-stream-accent-soft: rgba(142, 157, 167, 0.1); --rg-stream-accent-border: rgba(142, 157, 167, 0.22); }
+
+.rg-stream-row[data-tone] .rg-stream-icon,
+.rg-stream-row[data-tone] .rg-stream-title {
+  color: var(--rg-stream-accent);
+}
+
 .rg-stream-approval {
   align-items: flex-start;
   margin: 4px 0 6px;
@@ -1091,6 +1114,11 @@
   text-align: left;
 }
 
+.rg-stream-tool[data-tone] .rg-tool-toggle {
+  border-color: var(--rg-stream-accent-border) !important;
+  background: linear-gradient(90deg, var(--rg-stream-accent-soft), rgba(7, 16, 24, 0.94) 32%);
+}
+
 .rg-tool-toggle:hover {
   background: #0d1a23;
 }
@@ -1098,7 +1126,7 @@
 .rg-tool-toggle code {
   flex: 1;
   min-width: 0;
-  color: #00a7ff;
+  color: var(--rg-stream-accent, #00a7ff);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   overflow: hidden;
   text-overflow: ellipsis;

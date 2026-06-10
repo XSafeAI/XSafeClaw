@@ -28,6 +28,8 @@ _ALLOWED_TYPES = {
     "trace_end",
 }
 
+_TIMELINE_METADATA_KEYS = ("tool_category", "tool_action", "timeline_kind", "risk_level")
+
 
 def _bounded_text(value: Any, *, max_chars: int) -> Any:
     if value is None:
@@ -148,6 +150,9 @@ class HermesEventBridge:
                 tool_id = self._next_tool_id(session_key)
             normalized["tool_id"] = tool_id
             normalized["args"] = event.get("args") if isinstance(event.get("args"), (dict, list, str, int, float, bool, type(None))) else str(event.get("args"))
+            for key in _TIMELINE_METADATA_KEYS:
+                if event.get(key):
+                    normalized[key] = event[key]
             pending.append(tool_id)
             return normalized
 
@@ -162,6 +167,9 @@ class HermesEventBridge:
                 max_chars=self._max_result_chars,
             )
             normalized["is_error"] = bool(event.get("is_error"))
+            for key in _TIMELINE_METADATA_KEYS:
+                if event.get(key):
+                    normalized[key] = event[key]
             return normalized
 
         # tool_blocked
@@ -173,6 +181,9 @@ class HermesEventBridge:
         text = str(event.get("text") or "").strip()
         if text:
             normalized["text"] = text
+        for key in _TIMELINE_METADATA_KEYS:
+            if event.get(key):
+                normalized[key] = event[key]
         return normalized
 
     def publish(self, session_key: str, event: dict[str, Any]) -> bool:

@@ -297,6 +297,10 @@ class PendingApprovalResponse(BaseModel):
     resolved: bool = False
     resolution: str = ""
     resolved_at: float = 0.0
+    tool_category: str | None = None
+    tool_action: str | None = None
+    timeline_kind: str | None = None
+    risk_level: str | None = None
 
 
 @router.get("/pending", response_model=list[PendingApprovalResponse])
@@ -322,6 +326,10 @@ class RuntimeToolObservationResponse(BaseModel):
     guard_raw: str = ""
     session_context: str = ""
     created_at: float = 0.0
+    tool_category: str | None = None
+    tool_action: str | None = None
+    timeline_kind: str | None = None
+    risk_level: str | None = None
 
 
 @router.get("/observations", response_model=list[RuntimeToolObservationResponse])

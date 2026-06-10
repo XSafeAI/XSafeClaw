@@ -85,11 +85,91 @@ def test_tool_policy_api_get_put_roundtrip():
         ("exec", {"command": "pwsh -Command \"Invoke-WebRequest https://example.com\""}, "network"),
         ("read_file", {"path": "README.md"}, "file_system"),
         ("browser_navigate", {"url": "https://example.com"}, "browser"),
+        ("mcp_list_tools", {"server": "github"}, "mcp"),
+        ("search_web", {"q": "weather"}, "network"),
+        ("ls", {}, "shell"),
         ("custom_tool", {"value": 1}, "unknown"),
     ],
 )
 def test_classify_tool_category(tool_name, params, category):
     assert guard_service.classify_tool_category(tool_name, params) == category
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "params", "expected"),
+    [
+        ("exec", {"command": "git status"}, ("git", "inspect", "tool_git", "low")),
+        ("read_file", {"path": "README.md"}, ("file_system", "read", "tool_file_read", "low")),
+        ("write_file", {"path": "README.md"}, ("file_system", "write", "tool_file_write", "medium")),
+        ("delete_file", {"path": "README.md"}, ("file_system", "delete", "tool_file_delete", "high")),
+        ("browser_navigate", {"url": "https://example.com"}, ("browser", "navigate", "tool_browser", "low")),
+        ("curl", {"url": "https://example.com"}, ("network", "request", "tool_network", "medium")),
+        ("mcp_list_tools", {"server": "github"}, ("mcp", "request", "tool_mcp", "medium")),
+        ("custom_tool", {"value": 1}, ("unknown", "unknown", "tool_unknown", "unknown")),
+    ],
+)
+def test_timeline_tool_metadata(tool_name, params, expected):
+    metadata = guard_service.timeline_tool_metadata(tool_name, params)
+
+    assert (
+        metadata["tool_category"],
+        metadata["tool_action"],
+        metadata["timeline_kind"],
+        metadata["risk_level"],
+    ) == expected
+
+
+def test_enrich_timeline_event_marks_blocked_tool_high_risk():
+    event = guard_service.enrich_timeline_event(
+        {"type": "tool_blocked", "tool_name": "exec", "args": {"command": "rm -rf tmp"}}
+    )
+
+    assert event["tool_category"] == "file_system"
+    assert event["tool_action"] == "delete"
+    assert event["timeline_kind"] == "guard_blocked"
+    assert event["risk_level"] == "high"
+
+
+def test_pending_and_observation_responses_include_timeline_metadata():
+    client = TestClient(app)
+    pending = guard_service.PendingApproval(
+        id="pending-1",
+        platform="hermes",
+        instance_id="hermes-default",
+        guard_mode="prompt",
+        session_key="session-1",
+        tool_name="delete_file",
+        params={"path": "secret.txt"},
+        guard_verdict="unsafe",
+        created_at=1710000000,
+    )
+    guard_service._pending[pending.id] = pending
+    guard_service._store_observation(
+        guard_service.RuntimeToolObservation(
+            id="obs-1",
+            platform="hermes",
+            instance_id="hermes-default",
+            guard_mode="prompt",
+            session_key="session-1",
+            tool_name="delete_file",
+            params={"path": "secret.txt"},
+            action="block",
+            guard_verdict="unsafe",
+            created_at=1710000001,
+        )
+    )
+
+    pending_payload = client.get("/api/guard/pending").json()[0]
+    observation_payload = client.get("/api/guard/observations").json()[0]
+
+    assert pending_payload["tool_category"] == "file_system"
+    assert pending_payload["tool_action"] == "delete"
+    assert pending_payload["timeline_kind"] == "approval_request"
+    assert pending_payload["risk_level"] == "high"
+    assert observation_payload["tool_category"] == "file_system"
+    assert observation_payload["tool_action"] == "delete"
+    assert observation_payload["timeline_kind"] == "guard_blocked"
+    assert observation_payload["risk_level"] == "high"
 
 
 @pytest.mark.asyncio

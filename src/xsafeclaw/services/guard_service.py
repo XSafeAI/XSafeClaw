@@ -1126,6 +1126,20 @@ class PendingApproval:
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
+        metadata = timeline_tool_metadata(
+            self.tool_name,
+            self.params,
+            event_type="approval",
+            guard_verdict=self.guard_verdict,
+            resolution=self.resolution,
+        )
+        metadata["timeline_kind"] = (
+            "approval_allowed"
+            if self.resolved and self.resolution == "approved"
+            else "approval_denied"
+            if self.resolved and self.resolution == "rejected"
+            else "approval_request"
+        )
         return {
             "id": self.id,
             "platform": self.platform,
@@ -1144,6 +1158,7 @@ class PendingApproval:
             "resolved": self.resolved,
             "resolution": self.resolution,
             "resolved_at": self.resolved_at,
+            **metadata,
         }
 
 
@@ -1166,6 +1181,14 @@ class RuntimeToolObservation:
     created_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        metadata = timeline_tool_metadata(
+            self.tool_name,
+            self.params,
+            event_type="tool_blocked" if self.action == "block" else "tool_observation",
+            is_error=self.action == "block",
+            guard_verdict=self.guard_verdict,
+            decision_action=self.action,
+        )
         return {
             "id": self.id,
             "platform": self.platform,
@@ -1180,6 +1203,7 @@ class RuntimeToolObservation:
             "guard_raw": self.guard_raw,
             "session_context": self.session_context,
             "created_at": self.created_at,
+            **metadata,
         }
 
 
@@ -1230,6 +1254,19 @@ _TOOL_POLICY_FILE = settings.data_dir / "tool_policies.json"
 _TOOL_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 TOOL_POLICY_CATEGORIES = ("shell", "file_system", "browser", "network", "git")
+TIMELINE_TOOL_CATEGORIES = ("shell", "file_system", "browser", "network", "git", "mcp", "unknown")
+TIMELINE_TOOL_ACTIONS = (
+    "execute",
+    "read",
+    "write",
+    "modify",
+    "delete",
+    "navigate",
+    "search",
+    "request",
+    "inspect",
+    "unknown",
+)
 TOOL_POLICY_VALUES = ("allow", "guard", "ask")
 DEFAULT_TOOL_POLICIES = {
     "shell": "guard",
@@ -1242,6 +1279,9 @@ DEFAULT_TOOL_POLICIES = {
 _EXEC_TOOL_POLICY_NAMES = {
     "exec", "exec_command", "shell", "bash", "terminal", "run_command",
     "execute_command", "execute_shell_command",
+}
+_COMMON_SHELL_COMMAND_TOOL_NAMES = {
+    "ls", "pwd", "cat", "grep", "rg", "python", "python3", "node", "npm", "pip",
 }
 _FILE_TOOL_POLICY_NAMES = {
     "read", "read_file", "file_read", "view_file", "open_file",
@@ -1256,12 +1296,21 @@ _BROWSER_TOOL_POLICY_NAMES = {
 }
 _NETWORK_TOOL_POLICY_NAMES = {
     "web_search", "web_fetch", "fetch", "http", "http_request", "request",
-    "download", "url_fetch", "get_url", "curl", "wget",
+    "download", "url_fetch", "get_url", "curl", "wget", "search_web",
 }
 _NETWORK_COMMAND_NAMES = {
     "curl", "wget", "http", "https", "httpie", "invoke-webrequest",
     "invoke-restmethod", "iwr", "irm",
 }
+_MCP_TOOL_NAME_MARKERS = {"mcp", "mcp_tool", "mcp_call", "mcp_server"}
+_BROWSER_NAVIGATE_NAMES = {"browser_navigate", "navigate", "open_url", "visit"}
+_BROWSER_SEARCH_NAMES = {"browser_search", "web_search", "search"}
+_BROWSER_INSPECT_NAMES = {"browser_snapshot", "browser_screenshot", "snapshot", "screenshot", "inspect"}
+_FILE_WRITE_NAMES = {
+    "write", "write_file", "file_write", "append", "create", "create_file",
+    "copy", "move", "rename", "mkdir",
+}
+_GIT_INSPECT_NAMES = {"git_status", "git_diff", "git_log", "git_show", "git_branch", "git_rev_parse"}
 _SHELL_WRAPPER_NAMES = {
     "bash", "sh", "zsh", "cmd", "cmd.exe", "powershell", "powershell.exe",
     "pwsh", "pwsh.exe",
@@ -1330,6 +1379,18 @@ def _normalize_tool_name(tool_name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(tool_name or "").strip().lower()).strip("_")
 
 
+def _coerce_tool_params(params: Any) -> dict[str, Any]:
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, str) and params.strip():
+        try:
+            parsed = json.loads(params)
+        except Exception:
+            return {"raw": params}
+        return parsed if isinstance(parsed, dict) else {"value": parsed}
+    return {}
+
+
 def _first_string_param(params: dict[str, Any], keys: tuple[str, ...]) -> str:
     if not isinstance(params, dict):
         return ""
@@ -1393,9 +1454,16 @@ def _first_actual_shell_command(command: str, depth: int = 0) -> str:
     return ""
 
 
+def _is_mcp_tool_name(normalized_tool: str) -> bool:
+    if normalized_tool in _MCP_TOOL_NAME_MARKERS:
+        return True
+    parts = [part for part in normalized_tool.split("_") if part]
+    return bool(parts and parts[0] == "mcp")
+
+
 def classify_tool_category(tool_name: str, params: dict[str, Any] | None = None) -> str:
     """Classify a tool call into the RuntimeGuard policy buckets."""
-    safe_params = params if isinstance(params, dict) else {}
+    safe_params = _coerce_tool_params(params)
     normalized_tool = _normalize_tool_name(tool_name)
     shell_command = _first_string_param(safe_params, _SHELL_COMMAND_KEYS)
     first_shell_command = _first_actual_shell_command(shell_command) if shell_command else ""
@@ -1417,9 +1485,167 @@ def classify_tool_category(tool_name: str, params: dict[str, Any] | None = None)
         return "network"
     if normalized_tool in _BROWSER_TOOL_POLICY_NAMES or normalized_tool.startswith("browser_"):
         return "browser"
-    if normalized_tool in _EXEC_TOOL_POLICY_NAMES:
+    if normalized_tool in _EXEC_TOOL_POLICY_NAMES or normalized_tool in _COMMON_SHELL_COMMAND_TOOL_NAMES:
         return "shell"
+    if _is_mcp_tool_name(normalized_tool):
+        return "mcp"
     return "unknown"
+
+
+def classify_tool_action(
+    tool_name: str,
+    params: dict[str, Any] | None = None,
+    *,
+    category: str | None = None,
+) -> str:
+    """Infer the display action for a tool call without changing policy behavior."""
+    safe_params = _coerce_tool_params(params)
+    normalized_tool = _normalize_tool_name(tool_name)
+    category = category if category in TIMELINE_TOOL_CATEGORIES else classify_tool_category(tool_name, safe_params)
+    shell_command = _first_string_param(safe_params, _SHELL_COMMAND_KEYS).lower()
+
+    operations = {
+        str(operation)
+        for operation, _path in extract_tool_operations(tool_name, safe_params)
+    }
+    if "delete" in operations:
+        return "delete"
+    if "modify" in operations:
+        return "write" if normalized_tool in _FILE_WRITE_NAMES else "modify"
+    if "read" in operations:
+        return "read"
+
+    if category == "file_system":
+        if normalized_tool in {"delete", "delete_file", "remove", "remove_file", "rm", "rmdir", "unlink"}:
+            return "delete"
+        if normalized_tool in _FILE_WRITE_NAMES:
+            return "write"
+        if normalized_tool in {"edit", "edit_file", "file_edit", "replace"}:
+            return "modify"
+        if normalized_tool in {"read", "read_file", "file_read", "view_file", "open_file"}:
+            return "read"
+        return "inspect"
+    if category == "browser":
+        if normalized_tool in _BROWSER_NAVIGATE_NAMES or normalized_tool.startswith("browser_navigate"):
+            return "navigate"
+        if normalized_tool in _BROWSER_SEARCH_NAMES or normalized_tool.endswith("_search"):
+            return "search"
+        if normalized_tool in _BROWSER_INSPECT_NAMES:
+            return "inspect"
+        return "inspect"
+    if category == "network":
+        return "request"
+    if category == "git":
+        if any(f"git {verb}" in shell_command for verb in ("status", "diff", "log", "show", "branch")):
+            return "inspect"
+        return "inspect" if normalized_tool in _GIT_INSPECT_NAMES else "execute"
+    if category == "shell":
+        return "execute"
+    if category == "mcp":
+        return "request"
+    return "unknown"
+
+
+def _timeline_kind_for_tool(category: str, action: str) -> str:
+    if category == "shell":
+        return "tool_shell"
+    if category == "file_system":
+        if action == "read":
+            return "tool_file_read"
+        if action == "delete":
+            return "tool_file_delete"
+        return "tool_file_write"
+    if category == "browser":
+        return "tool_browser"
+    if category == "network":
+        return "tool_network"
+    if category == "git":
+        return "tool_git"
+    if category == "mcp":
+        return "tool_mcp"
+    return "tool_unknown"
+
+
+def _timeline_risk_level(
+    *,
+    event_type: str = "",
+    action: str = "",
+    is_error: bool = False,
+    guard_verdict: str = "",
+    decision_action: str = "",
+    resolution: str = "",
+) -> str:
+    if (
+        event_type == "tool_blocked"
+        or is_error
+        or decision_action == "block"
+        or resolution == "rejected"
+        or guard_verdict in {"unsafe", "error"}
+        or action == "delete"
+    ):
+        return "high"
+    if action in {"write", "modify", "execute", "request"}:
+        return "medium"
+    if action in {"read", "inspect", "navigate", "search"}:
+        return "low"
+    return "unknown"
+
+
+def timeline_tool_metadata(
+    tool_name: str,
+    params: dict[str, Any] | None = None,
+    *,
+    event_type: str = "",
+    is_error: bool = False,
+    guard_verdict: str = "",
+    decision_action: str = "",
+    resolution: str = "",
+) -> dict[str, str]:
+    """Return optional display metadata for RuntimeGuard timeline events."""
+    safe_params = _coerce_tool_params(params)
+    category = classify_tool_category(tool_name, safe_params)
+    if category not in TIMELINE_TOOL_CATEGORIES:
+        category = "unknown"
+    action = classify_tool_action(tool_name, safe_params, category=category)
+    if action not in TIMELINE_TOOL_ACTIONS:
+        action = "unknown"
+    timeline_kind = "guard_blocked" if event_type == "tool_blocked" else _timeline_kind_for_tool(category, action)
+    return {
+        "tool_category": category,
+        "tool_action": action,
+        "timeline_kind": timeline_kind,
+        "risk_level": _timeline_risk_level(
+            event_type=event_type,
+            action=action,
+            is_error=is_error,
+            guard_verdict=guard_verdict,
+            decision_action=decision_action,
+            resolution=resolution,
+        ),
+    }
+
+
+def enrich_timeline_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Attach RuntimeGuard timeline metadata to live tool events."""
+    if not isinstance(event, dict):
+        return event
+    event_type = str(event.get("type") or "").strip()
+    if event_type not in {"tool_start", "tool_result", "tool_blocked"}:
+        return event
+    tool_name = str(event.get("tool_name") or event.get("name") or "tool")
+    params = event.get("args")
+    if not isinstance(params, dict):
+        params = event.get("params")
+    metadata = timeline_tool_metadata(
+        tool_name,
+        params if isinstance(params, dict) else None,
+        event_type=event_type,
+        is_error=bool(event.get("is_error")),
+        guard_verdict=str(event.get("guard_verdict") or ""),
+        decision_action=str(event.get("action") or ""),
+        resolution=str(event.get("resolution") or ""),
+    )
+    return {**event, **{key: event.get(key) or value for key, value in metadata.items()}}
 
 
 def get_tool_policy_for_call(

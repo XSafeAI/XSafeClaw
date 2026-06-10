@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .guard_service import enrich_timeline_event
+
 
 def _result_text(content: object) -> str:
     if isinstance(content, str):
@@ -171,22 +173,22 @@ class OpenClawJsonlTraceTailer:
             if not tool_call:
                 continue
             events.append(
-                {
+                enrich_timeline_event({
                     "type": "tool_start",
                     "tool_id": tool_call["tool_id"],
                     "tool_name": tool_call["tool_name"],
                     "args": tool_call["args"],
-                }
+                })
             )
             if tool_call["result"] is not None:
                 events.append(
-                    {
+                    enrich_timeline_event({
                         "type": "tool_result",
                         "tool_id": tool_call["tool_id"],
                         "tool_name": tool_call["tool_name"],
                         "result": tool_call["result"],
                         "is_error": bool(tool_call["is_error"]),
-                    }
+                    })
                 )
         return events
 

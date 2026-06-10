@@ -26,6 +26,10 @@ export interface ChatMessage {
   trace_phase?: string;
   trace_step?: number;
   trace_summary?: string;
+  tool_category?: string;
+  tool_action?: string;
+  timeline_kind?: string;
+  risk_level?: string;
 }
 
 type Listener = () => void;

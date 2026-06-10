@@ -29,6 +29,7 @@ from ...services.event_sync_service import EventSyncService
 from ...services.guard_service import (
     GUARD_REJECTION_MARKER,
     call_runtime_model_prompt,
+    enrich_timeline_event,
     summarize_runtime_request_title,
 )
 from ...services.hermes_event_bridge import hermes_event_bridge
@@ -437,7 +438,7 @@ def _read_nanobot_history_from_jsonl(
                             args = json.loads(args)
                         except Exception:
                             args = {"raw": args}
-                    pending_tool_calls[tool_id] = {
+                    pending_tool_calls[tool_id] = _apply_tool_call_timeline_metadata({
                         "type": "tool_call",
                         "role": "tool_call",
                         "content": "",
@@ -449,7 +450,7 @@ def _read_nanobot_history_from_jsonl(
                         "result_pending": True,
                         "timestamp": timestamp,
                         "id": f"tool-{tool_id}",
-                    }
+                    })
 
                 text = _nanobot_result_text(entry.get("content")).strip()
                 if text:
@@ -472,6 +473,7 @@ def _read_nanobot_history_from_jsonl(
                     tool_msg["result"] = _nanobot_result_text(entry.get("content"))
                     tool_msg["is_error"] = str(tool_msg["result"]).startswith("Error")
                     tool_msg["result_pending"] = False
+                    _apply_tool_call_timeline_metadata(tool_msg)
                     queued_tool_calls.append(tool_msg)
 
         messages.extend(queued_tool_calls)
@@ -543,22 +545,22 @@ def _read_nanobot_tool_calls_from_jsonl(
         events = []
         for tool_call in tool_calls.values():
             events.append(
-                {
+                enrich_timeline_event({
                     "type": "tool_start",
                     "tool_id": tool_call["tool_id"],
                     "tool_name": tool_call["tool_name"],
                     "args": tool_call["args"],
-                }
+                })
             )
             if tool_call["result"] is not None:
                 events.append(
-                    {
+                    enrich_timeline_event({
                         "type": "tool_result",
                         "tool_id": tool_call["tool_id"],
                         "tool_name": tool_call["tool_name"],
                         "result": tool_call["result"],
                         "is_error": tool_call["is_error"],
-                    }
+                    })
                 )
         return events
     except Exception:
@@ -1248,7 +1250,7 @@ def _read_history_from_jsonl(
                             tc_name = block.get("name", "tool")
                             tc_args = block.get("input") or block.get("arguments")
                             if tc_id:
-                                pending_tool_calls[tc_id] = {
+                                pending_tool_calls[tc_id] = _apply_tool_call_timeline_metadata({
                                     "type":      "tool_call",
                                     "role":      "tool_call",
                                     "content":   "",
@@ -1260,7 +1262,7 @@ def _read_history_from_jsonl(
                                     "result_pending": True,
                                     "timestamp": timestamp,
                                     "id":        f"tool-{tc_id}",
-                                }
+                                })
                                 turn_tool_calls.append(tc_id)
 
                 # Extract assistant text (skip toolCall blocks)
@@ -1293,6 +1295,7 @@ def _read_history_from_jsonl(
                     tc["result"]         = result_text
                     tc["is_error"]       = bool(msg.get("isError", False))
                     tc["result_pending"] = False
+                    _apply_tool_call_timeline_metadata(tc)
                     queued_tool_calls.append(tc)
 
         # Flush any remaining tool calls
@@ -1434,9 +1437,9 @@ def _read_tool_calls_from_jsonl(
         # Emit: first a tool_start, then a tool_result for each tool
         events = []
         for tc in tool_calls.values():
-            events.append({"type": "tool_start",  **{k: v for k, v in tc.items() if k != "result" and k != "is_error"}})
+            events.append(enrich_timeline_event({"type": "tool_start",  **{k: v for k, v in tc.items() if k != "result" and k != "is_error"}}))
             if tc["result"] is not None:
-                events.append({"type": "tool_result", "tool_id": tc["tool_id"], "tool_name": tc["tool_name"], "result": tc["result"], "is_error": tc["is_error"]})
+                events.append(enrich_timeline_event({"type": "tool_result", "tool_id": tc["tool_id"], "tool_name": tc["tool_name"], "result": tc["result"], "is_error": tc["is_error"]}))
 
         return events
 
@@ -1782,6 +1785,27 @@ def _tool_result_is_error(msg: dict, result_text: str) -> bool:
     except Exception:
         return False
     return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
+_TIMELINE_METADATA_KEYS = ("tool_category", "tool_action", "timeline_kind", "risk_level")
+
+
+def _apply_tool_call_timeline_metadata(tool_call: dict) -> dict:
+    if not isinstance(tool_call, dict):
+        return tool_call
+    event_type = "tool_result" if tool_call.get("result") is not None else "tool_start"
+    enriched = enrich_timeline_event(
+        {
+            "type": event_type,
+            "tool_name": tool_call.get("tool_name"),
+            "args": tool_call.get("args"),
+            "is_error": bool(tool_call.get("is_error")),
+        }
+    )
+    for key in _TIMELINE_METADATA_KEYS:
+        if enriched.get(key) and not tool_call.get(key):
+            tool_call[key] = enriched[key]
+    return tool_call
 
 
 def _extract_guard_rejection_from_tool_events(tool_events: list[dict]) -> dict | None:
@@ -3717,7 +3741,7 @@ async def ingest_hermes_event(request: HermesEventIngestRequest):
     session_key = _normalize_hermes_session_key(request.session_key)
     if not session_key:
         raise HTTPException(status_code=400, detail="Invalid Hermes session_key")
-    event = {
+    event = enrich_timeline_event({
         "type": request.event_type,
         "tool_name": request.tool_name,
         "tool_call_id": request.tool_call_id,
@@ -3730,7 +3754,7 @@ async def ingest_hermes_event(request: HermesEventIngestRequest):
         "phase": request.phase,
         "step": request.step,
         "reasoning_chars": request.reasoning_chars,
-    }
+    })
     hermes_event_bridge.publish(session_key, event)
     return {"ok": True}
 
@@ -3795,6 +3819,7 @@ async def send_message_stream(request: SendMessageRequest):
         emitted_trace_events: list[dict] = []
 
         def _emit_chunk(chunk: dict) -> str | None:
+            chunk = enrich_timeline_event(chunk)
             dedupe_key = _tool_event_dedupe_key(chunk)
             if dedupe_key:
                 if dedupe_key in emitted_tool_event_keys:
@@ -4032,12 +4057,12 @@ async def send_message_stream(request: SendMessageRequest):
                 yield (
                     "data: "
                     + json.dumps(
-                        {
+                        enrich_timeline_event({
                             "type": "tool_blocked",
                             "tool_name": tool_name,
                             "reason": reason,
                             "text": fallback_text,
-                        },
+                        }),
                         ensure_ascii=False,
                     )
                     + "\n\n"

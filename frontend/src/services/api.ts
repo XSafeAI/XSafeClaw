@@ -716,6 +716,10 @@ export interface GuardPendingApproval {
   resolved: boolean;
   resolution: string;
   resolved_at: number;
+  tool_category?: string | null;
+  tool_action?: string | null;
+  timeline_kind?: string | null;
+  risk_level?: string | null;
 }
 
 export interface GuardRuntimeObservation {
@@ -732,6 +736,10 @@ export interface GuardRuntimeObservation {
   guard_raw: string;
   session_context: string;
   created_at: number;
+  tool_category?: string | null;
+  tool_action?: string | null;
+  timeline_kind?: string | null;
+  risk_level?: string | null;
 }
 
 export type GuardToolPolicy = 'allow' | 'guard' | 'ask';

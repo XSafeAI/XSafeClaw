@@ -67,6 +67,10 @@ def test_openclaw_trace_tailer_emits_incremental_start_and_result(tmp_path: Path
             "tool_id": "call-1",
             "tool_name": "read_file",
             "args": {"path": "README.md"},
+            "tool_category": "file_system",
+            "tool_action": "read",
+            "timeline_kind": "tool_file_read",
+            "risk_level": "low",
         }
     ]
 
@@ -105,6 +109,10 @@ def test_openclaw_trace_tailer_emits_incremental_start_and_result(tmp_path: Path
             "tool_name": "read_file",
             "result": "ok",
             "is_error": False,
+            "tool_category": "file_system",
+            "tool_action": "read",
+            "timeline_kind": "tool_file_read",
+            "risk_level": "low",
         }
     ]
     assert tailer.poll() == []
@@ -152,6 +160,10 @@ def test_openclaw_trace_tailer_resolves_agent_main_key_and_skips_bad_lines(tmp_p
             "tool_id": "call-2",
             "tool_name": "shell",
             "args": {"cmd": "pwd"},
+            "tool_category": "shell",
+            "tool_action": "execute",
+            "timeline_kind": "tool_shell",
+            "risk_level": "medium",
         }
     ]
 
@@ -243,6 +255,11 @@ def test_openclaw_trace_tailer_matches_history_fallback_parser(tmp_path: Path):
     )
     fallback_events = chat_routes._read_tool_calls_from_jsonl(instance, "chat-7")
     assert realtime_events == fallback_events
+    history_messages = chat_routes._read_history_from_jsonl(instance, "chat-7")
+    tool_messages = [message for message in history_messages if message.get("role") == "tool_call"]
+    assert tool_messages[0]["tool_category"] == "network"
+    assert tool_messages[0]["tool_action"] == "request"
+    assert tool_messages[0]["timeline_kind"] == "tool_network"
 
 
 def test_send_message_stream_openclaw_emits_tool_events_before_final(monkeypatch, tmp_path: Path):
