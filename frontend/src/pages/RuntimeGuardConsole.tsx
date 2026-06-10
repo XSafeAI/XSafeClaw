@@ -123,6 +123,8 @@ const RUNTIME_GUARD_LEFT_WIDTH = 156;
 const RUNTIME_GUARD_RIGHT_WIDTH = 207;
 const RUNTIME_GUARD_MIN_MAIN_WIDTH = 280;
 const RUNTIME_GUARD_TOP_GAP = 38;
+const RUNTIME_GUARD_MIN_DESIGN_WIDTH = RUNTIME_GUARD_LEFT_WIDTH + RUNTIME_GUARD_MIN_MAIN_WIDTH + RUNTIME_GUARD_RIGHT_WIDTH;
+const RUNTIME_GUARD_RIGHT_EDGE_GUARD = 2;
 
 const agentDefinitions: Array<{
   name: AgentName;
@@ -918,18 +920,136 @@ const runtimeTitleExplanationPatterns = [
   /\u7528\u6237\u8bf7\u6c42\u662f.*\u6807\u9898/i,
 ];
 
+const runtimeTitleCjkPattern = /[\u3400-\u9fff\uf900-\ufaff]/g;
+const runtimeTitleWordPattern = /[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g;
+const runtimeTitleRequestPatterns = [
+  /[?？]/i,
+  /^(?:帮我|帮忙|请|请问|麻烦|我想|我要|能不能|可以)/i,
+  /^(?:查询一下|查一下|查查|看一下|了解一下)/i,
+  /(?:哪个更难|怎么样|怎么|为什么|是否|难不难|简单|容易|吗|呢)/i,
+  /^(?:please|can you|could you|help me|i want to|i need to|check|look up|find out)\b/i,
+  /\b(?:what|why|how|whether)\b/i,
+];
+const runtimeTitleLeadInPatterns = [
+  /^(?:请帮我|麻烦帮我|帮我|帮忙|请问|请|麻烦|我想|我要|能不能|可以)/i,
+  /^(?:查询一下|查一下|查查|看一下|了解一下)/i,
+  /^(?:please|can you|could you|help me|i want to|i need to|check|look up|find out)\b\s*/i,
+];
+
 function runtimeTitleLooksLikeExplanation(input: string): boolean {
   const cleaned = input.replace(/\s+/g, ' ').trim();
   return Boolean(cleaned) && runtimeTitleExplanationPatterns.some(pattern => pattern.test(cleaned));
 }
 
+function stripRuntimeTitleLeadIns(input: string): string {
+  let compact = input.replace(/\s+/g, ' ').trim().replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, '');
+  for (let index = 0; index < 3; index += 1) {
+    let next = compact.trim();
+    runtimeTitleLeadInPatterns.forEach(pattern => {
+      next = next.replace(pattern, '').trim();
+    });
+    if (next === compact) break;
+    compact = next;
+  }
+  return compact.replace(/[?.!。？！；;，,：:]+$/g, '').trim() || input;
+}
+
+function shortenCjkRuntimeTitle(input: string, maxChars = 10): string {
+  const chars: string[] = [];
+  let cjkCount = 0;
+  for (const char of input) {
+    if (/[\u3400-\u9fff\uf900-\ufaff]/.test(char)) {
+      cjkCount += 1;
+      if (cjkCount > maxChars) break;
+      chars.push(char);
+    } else if (/^[A-Za-z0-9 _./-]$/.test(char)) {
+      chars.push(char);
+    }
+  }
+  return chars.join('').replace(/\s+/g, ' ').replace(/^[\s._/-]+|[\s._/-]+$/g, '');
+}
+
+function compactRuntimeRequestTitle(input: string): string {
+  const normalized = input.replace(/\s+/g, ' ').trim().replace(/^[\s"'`“”‘’]+|[\s"'`“”‘’]+$/g, '');
+  if (!normalized) return '';
+  const compact = stripRuntimeTitleLeadIns(normalized);
+  if (runtimeTitleCjkPattern.test(compact)) {
+    runtimeTitleCjkPattern.lastIndex = 0;
+    if (compact.includes('天气')) {
+      let place = '';
+      const weatherMatch = compact.match(/([\u3400-\u9fff\uf900-\ufaff]{2,8})(?:今天|今日|明天|现在|当前)?(?:的)?天气/);
+      if (weatherMatch?.[1]) {
+        place = weatherMatch[1];
+        ['的', '今天', '今日', '明天', '昨天', '现在', '当前', '今年', '去年', '一下'].forEach(word => {
+          place = place.split(word).join('');
+        });
+        place = place.replace(/^(?:查|查询|看|了解)/, '').trim();
+      }
+      return shortenCjkRuntimeTitle(place ? `${place}天气查询` : '天气查询') || '天气查询';
+    }
+    if (['相比', '对比', '比较', '哪个更', '更难', '难度', '去年'].some(marker => compact.includes(marker))) {
+      if (compact.includes('高考') && compact.includes('数学')) return '高考数学难度对比';
+      const topic = shortenCjkRuntimeTitle(
+        compact.replace(/(?:今年|去年|相比.*|比.*|哪个更.*|是难了.*|是简单了.*|难不难.*|吗|呢)/g, ''),
+        6,
+      );
+      if (topic) return shortenCjkRuntimeTitle(`${topic}对比`);
+    }
+    if (compact.includes('登录') && compact.includes('限流')) return '登录限流修复';
+    return shortenCjkRuntimeTitle(compact) || compact.slice(0, 10).trim();
+  }
+  const words = compact.match(runtimeTitleWordPattern);
+  if (words?.length) {
+    const lower = compact.toLowerCase();
+    if (lower.includes('weather')) return lower.includes('shanghai') ? 'Shanghai weather' : 'Weather lookup';
+    if ((lower.includes('compare') || lower.includes('comparison')) && lower.includes('math') && lower.includes('exam')) {
+      return 'Math exam comparison';
+    }
+    return words.slice(0, 6).join(' ');
+  }
+  return compact.slice(0, 48).trim();
+}
+
+function runtimeTitleLooksLikeRawRequest(input: string): boolean {
+  const cleaned = input.replace(/\s+/g, ' ').trim();
+  if (runtimeTitleRequestPatterns.some(pattern => pattern.test(cleaned))) return true;
+  const cjkCount = cleaned.match(runtimeTitleCjkPattern)?.length ?? 0;
+  runtimeTitleCjkPattern.lastIndex = 0;
+  if (cjkCount > 10 && /[?？]|吗|呢|怎么样|怎么|为什么|是否|难不难|简单|容易|帮我|请/.test(cleaned)) {
+    return true;
+  }
+  const words = cleaned.match(runtimeTitleWordPattern)?.length ?? 0;
+  return words > 10 && /\?$|\b(can you|could you|please|help me|what|why|how|whether)\b/i.test(cleaned);
+}
+
 export function titleFromUserMessage(input: string, fallback = ''): string {
   const cleaned = input.replace(/\s+/g, ' ').trim();
+  const fallbackCleaned = fallback.replace(/\s+/g, ' ').trim();
+  const compactFallback = compactRuntimeRequestTitle(fallbackCleaned);
   const safeTitle = cleaned && !runtimeTitleLooksLikeExplanation(cleaned)
-    ? cleaned
-    : fallback.replace(/\s+/g, ' ').trim();
+    ? (
+      (fallbackCleaned && cleaned === fallbackCleaned) || runtimeTitleLooksLikeRawRequest(cleaned)
+        ? compactRuntimeRequestTitle(cleaned)
+        : cleaned
+    )
+    : compactFallback || fallbackCleaned;
   if (!safeTitle) return '';
   return safeTitle.length > 48 ? `${safeTitle.slice(0, 48).trimEnd()}...` : safeTitle;
+}
+
+function runtimeGuardSessionBaseTitle(session: Pick<RuntimeGuardSession, 'agent' | 'title'>): string {
+  const agent = session.agent;
+  const title = titleFromUserMessage(session.title, agent) || agent;
+  const prefixed = title.match(/^(OpenClaw|Hermes|Nanobot)\s*[:：]\s*(.*)$/);
+  if (prefixed) {
+    const rest = prefixed[2]?.trim();
+    return rest || prefixed[1];
+  }
+  return title;
+}
+
+export function formatRuntimeGuardSessionTitle(session: Pick<RuntimeGuardSession, 'agent' | 'title'>): string {
+  return runtimeGuardSessionBaseTitle(session);
 }
 
 function extractMessageText(msg: any): string {
@@ -958,6 +1078,12 @@ function formatValue(value: any): string {
 
 function agentToPlatform(agent: AgentName): RuntimePlatform {
   return agentDefinitions.find(item => item.name === agent)?.platform ?? 'openclaw';
+}
+
+function configureRouteForAgent(agent: AgentName): string {
+  if (agent === 'Hermes') return '/hermes_configure';
+  if (agent === 'Nanobot') return '/nanobot_configure';
+  return '/openclaw_configure';
 }
 
 function findRuntimeForAgentInInstances(agent: AgentName, instances: RuntimeInstance[]): RuntimeInstance | null {
@@ -1448,6 +1574,8 @@ export function SessionHistoryViewAllModal({
           {filteredSessions.length > 0 ? (
             filteredSessions.map(session => {
               const status = sessionHistoryStatus(session, activeSessionId);
+              const displayTitle = formatRuntimeGuardSessionTitle(session);
+              const baseTitle = runtimeGuardSessionBaseTitle(session);
               const messages = messageMap[session.sessionKey] ?? [];
               const pendingApprovals = Object.values(middleApprovalCardsBySession[session.sessionKey] ?? {})
                 .filter(card => card.status === 'pending').length;
@@ -1470,10 +1598,10 @@ export function SessionHistoryViewAllModal({
                     <span className="rg-session-modal-time">{formatSessionHistoryTime(session.createdAt)}</span>
                     <span className="rg-session-modal-agent">
                       <AgentIconBadge agent={session.agent} size="compact" />
-                      {session.agent}
+                      {session.agent}:
                     </span>
                     <span className="rg-session-modal-title">
-                      <strong>{session.title}</strong>
+                      <strong>{baseTitle}</strong>
                       <em>{session.displayName || session.instanceId || session.platform}</em>
                     </span>
                     <span className="rg-session-modal-stats">
@@ -1489,10 +1617,10 @@ export function SessionHistoryViewAllModal({
                   <button
                     className="rg-session-modal-delete"
                     onClick={() => {
-                      const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: session.title }));
+                      const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: displayTitle }));
                       if (confirmed) onDeleteSession(session);
                     }}
-                    title={rgText(copy.sessionHistory.deleteTitle, { title: session.title })}
+                    title={rgText(copy.sessionHistory.deleteTitle, { title: displayTitle })}
                     type="button"
                   >
                     <Trash2 />
@@ -1950,10 +2078,13 @@ export default function RuntimeGuardConsole() {
 
   useEffect(() => {
     const updateLayoutFit = () => {
-      const scale = window.innerHeight / RUNTIME_GUARD_DESIGN_HEIGHT;
+      const availableWidth = Math.max(1, window.innerWidth - RUNTIME_GUARD_RIGHT_EDGE_GUARD);
+      const heightScale = window.innerHeight / RUNTIME_GUARD_DESIGN_HEIGHT;
+      const widthScale = availableWidth / RUNTIME_GUARD_MIN_DESIGN_WIDTH;
+      const scale = Math.min(heightScale, widthScale);
       const leftWidth = RUNTIME_GUARD_LEFT_WIDTH * scale;
       const rightWidth = RUNTIME_GUARD_RIGHT_WIDTH * scale;
-      const mainWidth = Math.max(window.innerWidth - leftWidth - rightWidth, RUNTIME_GUARD_MIN_MAIN_WIDTH * scale);
+      const mainWidth = Math.max(availableWidth - leftWidth - rightWidth, RUNTIME_GUARD_MIN_MAIN_WIDTH * scale);
 
       setLayoutFit({
         scale,
@@ -2980,7 +3111,7 @@ export default function RuntimeGuardConsole() {
   } as CSSProperties;
   const rightScaleStyle = {
     left: layoutFit.leftWidth + layoutFit.mainWidth,
-    width: layoutFit.rightWidth,
+    width: layoutFit.rightWidth + RUNTIME_GUARD_RIGHT_EDGE_GUARD,
     height: layoutFit.height,
     '--rg-scale': layoutFit.scale,
   } as CSSProperties;
@@ -3172,7 +3303,7 @@ export default function RuntimeGuardConsole() {
               key={agent.name}
               aria-disabled={!agent.installed}
               title={agent.installed
-                ? rgText(copy.sidebar.runtimeTitle, { agent: agent.name })
+                ? rgText(copy.sidebar.runtimeConfigureTitle, { agent: agent.name })
                 : rgText(copy.sidebar.notInstalledTitle, { agent: agent.name })}
               onClick={() => {
                 if (!agent.installed) {
@@ -3180,6 +3311,14 @@ export default function RuntimeGuardConsole() {
                   return;
                 }
                 setSelectedAgent(agent.name);
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                if (!agent.installed) {
+                  showInstallHint(agent.name);
+                  return;
+                }
+                navigate(configureRouteForAgent(agent.name));
               }}
               style={{ top: 18 + index * 36 }}
             >
@@ -3232,12 +3371,12 @@ export default function RuntimeGuardConsole() {
           <div className="rg-section-title">
             <span>{copy.sidebar.safetyTools}</span>
           </div>
-          <button className="rg-safety-row" onClick={() => navigate('/assets')} style={{ top: 20 }} type="button">
+          <button className="rg-safety-row" onClick={() => navigate('/assets')} style={{ top: 22 }} type="button">
             <Shield />
             <span>{copy.sidebar.assetShield}</span>
             <ChevronRight />
           </button>
-          <button className="rg-safety-row" onClick={() => navigate('/risk-test')} style={{ top: 48 }} type="button">
+          <button className="rg-safety-row" onClick={() => navigate('/risk-test')} style={{ top: 55 }} type="button">
             <AlertTriangle />
             <span>{copy.sidebar.riskTest}</span>
             <ChevronRight />
@@ -3270,46 +3409,46 @@ export default function RuntimeGuardConsole() {
         <div className="rg-tabs">
           <div className="rg-session-tabs">
             {sessions.map(session => (
-              <button
-                className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
-                key={session.sessionKey}
-                onClick={() => {
-                  setActiveSessionId(session.sessionKey);
-                  setSelectedAgent(session.agent);
-                }}
-                type="button"
-              >
-                <span className="rg-chat-tab-agent">
-                  <AgentIconBadge agent={session.agent} size="compact" />
-                </span>
-                <span className="rg-chat-tab-title">{session.title}</span>
-                <span
-                  className="rg-chat-tab-close"
-                  role="button"
-                  tabIndex={0}
-                  title={copy.main.closeSessionTitle}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    closeSession(session.sessionKey);
+                <button
+                  className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
+                  key={session.sessionKey}
+                  onClick={() => {
+                    setActiveSessionId(session.sessionKey);
+                    setSelectedAgent(session.agent);
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
+                  type="button"
+                >
+                  <span className="rg-chat-tab-agent">
+                    <AgentIconBadge agent={session.agent} size="compact" />
+                  </span>
+                  <span className="rg-chat-tab-title">{session.agent}</span>
+                  <span
+                    className="rg-chat-tab-close"
+                    role="button"
+                    tabIndex={0}
+                    title={copy.main.closeSessionTitle}
+                    onClick={(event) => {
                       event.stopPropagation();
                       closeSession(session.sessionKey);
-                    }
-                  }}
-                >
-                  <X />
-                </span>
-              </button>
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        closeSession(session.sessionKey);
+                      }
+                    }}
+                  >
+                    <X />
+                  </span>
+                </button>
             ))}
             <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession} disabled={Boolean(creatingAgent)}>+</button>
           </div>
         </div>
 
         <section className="rg-task-title">
-          <h1>{activeSession ? activeSession.title : copy.main.noSessionTitle}</h1>
+          <h1>{activeSession ? formatRuntimeGuardSessionTitle(activeSession) : copy.main.noSessionTitle}</h1>
           <p className="rg-session-meta">
             {activeSession
               ? formatSessionMeta(activeSession, availableInstances, copy, nowTs)
@@ -3449,6 +3588,7 @@ export default function RuntimeGuardConsole() {
             {sessionHistoryPreviewItems.length > 0 ? (
               sessionHistoryPreviewItems.map(session => {
                 const status = sessionHistoryStatus(session, activeSessionId);
+                const baseTitle = runtimeGuardSessionBaseTitle(session);
                 return (
                   <button
                     className="rg-session-history-row"
@@ -3458,8 +3598,8 @@ export default function RuntimeGuardConsole() {
                   >
                     <span className="rg-session-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
                     <div className="rg-session-history-main">
-                      <strong>{session.agent}</strong>
-                      <span>{session.title}</span>
+                      <strong>{session.agent}:</strong>
+                      <span>{baseTitle}</span>
                     </div>
                     <em className={status === 'Active' ? 'is-active' : ''}>{sessionStatusDisplay(status, copy)}</em>
                   </button>

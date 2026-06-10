@@ -995,6 +995,7 @@ export const zh: Translations = {
       setup: '设置',
       setupTitle: '前往设置',
       runtimeTitle: '{agent} 运行时',
+      runtimeConfigureTitle: '左键选择，右键配置 {agent}',
       notInstalledTitle: '{agent} 未安装',
       budgetReached: '{agent} 已达到预算上限',
       totalCost: '{agent} 总成本',

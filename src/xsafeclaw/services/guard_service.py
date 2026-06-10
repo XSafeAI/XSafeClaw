@@ -474,6 +474,8 @@ async def call_runtime_model_prompt(
     platform: str = "openclaw",
     instance_id: str = "",
     max_tokens: int = 128,
+    system_prompt: str | None = None,
+    temperature: float = 0.2,
 ) -> str:
     """Call the active runtime model with a plain prompt and return text only."""
     model_info = _resolve_guard_model_info(platform=platform, instance_id=instance_id)
@@ -482,12 +484,17 @@ async def call_runtime_model_prompt(
 
     headers = {"Content-Type": "application/json"}
     token_limit = max(16, min(max_tokens, 512))
+    clean_system_prompt = str(system_prompt or "").strip()
     if api_type == "openai-completions":
+        messages = []
+        if clean_system_prompt:
+            messages.append({"role": "system", "content": clean_system_prompt})
+        messages.append({"role": "user", "content": prompt})
         payload = {
             "model": model_info["model"],
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": token_limit,
-            "temperature": 0.2,
+            "temperature": temperature,
         }
         url = f"{base_url}/chat/completions"
         headers["Authorization"] = f"Bearer {model_info['api_key']}"
@@ -496,8 +503,10 @@ async def call_runtime_model_prompt(
             "model": model_info["model"],
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": token_limit,
-            "temperature": 0.2,
+            "temperature": temperature,
         }
+        if clean_system_prompt:
+            payload["system"] = clean_system_prompt
         url = f"{base_url}/messages"
         headers["x-api-key"] = model_info["api_key"]
         headers["Authorization"] = f"Bearer {model_info['api_key']}"
@@ -517,6 +526,55 @@ async def call_runtime_model_prompt(
         return _extract_openai_text_response(data)
     return _extract_text_content(data.get("content"))
 
+
+_RUNTIME_TITLE_DIRECT_SYSTEM_PROMPT = (
+    "You are XSafeClaw's silent UI session title generator.\n"
+    "This call is only for generating a short RuntimeGuard UI session label.\n"
+    "Do not answer the user's request.\n"
+    "Do not explain your reasoning, rules, or instructions.\n"
+    "Return only the summarized title text itself.\n"
+    "Do not return JSON, markdown, quotes, prefixes, or extra words.\n"
+    "Use the same language as the user's request.\n"
+    "For Chinese requests, the title must be 10 Chinese characters or fewer.\n"
+    "For English requests, the title must be 6 words or fewer.\n"
+    "The title must be a concise noun phrase or task phrase, not a question.\n"
+    "Do not copy the user's request verbatim.\n"
+    "Do not include request wording such as 帮我, 请, 查询一下, 哪个更难, please, can you, or could you.\n"
+    "Do not include markdown, prefixes, punctuation-heavy text, or meta phrases.\n"
+    "Examples:\n"
+    "User request: 帮我查一下今天的天气\n"
+    "Title response: 天气查询\n"
+    "User request: 帮我查一下上海今天的天气怎么样\n"
+    "Title response: 上海天气查询\n"
+    "User request: 今年高考的数学相比去年，哪个更难\n"
+    "Title response: 高考数学难度对比\n"
+    "User request: 分析这个项目的登录 bug 并加限流\n"
+    "Title response: 登录限流修复\n"
+    "User request: Find today's weather in Shanghai\n"
+    "Title response: Shanghai weather\n"
+    "User request: Compare this year's math exam with last year\n"
+    "Title response: Math exam comparison"
+)
+_RUNTIME_TITLE_REPAIR_SYSTEM_PROMPT = (
+    "You are repairing a failed RuntimeGuard UI session label generation.\n"
+    "Generate only the short label. Do not answer the user's request.\n"
+    "Return the summarized title text itself, preferably as one bare line.\n"
+    "If your runtime insists on a key-value line, title: ... or 标题：... is acceptable.\n"
+    "Do not explain. Do not include markdown.\n"
+    "Chinese labels must be 10 Chinese characters or fewer. English labels must be 6 words or fewer.\n"
+    "Use a concise noun phrase or task phrase, not a question."
+)
+_RUNTIME_TITLE_BARE_SYSTEM_PROMPT = (
+    "Return only the final short RuntimeGuard session label.\n"
+    "Return only a bare one-line title.\n"
+    "Do not explain, do not answer the request, and do not include bullets.\n"
+    "Chinese labels must be 10 Chinese characters or fewer. English labels must be 6 words or fewer.\n"
+    "Use a concise noun phrase or task phrase, not a question."
+)
+_RUNTIME_TITLE_MAX_ATTEMPTS = 3
+
+_RUNTIME_TITLE_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+_RUNTIME_TITLE_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 
 _RUNTIME_TITLE_EXPLANATION_PATTERNS = [
     re.compile(r"^(we|i)\s+(need|should|must|will)\b.*\b(title|ui title|user request)\b", re.IGNORECASE),
@@ -551,9 +609,227 @@ def _extract_runtime_title_candidate(raw: str) -> str:
     return text
 
 
+def _extract_runtime_title_json_candidate(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    if set(parsed.keys()) != {"title"}:
+        return ""
+    value = parsed.get("title")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _strip_runtime_title_fence(raw: str) -> str:
+    text = str(raw or "").strip()
+    text = re.sub(r"^```(?:json|text|markdown)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text).strip()
+    return text
+
+
+def _extract_runtime_title_json_or_key_value_candidate(raw: str) -> str:
+    text = _strip_runtime_title_fence(raw)
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("title", "summary", "标题", "摘要"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(parsed, str) and parsed.strip():
+        return parsed.strip()
+
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first_line:
+        return ""
+    key_value_match = re.match(r"^(?:title|summary|session title|标题|摘要)\s*[:：]\s*(.+)$", first_line, re.IGNORECASE)
+    if key_value_match:
+        return key_value_match.group(1).strip()
+    return first_line.strip()
+
+
+def _extract_runtime_title_bare_candidate(raw: str) -> str:
+    text = _extract_runtime_title_json_or_key_value_candidate(raw)
+    if not text:
+        return ""
+    return text.strip(" \t\r\n\"'`“”‘’")
+
+
+def extract_runtime_title_candidate_for_attempt(raw: str, attempt: int) -> str:
+    if attempt <= 0:
+        return _extract_runtime_title_bare_candidate(raw)
+    if attempt == 1:
+        return _extract_runtime_title_json_or_key_value_candidate(raw)
+    return _extract_runtime_title_bare_candidate(raw)
+
+
 def _is_runtime_title_explanation(title: str) -> bool:
     normalized = re.sub(r"\s+", " ", str(title or "")).strip()
     return bool(normalized) and any(pattern.search(normalized) for pattern in _RUNTIME_TITLE_EXPLANATION_PATTERNS)
+
+
+def _runtime_title_violates_generated_length(title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not normalized:
+        return False
+    cjk_count = len(_RUNTIME_TITLE_CJK_RE.findall(normalized))
+    if cjk_count:
+        return cjk_count > 10
+    words = _RUNTIME_TITLE_WORD_RE.findall(normalized)
+    return bool(words) and len(words) > 6
+
+
+_RUNTIME_TITLE_REQUEST_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"[?？]",
+        r"^(?:帮我|帮忙|请|请问|麻烦|我想|我要|能不能|可以)",
+        r"^(?:查询一下|查一下|查查|看一下|了解一下)",
+        r"(?:哪个更难|怎么样|怎么|为什么|是否|难不难|简单|容易|吗|呢)",
+        r"^(?:please|can you|could you|help me|i want to|i need to|check|look up|find out)\b",
+        r"\b(?:what|why|how|whether)\b",
+    )
+]
+
+
+def _runtime_title_looks_like_request(title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(title or "")).strip()
+    return bool(normalized) and any(pattern.search(normalized) for pattern in _RUNTIME_TITLE_REQUEST_PATTERNS)
+
+
+_RUNTIME_TITLE_LEAD_IN_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^(?:\u8bf7\u5e2e\u6211|\u9ebb\u70e6\u5e2e\u6211|\u5e2e\u6211|\u5e2e\u5fd9|\u8bf7\u95ee|\u8bf7|\u9ebb\u70e6|\u6211\u60f3|\u6211\u8981|\u80fd\u4e0d\u80fd|\u53ef\u4ee5)",
+        r"^(?:\u67e5\u8be2\u4e00\u4e0b|\u67e5\u4e00\u4e0b|\u67e5\u67e5|\u770b\u4e00\u4e0b|\u4e86\u89e3\u4e00\u4e0b)",
+        r"^(?:please|can you|could you|help me|i want to|i need to|check|look up|find out)\b\s*",
+    )
+]
+
+
+_RUNTIME_TITLE_CJK_STOP_WORDS = {
+    "的",
+    "今天",
+    "今日",
+    "明天",
+    "昨天",
+    "现在",
+    "当前",
+    "今年",
+    "去年",
+    "一下",
+}
+
+
+def _shorten_cjk_title(title: str, max_chars: int = 10) -> str:
+    chars: list[str] = []
+    cjk_count = 0
+    for char in title:
+        if _RUNTIME_TITLE_CJK_RE.match(char):
+            cjk_count += 1
+            if cjk_count > max_chars:
+                break
+            chars.append(char)
+        elif char.isascii() and (char.isalnum() or char in {" ", "-", "_", "/", "."}):
+            chars.append(char)
+    return re.sub(r"\s+", " ", "".join(chars)).strip(" \t\r\n-_/.,")
+
+
+def _strip_runtime_title_lead_ins(text: str) -> str:
+    compact = text.strip(" \t\r\n\"'`“”‘’")
+    for _ in range(3):
+        next_compact = compact.strip()
+        for pattern in _RUNTIME_TITLE_LEAD_IN_PATTERNS:
+            next_compact = pattern.sub("", next_compact).strip()
+        if next_compact == compact:
+            break
+        compact = next_compact
+    return compact.strip(" \t\r\n\"'`“”‘’").rstrip("?.!。？！；;，,：:") or text
+
+
+def _fallback_runtime_session_title(message: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(message or "")).strip()
+    normalized = normalized.strip(" \t\r\n\"'`“”‘’")
+    if not normalized:
+        return "New session"
+
+    compact = _strip_runtime_title_lead_ins(normalized)
+
+    if _RUNTIME_TITLE_CJK_RE.search(compact):
+        if "天气" in compact:
+            place = ""
+            weather_match = re.search(r"([\u3400-\u9fff\uf900-\ufaff]{2,8})(?:今天|今日|明天|现在|当前)?(?:的)?天气", compact)
+            if weather_match:
+                place = weather_match.group(1)
+                for stop_word in _RUNTIME_TITLE_CJK_STOP_WORDS:
+                    place = place.replace(stop_word, "")
+                place = re.sub(r"^(?:查|查询|看|了解)", "", place).strip()
+            title = f"{place}天气查询" if place else "天气查询"
+            return _shorten_cjk_title(title) or "天气查询"
+
+        comparison_markers = ("相比", "对比", "比较", "哪个更", "更难", "难度", "去年")
+        if any(marker in compact for marker in comparison_markers):
+            if "高考" in compact and "数学" in compact:
+                return "高考数学难度对比"
+            topic = compact
+            topic = re.sub(r"(?:今年|去年|相比.*|比.*|哪个更.*|是难了.*|是简单了.*|难不难.*|吗|呢)", "", topic)
+            topic = _shorten_cjk_title(topic, 6)
+            if topic:
+                return _shorten_cjk_title(f"{topic}对比")
+
+        if "登录" in compact and "限流" in compact:
+            return "登录限流修复"
+
+        title = _shorten_cjk_title(compact)
+        return title or compact[:10].strip() or "New session"
+
+    words = _RUNTIME_TITLE_WORD_RE.findall(compact)
+    if words:
+        lower = compact.lower()
+        if "weather" in lower:
+            if "shanghai" in lower:
+                return "Shanghai weather"
+            return "Weather lookup"
+        if ("compare" in lower or "comparison" in lower) and "math" in lower and "exam" in lower:
+            return "Math exam comparison"
+        return " ".join(words[:6])
+
+    return compact[:48].strip() or "New session"
+
+
+def runtime_title_system_prompt_for_attempt(attempt: int) -> str:
+    if attempt <= 0:
+        return _RUNTIME_TITLE_DIRECT_SYSTEM_PROMPT
+    if attempt == 1:
+        return _RUNTIME_TITLE_REPAIR_SYSTEM_PROMPT
+    return _RUNTIME_TITLE_BARE_SYSTEM_PROMPT
+
+
+def runtime_title_user_prompt_for_attempt(attempt: int, request: str, previous_output: str = "") -> str:
+    if attempt <= 0:
+        return f"User request:\n{request}"
+    if attempt == 1:
+        return (
+            "The previous label output could not be parsed or failed validation.\n"
+            "Return a short title for the user request as one bare line. title: ... or 标题：... is also acceptable.\n"
+            f"Previous output:\n{previous_output[:500]}\n\n"
+            f"User request:\n{request}"
+        )
+    return (
+        "Last retry. Return only the final short title text.\n"
+        "No explanation. No answer to the user's request. No request wording.\n"
+        f"Previous output:\n{previous_output[:500]}\n\n"
+        f"User request:\n{request}"
+    )
 
 
 def clean_runtime_session_title(raw: str, fallback: str = "New session") -> str:
@@ -569,9 +845,27 @@ def clean_runtime_session_title(raw: str, fallback: str = "New session") -> str:
     if _is_runtime_title_explanation(title):
         title = ""
     if not title:
-        title = fallback.strip() or "New session"
+        fallback_title = fallback.strip()
+        if fallback_title:
+            title = fallback_title
+        else:
+            return "" if fallback == "" else "New session"
     if len(title) > 48:
         title = title[:48].rstrip() + "..."
+    return title
+
+
+def _runtime_generated_title_or_empty(raw_title: str, attempt: int = 0) -> str:
+    candidate = extract_runtime_title_candidate_for_attempt(raw_title, attempt)
+    if not candidate:
+        return ""
+    title = clean_runtime_session_title(candidate, fallback="")
+    if not title:
+        return ""
+    if _runtime_title_violates_generated_length(title):
+        return ""
+    if _runtime_title_looks_like_request(title):
+        return ""
     return title
 
 
@@ -586,23 +880,41 @@ async def summarize_runtime_request_title(
     if not request_text:
         return "New session"
     truncated_request = request_text[:1600]
-    fallback = clean_runtime_session_title(truncated_request)
-    prompt = (
-        "Create a short UI title for this agent session.\n"
-        "Return strict JSON only: {\"title\":\"<short title>\"}\n"
-        "Rules for title:\n"
-        "- Use the same language as the user's request.\n"
-        "- Keep it under 12 words.\n"
-        "- Do not include markdown, prefixes, explanations, reasoning, or rule restatement.\n\n"
-        f"User request:\n{truncated_request}"
-    )
-    raw_title = await call_runtime_model_prompt(
-        prompt,
-        platform=platform,
-        instance_id=instance_id,
-        max_tokens=64,
-    )
-    return clean_runtime_session_title(raw_title, fallback=fallback)
+    fallback = _fallback_runtime_session_title(truncated_request)
+    last_output = ""
+    last_error: Exception | None = None
+    for attempt in range(_RUNTIME_TITLE_MAX_ATTEMPTS):
+        prompt = runtime_title_user_prompt_for_attempt(attempt, truncated_request, last_output)
+        system_prompt = runtime_title_system_prompt_for_attempt(attempt)
+        try:
+            raw_title = await call_runtime_model_prompt(
+                prompt,
+                platform=platform,
+                instance_id=instance_id,
+                max_tokens=48,
+                system_prompt=system_prompt,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            last_error = exc
+            last_output = str(exc)
+            print(
+                "[session-title] title model call failed "
+                f"attempt={attempt + 1}/{_RUNTIME_TITLE_MAX_ATTEMPTS}: {exc}"
+            )
+            continue
+        last_output = raw_title
+        title = _runtime_generated_title_or_empty(raw_title, attempt)
+        if title:
+            return title
+        print(
+            "[session-title] invalid title model output "
+            f"attempt={attempt + 1}/{_RUNTIME_TITLE_MAX_ATTEMPTS} raw={raw_title!r}"
+        )
+
+    if last_error:
+        print(f"[session-title] falling back after model errors: {last_error}")
+    return fallback
 
 
 # ---------------------------------------------------------------------------

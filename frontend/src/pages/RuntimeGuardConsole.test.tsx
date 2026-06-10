@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   budgetAPI,
@@ -20,6 +20,7 @@ import RuntimeGuardConsole, {
   NewTaskModal,
   SessionHistoryViewAllModal,
   ToolsViewAllModal,
+  formatRuntimeGuardSessionTitle,
   getTimelineAppearance,
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
@@ -234,9 +235,15 @@ function renderRuntimeGuardConsole() {
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={['/backend']}>
         <RuntimeGuardConsole />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <span data-testid="location-path" hidden>{location.pathname}</span>;
 }
 
 describe('AgentIconBadge', () => {
@@ -259,7 +266,23 @@ describe('titleFromUserMessage', () => {
   it('falls back when the title model returns explanation text', () => {
     const modelExplanation = '我们需根据用户请求生成UI标题。用户请求是中文：“帮我查一下上海今天的天气怎么样？” 规则要求使用同一种语言。';
 
-    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('帮我查一下上海今天的天气怎么样？');
+    expect(titleFromUserMessage(modelExplanation, '帮我查一下上海今天的天气怎么样？')).toBe('上海天气查询');
+  });
+
+  it('compacts raw user requests instead of using them as labels', () => {
+    const request = '今年高考数学难度大吗？相比去年，是难了还是简单了？';
+
+    expect(titleFromUserMessage('帮我查一下今天的天气')).toBe('天气查询');
+    expect(titleFromUserMessage(request, request)).toBe('高考数学难度对比');
+    expect(titleFromUserMessage(request)).toBe('高考数学难度对比');
+  });
+});
+
+describe('formatRuntimeGuardSessionTitle', () => {
+  it('shows generated labels without an agent prefix', () => {
+    expect(formatRuntimeGuardSessionTitle({ agent: 'OpenClaw', title: '查询天气' })).toBe('查询天气');
+    expect(formatRuntimeGuardSessionTitle({ agent: 'Hermes', title: 'Hermes:查询天气' })).toBe('查询天气');
+    expect(formatRuntimeGuardSessionTitle({ agent: 'Nanobot', title: 'Nanobot' })).toBe('Nanobot');
   });
 });
 
@@ -385,6 +408,18 @@ describe('NewTaskModal', () => {
     expect(startSessionSpy).not.toHaveBeenCalled();
   });
 
+  it('opens the installed agent configure page from the left agent row context menu', async () => {
+    mockRuntimeGuardApis();
+    renderRuntimeGuardConsole();
+
+    const openClawRow = await screen.findByTitle('Left click to select, right click to configure OpenClaw');
+    fireEvent.contextMenu(openClawRow);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('location-path').textContent).toBe('/openclaw_configure');
+    });
+  });
+
   it('previews only active-session approvals in the right approval panel', async () => {
     mockRuntimeGuardApis();
     const activeSessionKey = 'openclaw::runtime-openclaw::active-session';
@@ -457,6 +492,7 @@ describe('NewTaskModal', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Weather lookup' })).toBeTruthy();
     });
+    expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('OpenClaw');
     const meta = container.querySelector('.rg-session-meta')?.textContent ?? '';
     expect(meta).toContain('3 minutes ago workspace:/srv/xsafeclaw/weather');
     expect(meta).not.toContain('OpenClaw Agent');

@@ -2463,6 +2463,14 @@ _SMART_ROUTER_FALLBACK_SOURCE = "deterministic_fallback"
 _SMART_ROUTING_FAILURE_MESSAGE = (
     "Smart routing failed. Please choose an available agent manually."
 )
+_SMART_ROUTER_SYSTEM_PROMPT = (
+    "You are XSafeClaw's silent Agent router.\n"
+    "This call is only for selecting one already available Agent framework.\n"
+    "You must choose exactly one candidate id from candidate_options.\n"
+    "Return only one uppercase candidate id, such as A or B.\n"
+    "Do not return JSON, markdown, prose, explanations, or an agent name.\n"
+    "Never choose an Agent that is not in candidate_options."
+)
 
 
 def _start_session_runtime_label(
@@ -2589,12 +2597,7 @@ def _build_smart_router_prompt(
     ]
     valid_ids = ", ".join(option["id"] for option in candidate_options)
     return (
-        "You are XSafeClaw's silent Agent router.\n"
-        "Choose exactly one Agent framework for the user's request.\n"
-        "You must choose only from the candidate_options list below.\n"
-        f"Reply with exactly one candidate id only: {valid_ids}.\n"
-        "Do not return JSON, markdown, prose, explanations, or the agent name.\n"
-        "If several candidates seem possible, choose the single best available id.\n\n"
+        f"valid_candidate_ids: {valid_ids}\n\n"
         f"candidate_options:\n{json.dumps(candidate_options, ensure_ascii=False)}\n\n"
         f"user_request:\n{message[:4000]}"
     )
@@ -2721,6 +2724,7 @@ async def _route_smart_agent(
                     platform=source.platform,
                     instance_id=source.instance_id,
                     max_tokens=64,
+                    system_prompt=_SMART_ROUTER_SYSTEM_PROMPT,
                 ),
                 timeout=_SMART_ROUTER_TIMEOUT_S,
             )
