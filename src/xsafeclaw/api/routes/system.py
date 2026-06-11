@@ -51,6 +51,12 @@ from ...runtime.nanobot import (
     update_nanobot_gateway_state,
     update_nanobot_guard_state,
 )
+from ...services.openclaw_silent_credentials import (
+    delete_openclaw_silent_model_credentials,
+    openclaw_silent_credentials_match_provider,
+    openclaw_silent_model_credentials_path,
+    save_openclaw_silent_model_credentials,
+)
 
 try:
     import fcntl
@@ -4329,6 +4335,15 @@ async def config_reset(body: ConfigResetRequest):
         if auth_p.exists():
             auth_p.unlink()
             deleted.append(str(auth_p))
+        silent_credential_path = openclaw_silent_model_credentials_path()
+        if silent_credential_path.exists():
+            if delete_openclaw_silent_model_credentials():
+                deleted.append(str(silent_credential_path))
+                try:
+                    from ...services.guard_service import invalidate_model_cache
+                    invalidate_model_cache()
+                except Exception:
+                    pass
 
     if body.scope == "full":
         wp = Path(body.workspace).expanduser()
@@ -7659,17 +7674,32 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         web["search"] = search
         changed = True
 
-    # XSafeClaw Guard plugin — always register
+    # XSafeClaw Guard plugin — always register and repair existing entries.
     plugins = config.setdefault("plugins", {})
     entries = plugins.setdefault("entries", {})
-    if "safeclaw-guard" not in entries or not isinstance(entries.get("safeclaw-guard"), dict):
-        entries["safeclaw-guard"] = {
-            "enabled": True,
-            "config": {"safeclawUrl": "http://localhost:6874"},
-        }
+    guard_entry = entries.get("safeclaw-guard")
+    if not isinstance(guard_entry, dict):
+        guard_entry = {}
+        entries["safeclaw-guard"] = guard_entry
         changed = True
-    elif not entries["safeclaw-guard"].get("enabled"):
-        entries["safeclaw-guard"]["enabled"] = True
+
+    guard_path = str(_OPENCLAW_DIR / "extensions" / "safeclaw-guard")
+    if guard_entry.get("path") != guard_path:
+        guard_entry["path"] = guard_path
+        changed = True
+    if guard_entry.get("enabled") is not True:
+        guard_entry["enabled"] = True
+        changed = True
+    guard_config = guard_entry.get("config")
+    if not isinstance(guard_config, dict):
+        guard_config = {}
+        guard_entry["config"] = guard_config
+        changed = True
+    if not str(guard_config.get("safeclawUrl") or "").strip():
+        guard_config["safeclawUrl"] = "http://localhost:6874"
+        changed = True
+    if "failOpenOnGuardError" not in guard_config:
+        guard_config["failOpenOnGuardError"] = False
         changed = True
 
     if changed:
@@ -7680,6 +7710,40 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
             _CONFIG_PATH.touch()
         except OSError:
             pass
+
+
+def _persist_openclaw_silent_model_credentials_from_current_config(
+    *,
+    api_key: str,
+    source: str,
+) -> dict[str, str] | None:
+    """Cache OpenClaw provider credentials for XSafeClaw silent model calls."""
+    clean_key = str(api_key or "").strip()
+    if not clean_key or not _CONFIG_PATH.exists():
+        return None
+    try:
+        config = json.loads(_CONFIG_PATH.read_text("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(config, dict):
+        return None
+
+    try:
+        saved = save_openclaw_silent_model_credentials(
+            config,
+            api_key=clean_key,
+            source=source,
+        )
+    except Exception:
+        return None
+
+    if saved:
+        try:
+            from ...services.guard_service import invalidate_model_cache
+            invalidate_model_cache()
+        except Exception:
+            pass
+    return saved
 
 
 async def _auto_approve_devices() -> None:
@@ -8121,6 +8185,9 @@ async def provider_has_key(provider: str = "", platform: str | None = None):
         except Exception:
             pass
 
+    if openclaw_silent_credentials_match_provider(provider):
+        return {"has_key": True}
+
     return {"has_key": False}
 
 
@@ -8352,6 +8419,10 @@ async def quick_model_config(body: QuickModelConfigRequest):
         custom_context_window=body.custom_context_window or _CUSTOM_MODEL_DEFAULT_CONTEXT_WINDOW,
     )
     _patch_config_extras(full_body)
+    _persist_openclaw_silent_model_credentials_from_current_config(
+        api_key=body.api_key,
+        source="quick_model_config",
+    )
 
     try:
         from .chat import _available_models_cache
@@ -8895,6 +8966,10 @@ async def onboard_config(body: OnboardConfigRequest):
 
     # ── Post-patch extras not supported by CLI flags ─────────────────────
     _patch_config_extras(body)
+    _persist_openclaw_silent_model_credentials_from_current_config(
+        api_key=body.api_key,
+        source="onboard_config",
+    )
 
     # ── Install XSafeClaw Guard plugin into OpenClaw extensions ─────────
     _install_safeclaw_guard_plugin(platform="openclaw")

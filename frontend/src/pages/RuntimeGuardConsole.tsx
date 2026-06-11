@@ -2812,7 +2812,8 @@ export default function RuntimeGuardConsole() {
           applySessionTitle(key, data.title, text);
         })
         .catch(() => {
-          applySessionTitle(key, text);
+          const fallbackTitle = compactRuntimeRequestTitle(text) || titleFromUserMessage(text, text) || session.agent;
+          applySessionTitle(key, fallbackTitle, text);
         });
     }
 

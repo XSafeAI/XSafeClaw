@@ -6,6 +6,7 @@ import json
 import pytest
 
 from xsafeclaw.services import guard_service
+from xsafeclaw.services import openclaw_silent_credentials
 
 
 class _FakeResponse:
@@ -103,6 +104,89 @@ def test_get_openclaw_model_info_reads_api_type_and_provider_api_key(monkeypatch
     assert info["base_url"] == "https://api.deepseek.com/anthropic"
     assert info["api_key"] == "provider-key"
     assert info["api_type"] == "anthropic-messages"
+
+
+def test_get_openclaw_model_info_prefers_matching_silent_credentials(monkeypatch, tmp_path):
+    openclaw_dir = tmp_path / ".openclaw"
+    config_path = openclaw_dir / "openclaw.json"
+    data_dir = tmp_path / ".xsafeclaw"
+    config = {
+        "agents": {"defaults": {"model": {"primary": "deepseek/deepseek-v4-flash"}}},
+        "models": {
+            "providers": {
+                "deepseek": {
+                    "baseUrl": "https://api.deepseek.com",
+                    "api": "openai-completions",
+                    "models": [{"id": "deepseek-v4-flash"}],
+                }
+            }
+        },
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(guard_service, "_OPENCLAW_DIR", openclaw_dir)
+    monkeypatch.setattr(guard_service, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(guard_service.settings, "data_dir", data_dir)
+    openclaw_silent_credentials.save_openclaw_silent_model_credentials(
+        config,
+        api_key="sk-silent",
+        source="test",
+    )
+
+    info = guard_service._get_openclaw_model_info()
+
+    assert info["provider"] == "deepseek"
+    assert info["model"] == "deepseek-v4-flash"
+    assert info["base_url"] == "https://api.deepseek.com"
+    assert info["api_key"] == "sk-silent"
+    assert info["api_type"] == "openai-completions"
+    assert info["credential_source"] == "openclaw-silent-model"
+
+
+def test_get_openclaw_model_info_ignores_stale_silent_credentials(monkeypatch, tmp_path):
+    openclaw_dir = tmp_path / ".openclaw"
+    config_path = openclaw_dir / "openclaw.json"
+    data_dir = tmp_path / ".xsafeclaw"
+    stale_config = {
+        "agents": {"defaults": {"model": {"primary": "deepseek/deepseek-v4-flash"}}},
+        "models": {
+            "providers": {
+                "deepseek": {
+                    "baseUrl": "https://api.deepseek.com",
+                    "models": [{"id": "deepseek-v4-flash"}],
+                }
+            }
+        },
+    }
+    active_config = {
+        "agents": {"defaults": {"model": {"primary": "openai/gpt-5-mini"}}},
+        "models": {
+            "providers": {
+                "openai": {
+                    "baseUrl": "https://api.openai.com/v1",
+                    "apiKey": "provider-key",
+                    "models": [{"id": "gpt-5-mini"}],
+                }
+            }
+        },
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(active_config), encoding="utf-8")
+    monkeypatch.setattr(guard_service, "_OPENCLAW_DIR", openclaw_dir)
+    monkeypatch.setattr(guard_service, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(guard_service.settings, "data_dir", data_dir)
+    openclaw_silent_credentials.save_openclaw_silent_model_credentials(
+        stale_config,
+        api_key="sk-stale",
+        source="test",
+    )
+
+    info = guard_service._get_openclaw_model_info()
+
+    assert info["provider"] == "openai"
+    assert info["model"] == "gpt-5-mini"
+    assert info["api_key"] == "provider-key"
+    assert "credential_source" not in info
 
 
 def test_resolve_guard_model_info_uses_hermes_runtime_model(monkeypatch, tmp_path):
@@ -274,6 +358,72 @@ async def test_call_runtime_model_prompt_anthropic_uses_top_level_system(monkeyp
     assert body["messages"] == [{"role": "user", "content": "User request"}]
     assert body["max_tokens"] == 64
     assert body["temperature"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_call_runtime_model_prompt_deletes_silent_credentials_on_auth_failure(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".xsafeclaw"
+    monkeypatch.setattr(guard_service.settings, "data_dir", data_dir)
+    openclaw_silent_credentials.save_openclaw_silent_model_credentials(
+        {
+            "agents": {"defaults": {"model": {"primary": "deepseek/deepseek-v4-flash"}}},
+            "models": {
+                "providers": {
+                    "deepseek": {
+                        "baseUrl": "https://api.deepseek.com",
+                        "models": [{"id": "deepseek-v4-flash"}],
+                    }
+                }
+            },
+        },
+        api_key="sk-bad",
+        source="test",
+    )
+    credential_path = openclaw_silent_credentials.openclaw_silent_model_credentials_path()
+
+    class UnauthorizedResponse:
+        status_code = 401
+
+        def raise_for_status(self):
+            request = guard_service.httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+            response = guard_service.httpx.Response(401, request=request)
+            raise guard_service.httpx.HTTPStatusError(
+                "Unauthorized",
+                request=request,
+                response=response,
+            )
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return UnauthorizedResponse()
+
+    monkeypatch.setattr(guard_service.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        guard_service,
+        "_resolve_guard_model_info",
+        lambda **_kwargs: {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-bad",
+            "api_type": "openai-completions",
+            "credential_source": "openclaw-silent-model",
+        },
+    )
+
+    with pytest.raises(guard_service.httpx.HTTPStatusError):
+        await guard_service.call_runtime_model_prompt("title this")
+
+    assert not credential_path.exists()
 
 
 @pytest.mark.asyncio

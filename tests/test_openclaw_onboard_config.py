@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from fastapi import HTTPException
 
 from xsafeclaw.api.routes import system as system_routes
+from xsafeclaw.services import openclaw_silent_credentials
 
 
 class _FakeProc:
@@ -17,6 +19,44 @@ class _FakeProc:
 
     async def communicate(self):
         return self._output.encode("utf-8"), b""
+
+
+def _write_openclaw_model_config(config_path, *, provider="deepseek", model="deepseek-v4-flash"):
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "gateway": {
+                    "port": 18789,
+                    "bind": "loopback",
+                    "auth": {"mode": "token", "token": "gateway-token"},
+                },
+                "agents": {"defaults": {"model": {"primary": f"{provider}/{model}"}}},
+                "models": {
+                    "providers": {
+                        provider: {
+                            "baseUrl": "https://api.deepseek.com",
+                            "api": "openai-completions",
+                            "models": [{"id": model}],
+                        }
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+class _FakeGatewayClient:
+    async def connect(self):
+        return None
+
+    async def list_models(self):
+        return {"models": [{"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek"}]}
+
+    async def disconnect(self):
+        return None
 
 
 def test_append_openclaw_auth_args_adds_auth_choice_and_cli_flag():
@@ -131,3 +171,192 @@ def test_onboard_config_includes_auth_choice_and_fails_if_config_missing(monkeyp
     assert "openai-api-key" in captured["args"]
     assert "--openai-api-key" in captured["args"]
     assert "sk-test" in captured["args"]
+
+
+def test_patch_config_extras_repairs_existing_safeclaw_guard_plugin(monkeypatch, tmp_path):
+    config_path = tmp_path / "openclaw.json"
+    openclaw_root = tmp_path / ".openclaw"
+    config_path.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "entries": {
+                        "safeclaw-guard": {
+                            "enabled": True,
+                            "config": {"safeclawUrl": "http://127.0.0.1:9999"},
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(system_routes, "_OPENCLAW_DIR", openclaw_root)
+
+    body = system_routes.OnboardConfigRequest(
+        mode="remote",
+        provider="openai-api-key",
+        api_key="sk-test",
+        model_id="openai/gpt-5.5",
+        platform="openclaw",
+    )
+
+    system_routes._patch_config_extras(body)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    entry = saved["plugins"]["entries"]["safeclaw-guard"]
+    assert entry["enabled"] is True
+    assert entry["path"] == str(openclaw_root / "extensions" / "safeclaw-guard")
+    assert entry["config"]["safeclawUrl"] == "http://127.0.0.1:9999"
+    assert entry["config"]["failOpenOnGuardError"] is False
+
+
+def test_quick_model_config_persists_openclaw_silent_credentials(monkeypatch, tmp_path):
+    config_path = tmp_path / ".openclaw" / "openclaw.json"
+    data_dir = tmp_path / ".xsafeclaw"
+    captured: dict[str, list[str]] = {}
+    _write_openclaw_model_config(config_path)
+
+    async def _fake_create_subprocess_exec(*args, **_kwargs):
+        captured["args"] = [str(item) for item in args]
+        return _FakeProc(returncode=0, output="onboard ok")
+
+    async def _fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(system_routes.settings, "data_dir", data_dir)
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: "/usr/bin/openclaw")
+    monkeypatch.setattr(system_routes, "_build_env", lambda: {})
+    monkeypatch.setattr(
+        system_routes,
+        "_get_auth_providers_and_flags",
+        lambda: ([], {"deepseek-api-key": "--deepseek-api-key"}),
+    )
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(system_routes.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(system_routes, "trigger_onboard_scan_preload", lambda force=False: None)
+    monkeypatch.setattr("xsafeclaw.gateway_client.GatewayClient", _FakeGatewayClient)
+
+    body = system_routes.QuickModelConfigRequest(
+        provider="deepseek-api-key",
+        api_key="sk-deepseek",
+        model_id="deepseek/deepseek-v4-flash",
+        platform="openclaw",
+    )
+
+    result = asyncio.run(system_routes.quick_model_config(body))
+
+    assert result["success"] is True
+    assert "--deepseek-api-key" in captured["args"]
+    credential_path = openclaw_silent_credentials.openclaw_silent_model_credentials_path()
+    saved = json.loads(credential_path.read_text(encoding="utf-8"))
+    assert saved["provider"] == "deepseek"
+    assert saved["model"] == "deepseek-v4-flash"
+    assert saved["base_url"] == "https://api.deepseek.com"
+    assert saved["api_type"] == "openai-completions"
+    assert saved["api_key"] == "sk-deepseek"
+    assert saved["source"] == "quick_model_config"
+
+
+def test_onboard_config_persists_openclaw_silent_credentials(monkeypatch, tmp_path):
+    config_path = tmp_path / ".openclaw" / "openclaw.json"
+    data_dir = tmp_path / ".xsafeclaw"
+    _write_openclaw_model_config(config_path)
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        return _FakeProc(returncode=0, output="onboard ok")
+
+    async def _fake_auto_approve_devices():
+        return None
+
+    monkeypatch.setattr(system_routes.settings, "data_dir", data_dir)
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: "/usr/bin/openclaw")
+    monkeypatch.setattr(system_routes, "_build_env", lambda: {})
+    monkeypatch.setattr(
+        system_routes,
+        "_get_auth_providers_and_flags",
+        lambda: ([], {"deepseek-api-key": "--deepseek-api-key"}),
+    )
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(system_routes, "_install_safeclaw_guard_plugin", lambda platform="openclaw": True)
+    monkeypatch.setattr(system_routes, "_deploy_safety_files", lambda _workspace: None)
+    monkeypatch.setattr(system_routes, "_auto_approve_devices", _fake_auto_approve_devices)
+    monkeypatch.setattr(system_routes, "trigger_onboard_scan_preload", lambda force=False: None)
+
+    body = system_routes.OnboardConfigRequest(
+        mode="remote",
+        provider="deepseek-api-key",
+        api_key="sk-deepseek",
+        model_id="deepseek/deepseek-v4-flash",
+        platform="openclaw",
+    )
+
+    result = asyncio.run(system_routes.onboard_config(body))
+
+    assert result["success"] is True
+    saved = json.loads(
+        openclaw_silent_credentials.openclaw_silent_model_credentials_path().read_text(encoding="utf-8")
+    )
+    assert saved["api_key"] == "sk-deepseek"
+    assert saved["source"] == "onboard_config"
+
+
+def test_config_reset_removes_openclaw_silent_credentials(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".xsafeclaw"
+    monkeypatch.setattr(system_routes.settings, "data_dir", data_dir)
+    openclaw_silent_credentials.save_openclaw_silent_model_credentials(
+        {
+            "agents": {"defaults": {"model": {"primary": "deepseek/deepseek-v4-flash"}}},
+            "models": {
+                "providers": {
+                    "deepseek": {
+                        "baseUrl": "https://api.deepseek.com",
+                        "models": [{"id": "deepseek-v4-flash"}],
+                    }
+                }
+            },
+        },
+        api_key="sk-deepseek",
+        source="test",
+    )
+    credential_path = openclaw_silent_credentials.openclaw_silent_model_credentials_path()
+    assert credential_path.exists()
+
+    result = asyncio.run(
+        system_routes.config_reset(
+            system_routes.ConfigResetRequest(scope="config+creds+sessions")
+        )
+    )
+
+    assert str(credential_path) in result["deleted"]
+    assert not credential_path.exists()
+
+
+def test_provider_has_key_uses_silent_credentials_without_exposing_key(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".xsafeclaw"
+    monkeypatch.setattr(system_routes.settings, "data_dir", data_dir)
+    openclaw_silent_credentials.save_openclaw_silent_model_credentials(
+        {
+            "agents": {"defaults": {"model": {"primary": "deepseek/deepseek-v4-flash"}}},
+            "models": {
+                "providers": {
+                    "deepseek": {
+                        "baseUrl": "https://api.deepseek.com",
+                        "models": [{"id": "deepseek-v4-flash"}],
+                    }
+                }
+            },
+        },
+        api_key="sk-secret-never-return",
+        source="test",
+    )
+
+    result = asyncio.run(
+        system_routes.provider_has_key(provider="deepseek-api-key", platform="openclaw")
+    )
+
+    assert result == {"has_key": True}
+    assert "sk-secret-never-return" not in json.dumps(result, ensure_ascii=False)
