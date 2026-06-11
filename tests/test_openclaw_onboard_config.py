@@ -102,8 +102,10 @@ def test_append_openclaw_auth_args_skips_skip_and_patch_only():
 def test_quick_model_config_includes_auth_choice_and_fails_if_config_missing(monkeypatch, tmp_path):
     config_path = tmp_path / "openclaw.json"
     captured: dict[str, list[str]] = {}
+    order: list[str] = []
 
     async def _fake_create_subprocess_exec(*args, **_kwargs):
+        order.append("subprocess")
         captured["args"] = [str(item) for item in args]
         return _FakeProc(returncode=0, output="onboard ok")
 
@@ -116,6 +118,16 @@ def test_quick_model_config_includes_auth_choice_and_fails_if_config_missing(mon
         lambda: ([], {"openai-api-key": "--openai-api-key"}),
     )
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        system_routes,
+        "_install_safeclaw_guard_plugin",
+        lambda platform="openclaw": order.append("install"),
+    )
+    monkeypatch.setattr(
+        system_routes,
+        "sanitize_legacy_openclaw_config",
+        lambda: order.append("sanitize") or False,
+    )
 
     body = system_routes.QuickModelConfigRequest(
         provider="openai-api-key",
@@ -134,13 +146,16 @@ def test_quick_model_config_includes_auth_choice_and_fails_if_config_missing(mon
     assert "openai-api-key" in captured["args"]
     assert "--openai-api-key" in captured["args"]
     assert "sk-test" in captured["args"]
+    assert order[:3] == ["install", "sanitize", "subprocess"]
 
 
 def test_onboard_config_includes_auth_choice_and_fails_if_config_missing(monkeypatch, tmp_path):
     config_path = tmp_path / "openclaw.json"
     captured: dict[str, list[str]] = {}
+    order: list[str] = []
 
     async def _fake_create_subprocess_exec(*args, **_kwargs):
+        order.append("subprocess")
         captured["args"] = [str(item) for item in args]
         return _FakeProc(returncode=0, output="onboard ok")
 
@@ -153,6 +168,16 @@ def test_onboard_config_includes_auth_choice_and_fails_if_config_missing(monkeyp
         lambda: ([], {"openai-api-key": "--openai-api-key"}),
     )
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        system_routes,
+        "_install_safeclaw_guard_plugin",
+        lambda platform="openclaw": order.append("install"),
+    )
+    monkeypatch.setattr(
+        system_routes,
+        "sanitize_legacy_openclaw_config",
+        lambda: order.append("sanitize") or False,
+    )
 
     body = system_routes.OnboardConfigRequest(
         mode="remote",
@@ -172,6 +197,7 @@ def test_onboard_config_includes_auth_choice_and_fails_if_config_missing(monkeyp
     assert "openai-api-key" in captured["args"]
     assert "--openai-api-key" in captured["args"]
     assert "sk-test" in captured["args"]
+    assert order[:3] == ["install", "sanitize", "subprocess"]
 
 
 def test_patch_config_extras_repairs_existing_safeclaw_guard_plugin(monkeypatch, tmp_path):
@@ -181,10 +207,21 @@ def test_patch_config_extras_repairs_existing_safeclaw_guard_plugin(monkeypatch,
         json.dumps(
             {
                 "plugins": {
+                    "load": {
+                        "paths": [
+                            "/tmp/old-safeclaw",
+                            "/tmp/old-safeclaw",
+                            "",
+                        ]
+                    },
                     "entries": {
                         "safeclaw-guard": {
                             "enabled": True,
-                            "config": {"safeclawUrl": "http://127.0.0.1:9999"},
+                            "path": "/tmp/old-safeclaw",
+                            "config": {
+                                "safeclawUrl": "http://127.0.0.1:9999",
+                                "unexpected": "remove-me",
+                            },
                         }
                     }
                 }
@@ -206,11 +243,65 @@ def test_patch_config_extras_repairs_existing_safeclaw_guard_plugin(monkeypatch,
     system_routes._patch_config_extras(body)
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
+    paths = saved["plugins"]["load"]["paths"]
     entry = saved["plugins"]["entries"]["safeclaw-guard"]
+    assert paths == ["/tmp/old-safeclaw", str(openclaw_root / "extensions" / "safeclaw-guard")]
     assert entry["enabled"] is True
-    assert entry["path"] == str(openclaw_root / "extensions" / "safeclaw-guard")
+    assert "path" not in entry
     assert entry["config"]["safeclawUrl"] == "http://127.0.0.1:9999"
     assert entry["config"]["failOpenOnGuardError"] is False
+    assert "unexpected" not in entry["config"]
+
+
+def test_sanitize_legacy_openclaw_config_repairs_stale_safeclaw_guard_plugin(monkeypatch, tmp_path):
+    config_path = tmp_path / "openclaw.json"
+    openclaw_root = tmp_path / ".openclaw"
+    config_path.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "load": {"paths": ["stale", "stale"]},
+                    "entries": {
+                        "safeclaw-guard": {
+                            "path": "stale",
+                            "enabled": True,
+                            "config": {
+                                "safeclawUrl": "",
+                                "legacy": True,
+                            },
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(system_routes, "_OPENCLAW_DIR", openclaw_root)
+
+    changed = system_routes.sanitize_legacy_openclaw_config()
+
+    assert changed is True
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    paths = saved["plugins"]["load"]["paths"]
+    entry = saved["plugins"]["entries"]["safeclaw-guard"]
+    assert paths == ["stale", str(openclaw_root / "extensions" / "safeclaw-guard")]
+    assert "path" not in entry
+    assert entry["enabled"] is True
+    assert entry["config"] == {
+        "safeclawUrl": "http://localhost:6874",
+        "failOpenOnGuardError": False,
+    }
+
+
+def test_openclaw_guard_plugin_metadata_declares_runtime_entry_and_startup_activation():
+    plugin_root = system_routes._plugins_root() / "safeclaw-guard"
+
+    package = json.loads(plugin_root.joinpath("package.json").read_text(encoding="utf-8"))
+    manifest = json.loads(plugin_root.joinpath("openclaw.plugin.json").read_text(encoding="utf-8"))
+
+    assert package["openclaw"]["extensions"] == ["./index.js"]
+    assert manifest["activation"]["onStartup"] is True
 
 
 def test_quick_model_config_persists_openclaw_silent_credentials(monkeypatch, tmp_path):
@@ -237,6 +328,7 @@ def test_quick_model_config_persists_openclaw_silent_credentials(monkeypatch, tm
     )
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(system_routes.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(system_routes, "_install_safeclaw_guard_plugin", lambda platform="openclaw": True)
     monkeypatch.setattr(system_routes, "trigger_onboard_scan_preload", lambda force=False: None)
     monkeypatch.setattr("xsafeclaw.gateway_client.GatewayClient", _FakeGatewayClient)
 

@@ -4,6 +4,11 @@
   "description": "XSafeClaw before_tool_call guard plugin for OpenClaw",
   "main": "index.js",
   "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
   "scripts": {
     "build": "tsc"
   },

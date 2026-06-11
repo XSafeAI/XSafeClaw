@@ -212,9 +212,13 @@ Then add to `~/.openclaw/openclaw.json`:
 ```json
 {
   "plugins": {
+    "load": {
+      "paths": [
+        "~/.openclaw/extensions/safeclaw-guard"
+      ]
+    },
     "entries": {
       "safeclaw-guard": {
-        "path": "~/.openclaw/extensions/safeclaw-guard",
         "enabled": true,
         "config": {
           "safeclawUrl": "http://localhost:6874",

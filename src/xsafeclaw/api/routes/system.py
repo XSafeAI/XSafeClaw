@@ -7412,6 +7412,115 @@ def _repair_too_small_model_context_windows(config: dict) -> bool:
     return changed
 
 
+_OPENCLAW_GUARD_PLUGIN_ID = "safeclaw-guard"
+_OPENCLAW_GUARD_CONFIG_KEYS = {"safeclawUrl", "failOpenOnGuardError"}
+
+
+def _openclaw_guard_plugin_dir() -> Path:
+    return _OPENCLAW_DIR / "extensions" / _OPENCLAW_GUARD_PLUGIN_ID
+
+
+def _write_openclaw_config(config: dict) -> None:
+    tmp = _CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(_CONFIG_PATH)
+
+
+def _normalize_openclaw_guard_plugin_config(config: dict, *, ensure_entry: bool) -> bool:
+    """Keep XSafeClaw's OpenClaw plugin config on the official schema surface."""
+    changed = False
+    plugin_path = str(_openclaw_guard_plugin_dir())
+
+    plugins = config.get("plugins")
+    if not isinstance(plugins, dict):
+        if not ensure_entry:
+            return False
+        plugins = {}
+        config["plugins"] = plugins
+        changed = True
+
+    existing_entries = plugins.get("entries")
+    if (
+        not ensure_entry
+        and (
+            not isinstance(existing_entries, dict)
+            or _OPENCLAW_GUARD_PLUGIN_ID not in existing_entries
+        )
+    ):
+        return False
+
+    load = plugins.get("load")
+    if not isinstance(load, dict):
+        load = {}
+        plugins["load"] = load
+        changed = True
+
+    raw_paths = load.get("paths")
+    paths: list[str] = []
+    if isinstance(raw_paths, list):
+        seen: set[str] = set()
+        for raw_path in raw_paths:
+            path = str(raw_path or "").strip()
+            if not path or path in seen:
+                changed = True
+                continue
+            seen.add(path)
+            paths.append(path)
+    elif raw_paths is not None:
+        changed = True
+
+    if plugin_path not in paths:
+        paths.append(plugin_path)
+        changed = True
+    if raw_paths != paths:
+        load["paths"] = paths
+        changed = True
+
+    entries = plugins.get("entries")
+    if not isinstance(entries, dict):
+        if not ensure_entry:
+            return changed
+        entries = {}
+        plugins["entries"] = entries
+        changed = True
+
+    guard_entry = entries.get(_OPENCLAW_GUARD_PLUGIN_ID)
+    if not isinstance(guard_entry, dict):
+        if _OPENCLAW_GUARD_PLUGIN_ID not in entries and not ensure_entry:
+            return changed
+        guard_entry = {}
+        entries[_OPENCLAW_GUARD_PLUGIN_ID] = guard_entry
+        changed = True
+
+    if "path" in guard_entry:
+        guard_entry.pop("path", None)
+        changed = True
+
+    if ensure_entry and guard_entry.get("enabled") is not True:
+        guard_entry["enabled"] = True
+        changed = True
+
+    guard_config = guard_entry.get("config")
+    if not isinstance(guard_config, dict):
+        guard_config = {}
+        guard_entry["config"] = guard_config
+        changed = True
+    else:
+        for key in list(guard_config.keys()):
+            if key not in _OPENCLAW_GUARD_CONFIG_KEYS:
+                guard_config.pop(key, None)
+                changed = True
+
+    if not str(guard_config.get("safeclawUrl") or "").strip():
+        guard_config["safeclawUrl"] = "http://localhost:6874"
+        changed = True
+    if "failOpenOnGuardError" not in guard_config:
+        guard_config["failOpenOnGuardError"] = False
+        changed = True
+
+    return changed
+
+
 def sanitize_legacy_openclaw_config() -> bool:
     """Migrate/remove legacy XSafeClaw-only keys from openclaw.json."""
     if not _CONFIG_PATH.exists():
@@ -7429,12 +7538,12 @@ def sanitize_legacy_openclaw_config() -> bool:
         changed = True
     if _repair_too_small_model_context_windows(config):
         changed = True
+    if _normalize_openclaw_guard_plugin_config(config, ensure_entry=False):
+        changed = True
     if not changed:
         return False
 
-    tmp = _CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(_CONFIG_PATH)
+    _write_openclaw_config(config)
     return True
 
 
@@ -7680,37 +7789,11 @@ def _patch_config_extras(body: OnboardConfigRequest) -> None:
         changed = True
 
     # XSafeClaw Guard plugin — always register and repair existing entries.
-    plugins = config.setdefault("plugins", {})
-    entries = plugins.setdefault("entries", {})
-    guard_entry = entries.get("safeclaw-guard")
-    if not isinstance(guard_entry, dict):
-        guard_entry = {}
-        entries["safeclaw-guard"] = guard_entry
-        changed = True
-
-    guard_path = str(_OPENCLAW_DIR / "extensions" / "safeclaw-guard")
-    if guard_entry.get("path") != guard_path:
-        guard_entry["path"] = guard_path
-        changed = True
-    if guard_entry.get("enabled") is not True:
-        guard_entry["enabled"] = True
-        changed = True
-    guard_config = guard_entry.get("config")
-    if not isinstance(guard_config, dict):
-        guard_config = {}
-        guard_entry["config"] = guard_config
-        changed = True
-    if not str(guard_config.get("safeclawUrl") or "").strip():
-        guard_config["safeclawUrl"] = "http://localhost:6874"
-        changed = True
-    if "failOpenOnGuardError" not in guard_config:
-        guard_config["failOpenOnGuardError"] = False
+    if _normalize_openclaw_guard_plugin_config(config, ensure_entry=True):
         changed = True
 
     if changed:
-        tmp = _CONFIG_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(_CONFIG_PATH)
+        _write_openclaw_config(config)
         try:
             _CONFIG_PATH.touch()
         except OSError:
@@ -8348,6 +8431,8 @@ async def quick_model_config(body: QuickModelConfigRequest):
         raise HTTPException(status_code=500, detail="openclaw binary not found")
 
     env = _build_env()
+    _install_safeclaw_guard_plugin(platform="openclaw")
+    sanitize_legacy_openclaw_config()
 
     cli_output = ""
     if body.api_key and body.provider and body.provider != "skip":
@@ -8886,6 +8971,8 @@ async def onboard_config(body: OnboardConfigRequest):
         )
 
     env = _build_env()
+    _install_safeclaw_guard_plugin(platform="openclaw")
+    sanitize_legacy_openclaw_config()
 
     # ── Build CLI argument list ──────────────────────────────────────────
     args: list[str] = [
