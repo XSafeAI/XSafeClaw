@@ -192,6 +192,28 @@ def test_install_safeclaw_guard_plugin_copies_nanobot_plugin(monkeypatch, tmp_pa
     assert target.joinpath("plugin.json").exists()
 
 
+def test_install_safeclaw_guard_plugin_copies_openclaw_runtime_entry(monkeypatch, tmp_path):
+    plugins_root = tmp_path / "bundled-plugins"
+    source = plugins_root / "safeclaw-guard"
+    openclaw_root = tmp_path / ".openclaw"
+    target = openclaw_root / "extensions" / "safeclaw-guard"
+    source.mkdir(parents=True)
+    source.joinpath("index.js").write_text("export default function register() {}\n", encoding="utf-8")
+    source.joinpath("index.ts").write_text("export default function register() {}\n", encoding="utf-8")
+    source.joinpath("openclaw.plugin.json").write_text('{"id":"safeclaw-guard"}\n', encoding="utf-8")
+    source.joinpath("package.json").write_text('{"main":"index.js"}\n', encoding="utf-8")
+    monkeypatch.setattr(system_routes, "_plugins_root", lambda: plugins_root)
+    monkeypatch.setattr(system_routes, "_OPENCLAW_DIR", openclaw_root)
+
+    installed = system_routes._install_safeclaw_guard_plugin(platform="openclaw")
+
+    assert installed == target
+    assert target.joinpath("index.js").read_text(encoding="utf-8").startswith("export default")
+    assert target.joinpath("index.ts").exists()
+    assert target.joinpath("openclaw.plugin.json").exists()
+    assert json.loads(target.joinpath("package.json").read_text(encoding="utf-8"))["main"] == "index.js"
+
+
 def test_nanobot_hook_loader_deduplicates_existing_hook(monkeypatch):
     existing_hook = XSafeClawHook({"mode": "observe"})
     configured_hook = XSafeClawHook({"mode": "blocking"})

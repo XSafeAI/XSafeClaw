@@ -7775,7 +7775,7 @@ def _install_safeclaw_guard_plugin(*, platform: str | None = None) -> Path | Non
         return None
     dst_dir = _OPENCLAW_DIR / "extensions" / "safeclaw-guard"
     dst_dir.mkdir(parents=True, exist_ok=True)
-    for fname in ("index.ts", "openclaw.plugin.json", "package.json"):
+    for fname in ("index.js", "index.ts", "openclaw.plugin.json", "package.json"):
         src_file = src_dir / fname
         if src_file.exists():
             shutil.copy2(src_file, dst_dir / fname)
