@@ -8,8 +8,9 @@ import json
 import pytest
 from fastapi import HTTPException
 
+from xsafeclaw import gateway_client
 from xsafeclaw.api.routes import system as system_routes
-from xsafeclaw.services import openclaw_silent_credentials
+from xsafeclaw.services import openclaw_silent_credentials, runtime_autostart
 
 
 class _FakeProc:
@@ -357,6 +358,53 @@ def test_config_reset_removes_openclaw_workspace_attestations(monkeypatch, tmp_p
 
     assert str(attestations) in result["deleted"]
     assert not attestations.exists()
+
+
+def test_autostart_openclaw_uses_bundled_cli_and_configured_port(monkeypatch, tmp_path):
+    home = tmp_path
+    openclaw_root = home / ".openclaw"
+    config_path = openclaw_root / "openclaw.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps({"gateway": {"bind": "loopback", "port": 19876}}),
+        encoding="utf-8",
+    )
+    bundled_cli = home / ".xsafeclaw" / "node" / "bin" / "openclaw"
+    bundled_cli.parent.mkdir(parents=True)
+    bundled_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(gateway_client, "_find_openclaw_binary", lambda: str(bundled_cli))
+
+    probe_calls: list[tuple[str, int]] = []
+    captured: dict[str, list[str]] = {}
+
+    async def _fake_probe_tcp_listener(host, port, **_kwargs):
+        probe_calls.append((host, port))
+        return len(probe_calls) > 1
+
+    async def _fake_wait_http_health(*_args, **_kwargs):
+        return False
+
+    async def _fake_run_cmd(args, **_kwargs):
+        captured["args"] = list(args)
+        return 0, "started"
+
+    async def _fake_auto_approve_repairs():
+        return None
+
+    monkeypatch.setattr(runtime_autostart, "_probe_tcp_listener", _fake_probe_tcp_listener)
+    monkeypatch.setattr(runtime_autostart, "_wait_http_health", _fake_wait_http_health)
+    monkeypatch.setattr(runtime_autostart, "_run_cmd", _fake_run_cmd)
+    monkeypatch.setattr(runtime_autostart, "_auto_approve_openclaw_plugin_repairs", _fake_auto_approve_repairs)
+
+    status, detail = asyncio.run(runtime_autostart.autostart_openclaw(timeout_s=0.1))
+
+    assert status == "started"
+    assert "19876" in detail
+    assert captured["args"] == [str(bundled_cli), "gateway", "start", "--json"]
+    assert probe_calls == [("127.0.0.1", 19876), ("127.0.0.1", 19876)]
 
 
 def test_provider_has_key_uses_silent_credentials_without_exposing_key(monkeypatch, tmp_path):

@@ -194,13 +194,39 @@ def _openclaw_installed() -> tuple[bool, str | None]:
     ``openclaw onboard`` and there's no daemon to start; having only the
     config file means the CLI was uninstalled and we'd just fail spawning.
     """
-    cli = shutil.which("openclaw")
+    try:
+        from ..gateway_client import _find_openclaw_binary
+        cli = _find_openclaw_binary()
+    except Exception:
+        cli = shutil.which("openclaw")
     if not cli:
         return False, None
     config = Path.home() / ".openclaw" / "openclaw.json"
     if not config.exists():
         return False, cli
     return True, cli
+
+
+def _openclaw_gateway_endpoint() -> tuple[str, int]:
+    config = Path.home() / ".openclaw" / "openclaw.json"
+    host, port = "127.0.0.1", 18789
+    try:
+        import json as _json
+
+        data = _json.loads(config.read_text(encoding="utf-8"))
+        gateway = data.get("gateway") if isinstance(data, dict) else None
+        if isinstance(gateway, dict):
+            raw_host = str(gateway.get("bind") or host).strip()
+            if raw_host and raw_host not in {"loopback", "auto", "lan", "tailnet", "custom", "0.0.0.0"}:
+                host = raw_host
+            raw_port = gateway.get("port")
+            if raw_port is not None:
+                parsed_port = int(raw_port)
+                if 0 < parsed_port < 65536:
+                    port = parsed_port
+    except Exception:
+        pass
+    return host, port
 
 
 _OPENCLAW_PENDING_JSON = Path.home() / ".openclaw" / "devices" / "pending.json"
@@ -287,7 +313,7 @@ async def autostart_openclaw(*, timeout_s: float = 90.0) -> StartResult:
     Strategy (adapted for OpenClaw 2026.4.25):
       1. Skip if CLI is missing or ``~/.openclaw/openclaw.json`` is absent
          (the daemon would refuse to start without ``gateway.mode=local``).
-      2. First check **TCP-level** readiness on ``127.0.0.1:18789``. 4.25's
+      2. First check **TCP-level** readiness on the configured gateway port. 4.25's
          gateway may take ~80s to finish plugin loading but the port binds
          early, so a raw TCP accept is the most reliable "is anything
          listening?" signal. An HTTP GET is no longer authoritative — 4.25
@@ -310,7 +336,7 @@ async def autostart_openclaw(*, timeout_s: float = 90.0) -> StartResult:
     if not installed:
         return "skipped", "openclaw CLI or ~/.openclaw/openclaw.json missing"
 
-    host, port = "127.0.0.1", 18789
+    host, port = _openclaw_gateway_endpoint()
     probe_url = f"http://{host}:{port}/"
 
     async def _final(status: str, detail: str) -> StartResult:
