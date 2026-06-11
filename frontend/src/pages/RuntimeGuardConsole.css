@@ -533,10 +533,32 @@
   color: #74838d;
 }
 
+.rg-safety-row > svg:first-child {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  padding: 2px;
+  border-radius: 4px;
+}
+
+.rg-safety-row-asset > svg:first-child {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.rg-safety-row-risk > svg:first-child {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
 .rg-safety-row svg:last-child {
   width: 8px;
   height: 8px;
   justify-self: end;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #74838d;
 }
 
 .rg-budget {

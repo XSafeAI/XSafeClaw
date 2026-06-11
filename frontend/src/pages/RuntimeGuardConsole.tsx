@@ -3371,12 +3371,12 @@ export default function RuntimeGuardConsole() {
           <div className="rg-section-title">
             <span>{copy.sidebar.safetyTools}</span>
           </div>
-          <button className="rg-safety-row" onClick={() => navigate('/assets')} style={{ top: 22 }} type="button">
+          <button className="rg-safety-row rg-safety-row-asset" onClick={() => navigate('/assets')} style={{ top: 22 }} type="button">
             <Shield />
             <span>{copy.sidebar.assetShield}</span>
             <ChevronRight />
           </button>
-          <button className="rg-safety-row" onClick={() => navigate('/risk-test')} style={{ top: 55 }} type="button">
+          <button className="rg-safety-row rg-safety-row-risk" onClick={() => navigate('/risk-test')} style={{ top: 55 }} type="button">
             <AlertTriangle />
             <span>{copy.sidebar.riskTest}</span>
             <ChevronRight />
