@@ -92,6 +92,10 @@ _DEFAULT_OPENCLAW_WORKSPACE_STR = str(_OPENCLAW_DIR / "workspace")
 _XSAFECLAW_STATE_DIR = Path.home() / ".xsafeclaw"
 _UV_CACHE_DIR = _XSAFECLAW_STATE_DIR / "uv-cache"
 
+
+def _openclaw_workspace_attestations_dir() -> Path:
+    return _OPENCLAW_DIR / "workspace-attestations"
+
 # ---------------------------------------------------------------------------
 # PTY-based process registry for interactive (onboard) steps
 # { proc_id: {"proc": Process, "master_fd": int, "queue": Queue, "done": bool} }
@@ -4327,6 +4331,7 @@ async def config_reset(body: ConfigResetRequest):
         for p in [
             _OPENCLAW_DIR / "credentials",
             _OPENCLAW_DIR / "agents" / "main" / "sessions",
+            _openclaw_workspace_attestations_dir(),
         ]:
             if p.exists():
                 shutil.rmtree(str(p))

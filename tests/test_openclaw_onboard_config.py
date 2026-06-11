@@ -335,6 +335,30 @@ def test_config_reset_removes_openclaw_silent_credentials(monkeypatch, tmp_path)
     assert not credential_path.exists()
 
 
+def test_config_reset_removes_openclaw_workspace_attestations(monkeypatch, tmp_path):
+    openclaw_root = tmp_path / ".openclaw"
+    attestations = openclaw_root / "workspace-attestations"
+    attestation_file = attestations / "stale.attested"
+    attestation_file.parent.mkdir(parents=True)
+    attestation_file.write_text("workspace attested", encoding="utf-8")
+    monkeypatch.setattr(system_routes, "_OPENCLAW_DIR", openclaw_root)
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", openclaw_root / "openclaw.json")
+    monkeypatch.setattr(
+        system_routes,
+        "_EXPLICIT_MODELS_PATH",
+        openclaw_root / "xsafeclaw-explicit-models.json",
+    )
+
+    result = asyncio.run(
+        system_routes.config_reset(
+            system_routes.ConfigResetRequest(scope="config+creds+sessions")
+        )
+    )
+
+    assert str(attestations) in result["deleted"]
+    assert not attestations.exists()
+
+
 def test_provider_has_key_uses_silent_credentials_without_exposing_key(monkeypatch, tmp_path):
     data_dir = tmp_path / ".xsafeclaw"
     monkeypatch.setattr(system_routes.settings, "data_dir", data_dir)
