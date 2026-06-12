@@ -2,6 +2,9 @@
   "id": "safeclaw-guard",
   "name": "XSafeClaw Guard",
   "description": "Intercepts tool calls and sends them to XSafeClaw for safety evaluation before execution.",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -208,6 +208,21 @@ def test_guard_service_reloads_denylist_file_every_time(tmp_path, monkeypatch):
     assert guard_service._load_denylist() == {}
 
 
+def test_guard_service_blocks_internal_credentials_directory(tmp_path, monkeypatch):
+    """XSafeClaw's own cached credentials are protected without user denylist entries."""
+    denylist_file = tmp_path / "denylist.json"
+    data_dir = tmp_path / ".xsafeclaw"
+    monkeypatch.setattr(guard_service, "_DENYLIST_FILE", denylist_file)
+    monkeypatch.setattr(guard_service.settings, "data_dir", data_dir)
+
+    credential_file = data_dir / "credentials" / "openclaw-silent-model.json"
+
+    assert guard_service._denylist_precheck("read", {"path": str(credential_file)})
+    assert guard_service._denylist_precheck("write", {"path": str(credential_file), "content": "x"})
+    assert guard_service._denylist_precheck("delete_file", {"file_path": str(credential_file)})
+    assert guard_service._load_denylist() == {}
+
+
 def test_old_string_only_schema_still_blocks_all_operations(tmp_path, monkeypatch):
     """Existing denylist files should keep working after the schema upgrade."""
     denylist_file = tmp_path / "denylist.json"

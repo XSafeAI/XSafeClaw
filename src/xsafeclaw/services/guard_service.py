@@ -36,12 +36,20 @@ import httpx
 
 from ..config import settings
 from ..path_protection import (
+    PROTECTED_OPERATION_ORDER,
     build_block_reason,
     extract_tool_operations,
     load_rules,
     match_protected_scope,
 )
 from ..risk_rules import build_risk_rule_block_reason, load_risk_rules, match_risk_rule
+from .openclaw_silent_credentials import (
+    DEFAULT_PROVIDER_API_TYPES as _DEFAULT_PROVIDER_API_TYPES,
+    DEFAULT_PROVIDER_URLS as _DEFAULT_PROVIDER_URLS,
+    delete_openclaw_silent_model_credentials,
+    openclaw_silent_credentials_dir,
+    read_openclaw_silent_model_credentials_for_config,
+)
 
 logger = logging.getLogger(__name__)
 _GUARD_BLOCK_REASON = (
@@ -94,24 +102,6 @@ _NANOBOT_CONFIG_PATH = Path.home() / ".nanobot" / "config.json"
 
 _cached_model_info: dict[str, str] | None = None
 _ANTHROPIC_VERSION = "2023-06-01"
-_DEFAULT_PROVIDER_URLS = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-    "moonshot": "https://api.moonshot.cn/v1",
-    "deepseek": "https://api.deepseek.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "minimax": "https://api.minimax.io/v1",
-    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "alibaba": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-    "groq": "https://api.groq.com/openai/v1",
-    "mistral": "https://api.mistral.ai/v1",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "ollama": "http://127.0.0.1:11434/v1",
-}
-_DEFAULT_PROVIDER_API_TYPES = {
-    "anthropic": "anthropic-messages",
-}
 
 
 def _read_mapping(value: Any) -> dict[str, Any]:
@@ -184,6 +174,17 @@ def _get_openclaw_model_info() -> dict[str, str]:
 
     try:
         config = json.loads(_CONFIG_PATH.read_text("utf-8"))
+        cached_credential = read_openclaw_silent_model_credentials_for_config(config)
+        if cached_credential:
+            _cached_model_info = {
+                "model": cached_credential["model"],
+                "base_url": cached_credential["base_url"],
+                "api_key": cached_credential["api_key"],
+                "api_type": cached_credential["api_type"],
+                "provider": cached_credential["provider"],
+                "credential_source": "openclaw-silent-model",
+            }
+            return _cached_model_info
 
         primary = (
             config.get("agents", {})
@@ -377,6 +378,18 @@ def invalidate_model_cache() -> None:
     _cached_model_info = None
 
 
+def _handle_model_http_status_error(
+    exc: httpx.HTTPStatusError,
+    model_info: dict[str, str],
+) -> None:
+    if exc.response.status_code not in {401, 403}:
+        return
+    if model_info.get("credential_source") != "openclaw-silent-model":
+        return
+    delete_openclaw_silent_model_credentials()
+    invalidate_model_cache()
+
+
 def _normalize_model_api_base(base_url: str, api_type: str) -> str:
     normalized = str(base_url or "").strip().rstrip("/")
     if not normalized:
@@ -517,10 +530,14 @@ async def call_runtime_model_prompt(
             f"(provider={model_info.get('provider', 'unknown')})"
         )
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        _handle_model_http_status_error(exc, model_info)
+        raise
 
     if api_type == "openai-completions":
         return _extract_openai_text_response(data)
@@ -1000,6 +1017,7 @@ def clear_results() -> None:
 def _denylist_precheck(tool_name: str, params: dict[str, Any]) -> str | None:
     """Block tool calls that hit a user-protected path for the matched operation."""
     denylist = _load_denylist()
+    denylist.update(_load_internal_denylist())
     if not denylist:
         return None
 
@@ -1265,14 +1283,18 @@ async def _call_guard_model(
             f"(provider={model_info.get('provider', 'unknown')})"
         )
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            url,
-            json=payload,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        _handle_model_http_status_error(exc, model_info)
+        raise
 
     if api_type == "openai-completions":
         result = _extract_openai_guard_response(data)
@@ -1634,6 +1656,14 @@ _SHELL_NESTED_PARAM_KEYS = ("arguments", "args", "params", "input")
 
 def _load_denylist() -> dict[str, set[str]]:
     return load_rules(_DENYLIST_FILE)
+
+
+def _load_internal_denylist() -> dict[str, set[str]]:
+    try:
+        credentials_dir = str(openclaw_silent_credentials_dir().resolve())
+    except Exception:
+        credentials_dir = str(openclaw_silent_credentials_dir())
+    return {credentials_dir: set(PROTECTED_OPERATION_ORDER)}
 
 
 def _load_risk_rules() -> list[dict[str, Any]]:
