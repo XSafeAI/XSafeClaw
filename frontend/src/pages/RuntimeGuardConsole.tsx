@@ -1297,6 +1297,37 @@ function approvalByline(item: GuardPendingApproval): string {
   return item.instance_id ? `${platform} / ${item.instance_id}` : platform;
 }
 
+function demoRightApprovalItem(): GuardPendingApproval | null {
+  if (typeof window === 'undefined') return null;
+  if (new URLSearchParams(window.location.search).get('demoApproval') !== '1') return null;
+  return {
+    id: 'demo-right-approval',
+    platform: 'openclaw',
+    instance_id: 'openclaw-default',
+    guard_mode: 'manual',
+    session_key: 'demo-session',
+    tool_name: 'write_file',
+    params: {
+      path: 'workspace/config.json',
+      content: '{ "allowExperimentalTools": true }',
+    },
+    guard_verdict: 'policy_ask',
+    guard_raw: 'demo approval',
+    session_context: 'Demo approval for right panel visual review.',
+    risk_source: 'Demo',
+    failure_mode: 'Manual approval required',
+    real_world_harm: 'This is temporary demo data shown only with ?demoApproval=1.',
+    created_at: Date.now() / 1000,
+    resolved: false,
+    resolution: '',
+    resolved_at: 0,
+    tool_category: 'file_system',
+    tool_action: 'write',
+    timeline_kind: 'approval_request',
+    risk_level: 'medium',
+  };
+}
+
 function ApprovalCard({
   item,
   slotIndex,
@@ -2287,9 +2318,20 @@ export default function RuntimeGuardConsole() {
     [activeUnresolvedApprovalItems.length],
   );
   const visibleApprovals = useMemo(
-    () => activeUnresolvedApprovalItems.slice(0, 2),
+    () => activeUnresolvedApprovalItems.slice(0, 1),
     [activeUnresolvedApprovalItems],
   );
+  const demoApproval = useMemo(() => demoRightApprovalItem(), []);
+  const rightPanelApprovals = visibleApprovals.length > 0
+    ? visibleApprovals
+    : demoApproval
+      ? [demoApproval]
+      : [];
+  const rightPanelApprovalCount = visibleApprovals.length > 0
+    ? activeApprovalCount
+    : demoApproval
+      ? 1
+      : activeApprovalCount;
   const allBlockedItems = useMemo(
     () => mergeBlockedItems(approvalItems, blockedObservations),
     [approvalItems, blockedObservations],
@@ -3146,10 +3188,7 @@ export default function RuntimeGuardConsole() {
           <span>{copy.sidebar.agentTown}</span>
         </button>
         <button className="rg-top-utility rg-top-user" type="button" aria-disabled="true">
-          <span className="rg-top-user-icon" aria-hidden="true">
-            <img src="/user-icon.png" alt="" />
-          </span>
-          <span>{copy.sidebar.userInfo}</span>
+          <span>Free</span>
         </button>
       </div>
       {newTaskModalOpen && (
@@ -3617,11 +3656,11 @@ export default function RuntimeGuardConsole() {
           <section className="rg-approval-center">
             <div className="rg-card-head rg-approval-head">
               <span>{copy.approvals.panelTitle}</span>
-              <span className="rg-count">{activeApprovalCount}</span>
+              <span className="rg-count">{rightPanelApprovalCount}</span>
               <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>{copy.sidebar.viewAll}</button>
             </div>
-            {visibleApprovals.length > 0 ? (
-              visibleApprovals.map((item, index) => (
+            {rightPanelApprovals.length > 0 ? (
+              rightPanelApprovals.map((item, index) => (
                 <ApprovalCard
                   item={item}
                   key={item.id}
