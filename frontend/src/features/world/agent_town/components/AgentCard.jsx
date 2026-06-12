@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import MarkdownMessage from '../../../../components/MarkdownMessage';
 import { guardAPI } from '../../../../services/api';
 import { CHAR_BASE, USE_AGENT_TOWN_MOCK, formatAgentDisplayName } from '../config/constants';
 import { buildMockAssistantReply, buildMockHistory } from '../data/mockData';
 import {
+  formatConversationTime,
   getToolDisclosureSummary,
   isNearScrollBottom,
+  normalizeRuntimeTimestamp,
   shouldAutoScrollConversation,
 } from './conversationPanelUtils';
 
@@ -50,23 +53,15 @@ function fmtDur(s) {
 }
 
 function fmtTime(ts) {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-  } catch {
-    return '';
-  }
+  return formatConversationTime(ts, 'en-US');
 }
 
 function fmtDate(ts) {
   if (!ts) return '';
   try {
-    return new Date(ts).toLocaleString('en-US', {
+    const date = normalizeRuntimeTimestamp(ts, null);
+    if (!date) return '';
+    return date.toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -146,7 +141,7 @@ function normalizeHistoryMessage(msg) {
       id: msg.id || makeId(),
       role: 'tool_call',
       content: '',
-      timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+      timestamp: normalizeRuntimeTimestamp(msg.timestamp),
       tool_id: msg.tool_id,
       tool_name: msg.tool_name,
       args: msg.args,
@@ -163,7 +158,7 @@ function normalizeHistoryMessage(msg) {
       id: msg.id || makeId(),
       role: msg.role,
       content: text,
-      timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+      timestamp: normalizeRuntimeTimestamp(msg.timestamp),
     };
   }
 
@@ -192,7 +187,7 @@ function normalizeConversationMessages(messages = []) {
 
   messages.forEach((msg, index) => {
     if (!msg) return;
-    const timestamp = msg.timestamp ? new Date(msg.timestamp) : new Date();
+    const timestamp = normalizeRuntimeTimestamp(msg.timestamp);
     const role = msg.role === 'tool' ? 'toolResult' : msg.role;
     const text = msg.text || msg.content_text || '';
 
@@ -386,7 +381,7 @@ function AgentDialogMessage({ msg }) {
             <span />
           </div>
         ) : (
-          previewToolPayload(msg.content, DIALOG_TEXT_PREVIEW_LIMIT)
+          <MarkdownMessage content={previewToolPayload(msg.content, DIALOG_TEXT_PREVIEW_LIMIT)} />
         )}
       </div>
     </div>
@@ -687,7 +682,7 @@ export default function AgentCard({ data, onClose, onJourney, onDeleteAgent }) {
     if (USE_AGENT_TOWN_MOCK) {
       const mockHistory = buildMockHistory(agent, boundEvents).map((msg) => ({
         ...msg,
-        timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+        timestamp: normalizeRuntimeTimestamp(msg.timestamp),
       }));
       setMessages(mockHistory);
       return;

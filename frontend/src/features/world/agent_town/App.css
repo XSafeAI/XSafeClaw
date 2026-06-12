@@ -258,8 +258,8 @@ body.agent-town-page-cursor.cursor-grab-full *,
   z-index: 140;
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 5px;
+  gap: 4px;
+  padding: 3px 4px;
   border-radius: 4px;
   border: 2px solid rgba(180, 140, 80, 0.45);
   background:
@@ -282,7 +282,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 
 .town-hud-sep {
   width: 1px;
-  height: 28px;
+  height: 22px;
   background: linear-gradient(180deg, transparent, rgba(180, 140, 80, 0.35), transparent);
   flex-shrink: 0;
 }
@@ -293,8 +293,8 @@ body.agent-town-page-cursor.cursor-grab-full *,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 2px solid rgba(120, 90, 50, 0.4);
   border-radius: 3px;
@@ -386,7 +386,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .town-hud-icon {
-  font-size: 14px;
+  font-size: 11px;
   line-height: 1;
   position: relative;
   z-index: 1;
@@ -394,8 +394,8 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .town-hud-label {
-  font-size: 5px;
-  letter-spacing: 0.8px;
+  font-size: 4px;
+  letter-spacing: 0.4px;
   text-transform: uppercase;
   margin-top: 2px;
   opacity: 0.55;
@@ -425,7 +425,7 @@ body.agent-town-page-cursor.cursor-grab-full *,
 }
 
 .town-hud-home {
-  width: 52px;
+  width: 42px;
 }
 
 @keyframes hudIconFloat {
@@ -654,12 +654,12 @@ body.agent-town-page-cursor.cursor-grab-full *,
   }
 
   .town-hud-btn {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
   }
 
   .town-hud-icon {
-    font-size: 12px;
+    font-size: 10px;
   }
 
   .town-hud-label {

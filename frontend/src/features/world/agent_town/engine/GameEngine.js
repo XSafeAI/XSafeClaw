@@ -79,6 +79,21 @@ const FIELD_NPC_FLOAT_PAD = 20;
 const FIELD_NPC_FLOAT_CORNER = 10;
 const FIELD_NPC_FLOAT_MIN_W = 168;
 const FIELD_NPC_FLOAT_MIN_H = 72;
+export const NPC_NAME_TAG_MAX_LENGTH = 18;
+export const NPC_NAME_TAG_FONT_SIZE = 40;
+export const NPC_NAME_TAG_STROKE_THICKNESS = 5;
+export const NPC_NAME_TAG_Y_GAP = 10;
+export const FLOOR_SCREEN_LABEL_FONT_MIN = 22;
+export const FLOOR_SCREEN_PANEL_TITLE_FONT_MIN = 26;
+export const FLOOR_SCREEN_ROW_LABEL_FONT_MIN = 24;
+export const FLOOR_SCREEN_ROW_VALUE_FONT_MIN = 64;
+export const FLOOR_SCREEN_HERO_SUB_FONT_MIN = 26;
+export const FLOOR_SCREEN_GUARD_STATUS_FONT_MIN = 18;
+export const FLOOR_SCREEN_WARNING_COUNT_FONT_MIN = 24;
+const FLOOR_SCREEN_WELCOME_LEAD_FONT_MIN = 20;
+const FLOOR_SCREEN_WELCOME_TITLE_FONT_MIN = 46;
+const FLOOR_SCREEN_WARNING_LEAD_FONT_MIN = 24;
+const FLOOR_SCREEN_WARNING_TITLE_FONT_MIN = 36;
 
 function getShowNpcStandTexture(frames, direction = 'right') {
   if (!frames) return null;
@@ -1418,7 +1433,7 @@ export default class GameEngine {
 
     const leftStatusText = new PIXI.Text('OFFLINE', new PIXI.TextStyle({
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: 13,
+      fontSize: 16,
       fill: dashboardPalette.mutedText,
       letterSpacing: 0.7,
     }));
@@ -1456,7 +1471,7 @@ export default class GameEngine {
 
     const leftId = new PIXI.Text('AGENT', new PIXI.TextStyle({
       fontFamily: 'Arial, sans-serif',
-      fontSize: 18,
+      fontSize: 22,
       fill: dashboardPalette.text,
       fontWeight: '700',
       letterSpacing: 0.8,
@@ -1471,7 +1486,7 @@ export default class GameEngine {
 
     const rightHeader = new PIXI.Text('TASK ACTIVITY', new PIXI.TextStyle({
       fontFamily: 'Arial, sans-serif',
-      fontSize: 26,
+      fontSize: 32,
       fill: dashboardPalette.text,
       fontWeight: '700',
       letterSpacing: 1.1,
@@ -1483,7 +1498,7 @@ export default class GameEngine {
 
     const rightSub = new PIXI.Text('ALL TASKS · LAST 24H', new PIXI.TextStyle({
       fontFamily: DASHBOARD_CODE_FONT_FAMILY,
-      fontSize: 15,
+      fontSize: 18,
       fontWeight: '500',
       fill: dashboardPalette.mutedText,
       letterSpacing: 0.32,
@@ -1533,7 +1548,7 @@ export default class GameEngine {
 
     const axisLabelStyle = new PIXI.TextStyle({
       fontFamily: DASHBOARD_CODE_FONT_FAMILY,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: '500',
       fill: dashboardPalette.mutedText,
       letterSpacing: 0.22,
@@ -1557,7 +1572,7 @@ export default class GameEngine {
 
     const emptyText = new PIXI.Text('Awaiting task signal', new PIXI.TextStyle({
       fontFamily: DASHBOARD_CODE_FONT_FAMILY,
-      fontSize: 18,
+      fontSize: 22,
       fontWeight: '500',
       fill: dashboardPalette.mutedText,
       letterSpacing: 0.28,
@@ -2016,44 +2031,45 @@ export default class GameEngine {
 
     const labelStyle = {
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(12, Math.round(height * 0.016)),
+      fontSize: Math.max(FLOOR_SCREEN_LABEL_FONT_MIN, Math.round(height * 0.023)),
       fill: 0xaecddd,
       letterSpacing: 1.2,
     };
     const panelTitleStyle = {
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(15, Math.round(height * 0.02)),
+      fontSize: Math.max(FLOOR_SCREEN_PANEL_TITLE_FONT_MIN, Math.round(height * 0.03)),
       fill: 0xe9f8ff,
       letterSpacing: 1,
     };
     const rowLabelStyle = {
-      fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(15, Math.round(height * 0.021)),
+      fontFamily: DASHBOARD_CODE_FONT_FAMILY,
+      fontSize: Math.max(FLOOR_SCREEN_ROW_LABEL_FONT_MIN, Math.round(height * 0.03)),
       fill: 0xd8effa,
-      letterSpacing: 0.9,
+      fontWeight: '800',
+      letterSpacing: 0.25,
     };
     const rowValueStyle = {
       fontFamily: 'Arial, sans-serif',
-      fontSize: Math.max(54, Math.round(height * 0.082)),
+      fontSize: Math.max(FLOOR_SCREEN_ROW_VALUE_FONT_MIN, Math.round(height * 0.094)),
       fill: 0xfbfeff,
       fontWeight: '700',
       letterSpacing: 0.5,
     };
     const welcomeLeadStyle = {
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(13, Math.round(height * 0.018)),
+      fontSize: Math.max(FLOOR_SCREEN_WELCOME_LEAD_FONT_MIN, Math.round(height * 0.024)),
       fill: 0x8edfff,
       letterSpacing: 1.5,
     };
     const welcomeTitleStyle = {
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(34, Math.round(height * 0.045)),
+      fontSize: Math.max(FLOOR_SCREEN_WELCOME_TITLE_FONT_MIN, Math.round(height * 0.056)),
       fill: 0xf4fbff,
       letterSpacing: 1.1,
     };
     const heroSubStyle = {
       fontFamily: 'Arial, sans-serif',
-      fontSize: Math.max(20, Math.round(height * 0.028)),
+      fontSize: Math.max(FLOOR_SCREEN_HERO_SUB_FONT_MIN, Math.round(height * 0.036)),
       fill: 0xb9deef,
       fontWeight: '700',
       letterSpacing: 0.8,
@@ -2137,7 +2153,7 @@ export default class GameEngine {
       this.guardEnabled ? '⚔ GUARD ACTIVE' : '⚠ GUARD OFFLINE',
       new PIXI.TextStyle({
         fontFamily: 'Press Start 2P, monospace',
-        fontSize: Math.max(11, Math.round(height * 0.016)),
+        fontSize: Math.max(FLOOR_SCREEN_GUARD_STATUS_FONT_MIN, Math.round(height * 0.023)),
         fill: this.guardEnabled ? 0x34d399 : 0xffa500,
         letterSpacing: 1.2,
       })
@@ -2226,7 +2242,7 @@ export default class GameEngine {
 
     const warningLead = new PIXI.Text('WARNING', new PIXI.TextStyle({
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(16, Math.round(height * 0.022)),
+      fontSize: Math.max(FLOOR_SCREEN_WARNING_LEAD_FONT_MIN, Math.round(height * 0.03)),
       fill: 0xffaab1,
       letterSpacing: 1.2,
     }));
@@ -2237,7 +2253,7 @@ export default class GameEngine {
 
     const warningTitle = new PIXI.Text('PRIORITY REVIEW', new PIXI.TextStyle({
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(25, Math.round(height * 0.033)),
+      fontSize: Math.max(FLOOR_SCREEN_WARNING_TITLE_FONT_MIN, Math.round(height * 0.044)),
       fill: 0xfff2f3,
       letterSpacing: 1,
     }));
@@ -2257,7 +2273,7 @@ export default class GameEngine {
 
     const warningCount = new PIXI.Text('00 pending agents', new PIXI.TextStyle({
       fontFamily: 'Press Start 2P, monospace',
-      fontSize: Math.max(15, Math.round(height * 0.019)),
+      fontSize: Math.max(FLOOR_SCREEN_WARNING_COUNT_FONT_MIN, Math.round(height * 0.03)),
       fill: 0xff8089,
       letterSpacing: 0.9,
     }));
@@ -3638,11 +3654,16 @@ export default class GameEngine {
 
     // Name tag
     const nameTagColor = 0x7fb9ff;
-    const nameTag  = new PIXI.Text(formatAgentDisplayName(agent).substring(0, 18), {
-      fontFamily: 'Press Start 2P', fontSize: 20, fill: nameTagColor, align: 'center', stroke: 0x120d1c, strokeThickness: 2,
+    const nameTag  = new PIXI.Text(formatAgentDisplayName(agent).substring(0, NPC_NAME_TAG_MAX_LENGTH), {
+      fontFamily: 'Press Start 2P',
+      fontSize: NPC_NAME_TAG_FONT_SIZE,
+      fill: nameTagColor,
+      align: 'center',
+      stroke: 0x120d1c,
+      strokeThickness: NPC_NAME_TAG_STROKE_THICKNESS,
     });
     nameTag.anchor.set(0.5, 1);
-    nameTag.y = -FH * NPC_SCALE - 2;
+    nameTag.y = -FH * NPC_SCALE - NPC_NAME_TAG_Y_GAP;
     container.addChild(nameTag);
 
     // Issue marker

@@ -1,4 +1,5 @@
 const DEFAULT_SCROLL_BOTTOM_THRESHOLD = 48;
+const ISO_DATETIME_WITHOUT_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 
 function hasToolDetailValue(value) {
   if (value === null || value === undefined) return false;
@@ -18,6 +19,46 @@ export function isNearScrollBottom(element, threshold = DEFAULT_SCROLL_BOTTOM_TH
 
 export function shouldAutoScrollConversation({ agentChanged = false, wasPinnedToBottom = false } = {}) {
   return Boolean(agentChanged || wasPinnedToBottom);
+}
+
+export function normalizeRuntimeTimestamp(value, fallback = new Date()) {
+  const fallbackDate = fallback === null
+    ? null
+    : fallback instanceof Date
+      ? fallback
+      : new Date(fallback);
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? fallbackDate : value;
+  }
+
+  if (typeof value === 'number') {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? fallbackDate : date;
+  }
+
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return fallbackDate;
+    const normalized = ISO_DATETIME_WITHOUT_TZ_RE.test(text) ? `${text}Z` : text;
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? fallbackDate : date;
+  }
+
+  return fallbackDate;
+}
+
+export function formatConversationTime(value, locale = 'en-US', options = {}) {
+  if (!value) return '';
+  const date = normalizeRuntimeTimestamp(value, null);
+  if (!date) return '';
+  return date.toLocaleTimeString(locale, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    ...options,
+  });
 }
 
 export function getToolDisclosureSummary(msg = {}) {

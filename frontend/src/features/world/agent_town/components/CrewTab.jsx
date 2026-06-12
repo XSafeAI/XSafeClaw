@@ -382,11 +382,12 @@ function pendingApprovalToolMessage(item) {
   };
 }
 
-function ToolCallBubble({ msg, helpers }) {
+function ToolCallBubble({ msg, helpers, taskText }) {
   const [expanded, setExpanded] = useState(false);
   const argsPreview = previewChatValue(msg.args || msg.content || '');
-  const resultPreview = msg.result_pending ? 'Running...' : previewChatValue(msg.result);
+  const resultPreview = msg.result_pending ? taskText.runningResult : previewChatValue(msg.result);
   const summary = getToolDisclosureSummary(msg);
+  const tagLabel = msg.result_pending ? taskText.runningTag : msg.is_error ? taskText.errorTag : taskText.toolTag;
   const metaClass = msg.result_pending
     ? 'console-dialog-tag-tool-running'
     : msg.is_error
@@ -401,7 +402,7 @@ function ToolCallBubble({ msg, helpers }) {
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded}
       >
-        <span className={`console-dialog-tag ${metaClass}`}>{summary.label}</span>
+        <span className={`console-dialog-tag ${metaClass}`}>{tagLabel}</span>
         <span className="console-dialog-tool-summary-title">{summary.title}</span>
         <span className="console-dialog-tool-summary-hint">{expanded ? '收起' : summary.detailHint}</span>
         <span className="console-dialog-time">{helpers.fmtTime(msg.timestamp)}</span>
@@ -411,13 +412,13 @@ function ToolCallBubble({ msg, helpers }) {
         <div className="console-dialog-tool-payload">
           {argsPreview ? (
             <div className="console-dialog-tool-row console-dialog-tool-row-call">
-              <span className="console-dialog-tool-row-label">Call</span>
+              <span className="console-dialog-tool-row-label">{taskText.toolCall}</span>
               <div className="console-dialog-code console-dialog-code-args">{argsPreview}</div>
             </div>
           ) : null}
           {resultPreview ? (
             <div className="console-dialog-tool-row console-dialog-tool-row-result">
-              <span className="console-dialog-tool-row-label">Result</span>
+              <span className="console-dialog-tool-row-label">{taskText.toolResult}</span>
               <div className={`console-dialog-code console-dialog-code-result ${msg.is_error ? 'console-dialog-code-error' : ''}`}>{resultPreview}</div>
             </div>
           ) : null}
@@ -427,9 +428,10 @@ function ToolCallBubble({ msg, helpers }) {
   );
 }
 
-function ChatBubble({ msg, helpers }) {
+function ChatBubble({ msg, helpers, taskText: taskLabels }) {
+  const taskText = taskLabels || getAgentTownText('zh').tasks;
   if (msg.role === 'tool_call') {
-    return <ToolCallBubble msg={msg} helpers={helpers} />;
+    return <ToolCallBubble msg={msg} helpers={helpers} taskText={taskText} />;
   }
 
   const entryClass = msg.stopped
@@ -442,10 +444,10 @@ function ChatBubble({ msg, helpers }) {
   const roleLabel = msg.stopped
     ? 'STOPPED'
     : msg.role === 'user'
-      ? 'USER'
+      ? taskText.userTag
       : msg.role === 'error'
-        ? 'ERROR'
-        : 'ASSISTANT';
+        ? taskText.errorTag
+        : taskText.assistantTag;
   const roleClass = msg.stopped
     ? 'console-dialog-tag-stop'
     : msg.role === 'user'
@@ -501,19 +503,6 @@ function mapStageTaskStatus(status) {
 
 function formatStageTaskId(value, length = 12) {
   return String(value || '').slice(0, length) || '---';
-}
-
-function ledgerTitleFromDashboardEvent(event) {
-  if (event?.user_message_id) return `msg ${String(event.user_message_id).slice(0, 16)}`;
-  return `Task ${formatStageTaskId(event.id)}`;
-}
-
-function ledgerSnippetFromDashboardEvent(event) {
-  const user = String(event?.user_message_preview || '').trim();
-  if (user) return user.slice(0, 140);
-  const err = String(event?.error_message || '').trim();
-  if (err) return err.slice(0, 140);
-  return '—';
 }
 
 function fmtStageTokens(value) {
@@ -660,7 +649,8 @@ function StageTaskDetailFact({
   );
 }
 
-function StageTaskDetailMessage({ msg, helpers }) {
+function StageTaskDetailMessage({ msg, helpers, taskText: taskLabels }) {
+  const taskText = taskLabels || getAgentTownText('zh').tasks;
   const timestamp = helpers.fmtDate(msg.timestamp);
   const isUser = msg.role === 'user';
   const isAssistant = msg.role === 'assistant';
@@ -673,7 +663,7 @@ function StageTaskDetailMessage({ msg, helpers }) {
       {(isUser || isAssistant) && msg.content_text ? (
         <div className={`tc-task-detail-bubble ${isUser ? 'tc-task-detail-bubble-user' : 'tc-task-detail-bubble-assistant'}`}>
           <div className="tc-task-detail-bubble-head">
-            <span className="tc-task-detail-role">{isUser ? 'USER' : 'ASSISTANT'}</span>
+            <span className="tc-task-detail-role">{isUser ? taskText.userTag : taskText.assistantTag}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
           <div className="tc-task-detail-text">{msg.content_text}</div>
@@ -686,24 +676,24 @@ function StageTaskDetailMessage({ msg, helpers }) {
         >
           <div className="tc-task-detail-tool-head tc-task-detail-tool-head-main">
             <span className="tc-task-detail-tool-tag">
-              {msg.result_pending ? 'RUNNING' : msg.is_error ? 'ERROR' : 'TOOL'}
+              {msg.result_pending ? taskText.runningTag : msg.is_error ? taskText.errorTag : taskText.toolTag}
             </span>
-            <span className="tc-task-detail-tool-name">{msg.tool_name || 'tool-call'}</span>
+            <span className="tc-task-detail-tool-name">{msg.tool_name || taskText.toolCallFallback}</span>
             <span className="tc-task-detail-time">{timestamp}</span>
           </div>
           {(hasToolCall || hasToolResult) ? (
             <div className="tc-task-detail-tool-body">
               {hasToolCall ? (
                 <div className="tc-task-detail-tool-block tc-task-detail-tool-block-call">
-                  <div className="tc-task-detail-tool-subhead">Tool call</div>
+                  <div className="tc-task-detail-tool-subhead">{taskText.toolCall}</div>
                   <pre className="tc-task-detail-tool-payload">{stringifyStageTaskValue(msg.tool_arguments)}</pre>
                 </div>
               ) : null}
               {hasToolResult ? (
                 <div className="tc-task-detail-tool-block tc-task-detail-tool-block-result">
-                  <div className="tc-task-detail-tool-subhead">Tool result</div>
+                  <div className="tc-task-detail-tool-subhead">{taskText.toolResult}</div>
                   <pre className="tc-task-detail-tool-payload">
-                    {msg.result_pending ? 'Running...' : stringifyStageTaskValue(msg.tool_result)}
+                    {msg.result_pending ? taskText.runningResult : stringifyStageTaskValue(msg.tool_result)}
                   </pre>
                 </div>
               ) : null}
@@ -917,6 +907,14 @@ export default function CrewTab({
     : mapStageTaskStatus(detailTask?.status || liveStatus);
   const sessionIdValue = currentAgent?.id || '---';
   const sessionKeyValue = helpers.getAgentSessionKey(currentAgent) || currentAgent?.session_key || '---';
+  const latestLedgerEvent = currentEvents[0] || null;
+  const openLatestLedgerTask = () => {
+    if (!latestLedgerEvent || !currentAgent) return;
+    setSelectedLedgerTask({
+      task: latestLedgerEvent,
+      agentName: formatAgentDisplayName(currentAgent),
+    });
+  };
   const handleCopyField = async (field, value) => {
     const copied = await copyText(value);
     if (!copied) return;
@@ -1064,44 +1062,22 @@ export default function CrewTab({
           </section>
 
             <section className="tc-stage-bottom">
-              <div className="tc-ornate-panel tc-ledger-panel">
-                <BannerHeader label={townText.stage.taskLedger} tone="light" size="long" />
-                <div className="tc-panel-microcopy">{townText.stage.taskLedgerDescription}</div>
-                <div className="tc-ledger-list">
-                  {currentEvents.length === 0 ? (
-                    <div className="tc-empty">{townText.stage.noTask}</div>
-                  ) : (
-                    currentEvents.map((event) => {
-                      const statusMeta = taskStatusMeta[event.status] || taskStatusMeta.running;
-                      const snippet = ledgerSnippetFromDashboardEvent(event);
-                      return (
-                        <button
-                          key={event.id}
-                          type="button"
-                          className={`tc-ledger-item tc-ledger-item-button tc-ledger-item-${event.status || 'running'} ${selectedLedgerTask?.task?.id === event.id ? 'tc-ledger-item-selected' : ''}`}
-                          onClick={() => setSelectedLedgerTask({
-                            task: event,
-                            agentName: formatAgentDisplayName(currentAgent),
-                          })}
-                        >
-                          <div className="tc-ledger-row">
-                            <span className={`tc-ledger-badge ${statusMeta.className}`}>{statusMeta.label}</span>
-                            <span className="tc-ledger-time">{helpers.fmtDate(event.started_at)}</span>
-                          </div>
-                          <div className="tc-ledger-title">{ledgerTitleFromDashboardEvent(event)}</div>
-                          <div className="tc-ledger-note">{snippet}</div>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
-              <section className="console-dialog-shell">
+              <section className="console-dialog-shell console-dialog-shell-wide">
                 <div className="console-dialog-frame">
                   <div className="console-dialog-head">
                     <div className="console-dialog-title">{townText.stage.conversation}</div>
-                    <div className="console-dialog-status">{sending ? townText.stage.transmitting : loadingHistory ? townText.stage.syncing : townText.stage.ready}</div>
+                    <div className="console-dialog-head-actions">
+                      <button
+                        type="button"
+                        className="tc-ledger-launch"
+                        onClick={openLatestLedgerTask}
+                        disabled={!latestLedgerEvent}
+                      >
+                        <span>{townText.stage.taskLedger}</span>
+                        <span className="tc-ledger-launch-count">{currentEvents.length}</span>
+                      </button>
+                      <div className="console-dialog-status">{sending ? townText.stage.transmitting : loadingHistory ? townText.stage.syncing : townText.stage.ready}</div>
+                    </div>
                   </div>
 
                   <div
@@ -1115,7 +1091,7 @@ export default function CrewTab({
                       <div className="console-dialog-empty">{townText.stage.noMessages}</div>
                     ) : (
                       conversationMessages.map((msg) => (
-                        <ChatBubble key={msg.id} msg={msg} helpers={helpers} />
+                        <ChatBubble key={msg.id} msg={msg} helpers={helpers} taskText={townText.tasks} />
                       ))
                     )}
                     {agentPendingItems.map((item) => (
@@ -1266,8 +1242,8 @@ export default function CrewTab({
           >
             <div className="tc-task-modal-head">
               <div>
-                <div className="tc-task-lane-overline">TASK DETAIL</div>
-                <div className="tc-task-lane-title">Task {formatStageTaskId(selectedLedgerTask.task.id)}</div>
+                <div className="tc-task-lane-overline">{townText.tasks.taskDetailOverline}</div>
+                <div className="tc-task-lane-title">{townText.tasks.taskLabel} {formatStageTaskId(selectedLedgerTask.task.id)}</div>
               </div>
               <button
                 type="button"
@@ -1278,31 +1254,31 @@ export default function CrewTab({
                   setSelectedLedgerTask(null);
                 }}
               >
-                CLOSE
+                {townText.tasks.close}
               </button>
             </div>
 
             <div className="tc-task-detail-summary tc-task-detail-summary-flat">
-              <StageTaskDetailFact label="Task ID" value={formatStageTaskId(detailTask?.id || selectedLedgerTask.task.id, 18)} mono featured />
-              <StageTaskDetailFact label="Agent" value={selectedLedgerTask.agentName} featured />
-              <StageTaskDetailFact label="Session" value={detailTask?.session_id || selectedLedgerTask.task.session_id} mono wide tone="info" />
-              <StageTaskDetailFact label="User Message" value={detailTask?.user_message_id || selectedLedgerTask.task.user_message_id || '---'} mono wide />
+              <StageTaskDetailFact label={townText.tasks.taskId} value={formatStageTaskId(detailTask?.id || selectedLedgerTask.task.id, 18)} mono featured />
+              <StageTaskDetailFact label={townText.tasks.agent} value={selectedLedgerTask.agentName} featured />
+              <StageTaskDetailFact label={townText.tasks.session} value={detailTask?.session_id || selectedLedgerTask.task.session_id} mono wide tone="info" />
+              <StageTaskDetailFact label={townText.tasks.userMessage} value={detailTask?.user_message_id || selectedLedgerTask.task.user_message_id || '---'} mono wide />
               <StageTaskDetailFact
-                label="Status"
+                label={townText.tasks.status}
                 value={(taskStatusMeta[detailStatusId] || taskStatusMeta.running).label}
                 featured
                 tone={stageTaskToneFromStatus(detailStatusId)}
               />
-              <StageTaskDetailFact label="Started At" value={helpers.fmtDate(detailTask?.started_at || selectedLedgerTask.task.started_at)} />
-              <StageTaskDetailFact label="Completed At" value={(detailTask?.completed_at || selectedLedgerTask.task.completed_at) ? helpers.fmtDate(detailTask?.completed_at || selectedLedgerTask.task.completed_at) : '---'} />
-              <StageTaskDetailFact label="Duration" value={stageDurationStr(detailTask?.started_at || selectedLedgerTask.task.started_at, detailTask?.completed_at || selectedLedgerTask.task.completed_at)} />
-              <StageTaskDetailFact label="Total Messages" value={String(detailTask?.total_messages ?? selectedLedgerTask.task.total_messages ?? 0)} />
-              <StageTaskDetailFact label="Assistant Msgs" value={String(detailTask?.total_assistant_messages ?? '---')} />
-              <StageTaskDetailFact label="Tool Result Msgs" value={String(detailTask?.total_tool_result_messages ?? '---')} />
-              <StageTaskDetailFact label="Tool Calls" value={String(detailTask?.total_tool_calls ?? selectedLedgerTask.task.total_tool_calls ?? 0)} tone="tool" />
-              <StageTaskDetailFact label="Input Tokens" value={fmtStageTokens(detailTask?.total_input_tokens)} />
-              <StageTaskDetailFact label="Output Tokens" value={fmtStageTokens(detailTask?.total_output_tokens)} />
-              <StageTaskDetailFact label="Total Tokens" value={fmtStageTokens(detailTask?.total_tokens ?? selectedLedgerTask.task.total_tokens)} featured tone="info" />
+              <StageTaskDetailFact label={townText.tasks.startedAt} value={helpers.fmtDate(detailTask?.started_at || selectedLedgerTask.task.started_at)} />
+              <StageTaskDetailFact label={townText.tasks.completedAt} value={(detailTask?.completed_at || selectedLedgerTask.task.completed_at) ? helpers.fmtDate(detailTask?.completed_at || selectedLedgerTask.task.completed_at) : '---'} />
+              <StageTaskDetailFact label={townText.tasks.duration} value={stageDurationStr(detailTask?.started_at || selectedLedgerTask.task.started_at, detailTask?.completed_at || selectedLedgerTask.task.completed_at)} />
+              <StageTaskDetailFact label={townText.tasks.totalMessages} value={String(detailTask?.total_messages ?? selectedLedgerTask.task.total_messages ?? 0)} />
+              <StageTaskDetailFact label={townText.tasks.assistantMessages} value={String(detailTask?.total_assistant_messages ?? '---')} />
+              <StageTaskDetailFact label={townText.tasks.toolResultMessages} value={String(detailTask?.total_tool_result_messages ?? '---')} />
+              <StageTaskDetailFact label={townText.tasks.toolCalls} value={String(detailTask?.total_tool_calls ?? selectedLedgerTask.task.total_tool_calls ?? 0)} tone="tool" />
+              <StageTaskDetailFact label={townText.tasks.inputTokens} value={fmtStageTokens(detailTask?.total_input_tokens)} />
+              <StageTaskDetailFact label={townText.tasks.outputTokens} value={fmtStageTokens(detailTask?.total_output_tokens)} />
+              <StageTaskDetailFact label={townText.tasks.totalTokens} value={fmtStageTokens(detailTask?.total_tokens ?? selectedLedgerTask.task.total_tokens)} featured tone="info" />
             </div>
 
             {detailTask?.error_message || selectedLedgerTask.task.error_message ? (
@@ -1319,7 +1295,7 @@ export default function CrewTab({
                 <div className="tc-empty">{detailError || townText.tasks.noTaskDetail}</div>
               ) : (
                 detailMessages.map((msg) => (
-                  <StageTaskDetailMessage key={msg.message_id} msg={msg} helpers={helpers} />
+                  <StageTaskDetailMessage key={msg.message_id} msg={msg} helpers={helpers} taskText={townText.tasks} />
                 ))
               )}
             </div>

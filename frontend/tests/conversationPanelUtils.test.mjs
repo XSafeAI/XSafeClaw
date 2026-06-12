@@ -1,21 +1,22 @@
-import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { expect, test } from 'vitest';
 
 import {
   getToolDisclosureSummary,
+  formatConversationTime,
   isNearScrollBottom,
+  normalizeRuntimeTimestamp,
   shouldAutoScrollConversation,
 } from '../src/features/world/agent_town/components/conversationPanelUtils.js';
 
 test('detects when the conversation log is pinned near the bottom', () => {
-  assert.equal(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 535, clientHeight: 420 }), true);
-  assert.equal(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 400, clientHeight: 420 }), false);
+  expect(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 535, clientHeight: 420 })).toBe(true);
+  expect(isNearScrollBottom({ scrollHeight: 1000, scrollTop: 400, clientHeight: 420 })).toBe(false);
 });
 
 test('does not auto-scroll polling updates after the user scrolls away from the bottom', () => {
-  assert.equal(shouldAutoScrollConversation({ agentChanged: false, wasPinnedToBottom: false }), false);
-  assert.equal(shouldAutoScrollConversation({ agentChanged: false, wasPinnedToBottom: true }), true);
-  assert.equal(shouldAutoScrollConversation({ agentChanged: true, wasPinnedToBottom: false }), true);
+  expect(shouldAutoScrollConversation({ agentChanged: false, wasPinnedToBottom: false })).toBe(false);
+  expect(shouldAutoScrollConversation({ agentChanged: false, wasPinnedToBottom: true })).toBe(true);
+  expect(shouldAutoScrollConversation({ agentChanged: true, wasPinnedToBottom: false })).toBe(true);
 });
 
 test('builds a compact tool-call disclosure summary', () => {
@@ -27,7 +28,7 @@ test('builds a compact tool-call disclosure summary', () => {
     is_error: false,
   });
 
-  assert.deepEqual(summary, {
+  expect(summary).toEqual({
     label: 'TOOL',
     title: '已调用 read',
     detailHint: '点击展开',
@@ -35,4 +36,18 @@ test('builds a compact tool-call disclosure summary', () => {
     hasDetails: true,
     tone: 'tool',
   });
+});
+
+test('treats timezone-less runtime ISO timestamps as UTC', () => {
+  const timestamp = '2026-06-10T09:44:34';
+
+  expect(
+    normalizeRuntimeTimestamp(timestamp).toISOString(),
+  ).toBe('2026-06-10T09:44:34.000Z');
+  expect(
+    formatConversationTime(timestamp, 'en-US', { timeZone: 'Asia/Shanghai' }),
+  ).toBe('17:44:34');
+  expect(
+    formatConversationTime('2026-06-10T09:44:34+00:00', 'en-US', { timeZone: 'Asia/Shanghai' }),
+  ).toBe('17:44:34');
 });
