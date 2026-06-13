@@ -24,7 +24,7 @@
 .rg-left-scale {
   left: 0;
   z-index: 20;
-  background: #071016;
+  background: #02070a;
 }
 
 .rg-main-fluid {
@@ -129,26 +129,27 @@
 
 .rg-top-user {
   justify-content: center;
-  min-width: 36px;
-  padding: 0 8px;
-  border-color: #b8661b;
-  background: #ff8a22;
-  color: #fff3df;
+  min-width: 30px;
+  height: 19px;
+  padding: 0 6px;
+  border-color: #1e6ee9;
+  background: #1677ff;
+  color: #ffffff;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.28),
-    0 0 10px rgba(255, 138, 34, 0.18);
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 0 8px rgba(22, 119, 255, 0.18);
 }
 
 .rg-top-user[aria-disabled="true"] {
   cursor: default;
-  color: #fff3df;
-  background: #ff8a22;
+  color: #ffffff;
+  background: #1677ff;
 }
 
 .rg-top-user[aria-disabled="true"]:hover {
-  border-color: #b8661b;
-  background: #ff8a22;
-  color: #fff3df;
+  border-color: #1e6ee9;
+  background: #1677ff;
+  color: #ffffff;
 }
 
 .rg-sidebar {
@@ -167,10 +168,7 @@
   right: 0;
   left: 0;
   height: 538px;
-  border-right: 1px solid #12202a;
-  border-bottom: 1px solid #101f2a;
-  border-bottom-right-radius: 8px;
-  background: #071016;
+  background: #02070a;
   pointer-events: none;
 }
 
@@ -553,16 +551,16 @@
   left: 12px;
   width: 136px;
   height: 92px;
-  border: 1px solid #13232e;
+  border: 1px solid transparent;
   border-radius: 6px;
-  background: #09131b;
+  background: transparent;
   padding: 0;
   text-align: left;
 }
 
 .rg-budget:hover {
-  border-color: #24404d;
-  background: #0b1720;
+  border-color: transparent;
+  background: transparent;
 }
 
 .rg-budget:focus-visible {
@@ -571,15 +569,15 @@
 }
 
 .rg-budget.is-over-limit {
-  border-color: #4a3512;
-  background: #161207;
+  border-color: transparent;
+  background: transparent;
 }
 
 .rg-budget-title {
   position: absolute;
   top: 12px;
   left: 8px;
-  right: 8px;
+  right: 46px;
   height: 14px;
   color: #61717c;
   font-size: 8px;
@@ -588,6 +586,23 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rg-budget-settings {
+  position: absolute;
+  top: 12px;
+  right: 8px;
+  height: 14px;
+  padding: 0;
+  background: transparent;
+  color: #00a7ff;
+  font-size: 7px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.rg-budget-settings:hover {
+  color: #b8c7d1;
 }
 
 .rg-budget-amount-line {
@@ -2006,6 +2021,9 @@
 }
 
 .rg-score-ring {
+  --rg-score-accent: #00c879;
+  --rg-score-track: #17342a;
+  --rg-score-progress: 270deg;
   position: absolute;
   top: 40px;
   left: 11px;
@@ -2015,31 +2033,52 @@
   justify-content: center;
   width: 58px;
   height: 58px;
-  border: 4px solid #00c879;
-  border-right-color: #17342a;
   border-radius: 50%;
   box-shadow: 0 0 16px rgba(0, 200, 121, 0.18);
 }
 
+.rg-score-ring::before,
+.rg-score-ring::after {
+  content: '';
+  position: absolute;
+  border-radius: inherit;
+}
+
+.rg-score-ring::before {
+  inset: 0;
+  background: conic-gradient(
+    from 135deg,
+    var(--rg-score-accent) 0deg var(--rg-score-progress),
+    var(--rg-score-track) var(--rg-score-progress) 360deg
+  );
+}
+
+.rg-score-ring::after {
+  inset: 4px;
+  background: #02070a;
+}
+
 .rg-score-ring.rg-score-green {
-  border-color: #00c879;
-  border-right-color: #17342a;
+  --rg-score-accent: #00c879;
+  --rg-score-track: #17342a;
   box-shadow: 0 0 16px rgba(0, 200, 121, 0.18);
 }
 
 .rg-score-ring.rg-score-orange {
-  border-color: #e1b931;
-  border-right-color: #3b3214;
+  --rg-score-accent: #e1b931;
+  --rg-score-track: #3b3214;
   box-shadow: 0 0 16px rgba(225, 185, 49, 0.16);
 }
 
 .rg-score-ring.rg-score-red {
-  border-color: #ff5b5b;
-  border-right-color: #3d171b;
+  --rg-score-accent: #ff5b5b;
+  --rg-score-track: #3d171b;
   box-shadow: 0 0 16px rgba(255, 91, 91, 0.16);
 }
 
 .rg-score-ring strong {
+  position: relative;
+  z-index: 1;
   color: #e8f1f6;
   font-size: 22px;
   font-weight: 600;
@@ -2047,6 +2086,8 @@
 }
 
 .rg-score-ring span {
+  position: relative;
+  z-index: 1;
   color: #6f7e88;
   font-size: 7px;
   line-height: 8px;
@@ -2153,7 +2194,9 @@
   font-size: 8px;
 }
 
-.rg-status-active { color: #00c879; font-weight: 600; }
+.rg-status-guard { font-weight: 600; }
+.rg-status-guard.is-active { color: #00c879; }
+.rg-status-guard.is-off { color: #e1b931; }
 
 .rg-dot {
   display: inline-block;

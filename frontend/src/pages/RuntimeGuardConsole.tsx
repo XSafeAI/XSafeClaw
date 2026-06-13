@@ -264,6 +264,15 @@ function guardScoreTone(score: number): 'green' | 'orange' | 'red' {
   return 'red';
 }
 
+const GUARD_SCORE_RING_BASE_SCORE = 90;
+const GUARD_SCORE_RING_BASE_DEGREES = 270;
+
+function guardScoreRingDegrees(score: number): number {
+  const clampedScore = Math.min(100, Math.max(GUARD_SCORE_RING_BASE_SCORE, score));
+  const scoreRatio = (clampedScore - GUARD_SCORE_RING_BASE_SCORE) / (100 - GUARD_SCORE_RING_BASE_SCORE);
+  return GUARD_SCORE_RING_BASE_DEGREES + scoreRatio * (360 - GUARD_SCORE_RING_BASE_DEGREES);
+}
+
 const configurableTools: Array<{
   id: RuntimeGuardToolId;
   icon: LucideIcon;
@@ -3393,7 +3402,7 @@ export default function RuntimeGuardConsole() {
         <section className="rg-tools">
           <div className="rg-tools-title">
             <span>{copy.sidebar.toolPermission}</span>
-            <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>{copy.sidebar.viewAll}</button>
+            <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>{copy.sidebar.set}</button>
           </div>
           {sidebarTools.map((tool, index) => {
             const ToolIcon = tool.icon;
@@ -3423,8 +3432,9 @@ export default function RuntimeGuardConsole() {
           </button>
         </section>
 
-        <button className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`} onClick={openBudgetModal} type="button">
+        <div className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`}>
           <div className="rg-budget-title">{copy.sidebar.budget}</div>
+          <button className="rg-budget-settings" type="button" onClick={openBudgetModal}>{copy.sidebar.set}</button>
           <div className="rg-budget-amount-line">
             <strong className="rg-budget-used">{budgetDisplayCostText}</strong>
             {budgetConfigured && (
@@ -3439,7 +3449,7 @@ export default function RuntimeGuardConsole() {
           <div className="rg-budget-reset">
             {selectedBudgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: selectedBudgetAgentName }) : budgetResetText}
           </div>
-        </button>
+        </div>
 
       </aside>
       </div>
@@ -3601,8 +3611,10 @@ export default function RuntimeGuardConsole() {
         </section>
 
         <footer className="rg-statusbar">
-          <StatusDot tone="success" />
-          <span className="rg-status-active">{copy.main.statusActive}</span>
+          <StatusDot tone={guardMode === 'On' ? 'success' : 'warning'} />
+          <span className={`rg-status-guard ${guardMode === 'On' ? 'is-active' : 'is-off'}`}>
+            {guardMode === 'On' ? copy.main.statusActive : copy.main.statusOff}
+          </span>
           <span>{copy.main.events}: {activeMessages.length}</span>
           <span>{copy.main.blocked}: {activeMessages.filter(message => message.role === 'error').length}</span>
           <span>{copy.main.warnings}: {activeMessages.filter(message => message.role === 'trace' && message.trace_type?.includes('approval')).length}</span>
@@ -3621,7 +3633,7 @@ export default function RuntimeGuardConsole() {
                 setActiveRuntimeGuardModal('sessions');
               }}
             >
-              {copy.sidebar.viewAll}
+              {copy.sidebar.manage}
             </button>
           </div>
           <div className="rg-session-history-list">
@@ -3657,7 +3669,7 @@ export default function RuntimeGuardConsole() {
             <div className="rg-card-head rg-approval-head">
               <span>{copy.approvals.panelTitle}</span>
               <span className="rg-count">{rightPanelApprovalCount}</span>
-              <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>{copy.sidebar.viewAll}</button>
+              <button type="button" onClick={() => setActiveRuntimeGuardModal('approvals')}>{copy.sidebar.manage}</button>
             </div>
             {rightPanelApprovals.length > 0 ? (
               rightPanelApprovals.map((item, index) => (
@@ -3688,7 +3700,10 @@ export default function RuntimeGuardConsole() {
                 {guardSummaryDisplay(guardStatusSummary.label, copy)}
               </span>
             </div>
-            <div className={`rg-score-ring rg-score-${guardScoreTone(guardStatusSummary.score)}`}>
+            <div
+              className={`rg-score-ring rg-score-${guardScoreTone(guardStatusSummary.score)}`}
+              style={{ '--rg-score-progress': `${guardScoreRingDegrees(guardStatusSummary.score)}deg` } as CSSProperties}
+            >
               <strong>{guardStatusSummary.score}</strong>
               <span>/100</span>
             </div>
