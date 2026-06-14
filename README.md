@@ -53,6 +53,7 @@
 
 |      | Date       | Update                                                       |
 | :--: | :--------- | :----------------------------------------------------------- |
+|  🔥  | 2026-06-12 | v1.1.1 released and published to PyPI — Improved Agent Town task UI, OpenClaw setup and gateway reliability, reset cleanup, session labels, title display, Smart Router label handling, and backend visual polish. |
 |  🔥  | 2026-06-10 | v1.1.0 released and published to PyPI — Runtime Guard now includes approval-request display fixes, Hermes session-context guard coverage, smarter agent recommendations, budget controls, and improved backend and Agent Valley visuals. |
 |  🔥  | 2026-05-22 | v1.0.9 released — Chat responses in Safe Chat and Agent Valley now render Markdown normally, including headings, lists, tables, code blocks, and separators across OpenClaw, Hermes, and Nanobot. |
 |  🔥  | 2026-05-09 | v1.0.8 released — Per-model token usage and cost accounting now works uniformly across OpenClaw, Hermes, and Nanobot; concurrent multi-session messaging is supported; memory scan types are aligned across all runtimes. |
