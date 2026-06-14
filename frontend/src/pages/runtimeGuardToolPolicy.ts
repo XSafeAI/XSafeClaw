@@ -56,18 +56,6 @@ const policyToPermission: Record<GuardToolPolicy, RuntimeGuardToolPermission> = 
   ask: 'Asked',
 };
 
-const allowPenalties: Record<RuntimeGuardToolId, number> = {
-  shell: 2,
-  fileSystem: 3,
-  browser: 1,
-  network: 2,
-  git: 2,
-};
-
-function clampGuardScore(score: number): number {
-  return Math.min(100, Math.max(75, Math.round(score)));
-}
-
 function guardStatusFromScore(score: number, guardMode: RuntimeGuardMode): Pick<GuardStatusSummary, 'label' | 'tone'> {
   if (guardMode === 'Off') return { label: 'Manual', tone: 'off' };
   if (score >= 96) return { label: 'Secure', tone: 'secure' };
@@ -110,16 +98,10 @@ export function toolPoliciesFromPermissions(
 
 export function calculateGuardStatusSummary(
   guardMode: RuntimeGuardMode,
-  permissions: RuntimeGuardToolPermissions,
-  unresolvedApprovals: GuardPendingApproval[],
+  _permissions: RuntimeGuardToolPermissions,
+  _unresolvedApprovals: GuardPendingApproval[],
 ): GuardStatusSummary {
-  const baseScore = guardMode === 'On' ? 100 : 90;
-  const allowPenalty = Object.entries(permissions).reduce((total, [toolId, permission]) => {
-    if (permission !== 'Allowed') return total;
-    return total + allowPenalties[toolId as RuntimeGuardToolId];
-  }, 0);
-  const pendingPenalty = Math.min(unresolvedApprovals.length, 3);
-  const score = clampGuardScore(baseScore - allowPenalty - pendingPenalty);
+  const score = guardMode === 'On' ? 100 : 80;
   return { score, ...guardStatusFromScore(score, guardMode) };
 }
 

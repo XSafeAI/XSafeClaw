@@ -301,7 +301,7 @@ export default function RiskTest() {
   }, []);
 
   return (
-    <div className="min-h-screen">
+    <div className="xsafeclaw-fixed-dark min-h-screen bg-surface-0 text-text-primary">
       <div className="border-b border-border">
         <div className="px-8 py-6">
           <div className="flex flex-wrap items-start justify-between gap-4">

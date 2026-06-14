@@ -504,17 +504,17 @@ describe('NewTaskModal', () => {
 describe('RuntimeGuardConsole i18n', () => {
   it('toggles the shared locale from the Language card and localizes budget units', async () => {
     mockRuntimeGuardApis();
-    renderRuntimeGuardConsole();
+    const { container } = renderRuntimeGuardConsole();
 
     expect(screen.getByText('New Task')).toBeTruthy();
-    expect(screen.getByText('Chinese')).toBeTruthy();
+    expect(screen.getByText('CN')).toBeTruthy();
 
     expect(screen.getByText('$0.00')).toBeTruthy();
-    fireEvent.click(screen.getByText(/^BUDGET$/).closest('button') as HTMLElement);
+    fireEvent.click(container.querySelector('.rg-budget-settings') as HTMLElement);
     expect(screen.getByRole('option', { name: 'Hour' })).toBeTruthy();
     expect(screen.getByRole('option', { name: 'Day' })).toBeTruthy();
 
-    fireEvent.click(screen.getByText('Chinese').closest('button') as HTMLElement);
+    fireEvent.click(screen.getByText('CN').closest('button') as HTMLElement);
 
     await waitFor(() => {
       expect(window.localStorage.getItem('xsafeclaw:locale')).toBe('zh');
@@ -919,11 +919,11 @@ describe('ToolsViewAllModal', () => {
     };
 
     expect(calculateGuardStatusSummary('On', defaultPermissions, []).score).toBe(100);
-    expect(calculateGuardStatusSummary('Off', defaultPermissions, []).score).toBe(90);
+    expect(calculateGuardStatusSummary('Off', defaultPermissions, []).score).toBe(80);
     expect(calculateGuardStatusSummary('On', defaultPermissions, [
       approval({ id: 'pending-1' }),
       approval({ id: 'pending-2' }),
-    ]).score).toBe(98);
+    ]).score).toBe(100);
     expect(calculateGuardStatusSummary('Off', {
       shell: 'Allowed',
       fileSystem: 'Allowed',
@@ -935,7 +935,7 @@ describe('ToolsViewAllModal', () => {
       approval({ id: 'pending-2' }),
       approval({ id: 'pending-3' }),
       approval({ id: 'pending-4' }),
-    ]).score).toBe(77);
+    ]).score).toBe(80);
   });
 
   it('builds Guard Status display rows from guard mode', () => {

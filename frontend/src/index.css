@@ -71,6 +71,26 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+.xsafeclaw-fixed-dark {
+  --surface-0:      #1a1a1e;
+  --surface-1:      #222226;
+  --surface-2:      #2c2c31;
+  --surface-3:      #37373c;
+  --border:         #3b3b40;
+  --border-active:  #3370ff;
+  --accent:         #3370ff;
+  --accent-dim:     #245bdb;
+  --accent-glow:    rgba(51, 112, 255, 0.15);
+  --text-primary:   #e8e8ec;
+  --text-secondary: #8f9298;
+  --text-muted:     #5a5c63;
+  --text-dim:       #44464d;
+  --sidebar:        #1c1d2b;
+  color-scheme: dark;
+  background-color: var(--surface-0);
+  color: var(--text-primary);
+}
+
 body {
   margin: 0;
   min-height: 100vh;
