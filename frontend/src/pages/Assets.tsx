@@ -540,7 +540,7 @@ export default function Assets() {
   const softSources = [...new Set(softwareList.map(s => s.source))].sort();
 
   return (
-    <div className="min-h-screen">
+    <div className="xsafeclaw-fixed-dark min-h-screen bg-surface-0 text-text-primary">
       {/* ===== Header ===== */}
       <div className="border-b border-border">
         <div className="px-8 py-6">

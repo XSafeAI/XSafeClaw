@@ -1101,6 +1101,7 @@ export const en = {
     blockedActions: {
       title: 'Blocked actions',
       closeTitle: 'Close blocked events',
+      manage: 'Manage →',
       rangeAria: 'Blocked time range',
       all: 'All',
       blocked: 'Blocked',

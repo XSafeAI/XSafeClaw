@@ -1096,6 +1096,7 @@ export const zh: Translations = {
     blockedActions: {
       title: '阻塞事件',
       closeTitle: '关闭阻塞事件',
+      manage: '所有 →',
       rangeAria: '阻塞时间范围',
       all: '全部',
       blocked: '已阻塞',

@@ -264,7 +264,7 @@ function guardScoreTone(score: number): 'green' | 'orange' | 'red' {
   return 'red';
 }
 
-const GUARD_SCORE_RING_BASE_SCORE = 90;
+const GUARD_SCORE_RING_BASE_SCORE = 80;
 const GUARD_SCORE_RING_BASE_DEGREES = 270;
 
 function guardScoreRingDegrees(score: number): number {
@@ -3721,7 +3721,7 @@ export default function RuntimeGuardConsole() {
           <section className="rg-recent-blocked">
             <div className="rg-card-head rg-recent-head">
               <span>{copy.blockedActions.title.toUpperCase()}</span>
-              <button type="button" onClick={() => setActiveRuntimeGuardModal('blocked')}>{copy.sidebar.viewAll}</button>
+              <button type="button" onClick={() => setActiveRuntimeGuardModal('blocked')}>{copy.blockedActions.manage}</button>
             </div>
             {recentBlockedItems.length > 0 ? (
               recentBlockedItems.map((item, index) => (
