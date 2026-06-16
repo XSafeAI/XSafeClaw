@@ -105,6 +105,13 @@ export interface InstallStatusResponse {
   nanobot_version: string | null;
   nanobot_error?: string | null;
   nanobot_path: string | null;
+  codex_installed?: boolean;
+  codex_version?: string | null;
+  codex_error?: string | null;
+  codex_path?: string | null;
+  codex_configured?: boolean;
+  codex_status?: 'missing' | 'installed' | 'needs_login' | 'ready' | 'warning' | 'error' | string;
+  codex_warnings?: string[];
   config_exists: boolean;
   nanobot_config_exists: boolean;
   nanobot_model_configured: boolean;
@@ -118,6 +125,19 @@ export interface InstallStatusResponse {
   requires_nanobot_setup: boolean;
   requires_nanobot_configure: boolean;
   node_version: string;
+}
+
+export type CodexAuthStatus = 'logged_in' | 'logged_out' | 'missing' | 'error';
+export type CodexAuthMode = 'chatgpt' | 'api_key' | 'access_token' | 'unknown' | null;
+
+export interface CodexAuthStatusResponse {
+  installed: boolean;
+  logged_in: boolean;
+  auth_mode: CodexAuthMode;
+  status: CodexAuthStatus;
+  codex_path: string | null;
+  message: string;
+  error: string | null;
 }
 
 export interface RuntimeInstanceHealth {
@@ -793,6 +813,18 @@ export const systemAPI = {
 
   /** Fast install/config probe used by setup and route guards. */
   installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
+
+  /** Read Codex CLI ChatGPT login state. */
+  getCodexAuthStatus: () =>
+    api.get<CodexAuthStatusResponse>('/system/codex/auth/status', { timeout: 10000 }),
+
+  /** Start the official Codex CLI login flow in the system browser. */
+  loginCodexAuth: () =>
+    api.post<CodexAuthStatusResponse>('/system/codex/auth/login', {}, { timeout: 0 }),
+
+  /** Clear Codex CLI authentication and return the refreshed state. */
+  logoutCodexAuth: () =>
+    api.post<CodexAuthStatusResponse>('/system/codex/auth/logout', {}, { timeout: 60000 }),
 
   instances: () =>
     api.get<{ instances: RuntimeInstance[]; total: number }>('/system/instances'),

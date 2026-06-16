@@ -12,6 +12,7 @@ import Chat from './pages/Chat';
 import Setup from './pages/Setup';
 import Configure from './pages/Configure';
 import ConfigureSelector from './pages/ConfigureSelector';
+import CodexConfigure from './pages/CodexConfigure';
 import NanobotConfigure from './pages/NanobotConfigure';
 import { systemAPI } from './services/api';
 
@@ -52,6 +53,7 @@ const EXEMPT_PATHS = [
   '/openclaw_configure',
   '/hermes_configure',
   '/nanobot_configure',
+  '/codex_configure',
   '/configure_select',
   '/backend',
   '/runtime-guard-console',
@@ -135,6 +137,7 @@ function AppRoutes() {
       <Route path="/openclaw_configure" element={<Configure />} />
       <Route path="/hermes_configure" element={<Configure />} />
       <Route path="/nanobot_configure" element={<NanobotConfigure />} />
+      <Route path="/codex_configure" element={<CodexConfigure />} />
       <Route path="/configure_select" element={<ConfigureSelector />} />
       <Route path="/agent-town" element={<World />} />
       <Route path="/agent-valley" element={<World />} />

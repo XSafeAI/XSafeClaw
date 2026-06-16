@@ -25,6 +25,7 @@ import RuntimeGuardConsole, {
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
   runtimeGuardAgentStatus,
+  runtimeGuardSidebarLayoutMetrics,
   runtimeGuardStartSessionPayload,
   runtimeSessionRecordToRuntimeGuardSession,
   titleFromUserMessage,
@@ -169,7 +170,7 @@ function mockRuntimeGuardApis() {
     },
   } as any);
 
-  vi.spyOn(chatAPI, 'getHistory').mockResolvedValue({
+  const getHistorySpy = vi.spyOn(chatAPI, 'getHistory').mockResolvedValue({
     data: {
       session_key: 'created-session',
       messages: [],
@@ -215,7 +216,7 @@ function mockRuntimeGuardApis() {
     },
   } as any);
 
-  return { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy };
+  return { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy, getHistorySpy };
 }
 
 function renderRuntimeGuardConsole() {
@@ -238,6 +239,21 @@ function renderRuntimeGuardConsole() {
         <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
+  );
+}
+
+function expectCodexQuotaRows(budget: HTMLElement) {
+  const quotaRows = Array.from(budget.querySelectorAll('.rg-codex-quota-row'));
+  expect(quotaRows).toHaveLength(2);
+  expect(quotaRows.every(row => row.classList.contains('is-centered-columns'))).toBe(true);
+  expect(quotaRows[0].querySelector('.rg-codex-quota-percent')?.textContent).toBe('81%');
+  expect(quotaRows[0].querySelector('.rg-codex-quota-window')?.textContent).toBe('5 hours left');
+  expect(quotaRows[0].querySelector('.rg-codex-quota-refresh')?.textContent).toBe('Refreshes at 18:54');
+  expect(quotaRows[1].querySelector('.rg-codex-quota-percent')?.textContent).toBe('72%');
+  expect(quotaRows[1].querySelector('.rg-codex-quota-window')?.textContent).toBe('1 week left');
+  expect(quotaRows[1].querySelector('.rg-codex-quota-refresh')?.textContent).toBe('Refreshes Jun 18');
+  expect(quotaRows[0].querySelector('.rg-codex-quota-percent')?.className).toBe(
+    quotaRows[1].querySelector('.rg-codex-quota-percent')?.className,
   );
 }
 
@@ -420,6 +436,288 @@ describe('NewTaskModal', () => {
     });
   });
 
+  it('opens the Codex configure page from the Codex row context menu', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.contextMenu(codexRow);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('location-path').textContent).toBe('/codex_configure');
+    });
+  });
+
+  it('shows Codex as the fourth sidebar agent before tool permissions', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    await screen.findByText('Codex');
+
+    const sidebar = container.querySelector('.rg-sidebar') as HTMLElement;
+    const agentRows = Array.from(sidebar.querySelectorAll('.rg-agent-row'));
+    expect(agentRows.map(row => row.querySelector('.rg-agent-name')?.textContent)).toEqual([
+      'OpenClaw',
+      'Hermes',
+      'Nanobot',
+      'Codex',
+    ]);
+    expect(agentRows[3].querySelector('.rg-agent-badge')).toHaveClass('agent-codex');
+    expect((sidebar.textContent ?? '').indexOf('Codex')).toBeLessThan((sidebar.textContent ?? '').indexOf('TOOL PERMISSION'));
+  });
+
+  it('switches the budget card to Codex App remaining usage when Codex is selected', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(codexRow);
+
+    expect(codexRow).toHaveClass('is-selected');
+    const budget = container.querySelector('.rg-budget') as HTMLElement;
+    expect(within(budget).getByText('BUDGET')).toBeTruthy();
+    expect(within(budget).getByText('Details →')).toBeTruthy();
+    expectCodexQuotaRows(budget);
+    expect(within(budget).queryByText('Remaining Usage')).toBeNull();
+    expect(within(budget).queryByText('$0.00')).toBeNull();
+    expect(budget.querySelector('.rg-budget-amount-line')).toBeNull();
+    expect(budget.querySelector('.rg-budget-bar')).toBeNull();
+  });
+
+  it('allows an uninstalled Codex row to be selected for viewing Codex App quota', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: false,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(codexRow);
+
+    expect(codexRow).toHaveClass('is-selected');
+    expect(codexRow).toHaveClass('is-uninstalled');
+    const budget = container.querySelector('.rg-budget') as HTMLElement;
+    expect(within(budget).getByText('BUDGET')).toBeTruthy();
+    expect(within(budget).getByText('Details →')).toBeTruthy();
+    expectCodexQuotaRows(budget);
+  });
+
+  it('creates a frontend-only Codex session from the Codex open button', async () => {
+    const { startSessionSpy, smartStartSessionSpy, getHistorySpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    await waitFor(() => {
+      expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('Codex');
+    });
+
+    expect(startSessionSpy).not.toHaveBeenCalled();
+    expect(smartStartSessionSpy).not.toHaveBeenCalled();
+    expect(getHistorySpy).not.toHaveBeenCalled();
+    expect(container.querySelector('.rg-task-title h1')?.textContent).toBe('Codex');
+
+    const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+    expect(savedSessions[0]).toEqual(expect.objectContaining({
+      agent: 'Codex',
+      displayName: 'Codex App',
+      frontendOnly: true,
+      instanceId: 'codex-frontend',
+      platform: 'codex',
+      title: 'Codex',
+    }));
+    expect(savedSessions[0].sessionKey).toMatch(/^codex::frontend::/);
+
+    const composer = container.querySelector('.rg-codex-composer') as HTMLElement;
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'hello Codex' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    expect(sendMessageStreamSpy).not.toHaveBeenCalled();
+    expect(screen.getByText('hello Codex')).toBeTruthy();
+    expect(await screen.findByText('This is a Codex frontend preview session. Backend data is not connected yet.')).toBeTruthy();
+  });
+
+  it('shows Codex-only composer controls with local menus and interrupt action', async () => {
+    const { sendMessageStreamSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    expect(container.querySelector('.rg-command-input')).toBeNull();
+    const taskPanel = container.querySelector('.rg-task-panel') as HTMLElement;
+    expect(taskPanel).toHaveClass('has-codex-composer');
+    expect(taskPanel.querySelector(':scope > .rg-codex-composer')).toBe(composer);
+    expect(container.querySelector('.rg-task-scroll .rg-codex-composer')).toBeNull();
+    const toolbar = composer.querySelector('.rg-codex-toolbar') as HTMLElement;
+    expect(Array.from(toolbar.children).map(child => child.className)).toEqual([
+      'rg-codex-left-controls',
+      'rg-codex-toolbar-spacer',
+      'rg-codex-right-controls',
+    ]);
+    const rightControls = composer.querySelector('.rg-codex-right-controls') as HTMLElement;
+    expect(rightControls.contains(composer.querySelector('.rg-codex-model-wrap'))).toBe(true);
+    expect(Array.from(rightControls.children).map(child => child.className)).toEqual([
+      'rg-codex-model-wrap',
+      expect.stringContaining('rg-codex-send'),
+    ]);
+
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    const planMode = within(composer).getByRole('button', { name: 'Plan Mode' });
+    const pursueGoal = within(composer).getByRole('button', { name: 'Pursue Goal' });
+    expect(planMode).toHaveAttribute('aria-pressed', 'false');
+    expect(pursueGoal).toHaveAttribute('aria-pressed', 'false');
+    expect(composer.querySelector('.rg-codex-mode-indicator')).toBeNull();
+    fireEvent.click(planMode);
+    expect(planMode).toHaveAttribute('aria-pressed', 'true');
+    expect(pursueGoal).toHaveAttribute('aria-pressed', 'false');
+    expect(composer.querySelector('.rg-codex-mode-indicator.is-plan')).toBeTruthy();
+    expect(composer.querySelector('.rg-codex-mode-indicator.is-goal')).toBeNull();
+    fireEvent.click(pursueGoal);
+    expect(planMode).toHaveAttribute('aria-pressed', 'false');
+    expect(pursueGoal).toHaveAttribute('aria-pressed', 'true');
+    expect(composer.querySelector('.rg-codex-mode-indicator.is-plan')).toBeNull();
+    expect(composer.querySelector('.rg-codex-mode-indicator.is-goal')).toBeTruthy();
+
+    const modelButton = within(composer).getByRole('button', { name: /Select Codex model/ });
+    expect(modelButton).toHaveClass('is-standard');
+    expect(modelButton).not.toHaveClass('is-fast');
+    expect(modelButton.querySelector('.lucide-zap')).toBeNull();
+    fireEvent.click(modelButton);
+    expect(within(composer).getByText('Reasoning')).toBeTruthy();
+    expect(within(composer).queryByRole('button', { name: 'GPT-5.4' })).toBeNull();
+    const modelEntry = within(composer).getByRole('button', { name: /GPT-5.5/ });
+    expect(modelEntry.querySelector('.lucide-zap')).toBeNull();
+    expect(within(composer).getByRole('button', { name: /Speed/ })).toBeTruthy();
+    fireEvent.click(modelEntry);
+    expect(composer.querySelector('.rg-codex-submenu')).toBeTruthy();
+    expect(within(composer).getAllByRole('button', { name: /GPT-5.5/ }).length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(within(composer).getByRole('button', { name: 'GPT-5.4' }));
+    expect(composer.querySelector('.rg-codex-submenu')).toBeNull();
+    fireEvent.click(within(composer).getByRole('button', { name: 'High' }));
+    fireEvent.click(within(composer).getByRole('button', { name: /Speed/ }));
+    const speedMenu = composer.querySelector('.rg-codex-submenu.is-speed') as HTMLElement;
+    expect(speedMenu).toBeTruthy();
+    const standardSpeedOption = within(speedMenu).getByRole('button', { name: /^Standard/ });
+    const fastSpeedOption = within(speedMenu).getByRole('button', { name: /^Fast/ });
+    const standardSpeedCopy = standardSpeedOption.querySelector('.rg-codex-speed-copy') as HTMLElement;
+    const fastSpeedCopy = fastSpeedOption.querySelector('.rg-codex-speed-copy') as HTMLElement;
+    expect(standardSpeedCopy).toBeTruthy();
+    expect(fastSpeedCopy).toBeTruthy();
+    fireEvent.click(fastSpeedOption);
+    expect(modelButton).toHaveClass('is-fast');
+    expect(modelButton).not.toHaveClass('is-standard');
+    expect(modelButton.querySelector('.lucide-zap')).toBeTruthy();
+    expect(modelButton.textContent).toContain('5.4');
+    expect(modelButton.textContent).toContain('High');
+
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'draft local Codex action' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    const interruptButton = await within(composer).findByRole('button', { name: 'Interrupt response' });
+    fireEvent.click(interruptButton);
+
+    expect(sendMessageStreamSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText('Interrupted Codex frontend preview response.')).toBeTruthy();
+  });
+
+  it('restores a frontend-only Codex session without loading backend history', async () => {
+    const { getHistorySpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([{
+      sessionKey: 'codex::frontend::saved-session',
+      agent: 'Codex',
+      platform: 'codex',
+      instanceId: 'codex-frontend',
+      displayName: 'Codex App',
+      frontendOnly: true,
+      title: 'Codex',
+      createdAt: '2026-06-15T00:00:00.000Z',
+      status: 'ready',
+    }]));
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Codex' })).toBeTruthy();
+    });
+
+    expect(getHistorySpy).not.toHaveBeenCalled();
+    expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('Codex');
+    const codexRow = Array.from(container.querySelectorAll('.rg-agent-row'))
+      .find(row => row.querySelector('.rg-agent-name')?.textContent === 'Codex') as HTMLElement;
+    expect(codexRow).toHaveClass('is-selected');
+    expectCodexQuotaRows(container.querySelector('.rg-budget') as HTMLElement);
+  });
+
   it('previews only active-session approvals in the right approval panel', async () => {
     mockRuntimeGuardApis();
     const activeSessionKey = 'openclaw::runtime-openclaw::active-session';
@@ -529,6 +827,15 @@ describe('RuntimeGuardConsole i18n', () => {
       expect(window.localStorage.getItem('xsafeclaw:locale')).toBe('en');
       expect(screen.getByText('New Task')).toBeTruthy();
     });
+  });
+});
+
+describe('RuntimeGuardConsole sidebar layout', () => {
+  it('aligns the budget card with the middle session panel and distributes sidebar gaps evenly', () => {
+    const metrics = runtimeGuardSidebarLayoutMetrics();
+
+    expect(metrics.budgetBottom).toBe(metrics.middleSessionPanelBottom);
+    expect(Math.max(...metrics.visibleGaps) - Math.min(...metrics.visibleGaps)).toBeLessThanOrEqual(1);
   });
 });
 

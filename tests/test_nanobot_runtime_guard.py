@@ -1111,6 +1111,70 @@ def test_install_status_uses_fast_cli_checks_without_runtime_discovery(monkeypat
     assert data["nanobot_model_configured"] is True
 
 
+def test_install_status_reports_codex_cli_health(monkeypatch, tmp_path):
+    async def fail_list_instances():
+        raise AssertionError("install-status must not perform runtime discovery")
+
+    class FakeProcess:
+        def __init__(self, args):
+            self.args = args
+            self.returncode = 0
+
+        async def communicate(self):
+            command = " ".join(str(arg) for arg in self.args)
+            if "--version" in self.args:
+                return b"codex-cli 0.139.0\n", b""
+            if "doctor" in command:
+                payload = {
+                    "overallStatus": "warning",
+                    "codexVersion": "0.139.0",
+                    "checks": {
+                        "installation": {
+                            "status": "ok",
+                            "details": {
+                                "current executable": str(tmp_path / "codex.cmd"),
+                                "install context": "npm",
+                            },
+                        },
+                        "auth.credentials": {
+                            "status": "ok",
+                            "summary": "auth is configured",
+                        },
+                        "updates.status": {
+                            "status": "warning",
+                            "summary": "update check unavailable",
+                        },
+                    },
+                }
+                return json.dumps(payload).encode("utf-8"), b""
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        return FakeProcess(args)
+
+    monkeypatch.setattr(system_routes, "list_instances", fail_list_instances)
+    monkeypatch.setattr(system_routes, "_find_openclaw", lambda: None)
+    monkeypatch.setattr(system_routes, "_find_hermes", lambda: None)
+    monkeypatch.setattr(system_routes, "_find_nanobot", lambda **_: None)
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: str(tmp_path / "codex.cmd"))
+    monkeypatch.setattr(system_routes, "_find_node_version", lambda: "v22.0.0")
+    monkeypatch.setattr(system_routes, "_CONFIG_PATH", tmp_path / "missing-openclaw.json")
+    monkeypatch.setattr(system_routes.Path, "home", lambda: tmp_path / "fake-home")
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    client = TestClient(app)
+    response = client.get("/api/system/install-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["codex_installed"] is True
+    assert data["codex_configured"] is True
+    assert data["codex_status"] == "warning"
+    assert data["codex_version"] == "0.139.0"
+    assert data["codex_path"] == str(tmp_path / "codex.cmd")
+    assert data["codex_warnings"] == ["updates.status: update check unavailable"]
+
+
 def test_install_status_does_not_require_openclaw_config_for_nanobot_only(monkeypatch, tmp_path):
     async def fail_list_instances():
         raise AssertionError("install-status must not perform runtime discovery")

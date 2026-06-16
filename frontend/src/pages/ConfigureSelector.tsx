@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bot, ChevronRight, Loader2, MessageCircle, Settings2, Zap, type LucideIcon } from 'lucide-react';
+import { Bot, ChevronRight, Loader2, MessageCircle, Settings2, Sparkles, Zap, type LucideIcon } from 'lucide-react';
 import { systemAPI, type InstallStatusResponse } from '../services/api';
 import { useI18n } from '../i18n';
 
@@ -9,14 +9,16 @@ const copy = {
     eyebrow: '运行时配置',
     title: '选择要配置的平台',
     subtitle:
-      'OpenClaw、Hermes 和 Nanobot 现在并列运行。只需配置你实际要使用的平台，未配置的平台会在 Agent Town 中以灰态展示。',
+      'OpenClaw、Hermes、Nanobot 和 Codex 可以并列运行。只需要配置实际要使用的平台，未配置的平台会在后台中保持未就绪状态。',
     loading: '正在读取安装状态...',
-    openclawTitle: 'OpenClaw 配置向导',
+    openclawTitle: 'OpenClaw 配置',
     openclawDesc: '配置 OpenClaw 模型、网关、插件、渠道和 Guard 能力。',
-    hermesTitle: 'Hermes 配置向导',
-    hermesDesc: '配置 Hermes 模型、API Key 与 Guard 钩子，写入 ~/.hermes/config.yaml 与 ~/.hermes/.env。',
-    nanobotTitle: 'Nanobot 配置向导',
+    hermesTitle: 'Hermes 配置',
+    hermesDesc: '配置 Hermes 模型、API Key 和 Guard 钩子，写入 ~/.hermes/config.yaml 和 ~/.hermes/.env。',
+    nanobotTitle: 'Nanobot 配置',
     nanobotDesc: '写入 ~/.nanobot/config.json，配置模型、API Key、gateway、WebSocket 和 Guard hook。',
+    codexTitle: 'Codex 配置',
+    codexDesc: '登录 ChatGPT，设置默认工作区、CLI 路径、权限模式和新会话模型默认值。',
     installed: '已安装',
     missing: '未安装',
     configured: '已配置',
@@ -28,7 +30,7 @@ const copy = {
     eyebrow: 'Runtime Configuration',
     title: 'Choose a platform to configure',
     subtitle:
-      'OpenClaw, Hermes and Nanobot now run side by side. Configure only the runtimes you plan to use; the others stay greyed out in Agent Town.',
+      'OpenClaw, Hermes, Nanobot and Codex can run side by side. Configure only the runtimes you plan to use; unfinished ones stay not-ready in the backend.',
     loading: 'Reading install status...',
     openclawTitle: 'OpenClaw Configure',
     openclawDesc: 'Configure OpenClaw models, gateway, plugins, channels, and Guard capabilities.',
@@ -36,6 +38,8 @@ const copy = {
     hermesDesc: 'Configure Hermes models, API key and Guard hook; writes ~/.hermes/config.yaml and ~/.hermes/.env.',
     nanobotTitle: 'Nanobot Configure',
     nanobotDesc: 'Write ~/.nanobot/config.json for model, API key, gateway, WebSocket, and Guard hook settings.',
+    codexTitle: 'Codex Configure',
+    codexDesc: 'Sign in with ChatGPT, set the default workspace, CLI path, permissions, and new-session model defaults.',
     installed: 'Installed',
     missing: 'Missing',
     configured: 'Configured',
@@ -50,10 +54,10 @@ interface ConfigureCardProps {
   desc: string;
   installed: boolean;
   configured: boolean;
-  accent: 'blue' | 'cyan' | 'purple';
+  accent: 'blue' | 'cyan' | 'purple' | 'emerald';
   icon: LucideIcon;
   onClick: () => void;
-  labels: typeof copy.zh;
+  labels: typeof copy.en;
 }
 
 function ConfigureCard({ title, desc, installed, configured, accent, icon: Icon, onClick, labels }: ConfigureCardProps) {
@@ -61,20 +65,20 @@ function ConfigureCard({ title, desc, installed, configured, accent, icon: Icon,
     blue: 'border-blue-500/30 bg-blue-500/5 text-blue-300',
     cyan: 'border-cyan-500/30 bg-cyan-500/5 text-cyan-300',
     purple: 'border-purple-500/30 bg-purple-500/5 text-purple-300',
+    emerald: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300',
   } as const;
   const buttonMap = {
     blue: 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/25',
     cyan: 'bg-cyan-500 hover:bg-cyan-600 shadow-cyan-500/25',
     purple: 'bg-purple-500 hover:bg-purple-600 shadow-purple-500/25',
+    emerald: 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/25',
   } as const;
-  const accentClasses = accentMap[accent];
-  const buttonClasses = buttonMap[accent];
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`group text-left border rounded-3xl p-6 transition-all hover:-translate-y-1 hover:shadow-2xl ${accentClasses}`}
+      className={`group text-left border rounded-3xl p-6 transition-all hover:-translate-y-1 hover:shadow-2xl ${accentMap[accent]}`}
     >
       <div className="flex items-start justify-between gap-4">
         <div className="w-12 h-12 rounded-2xl bg-surface-0/70 border border-white/10 flex items-center justify-center">
@@ -90,8 +94,8 @@ function ConfigureCard({ title, desc, installed, configured, accent, icon: Icon,
         </div>
       </div>
       <h2 className="mt-6 text-xl font-black text-text-primary">{title}</h2>
-      <p className="mt-3 min-h-[54px] text-[13px] leading-6 text-text-secondary">{desc}</p>
-      <div className={`mt-6 inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] font-bold text-white shadow-lg ${buttonClasses}`}>
+      <p className="mt-3 min-h-[78px] text-[13px] leading-6 text-text-secondary">{desc}</p>
+      <div className={`mt-6 inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13px] font-bold text-white shadow-lg ${buttonMap[accent]}`}>
         {labels.enter}
         <ChevronRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
       </div>
@@ -102,7 +106,7 @@ function ConfigureCard({ title, desc, installed, configured, accent, icon: Icon,
 export default function ConfigureSelector() {
   const navigate = useNavigate();
   const { locale } = useI18n();
-  const labels = copy[locale];
+  const labels = copy[locale] ?? copy.en;
   const [status, setStatus] = useState<InstallStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -122,15 +126,12 @@ export default function ConfigureSelector() {
   const openclawInstalled = Boolean(status?.openclaw_installed);
   const hermesInstalled = Boolean(status?.hermes_installed);
   const nanobotInstalled = Boolean(status?.nanobot_installed);
+  const codexInstalled = Boolean(status?.codex_installed);
 
   return (
     <div className="min-h-screen relative overflow-hidden bg-[#070b10] text-text-primary">
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute -top-24 left-1/3 w-[520px] h-[520px] rounded-full bg-blue-500/10 blur-3xl" />
-        <div className="absolute top-1/3 right-0 w-[420px] h-[420px] rounded-full bg-cyan-500/10 blur-3xl" />
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.08),transparent_25%),linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:auto,44px_44px,44px_44px]" />
-      </div>
-      <div className="relative z-10 max-w-5xl mx-auto px-6 py-14">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.08),transparent_25%),linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:auto,44px_44px,44px_44px]" />
+      <div className="relative z-10 max-w-6xl mx-auto px-6 py-14">
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.24em] text-cyan-200">
@@ -155,7 +156,7 @@ export default function ConfigureSelector() {
             {labels.loading}
           </div>
         ) : (
-          <div className="mt-12 grid gap-5 md:grid-cols-3">
+          <div className="mt-12 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
             <ConfigureCard
               title={labels.openclawTitle}
               desc={labels.openclawDesc}
@@ -184,6 +185,16 @@ export default function ConfigureSelector() {
               accent="cyan"
               icon={Bot}
               onClick={() => navigate(nanobotInstalled ? '/nanobot_configure' : '/setup', { replace: true })}
+              labels={labels}
+            />
+            <ConfigureCard
+              title={labels.codexTitle}
+              desc={labels.codexDesc}
+              installed={codexInstalled}
+              configured={codexInstalled && Boolean(status?.codex_configured)}
+              accent="emerald"
+              icon={Sparkles}
+              onClick={() => navigate(codexInstalled ? '/codex_configure' : '/setup', { replace: true })}
               labels={labels}
             />
           </div>

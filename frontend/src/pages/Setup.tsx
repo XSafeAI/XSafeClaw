@@ -7,13 +7,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   CheckCircle, Download, Loader2, XCircle, ChevronRight, Terminal,
-  ArrowDownToLine, Zap, Bot, Code2, Settings2, MapPin, Activity,
+  ArrowDownToLine, Zap, Bot, Code2, Settings2, MapPin, Activity, Sparkles,
 } from 'lucide-react';
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
 
 type Stage = 'checking' | 'selecting' | 'downloading_node' | 'installing_openclaw' | 'installing_nanobot' | 'installing_hermes' | 'install_failed' | 'install_hermes_failed';
-type Platform = 'openclaw' | 'nanobot' | 'hermes';
+type Platform = 'openclaw' | 'nanobot' | 'hermes' | 'codex';
 type HostOs = 'windows' | 'macos' | 'linux';
 
 interface PlatformInfo {
@@ -124,13 +124,14 @@ interface SetupCardProps {
 function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: SetupCardProps) {
   const isOpenClaw = platform === 'openclaw';
   const isHermes = platform === 'hermes';
-  const name = isOpenClaw ? 'OpenClaw' : isHermes ? 'Hermes Agent' : 'Nanobot';
-  const Icon = isOpenClaw ? Zap : isHermes ? Code2 : Bot;
+  const isCodex = platform === 'codex';
+  const name = isOpenClaw ? 'OpenClaw' : isHermes ? 'Hermes Agent' : isCodex ? (t.setup.codexName || 'Codex CLI') : 'Nanobot';
+  const Icon = isOpenClaw ? Zap : isHermes ? Code2 : isCodex ? Sparkles : Bot;
   const isInstalled = info.installed === true;
   const isUnknown = info.installed === null;
-  const accentColor = isOpenClaw ? 'border-blue-500/30 bg-blue-500/5' : isHermes ? 'border-violet-500/30 bg-violet-500/5' : 'border-cyan-500/30 bg-cyan-500/5';
-  const iconBg = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : 'bg-cyan-500/15 text-cyan-400';
-  const badgeInstalled = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : 'bg-cyan-500/15 text-cyan-400';
+  const accentColor = isOpenClaw ? 'border-blue-500/30 bg-blue-500/5' : isHermes ? 'border-violet-500/30 bg-violet-500/5' : isCodex ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-cyan-500/30 bg-cyan-500/5';
+  const iconBg = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : isCodex ? 'bg-emerald-500/15 text-emerald-300' : 'bg-cyan-500/15 text-cyan-400';
+  const badgeInstalled = isOpenClaw ? 'bg-blue-500/15 text-blue-400' : isHermes ? 'bg-violet-500/15 text-violet-400' : isCodex ? 'bg-emerald-500/15 text-emerald-300' : 'bg-cyan-500/15 text-cyan-400';
   const badgeNotInstalled = 'bg-surface-2 text-text-muted';
 
   // §50 — installed cards become a single big click target that opens the
@@ -188,7 +189,9 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
               ? t.setup.openclawDesc
               : isHermes
                 ? (t.setup as any).hermesDesc
-                : t.setup.nanobotDesc}
+                : isCodex
+                  ? (t.setup.codexDesc || 'OpenAI Codex command-line agent runtime.')
+                  : t.setup.nanobotDesc}
           </p>
           {isInstalled && info.version && (
             <p className="text-[11px] text-text-muted mt-1 font-mono">
@@ -206,11 +209,13 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
               ? 'bg-blue-500 hover:bg-blue-600 text-white shadow-blue-500/25'
               : isHermes
                 ? 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-600/25'
+                : isCodex
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/25'
                 : 'bg-cyan-500 hover:bg-cyan-600 text-white shadow-cyan-500/25'
           }`}
         >
           <Download className="w-4 h-4" />
-          {isOpenClaw ? t.setup.installOpenClaw : isHermes ? ((t.setup as any).hermesGuideTitle || 'Install Hermes Agent') : t.setup.installNanobot}
+          {isOpenClaw ? t.setup.installOpenClaw : isHermes ? ((t.setup as any).hermesGuideTitle || 'Install Hermes Agent') : isCodex ? (t.setup.installCodex || 'Install Codex') : t.setup.installNanobot}
           <ChevronRight className="w-4 h-4" />
         </button>
       )}
@@ -284,6 +289,7 @@ export default function Setup() {
   const [openclawInfo, setOpenclawInfo] = useState<PlatformInfo>({ installed: null });
   const [nanobotInfo, setNanobotInfo] = useState<PlatformInfo>({ installed: null, configured: false });
   const [hermesInfo, setHermesInfo] = useState<PlatformInfo>({ installed: null, configured: false });
+  const [codexInfo, setCodexInfo] = useState<PlatformInfo>({ installed: null, configured: false });
   const [installingPlatform, setInstallingPlatform] = useState<Platform | null>(null);
   const [detectionError, setDetectionError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
@@ -302,6 +308,7 @@ export default function Setup() {
       const openclawOk = Boolean(d.openclaw_installed);
       const nanobotOk = Boolean(d.nanobot_installed);
       const hermesOk = Boolean(d.hermes_installed);
+      const codexOk = Boolean(d.codex_installed);
 
       setOpenclawInfo({
         installed: openclawOk,
@@ -318,10 +325,16 @@ export default function Setup() {
         version: d.hermes_version || undefined,
         configured: hermesOk && Boolean(d.config_exists),
       });
+      setCodexInfo({
+        installed: codexOk,
+        version: d.codex_version || undefined,
+        configured: codexOk && Boolean(d.codex_configured),
+      });
     } catch {
       setOpenclawInfo({ installed: null });
       setNanobotInfo({ installed: null, configured: false });
       setHermesInfo({ installed: null, configured: false });
+      setCodexInfo({ installed: null, configured: false });
       setDetectionError(t.setup.detectFailed || 'Runtime detection failed. Check the backend and retry.');
     } finally {
       setStage('selecting');
@@ -519,6 +532,10 @@ export default function Setup() {
     }
   };
 
+  const handleInstallCodex = () => {
+    window.open('https://github.com/openai/codex#installing-and-running-codex-cli', '_blank', 'noopener,noreferrer');
+  };
+
   const handleRetry = () => {
     setLogs([]);
     setNodeStatus(null);
@@ -598,6 +615,14 @@ export default function Setup() {
                 installing={installingPlatform === 'hermes'}
                 onInstall={handleInstallHermes}
                 onConfigure={() => navigate('/hermes_configure', { replace: true })}
+                t={t}
+              />
+              <SetupCard
+                platform="codex"
+                info={codexInfo}
+                installing={installingPlatform === 'codex'}
+                onInstall={handleInstallCodex}
+                onConfigure={() => navigate('/codex_configure', { replace: true })}
                 t={t}
               />
 

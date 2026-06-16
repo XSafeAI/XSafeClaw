@@ -20,6 +20,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ClipboardList,
   Cpu,
   FolderOpen,
   GitBranch,
@@ -27,9 +28,11 @@ import {
   Loader2,
   Lock,
   Network,
+  Plus,
   Route,
   Send,
   Shield,
+  Target,
   Terminal,
   Trash2,
   User,
@@ -82,18 +85,26 @@ import {
   type RuntimeGuardToolPermission,
   type RuntimeGuardToolPermissions,
 } from './runtimeGuardToolPolicy';
+import { loadCodexConfig } from './CodexConfigure';
 import './RuntimeGuardConsole.css';
 
-export type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
+export type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot' | 'Codex';
+type RuntimeAgentName = Exclude<AgentName, 'Codex'>;
 type RuntimePlatform = RuntimeInstance['platform'];
+type RuntimeGuardSessionPlatform = RuntimePlatform | 'codex';
 type RuntimeBudgetStatusMap = Record<RuntimeBudgetPlatform, RuntimeBudgetStatus>;
 type GuardMode = 'Off' | 'On';
 type AgentStatus = 'Running' | 'Idle' | 'Not installed';
+type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh';
+type CodexModelOption = 'GPT-5.5' | 'GPT-5.4' | 'GPT-5.4-Mini' | 'GPT-5.3-Codex-Spark';
+type CodexSpeedOption = 'standard' | 'fast';
+type CodexComposerMenu = 'options' | 'model' | null;
+type CodexSubmenu = 'model' | 'speed' | null;
 export type RuntimeGuardSession = {
   sessionKey: string;
   historySessionId?: string;
   agent: AgentName;
-  platform: RuntimePlatform;
+  platform: RuntimeGuardSessionPlatform;
   instanceId: string;
   displayName?: string;
   workspacePath?: string;
@@ -102,6 +113,7 @@ export type RuntimeGuardSession = {
   lastActivityAt?: string;
   status: 'ready' | 'error';
   autoTitlePending?: boolean;
+  frontendOnly?: boolean;
 };
 type InstallMap = Record<AgentName, boolean | null>;
 type AgentDisplay = {
@@ -109,6 +121,7 @@ type AgentDisplay = {
   status: AgentStatus;
   className: string;
   installed: boolean;
+  runtimeBacked: boolean;
 };
 type RuntimeGuardModal = 'tools' | 'sessions' | 'approvals' | 'blocked' | null;
 type SessionHistoryAgentFilter = 'All' | AgentName;
@@ -127,7 +140,7 @@ const RUNTIME_GUARD_MIN_DESIGN_WIDTH = RUNTIME_GUARD_LEFT_WIDTH + RUNTIME_GUARD_
 const RUNTIME_GUARD_RIGHT_EDGE_GUARD = 2;
 
 const agentDefinitions: Array<{
-  name: AgentName;
+  name: RuntimeAgentName;
   platform: RuntimeBudgetPlatform;
   className: string;
 }> = [
@@ -136,8 +149,64 @@ const agentDefinitions: Array<{
   { name: 'Nanobot', platform: 'nanobot', className: 'agent-nanobot' },
 ];
 
+const sidebarAgentDefinitions: Array<{
+  name: AgentName;
+  platform?: RuntimeBudgetPlatform;
+  className: string;
+  runtimeBacked: boolean;
+}> = [
+  ...agentDefinitions.map(agent => ({ ...agent, runtimeBacked: true })),
+  { name: 'Codex', className: 'agent-codex', runtimeBacked: false },
+];
+
+const RUNTIME_GUARD_SIDEBAR_LAYOUT = {
+  agentsTop: 94,
+  agentsHeight: 162,
+  agentRowsTop: 18,
+  agentRowGap: 36,
+  agentRowHeight: 34,
+  toolsTop: 263,
+  toolRowsTop: 20,
+  toolRowGap: 23,
+  toolRowHeight: 15,
+  toolCount: 3,
+  safetyTop: 354,
+  safetyLastRowTop: 55,
+  safetyRowHeight: 28,
+  budgetTop: 446,
+  budgetHeight: 92,
+  taskPanelTopBase: 88,
+  taskPanelHeightBase: 450,
+} as const;
+
+export function runtimeGuardSidebarLayoutMetrics() {
+  const agentsVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.agentsTop
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.agentRowsTop
+    + (sidebarAgentDefinitions.length - 1) * RUNTIME_GUARD_SIDEBAR_LAYOUT.agentRowGap
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.agentRowHeight;
+  const toolsVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.toolsTop
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.toolRowsTop
+    + (RUNTIME_GUARD_SIDEBAR_LAYOUT.toolCount - 1) * RUNTIME_GUARD_SIDEBAR_LAYOUT.toolRowGap
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.toolRowHeight;
+  const safetyVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyTop
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyLastRowTop
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyRowHeight;
+  return {
+    budgetBottom: RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop + RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetHeight,
+    middleSessionPanelBottom: RUNTIME_GUARD_SIDEBAR_LAYOUT.taskPanelTopBase + RUNTIME_GUARD_SIDEBAR_LAYOUT.taskPanelHeightBase,
+    visibleGaps: [
+      RUNTIME_GUARD_SIDEBAR_LAYOUT.toolsTop - agentsVisibleBottom,
+      RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyTop - toolsVisibleBottom,
+      RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop - safetyVisibleBottom,
+    ],
+  };
+}
+
 const sessionHistoryFilters: SessionHistoryAgentFilter[] = ['All', 'OpenClaw', 'Hermes', 'Nanobot'];
 const runtimeBudgetPlatforms: RuntimeBudgetPlatform[] = ['openclaw', 'hermes', 'nanobot'];
+const codexReasoningOptions: CodexReasoningLevel[] = ['low', 'medium', 'high', 'xhigh'];
+const codexModelOptions: CodexModelOption[] = ['GPT-5.5', 'GPT-5.4', 'GPT-5.4-Mini', 'GPT-5.3-Codex-Spark'];
+const codexSpeedOptions: CodexSpeedOption[] = ['standard', 'fast'];
 const DEFAULT_BUDGET_PERIOD_MS = 24 * 60 * 60 * 1000;
 
 function defaultRuntimeBudgetStatus(platform: RuntimeBudgetPlatform, now = Date.now()): RuntimeBudgetStatus {
@@ -625,6 +694,16 @@ function isRuntimePlatform(value: unknown): value is RuntimePlatform {
   return value === 'openclaw' || value === 'hermes' || value === 'nanobot';
 }
 
+function isRuntimeBudgetPlatform(value: unknown): value is RuntimeBudgetPlatform {
+  return runtimeBudgetPlatforms.includes(value as RuntimeBudgetPlatform);
+}
+
+function isRuntimeBackedSession(
+  session: RuntimeGuardSession,
+): session is RuntimeGuardSession & { platform: RuntimePlatform; frontendOnly?: false } {
+  return !session.frontendOnly && isRuntimePlatform(session.platform);
+}
+
 function platformToAgent(platform: RuntimePlatform): AgentName {
   if (platform === 'hermes') return 'Hermes';
   if (platform === 'nanobot') return 'Nanobot';
@@ -720,21 +799,25 @@ function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
         const sessionKey = typeof item?.sessionKey === 'string' ? item.sessionKey : '';
         const platform = item?.platform;
         const agent = item?.agent;
-        if (!sessionKey || !['openclaw', 'hermes', 'nanobot'].includes(platform)) return null;
-        if (!['OpenClaw', 'Hermes', 'Nanobot'].includes(agent)) return null;
+        const isFrontendCodex = platform === 'codex' && agent === 'Codex';
+        const isRuntimeSession = isRuntimePlatform(platform) && ['OpenClaw', 'Hermes', 'Nanobot'].includes(agent);
+        if (!sessionKey || (!isRuntimeSession && !isFrontendCodex)) return null;
+        const sessionAgent = (isFrontendCodex ? 'Codex' : agent) as AgentName;
+        const sessionPlatform = (isFrontendCodex ? 'codex' : platform) as RuntimeGuardSessionPlatform;
         return {
           sessionKey,
           historySessionId: typeof item?.historySessionId === 'string' ? item.historySessionId : undefined,
-          agent,
-          platform,
+          agent: sessionAgent,
+          platform: sessionPlatform,
           instanceId: typeof item?.instanceId === 'string' ? item.instanceId : '',
           displayName: typeof item?.displayName === 'string' ? item.displayName : undefined,
           workspacePath: typeof item?.workspacePath === 'string' ? item.workspacePath : undefined,
-          title: titleFromUserMessage(typeof item?.title === 'string' ? item.title : '', agent) || agent,
+          title: titleFromUserMessage(typeof item?.title === 'string' ? item.title : '', sessionAgent) || sessionAgent,
           createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
           lastActivityAt: typeof item?.lastActivityAt === 'string' ? item.lastActivityAt : undefined,
           status: item?.status === 'error' ? 'error' : 'ready',
           autoTitlePending: Boolean(item?.autoTitlePending),
+          frontendOnly: isFrontendCodex || Boolean(item?.frontendOnly),
         };
       })
       .filter((item): item is RuntimeGuardSession => item !== null);
@@ -827,9 +910,11 @@ function sessionWorkspacePath(
   copy: RuntimeGuardCopy,
 ): string {
   const exactInstance = instances.find(instance => instance.instance_id === session.instanceId);
-  const platformInstance = instances.find(instance => (
-    instance.platform === session.platform && instance.enabled && instance.workspace_path
-  ));
+  const platformInstance = isRuntimePlatform(session.platform)
+    ? instances.find(instance => (
+      instance.platform === session.platform && instance.enabled && instance.workspace_path
+    ))
+    : undefined;
   return firstText(
     session.workspacePath,
     exactInstance?.workspace_path,
@@ -1085,17 +1170,31 @@ function formatValue(value: any): string {
   }
 }
 
+function isRuntimeAgentName(agent: AgentName): agent is RuntimeAgentName {
+  return agent !== 'Codex';
+}
+
 function agentToPlatform(agent: AgentName): RuntimePlatform {
+  if (!isRuntimeAgentName(agent)) return 'openclaw';
   return agentDefinitions.find(item => item.name === agent)?.platform ?? 'openclaw';
+}
+
+function shortCodexModelLabel(model: CodexModelOption): string {
+  if (model === 'GPT-5.5') return '5.5';
+  if (model === 'GPT-5.4') return '5.4';
+  if (model === 'GPT-5.4-Mini') return '5.4-Mini';
+  return '5.3 Spark';
 }
 
 function configureRouteForAgent(agent: AgentName): string {
   if (agent === 'Hermes') return '/hermes_configure';
   if (agent === 'Nanobot') return '/nanobot_configure';
+  if (agent === 'Codex') return '/codex_configure';
   return '/openclaw_configure';
 }
 
 function findRuntimeForAgentInInstances(agent: AgentName, instances: RuntimeInstance[]): RuntimeInstance | null {
+  if (!isRuntimeAgentName(agent)) return null;
   const platform = agentToPlatform(agent);
   return instances.find(instance => instance.platform === platform && instance.is_default)
     ?? instances.find(instance => instance.platform === platform)
@@ -1105,11 +1204,12 @@ function findRuntimeForAgentInInstances(agent: AgentName, instances: RuntimeInst
 function agentIconComponent(agent: AgentName): LucideIcon {
   if (agent === 'OpenClaw') return Zap;
   if (agent === 'Hermes') return Route;
-  return Cpu;
+  if (agent === 'Nanobot') return Cpu;
+  return Brain;
 }
 
 function agentClassName(agent: AgentName): string {
-  return agentDefinitions.find(item => item.name === agent)?.className ?? 'agent-openclaw';
+  return sidebarAgentDefinitions.find(item => item.name === agent)?.className ?? 'agent-openclaw';
 }
 
 export function AgentIconBadge({
@@ -1977,6 +2077,7 @@ export default function RuntimeGuardConsole() {
     OpenClaw: null,
     Hermes: null,
     Nanobot: null,
+    Codex: null,
   });
   const [installProbeFailed, setInstallProbeFailed] = useState(false);
   const [xsafeclawVersion, setXsafeclawVersion] = useState<string | null>(BUILD_TIME_XSAFECLAW_VERSION);
@@ -1984,7 +2085,7 @@ export default function RuntimeGuardConsole() {
   const [activeSessionId, setActiveSessionId] = useState(() => loadRuntimeGuardSessions()[0]?.sessionKey ?? '');
   const [sessionHistoryItems, setSessionHistoryItems] = useState<RuntimeGuardSession[]>([]);
   const [sessionHistoryLoading, setSessionHistoryLoading] = useState(true);
-  const [selectedAgent, setSelectedAgent] = useState<AgentName>('OpenClaw');
+  const [selectedAgent, setSelectedAgent] = useState<AgentName>(() => loadRuntimeGuardSessions()[0]?.agent ?? 'OpenClaw');
   const [draftBySessionKey, setDraftBySessionKey] = useState<Record<string, string>>(() => loadRuntimeGuardDrafts());
   const [loadingHistory, setLoadingHistory] = useState<string | null>(null);
   const [creatingAgent, setCreatingAgent] = useState<AgentName | null>(null);
@@ -2012,6 +2113,14 @@ export default function RuntimeGuardConsole() {
   const [budgetAmountInput, setBudgetAmountInput] = useState('');
   const [budgetPeriodInput, setBudgetPeriodInput] = useState('');
   const [budgetPeriodUnit, setBudgetPeriodUnit] = useState<BudgetPeriodUnit>('hour');
+  const initialCodexConfig = useMemo(() => loadCodexConfig(), []);
+  const [codexComposerMenu, setCodexComposerMenu] = useState<CodexComposerMenu>(null);
+  const [codexSubmenu, setCodexSubmenu] = useState<CodexSubmenu>(null);
+  const [codexPlanMode, setCodexPlanMode] = useState(false);
+  const [codexGoalMode, setCodexGoalMode] = useState(false);
+  const [codexReasoningLevel, setCodexReasoningLevel] = useState<CodexReasoningLevel>(initialCodexConfig.defaultReasoning);
+  const [codexModel, setCodexModel] = useState<CodexModelOption>(initialCodexConfig.defaultModel);
+  const [codexSpeed, setCodexSpeed] = useState<CodexSpeedOption>(initialCodexConfig.defaultSpeed);
 
   useEffect(() => {
     const previousTitle = document.title;
@@ -2035,6 +2144,12 @@ export default function RuntimeGuardConsole() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inFlightKeysRef = useRef<Set<string>>(new Set());
   const approvalRefreshTimerRef = useRef<number | null>(null);
+  const codexPreviewTimersRef = useRef<Record<string, number>>({});
+
+  useEffect(() => () => {
+    Object.values(codexPreviewTimersRef.current).forEach(timer => window.clearTimeout(timer));
+    codexPreviewTimersRef.current = {};
+  }, []);
 
   const setMessageMap = useCallback((
     updaterOrValue: Record<string, ChatMessage[]> | ((prev: Record<string, ChatMessage[]>) => Record<string, ChatMessage[]>),
@@ -2049,6 +2164,7 @@ export default function RuntimeGuardConsole() {
   const activeSession = sessions.find(session => session.sessionKey === activeSessionId) ?? null;
   const activeSessionKey = activeSession?.sessionKey ?? '';
   const activeAgent = activeSession?.agent ?? selectedAgent;
+  const activeSessionIsCodex = activeSession?.agent === 'Codex';
   const activeMessages = useMemo(
     () => (activeSessionKey ? (messageMap[activeSessionKey] ?? []) : []),
     [activeSessionKey, messageMap],
@@ -2074,6 +2190,22 @@ export default function RuntimeGuardConsole() {
   );
   const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
   const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
+  const codexComposerCopy = copy.codexComposer;
+  const codexModelSummary = `${shortCodexModelLabel(codexModel)} ${codexComposerCopy.reasoning[codexReasoningLevel]}`;
+  const toggleCodexPlanMode = () => {
+    const nextPlanMode = !codexPlanMode;
+    setCodexPlanMode(nextPlanMode);
+    if (nextPlanMode) {
+      setCodexGoalMode(false);
+    }
+  };
+  const toggleCodexGoalMode = () => {
+    const nextGoalMode = !codexGoalMode;
+    setCodexGoalMode(nextGoalMode);
+    if (nextGoalMode) {
+      setCodexPlanMode(false);
+    }
+  };
   const availableInstances = useMemo(
     () => (runtimeInstancesQuery.data?.instances ?? []).filter(instance => instance.enabled),
     [runtimeInstancesQuery.data?.instances],
@@ -2088,7 +2220,9 @@ export default function RuntimeGuardConsole() {
     }),
     [availableInstances, installProbeFailed, installedAgents],
   );
-  const activeBudgetPlatform = (activeSession?.platform ?? agentToPlatform(selectedAgent)) as RuntimeBudgetPlatform;
+  const activeBudgetPlatform = isRuntimeBudgetPlatform(activeSession?.platform)
+    ? activeSession.platform
+    : agentToPlatform(selectedAgent);
   const sidebarTools = useMemo(() => ([
     ...configurableTools.map(tool => {
       const permission = toolPermissions[tool.id];
@@ -2222,6 +2356,7 @@ export default function RuntimeGuardConsole() {
           OpenClaw: Boolean(res.data.openclaw_installed),
           Hermes: Boolean(res.data.hermes_installed),
           Nanobot: Boolean(res.data.nanobot_installed),
+          Codex: Boolean(res.data.codex_installed),
         });
         setXsafeclawVersion(res.data.xsafeclaw_version ?? BUILD_TIME_XSAFECLAW_VERSION);
         setInstallProbeFailed(false);
@@ -2277,10 +2412,15 @@ export default function RuntimeGuardConsole() {
 
   const loadHistory = useCallback(async (sessionKey: string, force = false) => {
     if (!force && chatStreamStore.hasLoadedMessages(sessionKey)) return;
+    const session = sessions.find(session => session.sessionKey === sessionKey);
+    if (session && !isRuntimeBackedSession(session)) {
+      setMessageMap(prev => ({ ...prev, [sessionKey]: prev[sessionKey] ?? [] }));
+      return;
+    }
     setLoadingHistory(sessionKey);
     try {
       const res = await chatAPI.getHistory(sessionKey);
-      const sessionPlatform = sessions.find(session => session.sessionKey === sessionKey)?.platform;
+      const sessionPlatform = session?.platform;
       const loaded = (res.data.messages ?? [])
         .map((message: any) => mapHistoryMessage(message, sessionPlatform))
         .filter((message): message is ChatMessage => message !== null);
@@ -2358,16 +2498,19 @@ export default function RuntimeGuardConsole() {
     [guardMode, toolPermissions, unresolvedApprovalItems.length],
   );
   const agents: AgentDisplay[] = useMemo(
-    () => agentDefinitions.map(agent => {
+    () => sidebarAgentDefinitions.map(agent => {
       const installed = installedAgents[agent.name];
       const probeUnknown = installed === null || installProbeFailed;
-      const inferredInstalled = probeUnknown
-        ? availableInstances.some(instance => instance.platform === agent.platform) || installed !== false
-        : Boolean(installed);
+      const inferredInstalled = agent.runtimeBacked
+        ? probeUnknown
+          ? availableInstances.some(instance => instance.platform === agent.platform) || installed !== false
+          : Boolean(installed)
+        : installed === true;
       return {
         name: agent.name,
         className: agent.className,
         installed: inferredInstalled,
+        runtimeBacked: agent.runtimeBacked,
         status: runtimeGuardAgentStatus(agent.name, inferredInstalled, sessions, messageMap, sendingMap),
       };
     }),
@@ -2394,6 +2537,9 @@ export default function RuntimeGuardConsole() {
   const budgetResetText = budgetConfigured
     ? rgText(copy.sidebar.resetsIn, { time: formatBudgetRefreshTime(budgetRemainingMs, copy) })
     : rgText(copy.sidebar.totalCost, { agent: selectedBudgetAgentName });
+  const showCodexQuotaBudget = selectedAgent === 'Codex';
+  const codexFiveHourRemainingPercent = 81;
+  const codexWeekRemainingPercent = 72;
 
   const showToast = useCallback((message: string, timeout = 2600) => {
     setPlaceholder(message);
@@ -2604,10 +2750,45 @@ export default function RuntimeGuardConsole() {
     return session;
   }, [sessions, setMessageMap]);
 
+  const addFrontendCodexSession = useCallback(() => {
+    const now = new Date().toISOString();
+    const sameAgentCount = sessions.filter(session => session.agent === 'Codex').length + 1;
+    const label = sameAgentCount === 1 ? 'Codex' : `Codex ${sameAgentCount}`;
+    const session: RuntimeGuardSession = {
+      sessionKey: `codex::frontend::${uuidv4()}`,
+      agent: 'Codex',
+      platform: 'codex',
+      instanceId: 'codex-frontend',
+      displayName: 'Codex App',
+      title: label,
+      createdAt: now,
+      lastActivityAt: now,
+      status: 'ready',
+      autoTitlePending: false,
+      frontendOnly: true,
+    };
+
+    setSessions(current => [session, ...current]);
+    setSessionHistoryItems(current => sortSessionsNewestFirst([session, ...current.filter(item => item.sessionKey !== session.sessionKey)]));
+    setMessageMap(prev => ({ ...prev, [session.sessionKey]: [] }));
+    setDraftBySessionKey(current => ({ ...current, [session.sessionKey]: current[session.sessionKey] ?? '' }));
+    setActiveSessionId(session.sessionKey);
+    setSelectedAgent('Codex');
+    return session;
+  }, [sessions, setMessageMap]);
+
   const openSession = useCallback(async (agent: AgentName, installed = true) => {
     if (creatingAgent) return;
     if (!installed) {
       showInstallHint(agent);
+      return;
+    }
+    if (agent === 'Codex') {
+      addFrontendCodexSession();
+      return;
+    }
+    if (!isRuntimeAgentName(agent)) {
+      showToast(rgText(copy.toasts.noEnabledRuntime, { agent }));
       return;
     }
     if (runtimeInstancesQuery.isLoading) {
@@ -2641,6 +2822,7 @@ export default function RuntimeGuardConsole() {
   }, [
     creatingAgent,
     addCreatedRuntimeSession,
+    addFrontendCodexSession,
     findRuntimeForAgent,
     copy,
     runtimeInstancesQuery.isLoading,
@@ -2831,6 +3013,51 @@ export default function RuntimeGuardConsole() {
     const originalKey = session.sessionKey;
     const text = rawText.trim();
     if (!text || (sendingMap[originalKey] ?? false) || inFlightKeysRef.current.has(originalKey)) return;
+
+    if (!isRuntimeBackedSession(session)) {
+      const activity = new Date();
+      const activityIso = activity.toISOString();
+      const userMsg: ChatMessage = {
+        id: uuidv4(),
+        role: 'user',
+        content: text,
+        timestamp: activity,
+      };
+      const pendingId = uuidv4();
+      const assistantMsg: ChatMessage = {
+        id: pendingId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        pending: true,
+      };
+
+      inFlightKeysRef.current.add(originalKey);
+      chatStreamStore.setSending(originalKey, true);
+      setDraftBySessionKey(current => ({ ...current, [originalKey]: '' }));
+      setSessions(current => current.map(session => (
+        session.sessionKey === originalKey ? { ...session, lastActivityAt: activityIso } : session
+      )));
+      setSessionHistoryItems(current => sortSessionsNewestFirst(current.map(session => (
+        session.sessionKey === originalKey ? { ...session, lastActivityAt: activityIso } : session
+      ))));
+      setMessageMap(prev => ({ ...prev, [originalKey]: [...(prev[originalKey] ?? []), userMsg, assistantMsg] }));
+      const timer = window.setTimeout(() => {
+        setMessageMap(prev => ({
+          ...prev,
+          [originalKey]: (prev[originalKey] ?? []).map(message => (
+            message.id === pendingId
+              ? { ...message, content: copy.codexComposer.previewReply, pending: false }
+              : message
+          )),
+        }));
+        chatStreamStore.setSending(originalKey, false);
+        inFlightKeysRef.current.delete(originalKey);
+        delete codexPreviewTimersRef.current[originalKey];
+      }, 900);
+      codexPreviewTimersRef.current[originalKey] = timer;
+      return;
+    }
 
     const sessionBudgetPlatform = session.platform as RuntimeBudgetPlatform;
     const sessionBudgetStatus = runtimeBudgetStatuses[sessionBudgetPlatform] ?? defaultRuntimeBudgetStatus(sessionBudgetPlatform);
@@ -3139,6 +3366,26 @@ export default function RuntimeGuardConsole() {
     await sendMessageForSession(activeSession, activeDraft);
   };
 
+  const handleCodexInterrupt = () => {
+    if (!activeSession || isRuntimeBackedSession(activeSession)) return;
+    const key = activeSession.sessionKey;
+    const timer = codexPreviewTimersRef.current[key];
+    if (timer) {
+      window.clearTimeout(timer);
+      delete codexPreviewTimersRef.current[key];
+    }
+    setMessageMap(prev => ({
+      ...prev,
+      [key]: (prev[key] ?? []).map(message => (
+        message.pending
+          ? { ...message, content: copy.codexComposer.interrupted, pending: false }
+          : message
+      )),
+    }));
+    chatStreamStore.setSending(key, false);
+    inFlightKeysRef.current.delete(key);
+  };
+
   const handleInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || event.shiftKey || isComposing) return;
     event.preventDefault();
@@ -3341,7 +3588,13 @@ export default function RuntimeGuardConsole() {
           <span>{copy.sidebar.newTask}</span>
         </button>
 
-        <section className="rg-agents">
+        <section
+          className="rg-agents"
+          style={{
+            top: RUNTIME_GUARD_SIDEBAR_LAYOUT.agentsTop,
+            height: RUNTIME_GUARD_SIDEBAR_LAYOUT.agentsHeight,
+          }}
+        >
           <div className="rg-section-title">
             <span>{copy.sidebar.agents}</span>
             <button type="button" title={copy.sidebar.setupTitle} onClick={() => navigate('/setup')}>+</button>
@@ -3355,6 +3608,10 @@ export default function RuntimeGuardConsole() {
                 ? rgText(copy.sidebar.runtimeConfigureTitle, { agent: agent.name })
                 : rgText(copy.sidebar.notInstalledTitle, { agent: agent.name })}
               onClick={() => {
+                if (!agent.runtimeBacked) {
+                  setSelectedAgent(agent.name);
+                  return;
+                }
                 if (!agent.installed) {
                   showInstallHint(agent.name);
                   return;
@@ -3365,6 +3622,10 @@ export default function RuntimeGuardConsole() {
                 event.preventDefault();
                 if (!agent.installed) {
                   showInstallHint(agent.name);
+                  return;
+                }
+                if (!agent.runtimeBacked) {
+                  navigate(configureRouteForAgent(agent.name));
                   return;
                 }
                 navigate(configureRouteForAgent(agent.name));
@@ -3399,7 +3660,7 @@ export default function RuntimeGuardConsole() {
           ))}
         </section>
 
-        <section className="rg-tools">
+        <section className="rg-tools" style={{ top: RUNTIME_GUARD_SIDEBAR_LAYOUT.toolsTop }}>
           <div className="rg-tools-title">
             <span>{copy.sidebar.toolPermission}</span>
             <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>{copy.sidebar.set}</button>
@@ -3416,7 +3677,7 @@ export default function RuntimeGuardConsole() {
           })}
         </section>
 
-        <section className="rg-safety-links">
+        <section className="rg-safety-links" style={{ top: RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyTop }}>
           <div className="rg-section-title">
             <span>{copy.sidebar.safetyTools}</span>
           </div>
@@ -3432,23 +3693,47 @@ export default function RuntimeGuardConsole() {
           </button>
         </section>
 
-        <div className={`rg-budget ${selectedBudgetOverLimit ? 'is-over-limit' : ''}`}>
-          <div className="rg-budget-title">{copy.sidebar.budget}</div>
-          <button className="rg-budget-settings" type="button" onClick={openBudgetModal}>{copy.sidebar.set}</button>
-          <div className="rg-budget-amount-line">
-            <strong className="rg-budget-used">{budgetDisplayCostText}</strong>
-            {budgetConfigured && (
-              <>
-                <span className="rg-budget-slash">/</span>
-                <span className="rg-budget-limit">{budgetLimitText}</span>
-              </>
-            )}
-          </div>
-          <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
-          <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
-          <div className="rg-budget-reset">
-            {selectedBudgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: selectedBudgetAgentName }) : budgetResetText}
-          </div>
+        <div
+          className={`rg-budget ${showCodexQuotaBudget ? 'rg-budget-codex' : ''} ${!showCodexQuotaBudget && selectedBudgetOverLimit ? 'is-over-limit' : ''}`}
+          style={{ top: RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop }}
+        >
+          {showCodexQuotaBudget ? (
+            <>
+              <div className="rg-budget-title">{copy.sidebar.budget}</div>
+              <button className="rg-budget-settings" type="button">{copy.sidebar.codexQuotaAction}</button>
+              <div className="rg-codex-quota-rows">
+                <div className="rg-codex-quota-row is-centered-columns">
+                  <strong className="rg-codex-quota-percent">{codexFiveHourRemainingPercent}%</strong>
+                  <span className="rg-codex-quota-window">{copy.sidebar.codexQuotaFiveHour}</span>
+                  <span className="rg-codex-quota-refresh">{copy.sidebar.codexQuotaFiveHourReset}</span>
+                </div>
+                <div className="rg-codex-quota-row is-centered-columns">
+                  <strong className="rg-codex-quota-percent">{codexWeekRemainingPercent}%</strong>
+                  <span className="rg-codex-quota-window">{copy.sidebar.codexQuotaWeek}</span>
+                  <span className="rg-codex-quota-refresh">{copy.sidebar.codexQuotaWeekReset}</span>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="rg-budget-title">{copy.sidebar.budget}</div>
+              <button className="rg-budget-settings" type="button" onClick={openBudgetModal}>{copy.sidebar.set}</button>
+              <div className="rg-budget-amount-line">
+                <strong className="rg-budget-used">{budgetDisplayCostText}</strong>
+                {budgetConfigured && (
+                  <>
+                    <span className="rg-budget-slash">/</span>
+                    <span className="rg-budget-limit">{budgetLimitText}</span>
+                  </>
+                )}
+              </div>
+              <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
+              <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
+              <div className="rg-budget-reset">
+                {selectedBudgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: selectedBudgetAgentName }) : budgetResetText}
+              </div>
+            </>
+          )}
         </div>
 
       </aside>
@@ -3539,7 +3824,7 @@ export default function RuntimeGuardConsole() {
           </div>
         </section>
 
-        <section className="rg-task-panel">
+        <section className={`rg-task-panel ${activeSessionIsCodex ? 'has-codex-composer' : ''}`}>
           {!activeSession ? (
             <div className="rg-empty-task">
               <strong>{copy.main.noSessionTitle}</strong>
@@ -3577,35 +3862,212 @@ export default function RuntimeGuardConsole() {
                 )}
               </div>
 
-              <div className={`rg-command-input ${budgetOverLimit ? 'is-budget-blocked' : ''}`}>
-                <textarea
-                  ref={textareaRef}
-                  aria-label={rgText(copy.main.askAria, { agent: activeAgent })}
-                  disabled={budgetOverLimit || activeSending}
-                  onChange={(event) => updateActiveDraft(event.target.value)}
-                  onCompositionEnd={() => setIsComposing(false)}
-                  onCompositionStart={() => setIsComposing(true)}
-                  onKeyDown={handleInputKeyDown}
-                  placeholder={budgetOverLimit
-                    ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName })
-                    : rgText(copy.main.askPlaceholder, { agent: activeAgent })}
-                  rows={2}
-                  value={activeDraft}
-                />
-                <span className="rg-command-shortcuts">
-                  {budgetOverLimit
-                    ? rgText(copy.sidebar.resetsIn, { time: formatBudgetRefreshTime(activeBudgetRemainingMs, copy) })
-                    : copy.main.shortcuts}
-                </span>
-                <button
-                  disabled={budgetOverLimit || activeSending || !activeDraft.trim()}
-                  onClick={handleSend}
-                  type="button"
-                  title={budgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName }) : copy.main.sendTitle}
-                >
-                  {activeSending ? <Loader2 className="is-spinning" /> : <Send />}
-                </button>
-              </div>
+              {activeSessionIsCodex ? (
+                <div className={`rg-codex-composer ${budgetOverLimit ? 'is-budget-blocked' : ''}`}>
+                  <textarea
+                    ref={textareaRef}
+                    aria-label={rgText(copy.main.askAria, { agent: activeAgent })}
+                    disabled={budgetOverLimit}
+                    onChange={(event) => updateActiveDraft(event.target.value)}
+                    onCompositionEnd={() => setIsComposing(false)}
+                    onCompositionStart={() => setIsComposing(true)}
+                    onKeyDown={handleInputKeyDown}
+                    placeholder={budgetOverLimit
+                      ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName })
+                      : rgText(copy.main.askPlaceholder, { agent: activeAgent })}
+                    rows={2}
+                    value={activeDraft}
+                  />
+                  <div className="rg-codex-toolbar">
+                    <div className="rg-codex-left-controls">
+                      <button
+                        aria-label={codexComposerCopy.optionsAria}
+                        className="rg-codex-icon-button"
+                        onClick={() => setCodexComposerMenu(current => (current === 'options' ? null : 'options'))}
+                        type="button"
+                      >
+                        <Plus />
+                      </button>
+                      {codexPlanMode && (
+                        <span
+                          aria-label={codexComposerCopy.planMode}
+                          className="rg-codex-mode-indicator is-plan"
+                          role="img"
+                          title={codexComposerCopy.planMode}
+                        >
+                          <ClipboardList />
+                        </span>
+                      )}
+                      {codexGoalMode && (
+                        <span
+                          aria-label={codexComposerCopy.pursueGoal}
+                          className="rg-codex-mode-indicator is-goal"
+                          role="img"
+                          title={codexComposerCopy.pursueGoal}
+                        >
+                          <Target />
+                        </span>
+                      )}
+                      {codexComposerMenu === 'options' && (
+                        <div className="rg-codex-menu rg-codex-options-menu">
+                          <button
+                            aria-pressed={codexPlanMode}
+                            className="rg-codex-toggle-row"
+                            onClick={toggleCodexPlanMode}
+                            type="button"
+                          >
+                            <span>{codexComposerCopy.planMode}</span>
+                            <span className="rg-codex-switch" data-on={codexPlanMode}><i /></span>
+                          </button>
+                          <button
+                            aria-pressed={codexGoalMode}
+                            className="rg-codex-toggle-row"
+                            onClick={toggleCodexGoalMode}
+                            type="button"
+                          >
+                            <span>{codexComposerCopy.pursueGoal}</span>
+                            <span className="rg-codex-switch" data-on={codexGoalMode}><i /></span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rg-codex-toolbar-spacer" />
+
+                    <div className="rg-codex-right-controls">
+                      <div className="rg-codex-model-wrap">
+                      <button
+                        aria-label={`${codexComposerCopy.modelAria}: ${codexModelSummary}`}
+                        className={`rg-codex-model-button ${codexSpeed === 'fast' ? 'is-fast' : 'is-standard'}`}
+                        onClick={() => {
+                          setCodexSubmenu(null);
+                          setCodexComposerMenu(current => (current === 'model' ? null : 'model'));
+                        }}
+                        type="button"
+                      >
+                        {codexSpeed === 'fast' && <Zap />}
+                        <span>{codexModelSummary}</span>
+                        <ChevronDown />
+                      </button>
+                      {codexComposerMenu === 'model' && (
+                        <div className="rg-codex-menu rg-codex-model-menu">
+                          <span className="rg-codex-menu-label">{codexComposerCopy.reasoningSection}</span>
+                          {codexReasoningOptions.map(option => (
+                            <button
+                              className="rg-codex-option-row"
+                              key={option}
+                              onClick={() => setCodexReasoningLevel(option)}
+                              type="button"
+                            >
+                              <span>{codexComposerCopy.reasoning[option]}</span>
+                              {codexReasoningLevel === option && <Check />}
+                            </button>
+                          ))}
+                          <span className="rg-codex-menu-divider" />
+                          <button
+                            className="rg-codex-option-row"
+                            onClick={() => setCodexSubmenu(current => (current === 'model' ? null : 'model'))}
+                            type="button"
+                          >
+                            <span>{codexSpeed === 'fast' && <Zap />} {codexModel}</span>
+                            <ChevronRight />
+                          </button>
+                          <button
+                            className="rg-codex-option-row"
+                            onClick={() => setCodexSubmenu(current => (current === 'speed' ? null : 'speed'))}
+                            type="button"
+                          >
+                            <span>{codexComposerCopy.speedSection}</span>
+                            <ChevronRight />
+                          </button>
+                          {codexSubmenu === 'model' && (
+                            <div className="rg-codex-submenu is-model">
+                              <span className="rg-codex-menu-label">{codexComposerCopy.modelSection}</span>
+                              {codexModelOptions.map(option => (
+                                <button
+                                  className="rg-codex-option-row"
+                                  key={option}
+                                  onClick={() => {
+                                    setCodexModel(option);
+                                    setCodexSubmenu(null);
+                                  }}
+                                  type="button"
+                                >
+                                  <span>{option}</span>
+                                  {codexModel === option && <Check />}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {codexSubmenu === 'speed' && (
+                            <div className="rg-codex-submenu is-speed">
+                              <span className="rg-codex-menu-label">{codexComposerCopy.speedSection}</span>
+                              {codexSpeedOptions.map(option => (
+                                <button
+                                  className="rg-codex-option-row rg-codex-speed-row"
+                                  key={option}
+                                  onClick={() => {
+                                    setCodexSpeed(option);
+                                    setCodexSubmenu(null);
+                                  }}
+                                  type="button"
+                                >
+                                  <span className="rg-codex-speed-copy">
+                                    <strong>{codexComposerCopy.speed[option]}</strong>
+                                    <small>{codexComposerCopy.speedHint[option]}</small>
+                                  </span>
+                                  {codexSpeed === option && <Check />}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      </div>
+                      <button
+                        aria-label={activeSending ? codexComposerCopy.interruptTitle : copy.main.sendTitle}
+                        className={`rg-codex-send ${activeSending ? 'is-interrupt' : ''}`}
+                        disabled={budgetOverLimit || (!activeSending && !activeDraft.trim())}
+                        onClick={activeSending ? handleCodexInterrupt : handleSend}
+                        title={activeSending ? codexComposerCopy.interruptTitle : copy.main.sendTitle}
+                        type="button"
+                      >
+                        {activeSending ? <X /> : <Send />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className={`rg-command-input ${budgetOverLimit ? 'is-budget-blocked' : ''}`}>
+                  <textarea
+                    ref={textareaRef}
+                    aria-label={rgText(copy.main.askAria, { agent: activeAgent })}
+                    disabled={budgetOverLimit || activeSending}
+                    onChange={(event) => updateActiveDraft(event.target.value)}
+                    onCompositionEnd={() => setIsComposing(false)}
+                    onCompositionStart={() => setIsComposing(true)}
+                    onKeyDown={handleInputKeyDown}
+                    placeholder={budgetOverLimit
+                      ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName })
+                      : rgText(copy.main.askPlaceholder, { agent: activeAgent })}
+                    rows={2}
+                    value={activeDraft}
+                  />
+                  <span className="rg-command-shortcuts">
+                    {budgetOverLimit
+                      ? rgText(copy.sidebar.resetsIn, { time: formatBudgetRefreshTime(activeBudgetRemainingMs, copy) })
+                      : copy.main.shortcuts}
+                  </span>
+                  <button
+                    disabled={budgetOverLimit || activeSending || !activeDraft.trim()}
+                    onClick={handleSend}
+                    type="button"
+                    title={budgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: activeBudgetAgentName }) : copy.main.sendTitle}
+                  >
+                    {activeSending ? <Loader2 className="is-spinning" /> : <Send />}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </section>

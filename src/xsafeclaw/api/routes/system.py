@@ -18,6 +18,7 @@ import subprocess
 import sys
 import sysconfig
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -154,11 +155,18 @@ _NANOBOT_EXECUTABLES = (
     if os.name == "nt"
     else ("nanobot",)
 )
+_CODEX_EXECUTABLES = (
+    ("codex.cmd", "codex.exe", "codex.bat", "codex.ps1", "codex")
+    if os.name == "nt"
+    else ("codex",)
+)
 _UV_EXECUTABLES = (
     ("uv.cmd", "uv.exe", "uv.bat", "uv.ps1", "uv")
     if os.name == "nt"
     else ("uv",)
 )
+_CODEX_PROBE_CACHE_TTL_S = 15.0
+_codex_probe_cache: tuple[float, str, dict[str, Any]] | None = None
 _NANOBOT_PROVIDER_OPTIONS = [
     {"id": "minimax", "name": "MiniMax", "default_model": "MiniMax-M2.7"},
     {"id": "anthropic", "name": "Anthropic", "default_model": "anthropic/claude-opus-4-5"},
@@ -843,6 +851,19 @@ def _find_nanobot(*, env: dict | None = None) -> Optional[str]:
     return shutil.which("nanobot", path=(env or _build_env()).get("PATH"))
 
 
+def _find_codex(*, env: dict | None = None) -> Optional[str]:
+    """Locate the Codex CLI binary without reading Codex credential files."""
+    search_env = env or _build_env()
+    for d in _candidate_search_dirs(search_env):
+        if not d:
+            continue
+        for executable in _CODEX_EXECUTABLES:
+            candidate = d / executable
+            if _is_runnable_file(candidate):
+                return str(candidate)
+    return shutil.which("codex", path=search_env.get("PATH"))
+
+
 def _probe_nanobot_cli(
     nanobot_path: str | None,
     *,
@@ -1120,6 +1141,295 @@ async def _probe_nanobot_install_async(
     return False, None, first_line or f"nanobot exited with code {proc.returncode}"
 
 
+async def _run_tool_capture_async(
+    args: list[str],
+    *,
+    env: dict | None = None,
+    timeout_s: float = 5.0,
+) -> tuple[int | None, str, str | None]:
+    """Run a local tool with a bounded timeout and decoded combined output."""
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        return None, "", f"{Path(args[0]).name} timed out"
+    except Exception as exc:
+        return None, "", str(exc)
+
+    stdout_text = _decode_subprocess_output(stdout or b"")
+    stderr_text = _decode_subprocess_output(stderr or b"")
+    return proc.returncode, (stdout_text + "\n" + stderr_text).strip(), None
+
+
+def _codex_version_from_output(output: str) -> str | None:
+    first_line = output.strip().splitlines()[0].strip() if output.strip() else ""
+    if not first_line:
+        return None
+    match = re.search(r"(\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?)", first_line)
+    return match.group(1) if match else first_line
+
+
+def _codex_status_from_doctor(
+    doctor: dict[str, Any],
+    *,
+    fallback_version: str | None,
+    fallback_path: str,
+) -> dict[str, Any]:
+    checks = doctor.get("checks") if isinstance(doctor.get("checks"), dict) else {}
+    installation = checks.get("installation") if isinstance(checks.get("installation"), dict) else {}
+    auth = checks.get("auth.credentials") if isinstance(checks.get("auth.credentials"), dict) else {}
+    installation_ok = installation.get("status") == "ok"
+    auth_ok = auth.get("status") == "ok"
+    overall = str(doctor.get("overallStatus") or "").lower()
+    warnings: list[str] = []
+
+    for check_id, check in checks.items():
+        if not isinstance(check, dict):
+            continue
+        status = check.get("status")
+        if status in {None, "ok"}:
+            continue
+        summary = str(check.get("summary") or status)
+        warnings.append(f"{check_id}: {summary}")
+
+    if installation_ok and auth_ok and overall in {"ok", "warning"}:
+        status = "warning" if overall == "warning" or warnings else "ready"
+    elif installation_ok and not auth_ok:
+        status = "needs_login"
+    elif installation_ok:
+        status = "installed"
+    else:
+        status = "error"
+
+    details = installation.get("details") if isinstance(installation.get("details"), dict) else {}
+    return {
+        "installed": installation_ok,
+        "configured": auth_ok,
+        "version": doctor.get("codexVersion") or fallback_version,
+        "path": details.get("current executable") or fallback_path,
+        "status": status,
+        "error": None,
+        "warnings": warnings,
+    }
+
+
+def _invalidate_codex_probe_cache() -> None:
+    global _codex_probe_cache
+    _codex_probe_cache = None
+
+
+def _codex_auth_env() -> dict:
+    env = _build_env()
+    env.pop("CI", None)
+    return env
+
+
+def _codex_auth_mode_from_status_output(output: str) -> str | None:
+    lowered = output.lower()
+    if "chatgpt" in lowered or "chat gpt" in lowered:
+        return "chatgpt"
+    if "api key" in lowered or "api-key" in lowered:
+        return "api_key"
+    if "access token" in lowered:
+        return "access_token"
+    return "unknown" if output.strip() else None
+
+
+def _codex_auth_missing_response() -> dict[str, Any]:
+    return {
+        "installed": False,
+        "logged_in": False,
+        "auth_mode": None,
+        "status": "missing",
+        "codex_path": None,
+        "message": "",
+        "error": "codex executable not found",
+    }
+
+
+async def _get_codex_auth_status(*, env: dict | None = None) -> dict[str, Any]:
+    auth_env = env or _codex_auth_env()
+    codex_path = _find_codex(env=auth_env)
+    if not codex_path:
+        return _codex_auth_missing_response()
+
+    codex_command = _build_tool_command(codex_path, [])
+    status_code, status_output, status_error = await _run_tool_capture_async(
+        [*codex_command, "login", "status"],
+        env=auth_env,
+        timeout_s=10.0,
+    )
+    message = status_output.strip()
+
+    if status_error:
+        return {
+            "installed": True,
+            "logged_in": False,
+            "auth_mode": None,
+            "status": "error",
+            "codex_path": codex_path,
+            "message": message,
+            "error": status_error,
+        }
+
+    if status_code == 0:
+        return {
+            "installed": True,
+            "logged_in": True,
+            "auth_mode": _codex_auth_mode_from_status_output(message),
+            "status": "logged_in",
+            "codex_path": codex_path,
+            "message": message,
+            "error": None,
+        }
+
+    return {
+        "installed": True,
+        "logged_in": False,
+        "auth_mode": None,
+        "status": "logged_out",
+        "codex_path": codex_path,
+        "message": message,
+        "error": None,
+    }
+
+
+async def _run_codex_auth_command(command: Literal["login", "logout"]) -> dict[str, Any]:
+    auth_env = _codex_auth_env()
+    codex_path = _find_codex(env=auth_env)
+    if not codex_path:
+        raise HTTPException(status_code=404, detail="codex executable not found")
+
+    timeout_s = 300.0 if command == "login" else 30.0
+    command_code, command_output, command_error = await _run_tool_capture_async(
+        [*_build_tool_command(codex_path, []), command],
+        env=auth_env,
+        timeout_s=timeout_s,
+    )
+    _invalidate_codex_probe_cache()
+
+    if command_error or command_code != 0:
+        detail = command_error or command_output.strip() or f"codex {command} exited with code {command_code}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    return await _get_codex_auth_status(env=auth_env)
+
+
+@router.get("/codex/auth/status")
+async def codex_auth_status():
+    """Return Codex CLI login status without reading credential files."""
+    return await _get_codex_auth_status()
+
+
+@router.post("/codex/auth/login")
+async def codex_auth_login():
+    """Start the official Codex CLI ChatGPT login flow."""
+    return await _run_codex_auth_command("login")
+
+
+@router.post("/codex/auth/logout")
+async def codex_auth_logout():
+    """Clear Codex CLI authentication credentials."""
+    return await _run_codex_auth_command("logout")
+
+
+async def _probe_codex_install_async(
+    codex_path: str | None,
+    *,
+    env: dict | None = None,
+    version_timeout_s: float = 5.0,
+    doctor_timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    """Check Codex CLI install health without touching credential files directly."""
+    global _codex_probe_cache
+
+    if codex_path:
+        now = time.monotonic()
+        if _codex_probe_cache is not None:
+            cached_at, cached_path, cached_result = _codex_probe_cache
+            if cached_path == codex_path and now - cached_at < _CODEX_PROBE_CACHE_TTL_S:
+                return dict(cached_result)
+
+    if not codex_path:
+        return {
+            "installed": False,
+            "configured": False,
+            "version": None,
+            "path": None,
+            "status": "missing",
+            "error": "codex executable not found",
+            "warnings": [],
+        }
+
+    codex_command = _build_tool_command(codex_path, [])
+    version_code, version_output, version_error = await _run_tool_capture_async(
+        [*codex_command, "--version"],
+        env=env,
+        timeout_s=version_timeout_s,
+    )
+    version = _codex_version_from_output(version_output)
+    if version_code != 0 or not version or "codex" not in version_output.lower():
+        detail = version_error or version_output or f"codex --version exited with code {version_code}"
+        return {
+            "installed": False,
+            "configured": False,
+            "version": None,
+            "path": codex_path,
+            "status": "error",
+            "error": detail,
+            "warnings": [],
+        }
+
+    doctor_code, doctor_output, doctor_error = await _run_tool_capture_async(
+        [*codex_command, "doctor", "--json", "--summary"],
+        env=env,
+        timeout_s=doctor_timeout_s,
+    )
+    if doctor_code == 0 and doctor_output:
+        try:
+            doctor = json.loads(doctor_output)
+            result = _codex_status_from_doctor(
+                doctor,
+                fallback_version=version,
+                fallback_path=codex_path,
+            )
+            _codex_probe_cache = (time.monotonic(), codex_path, dict(result))
+            return result
+        except json.JSONDecodeError as exc:
+            doctor_error = f"codex doctor JSON parse failed: {exc}"
+
+    warnings = []
+    if doctor_error:
+        warnings.append(doctor_error)
+    elif doctor_output:
+        warnings.append(doctor_output.splitlines()[0])
+    else:
+        warnings.append(f"codex doctor exited with code {doctor_code}")
+    result = {
+        "installed": True,
+        "configured": False,
+        "version": version,
+        "path": codex_path,
+        "status": "installed",
+        "error": None,
+        "warnings": warnings,
+    }
+    _codex_probe_cache = (time.monotonic(), codex_path, dict(result))
+    return result
+
+
 @router.get("/install-status")
 async def get_install_status():
     """Fast install/config status for routing and setup screens."""
@@ -1128,14 +1438,25 @@ async def get_install_status():
     hermes_path = _find_hermes()
     hermes_home = Path.home() / ".hermes"
     nanobot_path = _find_nanobot(env=env)
+    codex_path = _find_codex(env=env)
 
-    openclaw_ready, openclaw_version, openclaw_error = await _probe_openclaw_install_async(
-        openclaw_path,
-        env=env,
-    )
-    nanobot_ready, nanobot_version, nanobot_error = await _probe_nanobot_install_async(
-        nanobot_path,
-        env=env,
+    (
+        (openclaw_ready, openclaw_version, openclaw_error),
+        (nanobot_ready, nanobot_version, nanobot_error),
+        codex_status,
+    ) = await asyncio.gather(
+        _probe_openclaw_install_async(
+            openclaw_path,
+            env=env,
+        ),
+        _probe_nanobot_install_async(
+            nanobot_path,
+            env=env,
+        ),
+        _probe_codex_install_async(
+            codex_path,
+            env=env,
+        ),
     )
 
     config_exists = _CONFIG_PATH.exists()
@@ -1166,6 +1487,13 @@ async def get_install_status():
         "nanobot_version": nanobot_version,
         "nanobot_error": nanobot_error,
         "nanobot_path": nanobot_path,
+        "codex_installed": codex_status["installed"],
+        "codex_version": codex_status["version"],
+        "codex_error": codex_status["error"],
+        "codex_path": codex_status["path"],
+        "codex_configured": codex_status["configured"],
+        "codex_status": codex_status["status"],
+        "codex_warnings": codex_status["warnings"],
         "config_exists": config_exists,
         "nanobot_config_exists": nanobot_config_exists,
         "nanobot_model_configured": nanobot_model_configured,
