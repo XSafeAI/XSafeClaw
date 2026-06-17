@@ -958,6 +958,11 @@ describe('NewTaskModal', () => {
       message: 'Please start executing the plan above.',
       plan_mode: false,
     }));
+    if (!composer.querySelector('.rg-codex-options-menu')) {
+      fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    }
+    expect(within(composer).getByRole('button', { name: 'Plan Mode' })).toHaveAttribute('aria-pressed', 'false');
+    expect(composer.querySelector('.rg-codex-mode-indicator.is-plan')).toBeNull();
   });
 
   it('keeps plan mode when the local plan confirmation sends revision feedback', async () => {

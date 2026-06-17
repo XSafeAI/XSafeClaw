@@ -618,6 +618,14 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
     assert params["effort"] == "xhigh"
     assert params["serviceTier"] == "fast"
     assert params["sandboxPolicy"]["type"] == "workspaceWrite"
+    assert params["collaborationMode"] == {
+        "mode": "default",
+        "settings": {
+            "model": "gpt-5.5",
+            "reasoning_effort": "xhigh",
+            "developer_instructions": None,
+        },
+    }
 
 
 def test_codex_turn_stream_maps_request_user_input_and_resolved_notification(monkeypatch, tmp_path):

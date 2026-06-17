@@ -1725,6 +1725,28 @@ def _codex_service_tier(speed: str | None, model_id: str | None) -> str | None:
     return "fast"
 
 
+def _codex_collaboration_mode(
+    mode: Literal["default", "plan"],
+    *,
+    model_id: str | None,
+    reasoning_effort: str | None = None,
+    preset: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    preset = preset or {}
+    return {
+        "mode": mode,
+        "settings": {
+            "model": model_id or _first_string(preset.get("model")) or "",
+            "reasoning_effort": (
+                _first_string(preset.get("reasoning_effort"), preset.get("reasoningEffort"))
+                if mode == "plan"
+                else reasoning_effort
+            ),
+            "developer_instructions": None,
+        },
+    }
+
+
 def _codex_sandbox_policy(
     permission_mode: Literal["read_only", "workspace_write", "full_access"] | None,
     cwd: str | None,
@@ -2018,6 +2040,11 @@ async def _codex_turn_stream_events(
         sandbox_policy = _codex_sandbox_policy(payload.permission_mode, payload.cwd)
         if sandbox_policy:
             turn_params["sandboxPolicy"] = sandbox_policy
+        collaboration_mode = _codex_collaboration_mode(
+            "default",
+            model_id=model_id,
+            reasoning_effort=payload.reasoning_effort,
+        )
         if payload.goal_mode:
             objective = (payload.goal_objective or payload.message).strip()
             if not objective:
@@ -2065,16 +2092,10 @@ async def _codex_turn_stream_events(
             )
             if not isinstance(plan_mode, dict):
                 raise CodexAppServerError("当前 Codex CLI 不支持计划模式")
-            turn_params["collaborationMode"] = {
-                "mode": "plan",
-                "settings": {
-                    "model": model_id or _first_string(plan_mode.get("model")) or "",
-                    "reasoning_effort": _first_string(plan_mode.get("reasoning_effort"), plan_mode.get("reasoningEffort")),
-                    "developer_instructions": None,
-                },
-            }
+            collaboration_mode = _codex_collaboration_mode("plan", model_id=model_id, preset=plan_mode)
             turn_params.pop("effort", None)
 
+        turn_params["collaborationMode"] = collaboration_mode
         await _codex_app_server_send(proc, {"id": next_request_id, "method": "turn/start", "params": turn_params})
         result = await _codex_app_server_response(proc, next_request_id, timeout_s=timeout_s)
         turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
