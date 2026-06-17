@@ -11,7 +11,7 @@
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'error' | 'tool_call' | 'trace';
+  role: 'user' | 'assistant' | 'error' | 'tool_call' | 'trace' | 'codex_question' | 'codex_plan' | 'codex_goal';
   content: string;
   timestamp: Date;
   pending?: boolean;
@@ -30,6 +30,53 @@ export interface ChatMessage {
   tool_action?: string;
   timeline_kind?: string;
   risk_level?: string;
+  codex_request_id?: string;
+  codex_thread_id?: string;
+  codex_turn_id?: string;
+  codex_item_id?: string;
+  codex_questions?: CodexUserInputQuestion[];
+  codex_response_status?: 'pending' | 'submitting' | 'submitted' | 'resolved' | 'error';
+  codex_answer_values?: Record<string, string[]>;
+  codex_error?: string;
+  codex_question?: string;
+  codex_options?: string[];
+  codex_allow_other?: boolean;
+  codex_secret?: boolean;
+  codex_submitted_answer?: string;
+  codex_plan_explanation?: string | null;
+  codex_plan_steps?: CodexPlanStep[];
+  codex_plan_text?: string;
+  codex_goal?: CodexGoalState | null;
+}
+
+export interface CodexUserInputOption {
+  label: string;
+  description: string;
+}
+
+export interface CodexUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  is_other: boolean;
+  is_secret: boolean;
+  options: CodexUserInputOption[];
+}
+
+export interface CodexPlanStep {
+  step: string;
+  status?: string | null;
+}
+
+export interface CodexGoalState {
+  thread_id?: string | null;
+  objective?: string | null;
+  status?: string | null;
+  token_budget?: number | null;
+  tokens_used?: number | null;
+  time_used_seconds?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 type Listener = () => void;

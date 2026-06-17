@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import {
   CheckCircle2,
   ChevronLeft,
+  ChevronRight,
+  FolderOpen,
   Loader2,
   LogIn,
   LogOut,
@@ -11,11 +13,19 @@ import {
   Shield,
   Sparkles,
   Terminal,
+  X,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { systemAPI, type CodexAuthStatusResponse } from '../services/api';
+import {
+  assetsAPI,
+  systemAPI,
+  type CodexAuthStatusResponse,
+  type CodexRuntimeStatusResponse,
+  type DirectoryBrowseEntry,
+} from '../services/api';
 
 export const CODEX_CONFIG_STORAGE_KEY = 'xsafeclaw:codex_config';
+const CODEX_CONFIG_VERSION = 2;
 
 export type CodexCliPathMode = 'auto' | 'manual';
 export type CodexPermissionMode = 'read_only' | 'workspace_write' | 'full_access';
@@ -24,6 +34,7 @@ export type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh';
 export type CodexSpeedOption = 'standard' | 'fast';
 
 export interface CodexLocalConfig {
+  configVersion: number;
   chatgptLoggedIn: boolean;
   chatgptAccount: string;
   workspaceDir: string;
@@ -36,9 +47,10 @@ export interface CodexLocalConfig {
 }
 
 export const DEFAULT_CODEX_CONFIG: CodexLocalConfig = {
+  configVersion: CODEX_CONFIG_VERSION,
   chatgptLoggedIn: false,
   chatgptAccount: '',
-  workspaceDir: '~/workspace',
+  workspaceDir: '',
   cliPathMode: 'auto',
   cliPath: 'codex',
   permissionMode: 'workspace_write',
@@ -62,14 +74,17 @@ export function loadCodexConfig(): CodexLocalConfig {
     const raw = window.localStorage.getItem(CODEX_CONFIG_STORAGE_KEY);
     if (!raw) return DEFAULT_CODEX_CONFIG;
     const parsed = JSON.parse(raw) as Partial<CodexLocalConfig>;
+    const isLegacyImplicitWorkspace = parsed.configVersion !== CODEX_CONFIG_VERSION
+      && parsed.workspaceDir === '~/workspace';
     return {
+      configVersion: CODEX_CONFIG_VERSION,
       chatgptLoggedIn: typeof parsed.chatgptLoggedIn === 'boolean'
         ? parsed.chatgptLoggedIn
         : DEFAULT_CODEX_CONFIG.chatgptLoggedIn,
       chatgptAccount: typeof parsed.chatgptAccount === 'string'
         ? parsed.chatgptAccount
         : DEFAULT_CODEX_CONFIG.chatgptAccount,
-      workspaceDir: typeof parsed.workspaceDir === 'string' && parsed.workspaceDir.trim()
+      workspaceDir: typeof parsed.workspaceDir === 'string' && parsed.workspaceDir.trim() && !isLegacyImplicitWorkspace
         ? parsed.workspaceDir
         : DEFAULT_CODEX_CONFIG.workspaceDir,
       cliPathMode: isOneOf(parsed.cliPathMode, ['auto', 'manual'])
@@ -98,7 +113,10 @@ export function loadCodexConfig(): CodexLocalConfig {
 
 export function saveCodexConfig(config: CodexLocalConfig) {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(CODEX_CONFIG_STORAGE_KEY, JSON.stringify(config));
+  window.localStorage.setItem(CODEX_CONFIG_STORAGE_KEY, JSON.stringify({
+    ...config,
+    configVersion: CODEX_CONFIG_VERSION,
+  }));
 }
 
 const copy = {
@@ -118,8 +136,14 @@ const copy = {
     relogin: '重新登录',
     logout: '退出登录',
     runtimeTitle: '运行环境',
-    runtimeDesc: 'Codex CLI 状态先使用前端 mock 展示，后续再接入真实检测。',
-    detected: '已检测',
+    runtimeDesc: '通过 Codex CLI 官方诊断命令检测安装、认证和运行环境状态。',
+    runtimeReady: '已就绪',
+    runtimeWarning: '警告',
+    runtimeNeedsLogin: '需要登录',
+    runtimeInstalled: '已安装',
+    runtimeMissing: '未检测到',
+    runtimeError: '错误',
+    unknownValue: '未获取',
     version: '版本',
     path: '路径',
     autoPath: 'PATH 自动检测',
@@ -127,12 +151,11 @@ const copy = {
     cliPathLabel: 'Codex CLI 路径',
     redetect: '重新检测',
     detecting: '检测中',
-    workspaceTitle: '默认工作区',
+    workspaceTitle: '工作区目录',
     workspaceDesc: '新建 Codex 会话时默认使用的目录。本轮仅保存文本路径。',
     workspaceLabel: '默认工作区目录',
     restoreDefault: '恢复默认',
     permissionTitle: '默认权限模式',
-    permissionDesc: '采用 Codex CLI 的三档权限语义，作为新会话默认值。',
     readOnly: '只读',
     workspaceWrite: '工作区写入',
     fullAccess: '完全访问',
@@ -171,8 +194,14 @@ const copy = {
     relogin: 'Re-login',
     logout: 'Log out',
     runtimeTitle: 'Runtime environment',
-    runtimeDesc: 'Codex CLI detection is shown as frontend mock data until the backend integration lands.',
-    detected: 'Detected',
+    runtimeDesc: 'Detected through official Codex CLI diagnostics for installation, auth, and runtime health.',
+    runtimeReady: 'Ready',
+    runtimeWarning: 'Warning',
+    runtimeNeedsLogin: 'Needs login',
+    runtimeInstalled: 'Installed',
+    runtimeMissing: 'Not detected',
+    runtimeError: 'Error',
+    unknownValue: 'Unavailable',
     version: 'Version',
     path: 'Path',
     autoPath: 'Auto detect from PATH',
@@ -180,12 +209,11 @@ const copy = {
     cliPathLabel: 'Codex CLI path',
     redetect: 'Refresh detection',
     detecting: 'Checking',
-    workspaceTitle: 'Default workspace',
+    workspaceTitle: 'Workspace directory',
     workspaceDesc: 'The directory used when a new Codex session is created. This version stores a text path only.',
     workspaceLabel: 'Default workspace directory',
     restoreDefault: 'Restore default',
     permissionTitle: 'Default permission mode',
-    permissionDesc: 'Uses Codex CLI permission semantics as the default for new sessions.',
     readOnly: 'Read only',
     workspaceWrite: 'Workspace write',
     fullAccess: 'Full access',
@@ -207,6 +235,41 @@ const copy = {
     back: 'Back to Backend',
     saved: 'Codex configuration saved locally.',
     localOnly: 'localStorage only',
+  },
+};
+
+const workspaceBrowseCopy = {
+  zh: {
+    desc: '新建 Codex 会话时使用的目录。',
+    browseWorkspace: '选择目录',
+    browseTitle: '选择工作区目录',
+    browseDesc: '从本机目录中选择 Codex 会话默认工作区。',
+    currentFolder: '当前目录',
+    upOneLevel: '上一级',
+    refresh: '刷新',
+    browseHint: '点击目录继续浏览，确认后写入工作区输入框。',
+    browseEmpty: '当前目录没有可浏览的子目录',
+    browseError: '目录读取失败，请检查路径后重试。',
+    useThisFolder: '使用当前目录',
+    cancel: '取消',
+    pathPlaceholder: '尚未选择目录',
+    hidden: '隐藏',
+  },
+  en: {
+    desc: 'The directory used when a new Codex session is created.',
+    browseWorkspace: 'Browse folders',
+    browseTitle: 'Select workspace directory',
+    browseDesc: 'Choose the default workspace folder for new Codex sessions.',
+    currentFolder: 'Current folder',
+    upOneLevel: 'Up one level',
+    refresh: 'Refresh',
+    browseHint: 'Open a folder to keep browsing, then confirm to fill the workspace field.',
+    browseEmpty: 'No browsable folders here',
+    browseError: 'Could not read this folder. Check the path and try again.',
+    useThisFolder: 'Use this folder',
+    cancel: 'Cancel',
+    pathPlaceholder: 'No folder selected',
+    hidden: 'hidden',
   },
 };
 
@@ -248,6 +311,7 @@ export default function CodexConfigure() {
   const navigate = useNavigate();
   const { locale } = useI18n();
   const labels = copy[locale] ?? copy.en;
+  const workspaceLabels = workspaceBrowseCopy[locale] ?? workspaceBrowseCopy.en;
   const initialConfig = useMemo(() => loadCodexConfig(), []);
   const [config, setConfig] = useState<CodexLocalConfig>(initialConfig);
   const [detecting, setDetecting] = useState(false);
@@ -256,6 +320,16 @@ export default function CodexConfigure() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authAction, setAuthAction] = useState<'login' | 'logout' | null>(null);
   const [authError, setAuthError] = useState('');
+  const [runtimeStatus, setRuntimeStatus] = useState<CodexRuntimeStatusResponse | null>(null);
+  const [runtimeLoading, setRuntimeLoading] = useState(true);
+  const [runtimeError, setRuntimeError] = useState('');
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState('');
+  const [browsePath, setBrowsePath] = useState('');
+  const [browseParentPath, setBrowseParentPath] = useState<string | null>(null);
+  const [browseRootPath, setBrowseRootPath] = useState('');
+  const [browseEntries, setBrowseEntries] = useState<DirectoryBrowseEntry[]>([]);
 
   const refreshCodexAuthStatus = useCallback(async () => {
     setAuthLoading(true);
@@ -271,9 +345,30 @@ export default function CodexConfigure() {
     }
   }, []);
 
+  const refreshCodexRuntimeStatus = useCallback(async (refresh?: boolean) => {
+    if (refresh) {
+      setDetecting(true);
+    } else {
+      setRuntimeLoading(true);
+    }
+    setRuntimeError('');
+    try {
+      const response = refresh
+        ? await systemAPI.getCodexRuntimeStatus(true)
+        : await systemAPI.getCodexRuntimeStatus();
+      setRuntimeStatus(response.data);
+    } catch (error) {
+      setRuntimeError(extractApiError(error));
+    } finally {
+      setRuntimeLoading(false);
+      setDetecting(false);
+    }
+  }, []);
+
   useEffect(() => {
     void refreshCodexAuthStatus();
-  }, [refreshCodexAuthStatus]);
+    void refreshCodexRuntimeStatus();
+  }, [refreshCodexAuthStatus, refreshCodexRuntimeStatus]);
 
   const updateConfig = (patch: Partial<CodexLocalConfig>) => {
     setConfig(current => ({ ...current, ...patch }));
@@ -307,8 +402,40 @@ export default function CodexConfigure() {
   };
 
   const handleRefreshDetection = () => {
-    setDetecting(true);
-    window.setTimeout(() => setDetecting(false), 520);
+    void refreshCodexRuntimeStatus(true);
+  };
+
+  const loadBrowse = useCallback(async (path?: string) => {
+    setBrowseLoading(true);
+    setBrowseError('');
+    try {
+      const response = await assetsAPI.browseDirectories(path);
+      setBrowsePath(response.data.current_path);
+      setBrowseParentPath(response.data.parent_path);
+      setBrowseRootPath(response.data.root_path);
+      setBrowseEntries(response.data.entries);
+    } catch (error) {
+      setBrowseError(extractApiError(error) || workspaceLabels.browseError);
+    } finally {
+      setBrowseLoading(false);
+    }
+  }, [workspaceLabels.browseError]);
+
+  const handleOpenBrowse = () => {
+    setBrowseOpen(true);
+    const seedPath = config.workspaceDir.trim();
+    void loadBrowse(seedPath || undefined);
+  };
+
+  const handleCloseBrowse = () => {
+    setBrowseOpen(false);
+    setBrowseError('');
+  };
+
+  const handleSelectBrowsePath = () => {
+    if (!browsePath) return;
+    updateConfig({ workspaceDir: browsePath });
+    setBrowseOpen(false);
   };
 
   const handleSave = () => {
@@ -329,6 +456,35 @@ export default function CodexConfigure() {
       ? 'bg-emerald-500/15 text-emerald-300'
       : 'bg-amber-500/15 text-amber-300';
   const authMessage = authError || (authAction === 'login' ? labels.loginHint : authStatus?.message || '');
+  const runtimeVisualStatus = runtimeLoading
+    ? 'checking'
+    : runtimeError
+      ? 'error'
+      : runtimeStatus?.status ?? 'error';
+  const runtimeBadgeLabel = runtimeVisualStatus === 'checking'
+    ? labels.detecting
+    : runtimeVisualStatus === 'ready'
+      ? labels.runtimeReady
+      : runtimeVisualStatus === 'warning'
+        ? labels.runtimeWarning
+        : runtimeVisualStatus === 'needs_login'
+          ? labels.runtimeNeedsLogin
+          : runtimeVisualStatus === 'installed'
+            ? labels.runtimeInstalled
+            : runtimeVisualStatus === 'missing'
+              ? labels.runtimeMissing
+              : labels.runtimeError;
+  const runtimeBadgeClass = runtimeVisualStatus === 'checking'
+    ? 'bg-blue-500/15 text-blue-300'
+    : runtimeVisualStatus === 'ready'
+      ? 'bg-emerald-500/15 text-emerald-300'
+      : runtimeVisualStatus === 'warning' || runtimeVisualStatus === 'needs_login' || runtimeVisualStatus === 'installed'
+        ? 'bg-amber-500/15 text-amber-300'
+        : 'bg-rose-500/15 text-rose-300';
+  const runtimeVersion = runtimeLoading ? labels.detecting : runtimeStatus?.version || labels.unknownValue;
+  const runtimePath = runtimeLoading ? labels.detecting : runtimeStatus?.path || runtimeStatus?.entry_path || labels.unknownValue;
+  const runtimeWarnings = runtimeStatus?.warnings ?? [];
+  const runtimeProblem = runtimeError || runtimeStatus?.error || '';
 
   return (
     <div className="min-h-screen bg-surface-0 text-text-primary px-5 py-8">
@@ -369,15 +525,17 @@ export default function CodexConfigure() {
                   )}
                 </div>
                 <div className="flex w-full flex-wrap gap-2 lg:w-auto lg:flex-shrink-0 lg:justify-end">
-                  <button
-                    type="button"
-                    onClick={handleLogin}
-                    disabled={authBusy}
-                    className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {authAction === 'login' ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
-                    {authAction === 'login' ? labels.loginOpening : codexLoggedIn ? labels.relogin : labels.login}
-                  </button>
+                  {!codexLoggedIn && (
+                    <button
+                      type="button"
+                      onClick={handleLogin}
+                      disabled={authBusy}
+                      className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {authAction === 'login' ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
+                      {authAction === 'login' ? labels.loginOpening : labels.login}
+                    </button>
+                  )}
                   {codexLoggedIn && (
                     <button
                       type="button"
@@ -446,21 +604,31 @@ export default function CodexConfigure() {
                   <h2 className="text-base font-bold text-text-primary">{labels.runtimeTitle}</h2>
                   <p className="mt-1 text-[12px] leading-5 text-text-muted">{labels.runtimeDesc}</p>
                 </div>
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-[11px] font-bold text-emerald-300">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  {labels.detected}
+                <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold ${runtimeBadgeClass}`}>
+                  {runtimeVisualStatus === 'checking'
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  {runtimeBadgeLabel}
                 </span>
               </div>
               <div className="mt-5 grid gap-3 text-[13px] sm:grid-cols-3">
                 <div className="rounded-xl border border-border bg-surface-1 p-3">
                   <p className="text-[11px] uppercase tracking-[0.14em] text-text-muted">{labels.version}</p>
-                  <p className="mt-2 font-mono font-semibold text-text-primary">0.14.0</p>
+                  <p className="mt-2 font-mono font-semibold text-text-primary">{runtimeVersion}</p>
                 </div>
                 <div className="rounded-xl border border-border bg-surface-1 p-3 sm:col-span-2">
                   <p className="text-[11px] uppercase tracking-[0.14em] text-text-muted">{labels.path}</p>
-                  <p className="mt-2 truncate font-mono font-semibold text-text-primary">{config.cliPath}</p>
+                  <p className="mt-2 truncate font-mono font-semibold text-text-primary">{runtimePath}</p>
                 </div>
               </div>
+              {(runtimeProblem || runtimeWarnings.length > 0) && (
+                <div className={`mt-3 rounded-xl border px-3 py-2 text-[12px] leading-5 ${runtimeProblem ? 'border-rose-500/25 bg-rose-500/10 text-rose-200' : 'border-amber-500/25 bg-amber-500/10 text-amber-200'}`}>
+                  {runtimeProblem && <p>{runtimeProblem}</p>}
+                  {runtimeWarnings.map((warning) => (
+                    <p key={warning}>{warning}</p>
+                  ))}
+                </div>
+              )}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -481,6 +649,7 @@ export default function CodexConfigure() {
                 <button
                   type="button"
                   onClick={handleRefreshDetection}
+                  disabled={detecting || runtimeLoading}
                   className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-2 px-4 py-2 text-[13px] font-semibold text-text-secondary transition hover:text-text-primary"
                 >
                   {detecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
@@ -505,11 +674,8 @@ export default function CodexConfigure() {
 
             <section className="rounded-xl border border-border bg-surface-0/70 p-5">
               <h2 className="text-base font-bold text-text-primary">{labels.workspaceTitle}</h2>
-              <p className="mt-1 text-[12px] leading-5 text-text-muted">{labels.workspaceDesc}</p>
-              <label className="mt-5 block text-[12px] font-semibold text-text-secondary" htmlFor="codex-workspace-dir">
-                {labels.workspaceLabel}
-              </label>
-              <div className="mt-2 flex gap-2">
+              <p className="mt-1 text-[12px] leading-5 text-text-muted">{workspaceLabels.desc}</p>
+              <div className="mt-5 flex gap-2">
                 <input
                   id="codex-workspace-dir"
                   aria-label={labels.workspaceLabel}
@@ -519,10 +685,11 @@ export default function CodexConfigure() {
                 />
                 <button
                   type="button"
-                  onClick={() => updateConfig({ workspaceDir: DEFAULT_CODEX_CONFIG.workspaceDir })}
-                  className="rounded-xl border border-border bg-surface-2 px-3 py-2 text-[12px] font-semibold text-text-secondary transition hover:text-text-primary"
+                  onClick={handleOpenBrowse}
+                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl border border-border bg-surface-2 px-3 py-2 text-[12px] font-semibold text-text-secondary transition hover:border-border-active hover:text-text-primary"
                 >
-                  {labels.restoreDefault}
+                  <FolderOpen className="h-4 w-4" />
+                  {workspaceLabels.browseWorkspace}
                 </button>
               </div>
             </section>
@@ -534,7 +701,6 @@ export default function CodexConfigure() {
                 </div>
                 <div>
                   <h2 className="text-base font-bold text-text-primary">{labels.permissionTitle}</h2>
-                  <p className="mt-1 text-[12px] leading-5 text-text-muted">{labels.permissionDesc}</p>
                 </div>
               </div>
               <div className="mt-5 grid gap-2 sm:grid-cols-3">
@@ -580,6 +746,126 @@ export default function CodexConfigure() {
             </div>
           </div>
         </main>
+
+        {browseOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 py-8 backdrop-blur-sm">
+            <div className="w-full max-w-3xl rounded-2xl border border-border bg-surface-1 shadow-2xl shadow-black/40">
+              <div className="flex items-center justify-between border-b border-border px-6 py-4">
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{workspaceLabels.browseTitle}</p>
+                  <p className="mt-1 text-[12px] text-text-muted">{workspaceLabels.browseDesc}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCloseBrowse}
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-text-muted transition hover:border-border-active hover:text-text-primary"
+                  aria-label={workspaceLabels.cancel}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="space-y-5 p-6">
+                <div className="rounded-xl border border-border bg-surface-0 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold uppercase text-text-muted">{workspaceLabels.currentFolder}</span>
+                    {browseRootPath && (
+                      <button
+                        type="button"
+                        onClick={() => void loadBrowse(browseRootPath)}
+                        disabled={browseLoading}
+                        className="inline-flex items-center rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition hover:border-accent/40 hover:text-accent disabled:opacity-40"
+                      >
+                        {browseRootPath}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => browseParentPath && void loadBrowse(browseParentPath)}
+                      disabled={!browseParentPath || browseLoading}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition hover:border-border-active hover:text-text-primary disabled:opacity-40"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                      {workspaceLabels.upOneLevel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void loadBrowse(browsePath || undefined)}
+                      disabled={browseLoading}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition hover:border-border-active hover:text-text-primary disabled:opacity-40"
+                    >
+                      <RotateCcw className={`h-3.5 w-3.5 ${browseLoading ? 'animate-spin' : ''}`} />
+                      {workspaceLabels.refresh}
+                    </button>
+                  </div>
+                  <div className="mt-3 rounded-lg border border-border/80 bg-surface-1 px-3 py-2 text-[12px] text-text-secondary break-all">
+                    {browsePath || workspaceLabels.pathPlaceholder}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-border bg-surface-0">
+                  <div className="border-b border-border px-4 py-3">
+                    <p className="text-[12px] font-medium text-text-secondary">{workspaceLabels.browseHint}</p>
+                  </div>
+                  <div className="max-h-[320px] overflow-y-auto">
+                    {browseLoading ? (
+                      <div className="flex min-h-[220px] items-center justify-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-accent" />
+                      </div>
+                    ) : browseError ? (
+                      <div className="p-6 text-center text-[12px] text-rose-300">{browseError}</div>
+                    ) : browseEntries.length === 0 ? (
+                      <div className="p-6 text-center text-[12px] text-text-muted">{workspaceLabels.browseEmpty}</div>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {browseEntries.map((entry) => (
+                          <button
+                            key={entry.path}
+                            type="button"
+                            onClick={() => void loadBrowse(entry.path)}
+                            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-surface-2/50"
+                          >
+                            <div className="flex min-w-0 items-center gap-3">
+                              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent/10 text-accent">
+                                <FolderOpen className="h-4 w-4" />
+                              </div>
+                              <div className="min-w-0">
+                                <p className="truncate text-[13px] font-medium text-text-primary">
+                                  {entry.name}
+                                  {entry.is_hidden ? <span className="ml-1 text-[11px] text-text-muted">- {workspaceLabels.hidden}</span> : null}
+                                </p>
+                                <p className="truncate text-[11px] text-text-muted">{entry.path}</p>
+                              </div>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-text-muted" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCloseBrowse}
+                    className="rounded-lg border border-border px-4 py-2.5 text-[13px] font-medium text-text-secondary transition hover:border-border-active hover:text-text-primary"
+                  >
+                    {workspaceLabels.cancel}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSelectBrowsePath}
+                    disabled={!browsePath}
+                    className="rounded-lg bg-accent px-4 py-2.5 text-[13px] font-medium text-white shadow-lg shadow-accent/20 transition hover:bg-accent-dim disabled:opacity-40"
+                  >
+                    {workspaceLabels.useThisFolder}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

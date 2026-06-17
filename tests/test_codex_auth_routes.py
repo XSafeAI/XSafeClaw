@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -155,3 +157,132 @@ def test_codex_auth_login_missing_cli_returns_displayable_error(monkeypatch):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "codex executable not found"
+
+
+def test_codex_runtime_status_reports_doctor_details(monkeypatch, tmp_path):
+    client, entry_path = _client_with_codex(monkeypatch, tmp_path)
+    executable_path = str(tmp_path / "vendor" / "codex.exe")
+    doctor_payload = {
+        "codexVersion": "0.139.0",
+        "overallStatus": "ok",
+        "checks": {
+            "installation": {
+                "status": "ok",
+                "details": {
+                    "current executable": executable_path,
+                    "install context": "npm",
+                },
+            },
+            "auth.credentials": {
+                "status": "ok",
+                "summary": "Authenticated using ChatGPT",
+            },
+        },
+    }
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        command = list(args)
+        if command[-1] == "--version":
+            return FakeProcess(args, returncode=0, stdout=b"codex-cli 0.139.0\n")
+        if command[-3:] == ["doctor", "--json", "--summary"]:
+            return FakeProcess(args, returncode=0, stdout=json.dumps(doctor_payload).encode("utf-8"))
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = client.get("/api/system/codex/runtime")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "installed": True,
+        "configured": True,
+        "status": "ready",
+        "version": "0.139.0",
+        "path": executable_path,
+        "entry_path": entry_path,
+        "install_context": "npm",
+        "warnings": [],
+        "error": None,
+    }
+
+
+def test_codex_runtime_status_missing_cli(monkeypatch):
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: None)
+    client = TestClient(app)
+
+    response = client.get("/api/system/codex/runtime")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "installed": False,
+        "configured": False,
+        "status": "missing",
+        "version": None,
+        "path": None,
+        "entry_path": None,
+        "install_context": None,
+        "warnings": [],
+        "error": "codex executable not found",
+    }
+
+
+def test_codex_runtime_status_falls_back_when_doctor_fails(monkeypatch, tmp_path):
+    client, entry_path = _client_with_codex(monkeypatch, tmp_path)
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        command = list(args)
+        if command[-1] == "--version":
+            return FakeProcess(args, returncode=0, stdout=b"codex-cli 0.139.0\n")
+        if command[-3:] == ["doctor", "--json", "--summary"]:
+            return FakeProcess(args, returncode=1, stderr=b"doctor failed\n")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = client.get("/api/system/codex/runtime")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["installed"] is True
+    assert data["configured"] is False
+    assert data["status"] == "installed"
+    assert data["version"] == "0.139.0"
+    assert data["path"] == entry_path
+    assert data["entry_path"] == entry_path
+    assert data["install_context"] is None
+    assert data["error"] is None
+    assert data["warnings"] == ["doctor failed"]
+
+
+def test_codex_runtime_refresh_invalidates_probe_cache(monkeypatch, tmp_path):
+    client, entry_path = _client_with_codex(monkeypatch, tmp_path)
+    system_routes._codex_probe_cache = (123.0, entry_path, {"status": "ready", "version": "old"})
+    commands: list[list[str]] = []
+    doctor_payload = {
+        "codexVersion": "0.140.0",
+        "overallStatus": "ok",
+        "checks": {
+            "installation": {
+                "status": "ok",
+                "details": {"current executable": entry_path},
+            },
+            "auth.credentials": {"status": "ok"},
+        },
+    }
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        command = list(args)
+        commands.append(command)
+        if command[-1] == "--version":
+            return FakeProcess(args, returncode=0, stdout=b"codex-cli 0.140.0\n")
+        if command[-3:] == ["doctor", "--json", "--summary"]:
+            return FakeProcess(args, returncode=0, stdout=json.dumps(doctor_payload).encode("utf-8"))
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = client.get("/api/system/codex/runtime?refresh=true")
+
+    assert response.status_code == 200
+    assert response.json()["version"] == "0.140.0"
+    assert [command[-1] for command in commands] == ["--version", "--summary"]

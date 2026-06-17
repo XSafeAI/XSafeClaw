@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -19,11 +19,13 @@ import RuntimeGuardConsole, {
   InlineApprovalCard,
   NewTaskModal,
   SessionHistoryViewAllModal,
+  TimelineMessage,
   ToolsViewAllModal,
   formatRuntimeGuardSessionTitle,
   getTimelineAppearance,
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
+  codexSessionRecordToRuntimeGuardSession,
   runtimeGuardAgentStatus,
   runtimeGuardSidebarLayoutMetrics,
   runtimeGuardStartSessionPayload,
@@ -52,6 +54,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   window.localStorage.clear();
 });
 
@@ -144,6 +147,29 @@ function runtimeBudgetStatus(platform: 'openclaw' | 'hermes' | 'nanobot', overLi
   };
 }
 
+function codexRateLimitsResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    data: {
+      installed: true,
+      status: 'ready',
+      five_hour: {
+        remaining_percent: 68,
+        used_percent: 32,
+        resets_at: 1781607727,
+      },
+      seven_day: {
+        remaining_percent: 55,
+        used_percent: 45,
+        resets_at: 1781762114,
+      },
+      plan_type: 'pro',
+      message: '',
+      error: null,
+      ...overrides,
+    },
+  };
+}
+
 function mockRuntimeGuardApis() {
   const sendMessageStreamSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => (
     new Response('data: {"type":"final","text":"Task created"}\n\ndata: [DONE]\n\n', {
@@ -200,6 +226,70 @@ function mockRuntimeGuardApis() {
     },
   } as any);
   vi.spyOn(sessionsAPI, 'listRuntime').mockResolvedValue({ data: { sessions: [] } } as any);
+  vi.spyOn(systemAPI, 'listCodexSessions').mockResolvedValue({
+    data: {
+      installed: true,
+      status: 'ready',
+      sessions: [],
+      next_cursor: null,
+      message: '',
+      error: null,
+    },
+  } as any);
+  const getCodexSessionMessagesSpy = vi.spyOn(systemAPI, 'getCodexSessionMessages').mockResolvedValue({
+    data: {
+      installed: true,
+      status: 'ready',
+      thread_id: 'thread-empty',
+      messages: [],
+      message: '',
+      error: null,
+    },
+  } as any);
+  const startCodexConversationSpy = vi.spyOn(systemAPI, 'startCodexConversation').mockResolvedValue({
+    data: {
+      installed: true,
+      status: 'ready',
+      session_key: 'codex:thread-started',
+      thread_id: 'thread-started',
+      session_id: 'session-started',
+      title: 'Codex',
+      cwd: 'E:/configured-codex-workspace',
+      instruction_hash: 'instruction-hash',
+      instruction_bytes: 123,
+      message: '',
+      error: null,
+    },
+  } as any);
+  const resumeCodexConversationSpy = vi.spyOn(systemAPI, 'resumeCodexConversation').mockResolvedValue({
+    data: {
+      installed: true,
+      status: 'ready',
+      session_key: 'codex:thread-abcdef123456',
+      thread_id: 'thread-abcdef123456',
+      session_id: 'session-codex-1',
+      title: 'Codex CLI history',
+      cwd: 'E:/work/codex-demo',
+      instruction_hash: 'instruction-hash',
+      instruction_bytes: 123,
+      message: '',
+      error: null,
+    },
+  } as any);
+  const respondCodexUserInputRequestSpy = vi.spyOn(systemAPI, 'respondCodexUserInputRequest').mockResolvedValue({
+    data: {
+      status: 'sent',
+      request_id: 'request-1',
+    },
+  } as any);
+  const clearCodexGoalSpy = vi.spyOn(systemAPI as any, 'clearCodexGoal').mockResolvedValue({
+    data: {
+      status: 'cleared',
+      thread_id: 'thread-started',
+      cleared: true,
+    },
+  } as any);
+  const codexRateLimitsSpy = vi.spyOn(systemAPI, 'getCodexRateLimits').mockResolvedValue(codexRateLimitsResponse() as any);
   vi.spyOn(budgetAPI, 'listRuntimeBudgets').mockResolvedValue({ data: { budgets: [] } } as any);
   vi.spyOn(guardAPI, 'pending').mockResolvedValue({ data: [] } as any);
   vi.spyOn(guardAPI, 'observations').mockResolvedValue({ data: [] } as any);
@@ -216,7 +306,18 @@ function mockRuntimeGuardApis() {
     },
   } as any);
 
-  return { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy, getHistorySpy };
+  return {
+    startSessionSpy,
+    smartStartSessionSpy,
+    sendMessageStreamSpy,
+    getHistorySpy,
+    getCodexSessionMessagesSpy,
+    startCodexConversationSpy,
+    resumeCodexConversationSpy,
+    respondCodexUserInputRequestSpy,
+    clearCodexGoalSpy,
+    codexRateLimitsSpy,
+  };
 }
 
 function renderRuntimeGuardConsole() {
@@ -242,16 +343,33 @@ function renderRuntimeGuardConsole() {
   );
 }
 
-function expectCodexQuotaRows(budget: HTMLElement) {
+function expectedCodexFiveHourReset(resetsAt = 1781607727) {
+  const time = new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(resetsAt * 1000));
+  return `Refreshes at ${time}`;
+}
+
+function expectedCodexWeekReset(resetsAt = 1781762114) {
+  const date = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(resetsAt * 1000));
+  return `Refreshes ${date}`;
+}
+
+function expectCodexQuotaRows(budget: HTMLElement, fiveHourPercent = '68%', weekPercent = '55%') {
   const quotaRows = Array.from(budget.querySelectorAll('.rg-codex-quota-row'));
   expect(quotaRows).toHaveLength(2);
   expect(quotaRows.every(row => row.classList.contains('is-centered-columns'))).toBe(true);
-  expect(quotaRows[0].querySelector('.rg-codex-quota-percent')?.textContent).toBe('81%');
-  expect(quotaRows[0].querySelector('.rg-codex-quota-window')?.textContent).toBe('5 hours left');
-  expect(quotaRows[0].querySelector('.rg-codex-quota-refresh')?.textContent).toBe('Refreshes at 18:54');
-  expect(quotaRows[1].querySelector('.rg-codex-quota-percent')?.textContent).toBe('72%');
-  expect(quotaRows[1].querySelector('.rg-codex-quota-window')?.textContent).toBe('1 week left');
-  expect(quotaRows[1].querySelector('.rg-codex-quota-refresh')?.textContent).toBe('Refreshes Jun 18');
+  expect(quotaRows[0].querySelector('.rg-codex-quota-percent')?.textContent).toBe(fiveHourPercent);
+  expect(quotaRows[0].querySelector('.rg-codex-quota-window')?.textContent).toBe('5 hours');
+  expect(quotaRows[0].querySelector('.rg-codex-quota-refresh')?.textContent).toBe(expectedCodexFiveHourReset());
+  expect(quotaRows[1].querySelector('.rg-codex-quota-percent')?.textContent).toBe(weekPercent);
+  expect(quotaRows[1].querySelector('.rg-codex-quota-window')?.textContent).toBe('1 week');
+  expect(quotaRows[1].querySelector('.rg-codex-quota-refresh')?.textContent).toBe(expectedCodexWeekReset());
   expect(quotaRows[0].querySelector('.rg-codex-quota-percent')?.className).toBe(
     quotaRows[1].querySelector('.rg-codex-quota-percent')?.className,
   );
@@ -484,7 +602,7 @@ describe('NewTaskModal', () => {
     expect((sidebar.textContent ?? '').indexOf('Codex')).toBeLessThan((sidebar.textContent ?? '').indexOf('TOOL PERMISSION'));
   });
 
-  it('switches the budget card to Codex App remaining usage when Codex is selected', async () => {
+  it('switches the budget card to Codex CLI remaining usage when Codex is selected', async () => {
     mockRuntimeGuardApis();
     vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
       data: {
@@ -503,15 +621,17 @@ describe('NewTaskModal', () => {
     expect(codexRow).toHaveClass('is-selected');
     const budget = container.querySelector('.rg-budget') as HTMLElement;
     expect(within(budget).getByText('BUDGET')).toBeTruthy();
-    expect(within(budget).getByText('Details →')).toBeTruthy();
-    expectCodexQuotaRows(budget);
+    expect(within(budget).getByText('Refresh')).toBeTruthy();
+    await waitFor(() => {
+      expectCodexQuotaRows(budget);
+    });
     expect(within(budget).queryByText('Remaining Usage')).toBeNull();
     expect(within(budget).queryByText('$0.00')).toBeNull();
     expect(budget.querySelector('.rg-budget-amount-line')).toBeNull();
     expect(budget.querySelector('.rg-budget-bar')).toBeNull();
   });
 
-  it('allows an uninstalled Codex row to be selected for viewing Codex App quota', async () => {
+  it('allows an uninstalled Codex row to be selected for viewing Codex CLI quota', async () => {
     mockRuntimeGuardApis();
     vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
       data: {
@@ -531,12 +651,113 @@ describe('NewTaskModal', () => {
     expect(codexRow).toHaveClass('is-uninstalled');
     const budget = container.querySelector('.rg-budget') as HTMLElement;
     expect(within(budget).getByText('BUDGET')).toBeTruthy();
-    expect(within(budget).getByText('Details →')).toBeTruthy();
-    expectCodexQuotaRows(budget);
+    expect(within(budget).getByText('Refresh')).toBeTruthy();
+    await waitFor(() => {
+      expectCodexQuotaRows(budget);
+    });
   });
 
-  it('creates a frontend-only Codex session from the Codex open button', async () => {
-    const { startSessionSpy, smartStartSessionSpy, getHistorySpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
+  it('refreshes Codex quota when the details action is clicked', async () => {
+    const { codexRateLimitsSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(codexRow);
+
+    await waitFor(() => {
+      expect(codexRateLimitsSpy).toHaveBeenCalledTimes(1);
+    });
+    fireEvent.click(container.querySelector('.rg-budget-settings') as HTMLElement);
+
+    await waitFor(() => {
+      expect(codexRateLimitsSpy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('silently refreshes Codex quota every 60 seconds while Codex is selected', async () => {
+    const { codexRateLimitsSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    vi.useFakeTimers();
+    fireEvent.click(codexRow);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(codexRateLimitsSpy).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(59_000);
+    });
+    expect(codexRateLimitsSpy).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(codexRateLimitsSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the Codex quota layout visible when rate limit loading fails', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.getCodexRateLimits).mockRejectedValueOnce(new Error('codex app-server failed'));
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(codexRow);
+
+    await waitFor(() => {
+      const budget = container.querySelector('.rg-budget') as HTMLElement;
+      const quotaRows = Array.from(budget.querySelectorAll('.rg-codex-quota-row'));
+      expect(quotaRows).toHaveLength(2);
+      expect(quotaRows[0].querySelector('.rg-codex-quota-percent')?.textContent).toBe('--%');
+      expect(quotaRows[1].querySelector('.rg-codex-quota-percent')?.textContent).toBe('--%');
+      expect(quotaRows[0].querySelector('.rg-codex-quota-refresh')?.textContent).toBe('Not available');
+      expect(quotaRows[1].querySelector('.rg-codex-quota-refresh')?.textContent).toBe('Not available');
+    });
+  });
+
+  it('creates a backend Codex session shell from the Codex open button', async () => {
+    const {
+      startSessionSpy,
+      smartStartSessionSpy,
+      getHistorySpy,
+      sendMessageStreamSpy,
+      startCodexConversationSpy,
+    } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/configured-codex-workspace',
+      permissionMode: 'workspace_write',
+      defaultModel: 'GPT-5.5',
+      defaultReasoning: 'xhigh',
+      defaultSpeed: 'standard',
+    }));
     vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
       data: {
         openclaw_installed: true,
@@ -555,6 +776,11 @@ describe('NewTaskModal', () => {
       expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('Codex');
     });
 
+    expect(startCodexConversationSpy).toHaveBeenCalledWith({
+      cwd: 'E:/configured-codex-workspace',
+      model: 'GPT-5.5',
+      permission_mode: 'workspace_write',
+    });
     expect(startSessionSpy).not.toHaveBeenCalled();
     expect(smartStartSessionSpy).not.toHaveBeenCalled();
     expect(getHistorySpy).not.toHaveBeenCalled();
@@ -563,13 +789,15 @@ describe('NewTaskModal', () => {
     const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
     expect(savedSessions[0]).toEqual(expect.objectContaining({
       agent: 'Codex',
-      displayName: 'Codex App',
-      frontendOnly: true,
-      instanceId: 'codex-frontend',
+      displayName: 'Codex CLI',
+      historySessionId: 'thread-started',
+      instanceId: 'codex-cli',
       platform: 'codex',
       title: 'Codex',
+      workspacePath: 'E:/configured-codex-workspace',
     }));
-    expect(savedSessions[0].sessionKey).toMatch(/^codex::frontend::/);
+    expect(savedSessions[0].frontendOnly).toBeFalsy();
+    expect(savedSessions[0].sessionKey).toBe('codex:thread-started');
 
     const composer = container.querySelector('.rg-codex-composer') as HTMLElement;
     fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
@@ -577,9 +805,211 @@ describe('NewTaskModal', () => {
     });
     fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
 
-    expect(sendMessageStreamSpy).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith(
+        '/api/system/codex/conversations/codex%3Athread-started/turns/stream',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    });
+    const [, codexRequest] = sendMessageStreamSpy.mock.calls[0];
+    expect(JSON.parse((codexRequest as RequestInit).body as string)).toEqual({
+      message: 'hello Codex',
+      thread_id: 'thread-started',
+      cwd: 'E:/configured-codex-workspace',
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      speed: 'standard',
+      permission_mode: 'workspace_write',
+      plan_mode: false,
+      goal_mode: false,
+      goal_objective: null,
+    });
     expect(screen.getByText('hello Codex')).toBeTruthy();
-    expect(await screen.findByText('This is a Codex frontend preview session. Backend data is not connected yet.')).toBeTruthy();
+    expect(await screen.findByText('Task created')).toBeTruthy();
+    expect(screen.queryByText('This is a Codex frontend preview session. Backend data is not connected yet.')).toBeNull();
+  });
+
+  it('sends Codex plan mode and renders streamed plan updates', async () => {
+    const { sendMessageStreamSpy } = mockRuntimeGuardApis();
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: ${JSON.stringify({
+          type: 'codex_plan_update',
+          thread_id: 'thread-started',
+          turn_id: 'turn-plan',
+          explanation: 'I will inspect first.',
+          steps: [
+            { step: 'Inspect files', status: 'inProgress' },
+            { step: 'Report plan', status: 'pending' },
+          ],
+        })}\n\ndata: ${JSON.stringify({
+          type: 'codex_plan_update',
+          thread_id: 'thread-started',
+          turn_id: 'turn-plan',
+          item_id: 'plan-item-1',
+          text: 'Final plan text',
+        })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    fireEvent.click(screen.getByRole('button', { name: /Plan Mode/ }));
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'make a plan' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => {
+      const [, request] = sendMessageStreamSpy.mock.calls[0];
+      expect(JSON.parse((request as RequestInit).body as string)).toEqual(expect.objectContaining({
+        message: 'make a plan',
+        plan_mode: true,
+        goal_mode: false,
+        goal_objective: null,
+      }));
+    });
+    expect(await screen.findByText('Codex plan')).toBeTruthy();
+    expect(screen.getByText('I will inspect first.')).toBeTruthy();
+    expect(screen.getByText('Inspect files')).toBeTruthy();
+    expect(screen.getByText('Final plan text')).toBeTruthy();
+  });
+
+  it('sends Codex goal mode with the message as objective and renders goal status', async () => {
+    const { sendMessageStreamSpy, clearCodexGoalSpy } = mockRuntimeGuardApis();
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: ${JSON.stringify({
+          type: 'codex_goal_update',
+          thread_id: 'thread-started',
+          goal: {
+            thread_id: 'thread-started',
+            objective: 'finish migration',
+            status: 'active',
+          },
+        })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    fireEvent.click(screen.getByRole('button', { name: /Pursue Goal/ }));
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'finish migration' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => {
+      const [, request] = sendMessageStreamSpy.mock.calls[0];
+      expect(JSON.parse((request as RequestInit).body as string)).toEqual(expect.objectContaining({
+        message: 'finish migration',
+        plan_mode: false,
+        goal_mode: true,
+        goal_objective: 'finish migration',
+      }));
+    });
+    expect(await screen.findByText('Codex goal')).toBeTruthy();
+    expect(screen.getAllByText('finish migration').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Active').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
+    await waitFor(() => expect(clearCodexGoalSpy).toHaveBeenCalledWith('codex:thread-started', { thread_id: 'thread-started' }));
+  });
+
+  it('renders Codex user-input requests from the stream and responds through app-server', async () => {
+    const { sendMessageStreamSpy, respondCodexUserInputRequestSpy } = mockRuntimeGuardApis();
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: ${JSON.stringify({
+          type: 'codex_user_input_request',
+          request_id: 'request-1',
+          thread_id: 'thread-started',
+          turn_id: 'turn-1',
+          item_id: 'item-question-1',
+          questions: [{
+            id: 'question-1',
+            header: 'Implementation choice',
+            question: 'Which path should Codex take?',
+            is_other: true,
+            is_secret: false,
+            options: [{ label: 'Minimal', description: 'Keep the change small' }],
+          }],
+        })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'ask a question' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('Which path should Codex take?')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Minimal' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and send' }));
+
+    await waitFor(() => expect(respondCodexUserInputRequestSpy).toHaveBeenCalledWith(
+      'codex:thread-started',
+      'request-1',
+      { answers: { 'question-1': { answers: ['Minimal'] } } },
+    ));
+    expect(screen.getAllByText('Sent').length).toBeGreaterThan(0);
   });
 
   it('shows Codex-only composer controls with local menus and interrupt action', async () => {
@@ -620,6 +1050,19 @@ describe('NewTaskModal', () => {
       'rg-codex-model-wrap',
       expect.stringContaining('rg-codex-send'),
     ]);
+    const leftControls = composer.querySelector('.rg-codex-left-controls') as HTMLElement;
+    expect(Array.from(leftControls.children).map(child => child.className)).toContain('rg-codex-permission-wrap');
+    const permissionButton = within(composer).getByRole('button', { name: 'Select Codex permission: Workspace write' });
+    expect(permissionButton.textContent).toContain('Workspace write');
+    fireEvent.click(permissionButton);
+    expect(within(composer).getByText('Permission')).toBeTruthy();
+    const readOnlyPermission = within(composer).getByRole('button', { name: 'Read only' });
+    const fullAccessPermission = within(composer).getByRole('button', { name: 'Full access' });
+    expect(readOnlyPermission).toBeTruthy();
+    expect(fullAccessPermission).toBeTruthy();
+    fireEvent.click(readOnlyPermission);
+    expect(composer.querySelector('.rg-codex-permission-menu')).toBeNull();
+    expect(permissionButton.textContent).toContain('Read only');
 
     fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
     const planMode = within(composer).getByRole('button', { name: 'Plan Mode' });
@@ -670,16 +1113,85 @@ describe('NewTaskModal', () => {
     expect(modelButton.textContent).toContain('5.4');
     expect(modelButton.textContent).toContain('High');
 
+    if (!composer.querySelector('.rg-codex-model-menu')) {
+      fireEvent.click(modelButton);
+    }
+    fireEvent.click(within(composer).getByRole('button', { name: /GPT-5.4/ }));
+    fireEvent.click(within(composer).getByRole('button', { name: 'GPT-5.4-Mini' }));
+    expect(composer.querySelector('.rg-codex-submenu')).toBeNull();
+    expect(modelButton).toHaveClass('is-standard');
+    expect(modelButton).not.toHaveClass('is-fast');
+    fireEvent.click(modelButton);
+    expect(within(composer).queryByRole('button', { name: /Speed/ })).toBeNull();
+
     fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
       target: { value: 'draft local Codex action' },
     });
+    let closeStream = () => {};
+    sendMessageStreamSpy
+      .mockImplementationOnce(async () => (
+        new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close();
+          },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      ) as any)
+      .mockImplementationOnce(async () => (
+        new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+      ) as any);
     fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
 
     const interruptButton = await within(composer).findByRole('button', { name: 'Interrupt response' });
     fireEvent.click(interruptButton);
 
-    expect(sendMessageStreamSpy).not.toHaveBeenCalled();
-    expect(await screen.findByText('Interrupted Codex frontend preview response.')).toBeTruthy();
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith(
+        '/api/system/codex/conversations/codex%3Athread-started/interrupt',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    closeStream();
+  });
+
+  it('closes Codex composer option and model menus when clicking outside', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    const taskPanel = container.querySelector('.rg-task-panel') as HTMLElement;
+
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    expect(composer.querySelector('.rg-codex-options-menu')).toBeTruthy();
+    fireEvent.click(within(composer).getByRole('button', { name: 'Plan Mode' }));
+    expect(composer.querySelector('.rg-codex-options-menu')).toBeTruthy();
+    fireEvent.pointerDown(taskPanel);
+    expect(composer.querySelector('.rg-codex-options-menu')).toBeNull();
+
+    fireEvent.click(within(composer).getByRole('button', { name: /Select Codex model/ }));
+    expect(composer.querySelector('.rg-codex-model-menu')).toBeTruthy();
+    fireEvent.click(within(composer).getByRole('button', { name: 'High' }));
+    expect(composer.querySelector('.rg-codex-model-menu')).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+    expect(composer.querySelector('.rg-codex-model-menu')).toBeNull();
   });
 
   it('restores a frontend-only Codex session without loading backend history', async () => {
@@ -716,6 +1228,224 @@ describe('NewTaskModal', () => {
       .find(row => row.querySelector('.rg-agent-name')?.textContent === 'Codex') as HTMLElement;
     expect(codexRow).toHaveClass('is-selected');
     expectCodexQuotaRows(container.querySelector('.rg-budget') as HTMLElement);
+  });
+
+  it('opens Codex CLI history and renders the real transcript in the middle panel', async () => {
+    const { getHistorySpy, getCodexSessionMessagesSpy, resumeCodexConversationSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.listCodexSessions).mockResolvedValue({
+      data: {
+        installed: true,
+        status: 'ready',
+        sessions: [
+          {
+            id: 'thread-abcdef123456',
+            session_id: 'session-codex-1',
+            title: 'Codex CLI history',
+            preview: 'Summarize local changes',
+            cwd: 'E:/work/codex-demo',
+            created_at: '2026-06-15T12:00:00Z',
+            updated_at: '2026-06-15T13:00:00Z',
+            status: 'idle',
+            source: 'cli',
+            path: 'C:/Users/heng/.codex/sessions/thread.jsonl',
+            cli_version: '0.139.0',
+          },
+        ],
+        next_cursor: null,
+        message: '',
+        error: null,
+      },
+    } as any);
+    getCodexSessionMessagesSpy.mockResolvedValueOnce({
+      data: {
+        installed: true,
+        status: 'ready',
+        thread_id: 'thread-abcdef123456',
+        messages: [
+          {
+            id: 'user-1',
+            role: 'user',
+            content: '我现在的登录情况',
+            timestamp: '2026-06-15T12:00:00Z',
+          },
+          {
+            id: 'command-1',
+            role: 'tool_call',
+            content: '',
+            timestamp: '2026-06-15T12:00:01Z',
+            tool_id: 'command-1',
+            tool_name: 'Shell',
+            args: { command: 'codex login status', cwd: 'E:/work/codex-demo' },
+            result: { output: 'Logged in using ChatGPT', exit_code: 0 },
+            is_error: false,
+            result_pending: false,
+            tool_category: 'shell',
+            tool_action: 'execute',
+            timeline_kind: 'shell_command',
+          },
+          {
+            id: 'assistant-1',
+            role: 'assistant',
+            content: '当前已经通过 ChatGPT 登录。',
+            timestamp: '2026-06-15T12:00:02Z',
+          },
+        ],
+        message: '',
+        error: null,
+      },
+    } as any);
+
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(systemAPI.listCodexSessions).toHaveBeenCalledWith({ limit: 100 });
+    });
+
+    fireEvent.click(container.querySelector('.rg-session-history-head button') as HTMLElement);
+    const dialog = screen.getByRole('dialog', { name: 'Session history' });
+    fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
+    expect(within(dialog).getByText('Codex CLI history')).toBeTruthy();
+    const codexHistoryRow = within(dialog).getByText('Codex CLI history').closest('.rg-session-modal-row') as HTMLElement;
+    expect(codexHistoryRow.querySelector('.rg-session-modal-title em')?.textContent).toBe('E:/work/codex-demo');
+    expect(codexHistoryRow.querySelector('.rg-session-modal-title em')?.textContent).not.toBe('Codex CLI');
+    expect(screen.queryByTitle('Delete Codex CLI history')).toBeNull();
+
+    fireEvent.click(within(dialog).getByText('Codex CLI history').closest('button') as HTMLElement);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Codex CLI history' })).toBeTruthy();
+    });
+    expect(resumeCodexConversationSpy).toHaveBeenCalledWith({
+      thread_id: 'thread-abcdef123456',
+      cwd: 'E:/work/codex-demo',
+      model: 'GPT-5.5',
+      permission_mode: 'workspace_write',
+    });
+    await waitFor(() => {
+      expect(getCodexSessionMessagesSpy).toHaveBeenCalledWith('thread-abcdef123456');
+    });
+    expect(getHistorySpy).not.toHaveBeenCalledWith('codex:thread-abcdef123456');
+    expect(screen.getByText('我现在的登录情况')).toBeTruthy();
+    expect(screen.getByText('当前已经通过 ChatGPT 登录。')).toBeTruthy();
+    expect(container.querySelector('.rg-session-meta')?.textContent ?? '').toContain('workspace:E:/work/codex-demo');
+  });
+
+  it('reloads Codex CLI history when an older frontend Codex shell already cached the same session key', async () => {
+    const { getHistorySpy, getCodexSessionMessagesSpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
+      {
+        sessionKey: 'codex:thread-abcdef123456',
+        agent: 'Codex',
+        platform: 'codex',
+        instanceId: 'codex-frontend',
+        displayName: 'Codex App',
+        frontendOnly: true,
+        codexHistory: false,
+        title: 'Stale frontend shell',
+        createdAt: '2026-06-15T11:00:00.000Z',
+        status: 'ready',
+      },
+    ]));
+    vi.mocked(systemAPI.listCodexSessions).mockResolvedValue({
+      data: {
+        installed: true,
+        status: 'ready',
+        sessions: [
+          {
+            id: 'thread-abcdef123456',
+            session_id: 'session-codex-1',
+            title: 'Codex CLI history',
+            preview: 'Summarize local changes',
+            cwd: 'E:/work/codex-demo',
+            created_at: '2026-06-15T12:00:00Z',
+            updated_at: '2026-06-15T13:00:00Z',
+            status: 'idle',
+            source: 'cli',
+            path: 'C:/Users/heng/.codex/sessions/thread.jsonl',
+            cli_version: '0.139.0',
+          },
+        ],
+        next_cursor: null,
+        message: '',
+        error: null,
+      },
+    } as any);
+    getCodexSessionMessagesSpy.mockResolvedValueOnce({
+      data: {
+        installed: true,
+        status: 'ready',
+        thread_id: 'thread-abcdef123456',
+        messages: [
+          {
+            id: 'assistant-1',
+            role: 'assistant',
+            content: '这是重新加载出来的真实 Codex 历史。',
+            timestamp: '2026-06-15T12:00:02Z',
+          },
+        ],
+        message: '',
+        error: null,
+      },
+    } as any);
+
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Stale frontend shell' })).toBeTruthy();
+    });
+    expect(getCodexSessionMessagesSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(container.querySelector('.rg-session-history-head button') as HTMLElement);
+    const dialog = screen.getByRole('dialog', { name: 'Session history' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Codex' }));
+    fireEvent.click(within(dialog).getByText('Codex CLI history').closest('button') as HTMLElement);
+
+    await waitFor(() => {
+      expect(getCodexSessionMessagesSpy).toHaveBeenCalledWith('thread-abcdef123456');
+    });
+    expect(getHistorySpy).not.toHaveBeenCalledWith('codex:thread-abcdef123456');
+    await waitFor(() => {
+      expect(screen.getByText('这是重新加载出来的真实 Codex 历史。')).toBeTruthy();
+    });
+    expect(screen.getByRole('heading', { name: 'Codex CLI history' })).toBeTruthy();
+  });
+
+  it('keeps runtime history visible when Codex CLI history fails to load', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(sessionsAPI.listRuntime).mockResolvedValue({
+      data: {
+        sessions: [
+          {
+            session_id: 'db-session-openclaw',
+            platform: 'openclaw',
+            instance_id: 'runtime-openclaw',
+            source_session_id: 'source-openclaw',
+            display_session_id: 'OpenClaw real history',
+            session_key: 'openclaw::runtime-openclaw::source-openclaw',
+            first_seen_at: '2026-06-15T10:00:00.000Z',
+            last_activity_at: '2026-06-15T11:00:00.000Z',
+            cwd: 'E:/work/openclaw-demo',
+            current_model_provider: null,
+            current_model_name: null,
+            total_runs: 1,
+            total_tokens: 10,
+            created_at: '2026-06-15T10:00:00.000Z',
+            updated_at: '2026-06-15T11:00:00.000Z',
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 100,
+      },
+    } as any);
+    vi.mocked(systemAPI.listCodexSessions).mockRejectedValue(new Error('codex app-server failed'));
+
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(systemAPI.listCodexSessions).toHaveBeenCalledWith({ limit: 100 });
+    });
+    fireEvent.click(container.querySelector('.rg-session-history-head button') as HTMLElement);
+    expect(within(screen.getByRole('dialog', { name: 'Session history' })).getByText('OpenClaw real history')).toBeTruthy();
   });
 
   it('previews only active-session approvals in the right approval panel', async () => {
@@ -857,6 +1587,16 @@ describe('getTimelineAppearance', () => {
     expect(getTimelineAppearance(message({ role: 'error', content: 'boom' })).tone).toBe('red');
   });
 
+  it('maps Codex question rows as user-input requests', () => {
+    const appearance = getTimelineAppearance(message({
+      role: 'codex_question',
+      codex_question: 'Which path should I use?',
+    }));
+
+    expect(appearance.kind).toBe('codex_user_input');
+    expect(appearance.tone).toBe('cyan');
+  });
+
   it.each([
     ['exec', { command: 'echo hi' }, 'tool_shell', 'green'],
     ['read_file', { path: 'README.md' }, 'tool_file_read', 'yellow'],
@@ -938,6 +1678,87 @@ describe('InlineApprovalCard', () => {
   });
 });
 
+describe('TimelineMessage Codex question', () => {
+  it('submits a selected option with the Codex user-input response shape', async () => {
+    const onCodexQuestionSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <TimelineMessage
+        expanded={false}
+        msg={{
+          id: 'codex-question-1',
+          role: 'codex_question',
+          content: '',
+          timestamp: new Date('2026-06-10T12:00:00.000Z'),
+          codex_request_id: 'request-1',
+          codex_questions: [{
+            id: 'question-1',
+            header: 'Implementation choice',
+            question: 'Which approach should Codex use?',
+            is_other: true,
+            is_secret: false,
+            options: [
+              { label: 'Minimal change', description: 'Keep the change small' },
+              { label: 'Full interaction', description: 'Build the full flow' },
+            ],
+          }],
+          codex_response_status: 'pending',
+        }}
+        onCodexQuestionSubmit={onCodexQuestionSubmit}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Codex question')).toBeTruthy();
+    expect(screen.getByText('Which approach should Codex use?')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Confirm and send' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Minimal change' }));
+    expect(screen.getByText('Selected: Minimal change')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and send' }));
+
+    await waitFor(() => expect(onCodexQuestionSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ codex_request_id: 'request-1' }),
+      { answers: { 'question-1': { answers: ['Minimal change'] } } },
+    ));
+  });
+
+  it('submits a custom secret answer for questions without options', async () => {
+    const onCodexQuestionSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <TimelineMessage
+        expanded={false}
+        msg={{
+          id: 'codex-question-secret',
+          role: 'codex_question',
+          content: '',
+          timestamp: new Date('2026-06-10T12:00:00.000Z'),
+          codex_request_id: 'request-secret',
+          codex_questions: [{
+            id: 'secret-question',
+            header: 'Token',
+            question: 'Paste the temporary code.',
+            is_other: true,
+            is_secret: true,
+            options: [],
+          }],
+          codex_response_status: 'pending',
+        }}
+        onCodexQuestionSubmit={onCodexQuestionSubmit}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByPlaceholderText('Type your answer...');
+    expect(input).toHaveAttribute('type', 'password');
+    fireEvent.change(input, { target: { value: 'temporary-code' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and send' }));
+
+    await waitFor(() => expect(onCodexQuestionSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ codex_request_id: 'request-secret' }),
+      { answers: { 'secret-question': { answers: ['temporary-code'] } } },
+    ));
+  });
+});
+
 describe('SessionHistoryViewAllModal', () => {
   const sessions: RuntimeGuardSession[] = [
     {
@@ -963,6 +1784,18 @@ describe('SessionHistoryViewAllModal', () => {
       createdAt: '2026-06-05T05:58:00.000Z',
       lastActivityAt: '2026-06-05T06:01:00.000Z',
       status: 'ready' as const,
+    },
+    {
+      sessionKey: 'session-codex',
+      agent: 'Codex' as const,
+      platform: 'codex' as const,
+      instanceId: 'codex-local',
+      displayName: 'Codex',
+      title: 'Restore Codex transcript',
+      createdAt: '2026-06-05T05:42:00.000Z',
+      lastActivityAt: '2026-06-05T05:50:00.000Z',
+      status: 'ready' as const,
+      frontendOnly: true,
     },
   ];
 
@@ -1006,10 +1839,42 @@ describe('SessionHistoryViewAllModal', () => {
     expect(merged[0].historySessionId).toBe('db-session-1');
   });
 
+  it('maps Codex CLI thread summaries as readonly frontend sessions', () => {
+    const mapped = codexSessionRecordToRuntimeGuardSession({
+      id: 'thread-abcdef123456',
+      session_id: 'session-codex-1',
+      title: '',
+      preview: 'Inspect app-server thread list',
+      cwd: 'E:/work/codex-demo',
+      created_at: '2026-06-15T12:00:00Z',
+      updated_at: '2026-06-15T13:00:00Z',
+      status: 'idle',
+      source: 'cli',
+      path: 'C:/Users/heng/.codex/sessions/thread.jsonl',
+      cli_version: '0.139.0',
+    });
+
+    expect(mapped).toMatchObject({
+      sessionKey: 'codex:thread-abcdef123456',
+      historySessionId: 'thread-abcdef123456',
+      agent: 'Codex',
+      platform: 'codex',
+      instanceId: 'codex-cli',
+      displayName: 'Codex CLI',
+      workspacePath: 'E:/work/codex-demo',
+      title: 'Inspect app-server thread list',
+      createdAt: '2026-06-15T12:00:00Z',
+      lastActivityAt: '2026-06-15T13:00:00Z',
+      status: 'ready',
+      frontendOnly: true,
+      codexHistory: true,
+    });
+  });
+
   it('promotes an already opened history session to the first tab position', () => {
     const promoted = promoteRuntimeGuardSession(sessions, sessions[1]);
 
-    expect(promoted.map(session => session.sessionKey)).toEqual(['session-hermes', 'session-openclaw']);
+    expect(promoted.map(session => session.sessionKey)).toEqual(['session-hermes', 'session-openclaw', 'session-codex']);
   });
 
   it('renders existing frontend sessions, filters, and switches the active session', () => {
@@ -1043,10 +1908,39 @@ describe('SessionHistoryViewAllModal', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hermes' }));
     expect(screen.queryByText('Fix login bug and add rate limit')).toBeNull();
     expect(screen.getByText('Review protected file access')).toBeTruthy();
+    expect(screen.queryByText('Restore Codex transcript')).toBeNull();
 
-    fireEvent.click(screen.getByText('Review protected file access').closest('button') as HTMLElement);
-    expect(onSelectSession).toHaveBeenCalledWith(sessions[1]);
+    fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
+    expect(screen.queryByText('Review protected file access')).toBeNull();
+    expect(screen.getByText('Restore Codex transcript')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('Restore Codex transcript').closest('button') as HTMLElement);
+    expect(onSelectSession).toHaveBeenCalledWith(sessions[2]);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides delete controls for readonly Codex CLI history records', () => {
+    const codexHistorySession = {
+      ...sessions[2],
+      sessionKey: 'codex:thread-abcdef123456',
+      historySessionId: 'thread-abcdef123456',
+      codexHistory: true,
+    } as RuntimeGuardSession;
+    render(
+      <SessionHistoryViewAllModal
+        sessions={[codexHistorySession]}
+        loading={false}
+        activeSessionId=""
+        messageMap={{}}
+        middleApprovalCardsBySession={{}}
+        onSelectSession={vi.fn()}
+        onDeleteSession={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Restore Codex transcript')).toBeTruthy();
+    expect(screen.queryByTitle('Delete Restore Codex transcript')).toBeNull();
   });
 
   it('confirms before deleting a session record', () => {

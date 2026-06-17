@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 import json
 import locale
@@ -23,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -57,6 +59,10 @@ from ...services.openclaw_silent_credentials import (
     openclaw_silent_credentials_match_provider,
     openclaw_silent_model_credentials_path,
     save_openclaw_silent_model_credentials,
+)
+from ...services.codex_safety_prompt import (
+    CodexSafetyPromptError,
+    build_codex_developer_instructions,
 )
 
 try:
@@ -1219,9 +1225,25 @@ def _codex_status_from_doctor(
         "configured": auth_ok,
         "version": doctor.get("codexVersion") or fallback_version,
         "path": details.get("current executable") or fallback_path,
+        "entry_path": fallback_path,
+        "install_context": details.get("install context"),
         "status": status,
         "error": None,
         "warnings": warnings,
+    }
+
+
+def _codex_runtime_response(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "installed": bool(status.get("installed")),
+        "configured": bool(status.get("configured")),
+        "status": status.get("status") or "error",
+        "version": status.get("version"),
+        "path": status.get("path"),
+        "entry_path": status.get("entry_path"),
+        "install_context": status.get("install_context"),
+        "warnings": status.get("warnings") if isinstance(status.get("warnings"), list) else [],
+        "error": status.get("error"),
     }
 
 
@@ -1368,6 +1390,8 @@ async def _probe_codex_install_async(
             "configured": False,
             "version": None,
             "path": None,
+            "entry_path": None,
+            "install_context": None,
             "status": "missing",
             "error": "codex executable not found",
             "warnings": [],
@@ -1387,6 +1411,8 @@ async def _probe_codex_install_async(
             "configured": False,
             "version": None,
             "path": codex_path,
+            "entry_path": codex_path,
+            "install_context": None,
             "status": "error",
             "error": detail,
             "warnings": [],
@@ -1422,12 +1448,1590 @@ async def _probe_codex_install_async(
         "configured": False,
         "version": version,
         "path": codex_path,
+        "entry_path": codex_path,
+        "install_context": None,
         "status": "installed",
         "error": None,
         "warnings": warnings,
     }
     _codex_probe_cache = (time.monotonic(), codex_path, dict(result))
     return result
+
+
+@router.get("/codex/runtime")
+async def codex_runtime_status(refresh: bool = False):
+    """Return Codex CLI runtime health using redacted CLI diagnostics only."""
+    if refresh:
+        _invalidate_codex_probe_cache()
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    status = await _probe_codex_install_async(codex_path, env=env)
+    return _codex_runtime_response(status)
+
+
+class CodexAppServerError(RuntimeError):
+    """Raised when Codex app-server returns a JSON-RPC failure."""
+
+
+class CodexConversationStartRequest(BaseModel):
+    cwd: str | None = None
+    model: str | None = None
+    permission_mode: Literal["read_only", "workspace_write", "full_access"] | None = None
+
+
+class CodexConversationResumeRequest(BaseModel):
+    thread_id: str = Field(..., min_length=1)
+    cwd: str | None = None
+    model: str | None = None
+    permission_mode: Literal["read_only", "workspace_write", "full_access"] | None = None
+
+
+class CodexConversationTurnRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    thread_id: str = Field(..., min_length=1)
+    cwd: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    speed: Literal["standard", "fast"] | None = "standard"
+    permission_mode: Literal["read_only", "workspace_write", "full_access"] | None = None
+    plan_mode: bool = False
+    goal_mode: bool = False
+    goal_objective: str | None = None
+
+
+class CodexConversationInterruptRequest(BaseModel):
+    thread_id: str | None = None
+    turn_id: str | None = None
+
+
+class CodexConversationGoalClearRequest(BaseModel):
+    thread_id: str | None = None
+
+
+class CodexUserInputAnswer(BaseModel):
+    answers: list[str]
+
+
+class CodexRequestUserInputResponseRequest(BaseModel):
+    answers: dict[str, CodexUserInputAnswer]
+
+
+_CODEX_MODEL_IDS: dict[str, str] = {
+    "GPT-5.5": "gpt-5.5",
+    "GPT-5.4": "gpt-5.4",
+    "GPT-5.4-Mini": "gpt-5.4-mini",
+    "GPT-5.3-Codex-Spark": "gpt-5.3-codex-spark",
+}
+_CODEX_FAST_MODE_MODELS = {"gpt-5.5", "gpt-5.4"}
+_CODEX_APP_SERVER_INTERACTIVE_IDLE_TIMEOUT_S = 30 * 60
+_codex_active_turns: dict[str, dict[str, Any]] = {}
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _codex_timestamp_to_iso(value: Any) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except (OSError, OverflowError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            numeric = float(text)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            return _codex_timestamp_to_iso(numeric)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            return text
+    return None
+
+
+def _codex_status_label(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        return _first_string(value.get("type"), value.get("status"), value.get("state"), value.get("kind"))
+    return None
+
+
+def _codex_source_label(value: Any, fallback: Any = None) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        return _first_string(value.get("kind"), value.get("type"), value.get("source"), value.get("name"))
+    return _codex_source_label(fallback) if fallback is not None else None
+
+
+def _codex_thread_summary(thread: dict[str, Any]) -> dict[str, Any] | None:
+    thread_id = _first_string(thread.get("id"), thread.get("threadId"))
+    if not thread_id:
+        return None
+    created_at = _codex_timestamp_to_iso(thread.get("createdAt") or thread.get("created_at"))
+    updated_at = _codex_timestamp_to_iso(thread.get("updatedAt") or thread.get("updated_at"))
+    return {
+        "id": thread_id,
+        "session_id": _first_string(thread.get("sessionId"), thread.get("session_id")),
+        "title": _first_string(thread.get("name"), thread.get("title")),
+        "preview": _first_string(thread.get("preview")),
+        "cwd": _first_string(thread.get("cwd")),
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "status": _codex_status_label(thread.get("status")),
+        "source": _codex_source_label(thread.get("source"), thread.get("threadSource")),
+        "path": _first_string(thread.get("path")),
+        "cli_version": _first_string(thread.get("cliVersion"), thread.get("cli_version")),
+    }
+
+
+async def _codex_app_server_response(
+    proc: asyncio.subprocess.Process,
+    request_id: int,
+    *,
+    timeout_s: float,
+) -> dict[str, Any]:
+    if proc.stdout is None:
+        raise CodexAppServerError("codex app-server stdout is unavailable")
+
+    while True:
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout_s)
+        if not line:
+            raise CodexAppServerError("codex app-server closed before responding")
+        try:
+            message = json.loads(_decode_subprocess_output(line))
+        except json.JSONDecodeError:
+            continue
+        if message.get("id") != request_id:
+            continue
+        error = message.get("error")
+        if error:
+            if isinstance(error, dict):
+                detail = _first_string(error.get("message"), error.get("code")) or json.dumps(error, ensure_ascii=False)
+            else:
+                detail = str(error)
+            raise CodexAppServerError(detail)
+        result = message.get("result")
+        return result if isinstance(result, dict) else {}
+
+
+async def _codex_app_server_send(proc: asyncio.subprocess.Process, message: dict[str, Any]) -> None:
+    if proc.stdin is None:
+        raise CodexAppServerError("codex app-server stdin is unavailable")
+    proc.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
+    await proc.stdin.drain()
+
+
+async def _codex_app_server_initialize(
+    proc: asyncio.subprocess.Process,
+    *,
+    timeout_s: float,
+) -> None:
+    await _codex_app_server_send(
+        proc,
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "XSafeClaw",
+                    "version": _xsafeclaw_package_version(),
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        },
+    )
+    await _codex_app_server_response(proc, 1, timeout_s=timeout_s)
+    await _codex_app_server_send(proc, {"method": "initialized"})
+
+
+def _codex_thread_list_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = result.get("threads")
+    if raw_items is None:
+        raw_items = result.get("items")
+    if raw_items is None:
+        raw_items = result.get("data")
+    if not isinstance(raw_items, list):
+        return []
+    return [item for item in raw_items if isinstance(item, dict)]
+
+
+def _codex_thread_read_thread(result: dict[str, Any]) -> dict[str, Any] | None:
+    thread = result.get("thread")
+    if isinstance(thread, dict):
+        return thread
+    if isinstance(result.get("data"), dict):
+        return result.get("data")
+    if any(key in result for key in ("id", "threadId", "turns")):
+        return result
+    return None
+
+
+def _codex_conversation_response(
+    result: dict[str, Any],
+    *,
+    instruction_hash: str,
+    instruction_bytes: int,
+    fallback_thread_id: str | None = None,
+    fallback_cwd: str | None = None,
+) -> dict[str, Any]:
+    thread = _codex_thread_read_thread(result) or {}
+    thread_id = _first_string(thread.get("id"), thread.get("threadId"), result.get("threadId"), fallback_thread_id)
+    if not thread_id:
+        raise CodexAppServerError("codex app-server did not return a thread id")
+    return {
+        "installed": True,
+        "status": "ready",
+        "session_key": f"codex:{thread_id}",
+        "thread_id": thread_id,
+        "session_id": _first_string(thread.get("sessionId"), thread.get("session_id"), result.get("sessionId")),
+        "title": _first_string(thread.get("name"), thread.get("title"), thread.get("preview")) or "Codex",
+        "cwd": _first_string(thread.get("cwd"), result.get("cwd"), fallback_cwd),
+        "instruction_hash": instruction_hash,
+        "instruction_bytes": instruction_bytes,
+        "message": "",
+        "error": None,
+    }
+
+
+def _codex_model_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return _CODEX_MODEL_IDS.get(text, text)
+
+
+def _codex_service_tier(speed: str | None, model_id: str | None) -> str | None:
+    if speed != "fast":
+        return None
+    if model_id not in _CODEX_FAST_MODE_MODELS:
+        raise CodexAppServerError("fast mode is only supported for GPT-5.5 and GPT-5.4")
+    return "fast"
+
+
+def _codex_sandbox_policy(
+    permission_mode: Literal["read_only", "workspace_write", "full_access"] | None,
+    cwd: str | None,
+) -> dict[str, Any] | None:
+    if permission_mode == "read_only":
+        return {"type": "readOnly", "networkAccess": False}
+    if permission_mode == "workspace_write":
+        writable_roots = [cwd] if cwd else []
+        return {
+            "type": "workspaceWrite",
+            "writableRoots": writable_roots,
+            "networkAccess": False,
+            "excludeTmpdirEnvVar": False,
+            "excludeSlashTmp": False,
+        }
+    if permission_mode == "full_access":
+        return {"type": "dangerFullAccess"}
+    return None
+
+
+def _codex_sse(data: dict[str, Any]) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _codex_thread_id_from_session_key(session_key: str) -> str:
+    return session_key.removeprefix("codex:")
+
+
+def _codex_jsonrpc_id(value: Any) -> Any | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (str, int, float)):
+        return value
+    return None
+
+
+def _codex_request_id_text(value: Any) -> str | None:
+    jsonrpc_id = _codex_jsonrpc_id(value)
+    return str(jsonrpc_id) if jsonrpc_id is not None else None
+
+
+def _codex_user_input_request_chunk(message: dict[str, Any], params: dict[str, Any]) -> dict[str, Any] | None:
+    request_id = _codex_request_id_text(message.get("id"))
+    if not request_id:
+        return None
+    questions: list[dict[str, Any]] = []
+    raw_questions = params.get("questions") if isinstance(params.get("questions"), list) else []
+    for index, raw_question in enumerate(raw_questions):
+        if not isinstance(raw_question, dict):
+            continue
+        question_id = _first_string(raw_question.get("id")) or f"question-{index + 1}"
+        raw_options = raw_question.get("options") if isinstance(raw_question.get("options"), list) else []
+        options: list[dict[str, str]] = []
+        for raw_option in raw_options:
+            if not isinstance(raw_option, dict):
+                continue
+            label = _first_string(raw_option.get("label"))
+            if not label:
+                continue
+            options.append(
+                {
+                    "label": label,
+                    "description": _first_string(raw_option.get("description")) or "",
+                }
+            )
+        questions.append(
+            {
+                "id": question_id,
+                "header": _first_string(raw_question.get("header")) or "",
+                "question": _first_string(raw_question.get("question")) or "",
+                "is_other": bool(raw_question.get("isOther", raw_question.get("is_other", False))),
+                "is_secret": bool(raw_question.get("isSecret", raw_question.get("is_secret", False))),
+                "options": options,
+            }
+        )
+    return {
+        "type": "codex_user_input_request",
+        "request_id": request_id,
+        "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+        "item_id": _first_string(params.get("itemId"), params.get("item_id")),
+        "questions": questions,
+    }
+
+
+def _codex_goal_payload(goal: Any) -> dict[str, Any] | None:
+    if not isinstance(goal, dict):
+        return None
+    thread_id = _first_string(goal.get("threadId"), goal.get("thread_id"))
+    objective = _first_string(goal.get("objective"))
+    status = _first_string(goal.get("status"))
+    if not thread_id and not objective and not status:
+        return None
+    return {
+        "thread_id": thread_id,
+        "objective": objective,
+        "status": status,
+        "token_budget": goal.get("tokenBudget", goal.get("token_budget")),
+        "tokens_used": goal.get("tokensUsed", goal.get("tokens_used")),
+        "time_used_seconds": goal.get("timeUsedSeconds", goal.get("time_used_seconds")),
+        "created_at": _codex_timestamp_to_iso(goal.get("createdAt") or goal.get("created_at")),
+        "updated_at": _codex_timestamp_to_iso(goal.get("updatedAt") or goal.get("updated_at")),
+    }
+
+
+def _codex_plan_update_chunk(params: dict[str, Any]) -> dict[str, Any]:
+    raw_plan = params.get("plan") if isinstance(params.get("plan"), list) else []
+    steps: list[dict[str, Any]] = []
+    for raw_step in raw_plan:
+        if not isinstance(raw_step, dict):
+            continue
+        step = _first_string(raw_step.get("step"))
+        if not step:
+            continue
+        steps.append({"step": step, "status": _first_string(raw_step.get("status"))})
+    return {
+        "type": "codex_plan_update",
+        "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+        "explanation": _first_string(params.get("explanation")),
+        "steps": steps,
+    }
+
+
+def _codex_plan_delta_chunk(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "codex_plan_update",
+        "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+        "item_id": _first_string(params.get("itemId"), params.get("item_id")),
+        "delta": _first_string(params.get("delta")) or "",
+    }
+
+
+def _codex_plan_item_chunk(item: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "codex_plan_update",
+        "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+        "item_id": _first_string(item.get("id"), params.get("itemId"), params.get("item_id")),
+        "text": _first_string(item.get("text"), item.get("content")) or "",
+    }
+
+
+def _codex_notification_chunk(message: dict[str, Any]) -> dict[str, Any] | None:
+    method = _first_string(message.get("method"))
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    if method == "item/tool/requestUserInput":
+        return _codex_user_input_request_chunk(message, params)
+    if method == "turn/plan/updated":
+        return _codex_plan_update_chunk(params)
+    if method == "item/plan/delta":
+        return _codex_plan_delta_chunk(params)
+    if method == "thread/goal/updated":
+        goal = _codex_goal_payload(params.get("goal"))
+        return {
+            "type": "codex_goal_update",
+            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+            "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+            "goal": goal,
+        }
+    if method == "thread/goal/cleared":
+        return {
+            "type": "codex_goal_cleared",
+            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        }
+    if method == "serverRequest/resolved":
+        request_id = (
+            _first_string(params.get("requestId"), params.get("request_id"), params.get("id"))
+            or _codex_request_id_text(params.get("requestId"))
+            or _codex_request_id_text(params.get("request_id"))
+            or _codex_request_id_text(params.get("id"))
+        )
+        return {
+            "type": "codex_request_resolved",
+            "request_id": request_id,
+            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        }
+    if method == "item/agentMessage/delta":
+        return {"type": "delta", "text": _first_string(params.get("delta")) or ""}
+    if method == "item/started":
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        item_id = _first_string(item.get("id"), params.get("itemId")) or str(uuid.uuid4())
+        item_type = _first_string(item.get("type")) or "tool"
+        if item_type in {"agentMessage", "userMessage"}:
+            return None
+        return {
+            "type": "tool_start",
+            "tool_id": item_id,
+            "tool_name": _first_string(item.get("name"), item.get("toolName"), item_type) or "Codex",
+            "args": item,
+            "tool_category": _first_string(item.get("type")),
+            "timeline_kind": _first_string(item.get("type")),
+        }
+    if method == "item/completed":
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        item_id = _first_string(item.get("id"), params.get("itemId"))
+        item_type = _first_string(item.get("type")) or "tool"
+        if item_type in {"agentMessage", "userMessage"}:
+            return None
+        if item_type == "plan":
+            return _codex_plan_item_chunk(item, params)
+        return {
+            "type": "tool_result",
+            "tool_id": item_id,
+            "tool_name": _first_string(item.get("name"), item.get("toolName"), item_type) or "Codex",
+            "result": item,
+            "is_error": False,
+            "tool_category": _first_string(item.get("type")),
+            "timeline_kind": _first_string(item.get("type")),
+        }
+    if method == "warning":
+        return {"type": "status", "text": _first_string(params.get("message"), params.get("warning")) or "Codex warning"}
+    if method == "error":
+        return {"type": "error", "text": _first_string(params.get("message"), params.get("error")) or "Codex error"}
+    if method == "turn/completed":
+        return {"type": "final", "text": ""}
+    return None
+
+
+async def _read_codex_jsonrpc_message(
+    proc: asyncio.subprocess.Process,
+    *,
+    timeout_s: float,
+) -> dict[str, Any]:
+    if proc.stdout is None:
+        raise CodexAppServerError("codex app-server stdout is unavailable")
+    while True:
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout_s)
+        if not line:
+            raise CodexAppServerError("codex app-server closed before responding")
+        try:
+            message = json.loads(_decode_subprocess_output(line))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict):
+            return message
+
+
+async def _codex_turn_stream_events(
+    codex_path: str,
+    session_key: str,
+    payload: CodexConversationTurnRequest,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 20.0,
+):
+    instructions = build_codex_developer_instructions()
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    turn_id: str | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+        await _codex_app_server_initialize(proc, timeout_s=timeout_s)
+        resume_params: dict[str, Any] = {
+            "threadId": payload.thread_id,
+            "developerInstructions": instructions.text,
+        }
+        if payload.cwd:
+            resume_params["cwd"] = payload.cwd
+        model_id = _codex_model_id(payload.model)
+        if model_id:
+            resume_params["model"] = model_id
+        await _codex_app_server_send(proc, {"id": 2, "method": "thread/resume", "params": resume_params})
+        await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+
+        next_request_id = 3
+
+        turn_params: dict[str, Any] = {
+            "threadId": payload.thread_id,
+            "input": [{"type": "text", "text": payload.message.strip(), "text_elements": []}],
+        }
+        if payload.cwd:
+            turn_params["cwd"] = payload.cwd
+        if model_id:
+            turn_params["model"] = model_id
+        if payload.reasoning_effort:
+            turn_params["effort"] = payload.reasoning_effort
+        service_tier = _codex_service_tier(payload.speed, model_id)
+        if service_tier:
+            turn_params["serviceTier"] = service_tier
+        sandbox_policy = _codex_sandbox_policy(payload.permission_mode, payload.cwd)
+        if sandbox_policy:
+            turn_params["sandboxPolicy"] = sandbox_policy
+        if payload.goal_mode:
+            objective = (payload.goal_objective or payload.message).strip()
+            if not objective:
+                raise CodexAppServerError("Codex goal objective is required")
+            await _codex_app_server_send(
+                proc,
+                {
+                    "id": next_request_id,
+                    "method": "thread/goal/set",
+                    "params": {
+                        "threadId": payload.thread_id,
+                        "objective": objective,
+                        "status": "active",
+                        "tokenBudget": None,
+                    },
+                },
+            )
+            goal_result = await _codex_app_server_response(proc, next_request_id, timeout_s=timeout_s)
+            goal = _codex_goal_payload(goal_result.get("goal"))
+            if goal:
+                yield _codex_sse(
+                    {
+                        "type": "codex_goal_update",
+                        "thread_id": payload.thread_id,
+                        "turn_id": None,
+                        "goal": goal,
+                    }
+                )
+            next_request_id += 1
+        if payload.plan_mode:
+            await _codex_app_server_send(
+                proc,
+                {"id": next_request_id, "method": "collaborationMode/list", "params": {}},
+            )
+            collaboration_result = await _codex_app_server_response(proc, next_request_id, timeout_s=timeout_s)
+            next_request_id += 1
+            raw_modes = collaboration_result.get("data") if isinstance(collaboration_result.get("data"), list) else []
+            plan_mode = next(
+                (
+                    item for item in raw_modes
+                    if isinstance(item, dict)
+                    and (_first_string(item.get("mode")) == "plan" or (_first_string(item.get("name")) or "").lower() == "plan")
+                ),
+                None,
+            )
+            if not isinstance(plan_mode, dict):
+                raise CodexAppServerError("当前 Codex CLI 不支持计划模式")
+            turn_params["collaborationMode"] = {
+                "mode": "plan",
+                "settings": {
+                    "model": model_id or _first_string(plan_mode.get("model")) or "",
+                    "reasoning_effort": _first_string(plan_mode.get("reasoning_effort"), plan_mode.get("reasoningEffort")),
+                    "developer_instructions": None,
+                },
+            }
+            turn_params.pop("effort", None)
+
+        await _codex_app_server_send(proc, {"id": next_request_id, "method": "turn/start", "params": turn_params})
+        result = await _codex_app_server_response(proc, next_request_id, timeout_s=timeout_s)
+        turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
+        turn_id = _first_string(turn.get("id"), result.get("turnId"))
+        if turn_id:
+            _codex_active_turns[session_key] = {
+                "proc": proc,
+                "thread_id": payload.thread_id,
+                "turn_id": turn_id,
+                "pending_requests": {},
+                "write_lock": asyncio.Lock(),
+            }
+
+        while True:
+            message = await _read_codex_jsonrpc_message(proc, timeout_s=_CODEX_APP_SERVER_INTERACTIVE_IDLE_TIMEOUT_S)
+            chunk = _codex_notification_chunk(message)
+            method = _first_string(message.get("method"))
+            active = _codex_active_turns.get(session_key)
+            if active and method == "item/tool/requestUserInput":
+                request_id = _codex_request_id_text(message.get("id"))
+                if request_id:
+                    active.setdefault("pending_requests", {})[request_id] = {
+                        "id": message.get("id"),
+                        "method": method,
+                        "params": message.get("params") if isinstance(message.get("params"), dict) else {},
+                    }
+            elif active and method == "serverRequest/resolved":
+                params = message.get("params") if isinstance(message.get("params"), dict) else {}
+                request_id = (
+                    _first_string(params.get("requestId"), params.get("request_id"), params.get("id"))
+                    or _codex_request_id_text(params.get("requestId"))
+                    or _codex_request_id_text(params.get("request_id"))
+                    or _codex_request_id_text(params.get("id"))
+                )
+                if request_id:
+                    active.setdefault("pending_requests", {}).pop(request_id, None)
+            if chunk:
+                yield _codex_sse(chunk)
+            if method == "turn/completed":
+                break
+        yield "data: [DONE]\n\n"
+    except Exception as exc:
+        yield _codex_sse({"type": "error", "text": str(exc)})
+        yield "data: [DONE]\n\n"
+    finally:
+        active = _codex_active_turns.get(session_key)
+        if active and active.get("proc") is proc:
+            _codex_active_turns.pop(session_key, None)
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+async def _open_codex_conversation_via_app_server(
+    codex_path: str,
+    *,
+    method: Literal["thread/start", "thread/resume"],
+    thread_id: str | None = None,
+    cwd: str | None = None,
+    model: str | None = None,
+    env: dict | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    instructions = build_codex_developer_instructions()
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+        await _codex_app_server_initialize(proc, timeout_s=timeout_s)
+
+        params: dict[str, Any] = {"developerInstructions": instructions.text}
+        if method == "thread/resume":
+            if not thread_id:
+                raise CodexAppServerError("thread id is required to resume Codex conversation")
+            params["threadId"] = thread_id
+        if cwd:
+            params["cwd"] = cwd
+        if model:
+            params["model"] = model
+
+        await _codex_app_server_send(proc, {"id": 2, "method": method, "params": params})
+        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        return _codex_conversation_response(
+            result,
+            instruction_hash=instructions.sha256,
+            instruction_bytes=instructions.byte_length,
+            fallback_thread_id=thread_id,
+            fallback_cwd=cwd,
+        )
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+def _codex_turn_items(turn: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = turn.get("items")
+    if not isinstance(raw_items, list):
+        return []
+    return [item for item in raw_items if isinstance(item, dict)]
+
+
+def _codex_text_parts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+            elif isinstance(item, dict):
+                text = _first_string(item.get("text"), item.get("content"), item.get("value"))
+                if text:
+                    parts.append(text)
+        return parts
+    return []
+
+
+def _codex_user_message_text(item: dict[str, Any]) -> str:
+    content = item.get("content")
+    if isinstance(content, list):
+        lines: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = _first_string(block.get("type"))
+            if block_type == "text":
+                text = _first_string(block.get("text"))
+                if text:
+                    lines.append(text)
+            elif block_type == "localImage":
+                path = _first_string(block.get("path"))
+                if path:
+                    lines.append(f"[local image: {path}]")
+        return "\n".join(lines).strip()
+    return _first_string(item.get("text"), item.get("content")) or ""
+
+
+def _codex_file_change_action(changes: list[dict[str, Any]]) -> str:
+    kinds = {
+        (_first_string(change.get("kind"), change.get("type")) or "").lower()
+        for change in changes
+    }
+    if not kinds:
+        return "modify"
+    if kinds <= {"create", "created", "add", "added"}:
+        return "create"
+    if kinds <= {"delete", "deleted", "remove", "removed"}:
+        return "delete"
+    return "modify"
+
+
+def _codex_thread_item_messages(
+    item: dict[str, Any],
+    *,
+    timestamp: str | None,
+    turn_status: str | None,
+) -> list[dict[str, Any]]:
+    item_id = _first_string(item.get("id"), item.get("clientId")) or str(uuid.uuid4())
+    item_type = (_first_string(item.get("type")) or "").strip()
+    message_timestamp = timestamp or _codex_timestamp_to_iso(item.get("createdAt")) or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    if item_type == "userMessage":
+        text = _codex_user_message_text(item)
+        if not text:
+            return []
+        return [{
+            "id": item_id,
+            "role": "user",
+            "content": text,
+            "timestamp": message_timestamp,
+        }]
+
+    if item_type == "agentMessage":
+        text = _first_string(item.get("text"), item.get("content")) or ""
+        if not text:
+            return []
+        return [{
+            "id": item_id,
+            "role": "assistant",
+            "content": text,
+            "timestamp": message_timestamp,
+        }]
+
+    if item_type == "reasoning":
+        summary = "\n".join(_codex_text_parts(item.get("summary"))).strip()
+        if not summary:
+            return []
+        return [{
+            "id": item_id,
+            "role": "trace",
+            "content": summary,
+            "timestamp": message_timestamp,
+            "trace_type": "reasoning_summary",
+            "trace_phase": turn_status or "completed",
+            "trace_summary": "Reasoning",
+        }]
+
+    if item_type == "commandExecution":
+        command = _first_string(item.get("command")) or ""
+        cwd = _first_string(item.get("cwd"))
+        status = (_first_string(item.get("status")) or "").lower()
+        exit_code = item.get("exitCode")
+        return [{
+            "id": item_id,
+            "role": "tool_call",
+            "content": "",
+            "timestamp": message_timestamp,
+            "tool_id": item_id,
+            "tool_name": "Shell",
+            "args": {
+                "command": command,
+                "cwd": cwd,
+                "command_actions": item.get("commandActions"),
+            },
+            "result": {
+                "output": _first_string(item.get("aggregatedOutput"), item.get("output")) or "",
+                "exit_code": exit_code,
+                "duration_ms": item.get("durationMs"),
+            },
+            "is_error": bool(status in {"failed", "error"} or (isinstance(exit_code, int) and exit_code != 0)),
+            "result_pending": status not in {"completed", "failed", "error"} and exit_code is None,
+            "tool_category": "shell",
+            "tool_action": "execute",
+            "timeline_kind": "shell_command",
+        }]
+
+    if item_type == "fileChange":
+        changes = [change for change in item.get("changes", []) if isinstance(change, dict)]
+        return [{
+            "id": item_id,
+            "role": "tool_call",
+            "content": "",
+            "timestamp": message_timestamp,
+            "tool_id": item_id,
+            "tool_name": "File Change",
+            "args": {
+                "changes": changes,
+            },
+            "result": {
+                "changes": changes,
+                "status": _first_string(item.get("status")) or "completed",
+            },
+            "is_error": False,
+            "result_pending": False,
+            "tool_category": "file_system",
+            "tool_action": _codex_file_change_action(changes),
+            "timeline_kind": "file_change",
+        }]
+
+    return []
+
+
+def _codex_thread_messages(result: dict[str, Any]) -> list[dict[str, Any]]:
+    thread = _codex_thread_read_thread(result)
+    if not isinstance(thread, dict):
+        return []
+
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return []
+
+    messages: list[dict[str, Any]] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        turn_timestamp = (
+            _codex_timestamp_to_iso(turn.get("startedAt"))
+            or _codex_timestamp_to_iso(turn.get("createdAt"))
+            or _codex_timestamp_to_iso(turn.get("completedAt"))
+        )
+        turn_status = _codex_status_label(turn.get("status"))
+        for item in _codex_turn_items(turn):
+            messages.extend(_codex_thread_item_messages(item, timestamp=turn_timestamp, turn_status=turn_status))
+    return messages
+
+
+async def _read_codex_cli_session_messages_via_app_server(
+    codex_path: str,
+    thread_id: str,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+        await _codex_app_server_send(
+            proc,
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "XSafeClaw",
+                        "version": _xsafeclaw_package_version(),
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
+            },
+        )
+        await _codex_app_server_response(proc, 1, timeout_s=timeout_s)
+        await _codex_app_server_send(proc, {"method": "initialized"})
+        await _codex_app_server_send(
+            proc,
+            {
+                "id": 2,
+                "method": "thread/read",
+                "params": {
+                    "threadId": thread_id,
+                    "includeTurns": True,
+                },
+            },
+        )
+        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        return {
+            "installed": True,
+            "status": "ready",
+            "thread_id": thread_id,
+            "messages": _codex_thread_messages(result),
+            "message": "",
+            "error": None,
+        }
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+def _empty_codex_rate_limit_window() -> dict[str, Any]:
+    return {"remaining_percent": None, "used_percent": None, "resets_at": None}
+
+
+def _codex_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _codex_int_timestamp(value: Any) -> int | None:
+    number = _codex_number(value)
+    if number is None:
+        return None
+    try:
+        return int(number)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _codex_rate_limit_window(window: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(window, dict):
+        return _empty_codex_rate_limit_window()
+    used_percent = _codex_number(window.get("usedPercent"))
+    remaining_percent = None
+    if used_percent is not None:
+        remaining_percent = max(0.0, min(100.0, 100.0 - used_percent))
+    return {
+        "remaining_percent": remaining_percent,
+        "used_percent": used_percent,
+        "resets_at": _codex_int_timestamp(window.get("resetsAt")),
+    }
+
+
+def _codex_window_duration(window: Any) -> int | None:
+    if not isinstance(window, dict):
+        return None
+    number = _codex_number(window.get("windowDurationMins"))
+    if number is None:
+        return None
+    try:
+        return int(number)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _codex_rate_limit_snapshot(result: dict[str, Any]) -> dict[str, Any] | None:
+    by_limit_id = result.get("rateLimitsByLimitId")
+    if isinstance(by_limit_id, dict):
+        codex_snapshot = by_limit_id.get("codex")
+        if isinstance(codex_snapshot, dict):
+            return codex_snapshot
+    fallback = result.get("rateLimits")
+    return fallback if isinstance(fallback, dict) else None
+
+
+def _codex_rate_limits_response_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    windows = [
+        window
+        for window in (snapshot.get("primary"), snapshot.get("secondary"))
+        if isinstance(window, dict)
+    ]
+    windows_by_duration = {
+        duration: window
+        for window in windows
+        if (duration := _codex_window_duration(window)) is not None
+    }
+    five_hour = windows_by_duration.get(300)
+    seven_day = windows_by_duration.get(10080)
+    if five_hour is None and windows:
+        five_hour = windows[0]
+    if seven_day is None and len(windows) > 1:
+        seven_day = windows[1]
+
+    status = "ready" if five_hour is not None or seven_day is not None else "unsupported"
+    return {
+        "installed": True,
+        "status": status,
+        "five_hour": _codex_rate_limit_window(five_hour),
+        "seven_day": _codex_rate_limit_window(seven_day),
+        "plan_type": _first_string(snapshot.get("planType"), snapshot.get("plan_type")),
+        "message": "" if status == "ready" else "codex rate limits are unavailable",
+        "error": None,
+    }
+
+
+def _codex_rate_limits_error_response(
+    *,
+    installed: bool,
+    status: str,
+    error: str | None,
+    message: str = "",
+) -> dict[str, Any]:
+    return {
+        "installed": installed,
+        "status": status,
+        "five_hour": _empty_codex_rate_limit_window(),
+        "seven_day": _empty_codex_rate_limit_window(),
+        "plan_type": None,
+        "message": message,
+        "error": error,
+    }
+
+
+def _codex_rate_limit_error_status(error: str) -> str:
+    text = error.lower()
+    if "not logged in" in text or "login" in text or "unauthorized" in text or "authentication" in text:
+        return "logged_out"
+    if "method not found" in text or "unknown method" in text or "not supported" in text:
+        return "unsupported"
+    return "error"
+
+
+async def _read_codex_rate_limits_via_app_server(
+    codex_path: str,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+        await _codex_app_server_send(
+            proc,
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "XSafeClaw",
+                        "version": _xsafeclaw_package_version(),
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
+            },
+        )
+        await _codex_app_server_response(proc, 1, timeout_s=timeout_s)
+        await _codex_app_server_send(proc, {"method": "initialized"})
+        await _codex_app_server_send(proc, {"id": 2, "method": "account/rateLimits/read"})
+        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        snapshot = _codex_rate_limit_snapshot(result)
+        if snapshot is None:
+            return _codex_rate_limits_error_response(
+                installed=True,
+                status="unsupported",
+                message="codex rate limits are unavailable",
+                error=None,
+            )
+        return _codex_rate_limits_response_from_snapshot(snapshot)
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+async def _list_codex_cli_sessions_via_app_server(
+    codex_path: str,
+    *,
+    env: dict | None = None,
+    limit: int = 100,
+    cursor: str | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+        await _codex_app_server_send(
+            proc,
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "XSafeClaw",
+                        "version": _xsafeclaw_package_version(),
+                    },
+                    "capabilities": {"experimentalApi": True},
+                },
+            },
+        )
+        await _codex_app_server_response(proc, 1, timeout_s=timeout_s)
+        await _codex_app_server_send(proc, {"method": "initialized"})
+
+        params = {
+            "sourceKinds": ["cli"],
+            "archived": False,
+            "limit": limit,
+            "cursor": cursor,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+        }
+        await _codex_app_server_send(proc, {"id": 2, "method": "thread/list", "params": params})
+        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        sessions = [
+            summary
+            for summary in (_codex_thread_summary(item) for item in _codex_thread_list_items(result))
+            if summary is not None
+        ]
+        return {
+            "installed": True,
+            "status": "ready",
+            "sessions": sessions,
+            "next_cursor": _first_string(result.get("nextCursor"), result.get("next_cursor"), result.get("cursor")),
+            "message": "",
+            "error": None,
+        }
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+@router.post("/codex/conversations/start")
+async def codex_conversation_start(payload: CodexConversationStartRequest):
+    """Start a Codex app-server thread with XSafeClaw developer instructions."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        raise HTTPException(status_code=404, detail="codex executable not found")
+
+    try:
+        return await _open_codex_conversation_via_app_server(
+            codex_path,
+            method="thread/start",
+            cwd=payload.cwd,
+            model=payload.model,
+            env=env,
+        )
+    except CodexSafetyPromptError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=500, detail="codex app-server timed out") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/codex/conversations/resume")
+async def codex_conversation_resume(payload: CodexConversationResumeRequest):
+    """Resume a Codex app-server thread with XSafeClaw developer instructions."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        raise HTTPException(status_code=404, detail="codex executable not found")
+
+    try:
+        return await _open_codex_conversation_via_app_server(
+            codex_path,
+            method="thread/resume",
+            thread_id=payload.thread_id,
+            cwd=payload.cwd,
+            model=payload.model,
+            env=env,
+        )
+    except CodexSafetyPromptError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=500, detail="codex app-server timed out") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/codex/conversations/{session_key}/turns/stream")
+async def codex_conversation_turn_stream(session_key: str, payload: CodexConversationTurnRequest):
+    """Start a Codex app-server turn and stream JSON-RPC notifications as SSE."""
+    if payload.plan_mode and payload.goal_mode:
+        raise HTTPException(status_code=400, detail="Codex plan mode and goal mode cannot both be enabled")
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        raise HTTPException(status_code=404, detail="codex executable not found")
+    if not payload.message.strip():
+        raise HTTPException(status_code=400, detail="message is required")
+    return StreamingResponse(
+        _codex_turn_stream_events(
+            codex_path,
+            session_key,
+            payload,
+            env=env,
+        ),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/codex/conversations/{session_key}/requests/{request_id}/respond")
+async def codex_conversation_request_respond(
+    session_key: str,
+    request_id: str,
+    payload: CodexRequestUserInputResponseRequest,
+):
+    """Respond to an active Codex app-server user-input server request."""
+    active = _codex_active_turns.get(session_key)
+    if not active:
+        raise HTTPException(status_code=409, detail="Codex turn is not active")
+
+    pending_requests = active.get("pending_requests") if isinstance(active.get("pending_requests"), dict) else {}
+    pending = pending_requests.get(request_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Codex request is not pending")
+
+    proc = active.get("proc")
+    if proc is None or getattr(proc, "stdin", None) is None:
+        _codex_active_turns.pop(session_key, None)
+        raise HTTPException(status_code=409, detail="Codex turn is not active")
+
+    response_message = {
+        "id": pending.get("id", request_id) if isinstance(pending, dict) else request_id,
+        "result": payload.model_dump(mode="json"),
+    }
+    write_lock = active.get("write_lock")
+    try:
+        if write_lock is not None:
+            async with write_lock:
+                await _codex_app_server_send(proc, response_message)
+        else:
+            await _codex_app_server_send(proc, response_message)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "sent", "request_id": request_id}
+
+
+@router.post("/codex/conversations/{session_key}/goal/clear")
+async def codex_conversation_goal_clear(session_key: str, payload: CodexConversationGoalClearRequest | None = None):
+    """Clear a Codex app-server thread goal."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        raise HTTPException(status_code=404, detail="codex executable not found")
+    thread_id = (payload.thread_id if payload else None) or _codex_thread_id_from_session_key(session_key)
+    if not thread_id:
+        raise HTTPException(status_code=400, detail="thread id is required")
+
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        instructions = build_codex_developer_instructions()
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+        await _codex_app_server_initialize(proc, timeout_s=12.0)
+        await _codex_app_server_send(
+            proc,
+            {
+                "id": 2,
+                "method": "thread/resume",
+                "params": {"threadId": thread_id, "developerInstructions": instructions.text},
+            },
+        )
+        await _codex_app_server_response(proc, 2, timeout_s=12.0)
+        await _codex_app_server_send(
+            proc,
+            {"id": 3, "method": "thread/goal/clear", "params": {"threadId": thread_id}},
+        )
+        result = await _codex_app_server_response(proc, 3, timeout_s=12.0)
+        return {"status": "cleared", "thread_id": thread_id, "cleared": bool(result.get("cleared", True))}
+    except CodexSafetyPromptError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+@router.post("/codex/conversations/{session_key}/interrupt")
+async def codex_conversation_interrupt(session_key: str, payload: CodexConversationInterruptRequest | None = None):
+    """Interrupt the active Codex app-server turn for this session."""
+    active = _codex_active_turns.get(session_key)
+    if not active:
+        return {"status": "idle", "interrupted": False}
+    proc = active.get("proc")
+    thread_id = (payload.thread_id if payload else None) or active.get("thread_id")
+    turn_id = (payload.turn_id if payload else None) or active.get("turn_id")
+    if proc is None or getattr(proc, "stdin", None) is None or not thread_id or not turn_id:
+        _codex_active_turns.pop(session_key, None)
+        return {"status": "idle", "interrupted": False}
+    request_id = int(time.time() * 1000) % 1_000_000_000
+    interrupt_message = {
+        "id": request_id,
+        "method": "turn/interrupt",
+        "params": {"threadId": thread_id, "turnId": turn_id},
+    }
+    write_lock = active.get("write_lock")
+    if write_lock is not None:
+        async with write_lock:
+            await _codex_app_server_send(proc, interrupt_message)
+    else:
+        await _codex_app_server_send(proc, interrupt_message)
+    return {"status": "interrupted", "interrupted": True}
+
+
+@router.get("/codex/rate-limits")
+async def codex_rate_limits():
+    """Read Codex CLI rolling rate limits through app-server JSON-RPC."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        return _codex_rate_limits_error_response(
+            installed=False,
+            status="missing",
+            error="codex executable not found",
+        )
+
+    try:
+        return await _read_codex_rate_limits_via_app_server(codex_path, env=env)
+    except TimeoutError:
+        return _codex_rate_limits_error_response(
+            installed=True,
+            status="error",
+            error="codex app-server timed out",
+        )
+    except Exception as exc:
+        error = str(exc)
+        return _codex_rate_limits_error_response(
+            installed=True,
+            status=_codex_rate_limit_error_status(error),
+            error=error,
+        )
+
+
+@router.get("/codex/sessions")
+async def codex_sessions(
+    limit: int = Query(100, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+):
+    """List local Codex CLI session summaries through app-server JSON-RPC."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        return {
+            "installed": False,
+            "status": "missing",
+            "sessions": [],
+            "next_cursor": None,
+            "message": "",
+            "error": "codex executable not found",
+        }
+
+    try:
+        return await _list_codex_cli_sessions_via_app_server(
+            codex_path,
+            env=env,
+            limit=limit,
+            cursor=cursor,
+        )
+    except TimeoutError:
+        return {
+            "installed": True,
+            "status": "error",
+            "sessions": [],
+            "next_cursor": None,
+            "message": "",
+            "error": "codex app-server timed out",
+        }
+    except Exception as exc:
+        return {
+            "installed": True,
+            "status": "error",
+            "sessions": [],
+            "next_cursor": None,
+            "message": "",
+            "error": str(exc),
+        }
+
+
+@router.get("/codex/sessions/{thread_id}/messages")
+async def codex_session_messages(thread_id: str):
+    """Read a Codex CLI thread transcript summary through app-server JSON-RPC."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        return {
+            "installed": False,
+            "status": "missing",
+            "thread_id": thread_id,
+            "messages": [],
+            "message": "",
+            "error": "codex executable not found",
+        }
+
+    try:
+        return await _read_codex_cli_session_messages_via_app_server(
+            codex_path,
+            thread_id,
+            env=env,
+        )
+    except TimeoutError:
+        return {
+            "installed": True,
+            "status": "error",
+            "thread_id": thread_id,
+            "messages": [],
+            "message": "",
+            "error": "codex app-server timed out",
+        }
+    except Exception as exc:
+        return {
+            "installed": True,
+            "status": "error",
+            "thread_id": thread_id,
+            "messages": [],
+            "message": "",
+            "error": str(exc),
+        }
 
 
 @router.get("/install-status")

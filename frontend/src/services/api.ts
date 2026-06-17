@@ -129,6 +129,7 @@ export interface InstallStatusResponse {
 
 export type CodexAuthStatus = 'logged_in' | 'logged_out' | 'missing' | 'error';
 export type CodexAuthMode = 'chatgpt' | 'api_key' | 'access_token' | 'unknown' | null;
+export type CodexRuntimeStatus = 'missing' | 'installed' | 'needs_login' | 'ready' | 'warning' | 'error';
 
 export interface CodexAuthStatusResponse {
   installed: boolean;
@@ -138,6 +139,153 @@ export interface CodexAuthStatusResponse {
   codex_path: string | null;
   message: string;
   error: string | null;
+}
+
+export interface CodexRuntimeStatusResponse {
+  installed: boolean;
+  configured: boolean;
+  status: CodexRuntimeStatus;
+  version: string | null;
+  path: string | null;
+  entry_path: string | null;
+  install_context: string | null;
+  warnings: string[];
+  error: string | null;
+}
+
+export type CodexRateLimitStatus = 'ready' | 'missing' | 'logged_out' | 'unsupported' | 'error' | string;
+
+export interface CodexRateLimitWindow {
+  remaining_percent: number | null;
+  used_percent: number | null;
+  resets_at: number | null;
+}
+
+export interface CodexRateLimitsResponse {
+  installed: boolean;
+  status: CodexRateLimitStatus;
+  five_hour: CodexRateLimitWindow;
+  seven_day: CodexRateLimitWindow;
+  plan_type: string | null;
+  message: string;
+  error: string | null;
+}
+
+export type CodexSessionListStatus = 'ready' | 'missing' | 'error' | string;
+
+export interface CodexSessionRecord {
+  id: string;
+  session_id: string | null;
+  title: string | null;
+  preview: string | null;
+  cwd: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  status: string | null;
+  source: string | null;
+  path: string | null;
+  cli_version: string | null;
+}
+
+export interface CodexSessionListResponse {
+  installed: boolean;
+  status: CodexSessionListStatus;
+  sessions: CodexSessionRecord[];
+  next_cursor: string | null;
+  message: string;
+  error: string | null;
+}
+
+export type CodexSessionMessagesStatus = 'ready' | 'missing' | 'error' | string;
+
+export interface CodexSessionMessageRecord {
+  id: string;
+  role: 'user' | 'assistant' | 'error' | 'tool_call' | 'trace';
+  content: string;
+  timestamp: string;
+  tool_id?: string;
+  tool_name?: string;
+  args?: any;
+  result?: any;
+  is_error?: boolean;
+  result_pending?: boolean;
+  trace_type?: string;
+  trace_phase?: string;
+  trace_step?: number;
+  trace_summary?: string;
+  tool_category?: string;
+  tool_action?: string;
+  timeline_kind?: string;
+  risk_level?: string;
+}
+
+export interface CodexSessionMessagesResponse {
+  installed: boolean;
+  status: CodexSessionMessagesStatus;
+  thread_id: string;
+  messages: CodexSessionMessageRecord[];
+  message: string;
+  error: string | null;
+}
+
+export interface CodexConversationOpenRequest {
+  cwd?: string | null;
+  model?: string | null;
+  permission_mode?: 'read_only' | 'workspace_write' | 'full_access' | null;
+}
+
+export interface CodexConversationResumeRequest extends CodexConversationOpenRequest {
+  thread_id: string;
+}
+
+export interface CodexConversationOpenResponse {
+  installed: boolean;
+  status: 'ready' | 'missing' | 'error' | string;
+  session_key: string;
+  thread_id: string;
+  session_id: string | null;
+  title: string;
+  cwd: string | null;
+  instruction_hash: string;
+  instruction_bytes: number;
+  message: string;
+  error: string | null;
+}
+
+export interface CodexConversationTurnRequest {
+  message: string;
+  thread_id: string;
+  cwd?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  speed?: 'standard' | 'fast' | null;
+  permission_mode?: 'read_only' | 'workspace_write' | 'full_access' | null;
+  plan_mode?: boolean;
+  goal_mode?: boolean;
+  goal_objective?: string | null;
+}
+
+export interface CodexConversationInterruptRequest {
+  thread_id?: string | null;
+  turn_id?: string | null;
+}
+
+export interface CodexConversationGoalClearRequest {
+  thread_id?: string | null;
+}
+
+export interface CodexConversationGoalClearResponse {
+  status: string;
+  thread_id: string | null;
+  cleared: boolean;
+}
+
+export interface CodexUserInputAnswerPayload {
+  answers: string[];
+}
+
+export interface CodexRequestUserInputResponseRequest {
+  answers: Record<string, CodexUserInputAnswerPayload>;
 }
 
 export interface RuntimeInstanceHealth {
@@ -818,6 +966,17 @@ export const systemAPI = {
   getCodexAuthStatus: () =>
     api.get<CodexAuthStatusResponse>('/system/codex/auth/status', { timeout: 10000 }),
 
+  /** Read Codex CLI runtime health from redacted CLI diagnostics. */
+  getCodexRuntimeStatus: (refresh?: boolean) =>
+    api.get<CodexRuntimeStatusResponse>(
+      '/system/codex/runtime',
+      { timeout: 15000, params: refresh ? { refresh: true } : undefined },
+    ),
+
+  /** Read Codex CLI ChatGPT rolling rate limits through app-server. */
+  getCodexRateLimits: () =>
+    api.get<CodexRateLimitsResponse>('/system/codex/rate-limits', { timeout: 15000 }),
+
   /** Start the official Codex CLI login flow in the system browser. */
   loginCodexAuth: () =>
     api.post<CodexAuthStatusResponse>('/system/codex/auth/login', {}, { timeout: 0 }),
@@ -825,6 +984,50 @@ export const systemAPI = {
   /** Clear Codex CLI authentication and return the refreshed state. */
   logoutCodexAuth: () =>
     api.post<CodexAuthStatusResponse>('/system/codex/auth/logout', {}, { timeout: 60000 }),
+
+  /** List local Codex CLI session summaries through app-server. */
+  listCodexSessions: (params?: { limit?: number; cursor?: string }) =>
+    api.get<CodexSessionListResponse>('/system/codex/sessions', { timeout: 15000, params }),
+
+  /** Read a Codex CLI thread transcript summary through app-server. */
+  getCodexSessionMessages: (threadId: string) =>
+    api.get<CodexSessionMessagesResponse>(`/system/codex/sessions/${encodeURIComponent(threadId)}/messages`, { timeout: 15000 }),
+
+  /** Start a Codex app-server thread with XSafeClaw developer instructions. */
+  startCodexConversation: (payload: CodexConversationOpenRequest) =>
+    api.post<CodexConversationOpenResponse>('/system/codex/conversations/start', payload, { timeout: 20000 }),
+
+  /** Resume a Codex app-server thread with XSafeClaw developer instructions. */
+  resumeCodexConversation: (payload: CodexConversationResumeRequest) =>
+    api.post<CodexConversationOpenResponse>('/system/codex/conversations/resume', payload, { timeout: 20000 }),
+
+  /** Interrupt the active Codex app-server turn for a conversation. */
+  interruptCodexConversation: (sessionKey: string, payload?: CodexConversationInterruptRequest) =>
+    api.post<{ status: string; interrupted: boolean }>(
+      `/system/codex/conversations/${encodeURIComponent(sessionKey)}/interrupt`,
+      payload ?? {},
+      { timeout: 10000 },
+    ),
+
+  /** Respond to an active Codex app-server user-input request. */
+  respondCodexUserInputRequest: (
+    sessionKey: string,
+    requestId: string,
+    payload: CodexRequestUserInputResponseRequest,
+  ) =>
+    api.post<{ status: string; request_id: string }>(
+      `/system/codex/conversations/${encodeURIComponent(sessionKey)}/requests/${encodeURIComponent(requestId)}/respond`,
+      payload,
+      { timeout: 10000 },
+    ),
+
+  /** Clear an active Codex app-server goal for a conversation. */
+  clearCodexGoal: (sessionKey: string, payload?: CodexConversationGoalClearRequest) =>
+    api.post<CodexConversationGoalClearResponse>(
+      `/system/codex/conversations/${encodeURIComponent(sessionKey)}/goal/clear`,
+      payload ?? {},
+      { timeout: 10000 },
+    ),
 
   instances: () =>
     api.get<{ instances: RuntimeInstance[]; total: number }>('/system/instances'),
