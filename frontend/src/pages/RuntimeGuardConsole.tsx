@@ -2235,6 +2235,40 @@ function codexGoalStatusLabel(status?: string | null): string {
   return status ?? 'Unknown';
 }
 
+function codexPlanConfirmationQuestion(locale: string) {
+  const isZh = locale === 'zh';
+  return {
+    id: 'plan-confirmation',
+    header: '',
+    question: isZh ? '是否执行当前计划，或给出修改意见？' : 'Execute this plan, or provide changes?',
+    is_other: true,
+    is_secret: false,
+    options: [{
+      label: isZh ? '执行计划' : 'Execute plan',
+      description: '',
+    }],
+  };
+}
+
+function codexPlanConfirmationPlaceholder(locale: string) {
+  return locale === 'zh' ? '输入修改意见…' : 'Type changes to the plan...';
+}
+
+function codexPlanExecutePrompt(locale: string) {
+  return locale === 'zh' ? '请按刚才的计划开始执行。' : 'Please start executing the plan above.';
+}
+
+function codexPlanRevisionPrompt(locale: string, feedback: string) {
+  return locale === 'zh'
+    ? `请根据以下意见修改刚才的计划：\n${feedback}`
+    : `Please revise the plan above using this feedback:\n${feedback}`;
+}
+
+function isCodexPlanExecuteAnswer(answer: string) {
+  const trimmed = answer.trim();
+  return trimmed.toLowerCase() === 'execute plan' || trimmed === '执行计划';
+}
+
 export function TimelineMessage({
   msg,
   expanded,
@@ -2275,7 +2309,9 @@ export function TimelineMessage({
             <div className="rg-codex-plan-head">
               <span className="rg-stream-title">Codex plan</span>
             </div>
-            {msg.codex_plan_explanation && <p>{msg.codex_plan_explanation}</p>}
+            {msg.codex_plan_explanation && (
+              <MarkdownMessage content={msg.codex_plan_explanation} className="rg-codex-plan-markdown rg-codex-plan-explanation" />
+            )}
             {steps.length > 0 && (
               <ol className="rg-codex-plan-steps">
                 {steps.map((step, index) => (
@@ -2286,7 +2322,7 @@ export function TimelineMessage({
                 ))}
               </ol>
             )}
-            {planText && <pre>{planText}</pre>}
+            {planText && <MarkdownMessage content={planText} className="rg-codex-plan-markdown" />}
           </div>
         </div>
       </div>
@@ -2368,6 +2404,11 @@ export function TimelineMessage({
               const selectedAnswer = codexQuestionAnswers[question.id] ?? '';
               const answerIsOption = question.options.some(option => option.label === selectedAnswer);
               const controlsDisabled = isSubmitting || isAnswered;
+              const inputPlaceholder = msg.codex_question_kind === 'plan_confirmation'
+                ? codexPlanConfirmationPlaceholder(locale)
+                : question.options.length
+                  ? (isZh ? '或输入其他意见...' : 'Or type another answer...')
+                  : (isZh ? '输入你的回答...' : 'Type your answer...');
               return (
                 <div className="rg-codex-question-block" key={question.id}>
                   {question.header && <strong>{question.header}</strong>}
@@ -2394,7 +2435,7 @@ export function TimelineMessage({
                       className="rg-codex-question-input"
                       disabled={controlsDisabled}
                       onChange={event => setCodexQuestionAnswers(current => ({ ...current, [question.id]: event.target.value }))}
-                      placeholder={question.options.length ? (isZh ? '或输入其他意见...' : 'Or type another answer...') : (isZh ? '输入你的回答...' : 'Type your answer...')}
+                      placeholder={inputPlaceholder}
                       type={question.is_secret ? 'password' : 'text'}
                       value={answerIsOption ? '' : selectedAnswer}
                     />
@@ -3605,7 +3646,7 @@ export default function RuntimeGuardConsole() {
     )));
   }, []);
 
-  const submitCodexQuestionResponse = useCallback(async (
+  const submitCodexQuestionResponse = async (
     msg: ChatMessage,
     payload: CodexRequestUserInputResponseRequest,
   ) => {
@@ -3614,7 +3655,8 @@ export default function RuntimeGuardConsole() {
     }
     const sessionKey = activeSession.sessionKey;
     const requestId = msg.codex_request_id;
-    if (!requestId) {
+    const isPlanConfirmation = msg.codex_question_kind === 'plan_confirmation';
+    if (!requestId && !isPlanConfirmation) {
       throw new Error('Codex request id is missing.');
     }
 
@@ -3637,7 +3679,40 @@ export default function RuntimeGuardConsole() {
       codex_error: undefined,
     }));
 
-    if (requestId.startsWith('demo-')) {
+    if (isPlanConfirmation) {
+      const answer = Object.values(answerValues)[0]?.[0]?.trim() ?? '';
+      const executePlan = isCodexPlanExecuteAnswer(answer);
+      const nextPrompt = executePlan
+        ? codexPlanExecutePrompt(locale)
+        : codexPlanRevisionPrompt(locale, answer);
+      if (executePlan) {
+        setCodexPlanMode(false);
+      }
+      try {
+        await sendMessageForSession(activeSession, nextPrompt, {
+          codexPlanMode: !executePlan,
+          codexGoalMode: false,
+        });
+        updateQuestionMessage(message => ({
+          ...message,
+          codex_response_status: 'submitted',
+          codex_answer_values: answerValues,
+        }));
+      } catch (error: any) {
+        const detail = String(error?.message || 'Failed to send Codex response.');
+        updateQuestionMessage(message => ({
+          ...message,
+          codex_response_status: 'error',
+          codex_answer_values: answerValues,
+          codex_error: detail,
+        }));
+        throw new Error(detail);
+      }
+      return;
+    }
+
+    const nativeRequestId = requestId ?? '';
+    if (nativeRequestId.startsWith('demo-')) {
       updateQuestionMessage(message => ({
         ...message,
         codex_response_status: 'submitted',
@@ -3647,7 +3722,7 @@ export default function RuntimeGuardConsole() {
     }
 
     try {
-      await systemAPI.respondCodexUserInputRequest(sessionKey, requestId, payload);
+      await systemAPI.respondCodexUserInputRequest(sessionKey, nativeRequestId, payload);
       updateQuestionMessage(message => ({
         ...message,
         codex_response_status: 'submitted',
@@ -3663,7 +3738,7 @@ export default function RuntimeGuardConsole() {
       }));
       throw new Error(detail);
     }
-  }, [activeSession, setMessageMap]);
+  };
 
   const clearCodexGoal = useCallback(async (msg: ChatMessage) => {
     if (!activeSession || activeSession.agent !== 'Codex') {
@@ -3687,12 +3762,18 @@ export default function RuntimeGuardConsole() {
     }));
   }, [activeSession, setMessageMap]);
 
-  async function sendMessageForSession(session: RuntimeGuardSession, rawText: string) {
+  async function sendMessageForSession(
+    session: RuntimeGuardSession,
+    rawText: string,
+    options: { codexPlanMode?: boolean; codexGoalMode?: boolean } = {},
+  ) {
     const originalKey = session.sessionKey;
     const text = rawText.trim();
     if (!text || (sendingMap[originalKey] ?? false) || inFlightKeysRef.current.has(originalKey)) return;
 
     if (session.agent === 'Codex') {
+      const effectiveCodexPlanMode = options.codexPlanMode ?? codexPlanMode;
+      const effectiveCodexGoalMode = options.codexGoalMode ?? codexGoalMode;
       const activity = new Date();
       const activityIso = activity.toISOString();
       const userMsg: ChatMessage = {
@@ -3737,9 +3818,9 @@ export default function RuntimeGuardConsole() {
             reasoning_effort: codexReasoningLevel,
             speed: codexEffectiveSpeed,
             permission_mode: codexPermissionMode,
-            plan_mode: codexPlanMode,
-            goal_mode: codexGoalMode,
-            goal_objective: codexGoalMode ? text : null,
+            plan_mode: effectiveCodexPlanMode,
+            goal_mode: effectiveCodexGoalMode,
+            goal_objective: effectiveCodexGoalMode ? text : null,
           }),
         });
 
@@ -3751,6 +3832,10 @@ export default function RuntimeGuardConsole() {
         const decoder = new TextDecoder();
         let buffer = '';
         let streamDone = false;
+        let sawCodexPlanUpdate = false;
+        let sawCodexNativeUserInputRequest = false;
+        let latestCodexPlanTurnId = '';
+        let latestCodexPlanItemId = '';
 
         while (!streamDone) {
           const { done, value } = await reader.read();
@@ -3870,6 +3955,7 @@ export default function RuntimeGuardConsole() {
                   )),
                 }));
               } else if (chunk.type === 'codex_user_input_request') {
+                sawCodexNativeUserInputRequest = true;
                 const requestId = String(chunk.request_id || uuidv4());
                 appendBeforeAssistant({
                   id: `codex-question-${requestId}`,
@@ -3877,6 +3963,7 @@ export default function RuntimeGuardConsole() {
                   content: '',
                   timestamp: new Date(),
                   codex_request_id: requestId,
+                  codex_question_kind: 'native_request',
                   codex_thread_id: chunk.thread_id,
                   codex_turn_id: chunk.turn_id,
                   codex_item_id: chunk.item_id,
@@ -3884,6 +3971,9 @@ export default function RuntimeGuardConsole() {
                   codex_response_status: 'pending',
                 });
               } else if (chunk.type === 'codex_plan_update') {
+                sawCodexPlanUpdate = true;
+                latestCodexPlanTurnId = chunk.turn_id || latestCodexPlanTurnId;
+                latestCodexPlanItemId = chunk.item_id || latestCodexPlanItemId;
                 const planId = `codex-plan-${chunk.turn_id || chunk.item_id || pendingId}`;
                 upsertBeforeAssistant(planId, existing => {
                   const existingText = existing?.codex_plan_text || existing?.content || '';
@@ -3970,6 +4060,30 @@ export default function RuntimeGuardConsole() {
               // Ignore malformed SSE data.
             }
           }
+        }
+
+        if (effectiveCodexPlanMode && sawCodexPlanUpdate && !sawCodexNativeUserInputRequest) {
+          const confirmationId = `codex-plan-confirm-${latestCodexPlanTurnId || latestCodexPlanItemId || pendingId}`;
+          const confirmationMessage: ChatMessage = {
+            id: confirmationId,
+            role: 'codex_question',
+            content: '',
+            timestamp: new Date(),
+            codex_request_id: `local:${confirmationId}`,
+            codex_question_kind: 'plan_confirmation',
+            codex_thread_id: threadId,
+            codex_turn_id: latestCodexPlanTurnId || undefined,
+            codex_item_id: latestCodexPlanItemId || undefined,
+            codex_questions: [codexPlanConfirmationQuestion(locale)],
+            codex_response_status: 'pending',
+          };
+          setMessageMap(prev => {
+            const messages = [...(prev[originalKey] ?? [])];
+            if (messages.some(message => message.id === confirmationId)) return prev;
+            const assistantIndex = messages.findIndex(message => message.id === pendingId);
+            messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, confirmationMessage);
+            return { ...prev, [originalKey]: messages };
+          });
         }
 
         setMessageMap(prev => ({

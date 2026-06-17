@@ -850,7 +850,7 @@ describe('NewTaskModal', () => {
           thread_id: 'thread-started',
           turn_id: 'turn-plan',
           item_id: 'plan-item-1',
-          text: 'Final plan text',
+          text: '### Final plan\n\n- **Inspect** files\n- Implement fix',
         })}\n\ndata: [DONE]\n\n`,
         { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
       )
@@ -893,7 +893,194 @@ describe('NewTaskModal', () => {
     expect(await screen.findByText('Codex plan')).toBeTruthy();
     expect(screen.getByText('I will inspect first.')).toBeTruthy();
     expect(screen.getByText('Inspect files')).toBeTruthy();
-    expect(screen.getByText('Final plan text')).toBeTruthy();
+    expect(container.querySelector('.rg-codex-plan-card h3')?.textContent).toBe('Final plan');
+    expect(container.querySelector('.rg-codex-plan-card strong')?.textContent).toBe('Inspect');
+    expect(screen.queryByText('### Final plan')).toBeNull();
+    expect(await screen.findByText('Execute this plan, or provide changes?')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Execute plan' })).toBeTruthy();
+    expect(screen.getByPlaceholderText('Type changes to the plan...')).toBeTruthy();
+  });
+
+  it('sends a normal Codex turn when the local plan confirmation chooses execution', async () => {
+    const { sendMessageStreamSpy } = mockRuntimeGuardApis();
+    sendMessageStreamSpy
+      .mockImplementationOnce(async () => (
+        new Response(
+          `data: ${JSON.stringify({
+            type: 'codex_plan_update',
+            thread_id: 'thread-started',
+            turn_id: 'turn-plan',
+            item_id: 'plan-item-1',
+            text: '### Plan\n\n- Inspect',
+          })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      ) as any)
+      .mockImplementationOnce(async () => (
+        new Response('data: {"type":"final","text":"Executing"}\n\ndata: [DONE]\n\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      ) as any);
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    fireEvent.click(screen.getByRole('button', { name: /Plan Mode/ }));
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'make a plan' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    await screen.findByText('Execute this plan, or provide changes?');
+    fireEvent.click(screen.getByRole('button', { name: 'Execute plan' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and send' }));
+
+    await waitFor(() => expect(sendMessageStreamSpy).toHaveBeenCalledTimes(2));
+    const [, executeRequest] = sendMessageStreamSpy.mock.calls[1];
+    expect(JSON.parse((executeRequest as RequestInit).body as string)).toEqual(expect.objectContaining({
+      message: 'Please start executing the plan above.',
+      plan_mode: false,
+    }));
+  });
+
+  it('keeps plan mode when the local plan confirmation sends revision feedback', async () => {
+    const { sendMessageStreamSpy } = mockRuntimeGuardApis();
+    sendMessageStreamSpy
+      .mockImplementationOnce(async () => (
+        new Response(
+          `data: ${JSON.stringify({
+            type: 'codex_plan_update',
+            thread_id: 'thread-started',
+            turn_id: 'turn-plan',
+            item_id: 'plan-item-1',
+            text: '### Plan\n\n- Inspect',
+          })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      ) as any)
+      .mockImplementationOnce(async () => (
+        new Response(
+          `data: ${JSON.stringify({
+            type: 'codex_plan_update',
+            thread_id: 'thread-started',
+            turn_id: 'turn-plan-revised',
+            item_id: 'plan-item-2',
+            text: '### Revised plan',
+          })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        )
+      ) as any);
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    fireEvent.click(screen.getByRole('button', { name: /Plan Mode/ }));
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'make a plan' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    const feedbackInput = await screen.findByPlaceholderText('Type changes to the plan...');
+    fireEvent.change(feedbackInput, { target: { value: 'Add a rollback step.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and send' }));
+
+    await waitFor(() => expect(sendMessageStreamSpy).toHaveBeenCalledTimes(2));
+    const [, revisionRequest] = sendMessageStreamSpy.mock.calls[1];
+    expect(JSON.parse((revisionRequest as RequestInit).body as string)).toEqual(expect.objectContaining({
+      message: 'Please revise the plan above using this feedback:\nAdd a rollback step.',
+      plan_mode: true,
+    }));
+  });
+
+  it('does not add local plan confirmation when Codex sends a native question for the plan turn', async () => {
+    const { sendMessageStreamSpy } = mockRuntimeGuardApis();
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: ${JSON.stringify({
+          type: 'codex_plan_update',
+          thread_id: 'thread-started',
+          turn_id: 'turn-plan',
+          item_id: 'plan-item-1',
+          text: '### Plan\n\n- Inspect',
+        })}\n\ndata: ${JSON.stringify({
+          type: 'codex_user_input_request',
+          request_id: 'request-plan-native',
+          thread_id: 'thread-started',
+          turn_id: 'turn-plan',
+          item_id: 'item-question-1',
+          questions: [{
+            id: 'question-1',
+            header: 'Plan choice',
+            question: 'Should I continue?',
+            is_other: true,
+            is_secret: false,
+            options: [{ label: 'Continue', description: '' }],
+          }],
+        })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Composer options' }));
+    fireEvent.click(screen.getByRole('button', { name: /Plan Mode/ }));
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'make a plan' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('Should I continue?')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('Execute this plan, or provide changes?')).toBeNull());
   });
 
   it('sends Codex goal mode with the message as objective and renders goal status', async () => {

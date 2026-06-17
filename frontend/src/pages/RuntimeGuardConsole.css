@@ -1434,14 +1434,44 @@
   font-style: normal;
 }
 
-.rg-codex-plan-card pre {
+.rg-codex-plan-card .rg-codex-plan-markdown {
   margin: 0;
   padding: 7px 8px;
   border: 1px solid #203543;
   border-radius: 5px;
   background: #050a0e;
   color: #d8e3ea;
-  white-space: pre-wrap;
+}
+
+.rg-codex-plan-card .rg-codex-plan-explanation {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.rg-codex-plan-card .rg-codex-plan-markdown :is(h1, h2, h3, h4, p, ul, ol, pre) {
+  margin: 0;
+}
+
+.rg-codex-plan-card .rg-codex-plan-markdown :is(h1, h2, h3, h4) {
+  color: #f1f7fb;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.rg-codex-plan-card .rg-codex-plan-markdown :is(ul, ol) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 16px;
+}
+
+.rg-codex-plan-card .rg-codex-plan-markdown strong {
+  color: #ffffff;
+}
+
+.rg-codex-plan-card .rg-codex-plan-markdown code {
+  color: #d7efff;
 }
 
 .rg-codex-goal-clear {

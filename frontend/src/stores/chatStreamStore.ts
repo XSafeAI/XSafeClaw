@@ -31,6 +31,7 @@ export interface ChatMessage {
   timeline_kind?: string;
   risk_level?: string;
   codex_request_id?: string;
+  codex_question_kind?: 'native_request' | 'plan_confirmation';
   codex_thread_id?: string;
   codex_turn_id?: string;
   codex_item_id?: string;
