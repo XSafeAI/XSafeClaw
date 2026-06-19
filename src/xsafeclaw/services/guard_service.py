@@ -2183,13 +2183,14 @@ async def check_runtime_tool_call(
     tool_name: str,
     params: dict[str, Any],
     messages: list[dict[str, Any]],
+    force_approval: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a runtime tool call using submitted message context."""
     normalized_mode = str(guard_mode or "observe").strip().lower()
     if normalized_mode not in {"observe", "blocking"}:
         normalized_mode = "observe"
 
-    profile = "nanobot AI Agent" if platform == "nanobot" else "OpenClaw AI Agent"
+    profile = _PROFILE_BY_PLATFORM.get(platform, "OpenClaw AI Agent")
     trajectory_text = _build_runtime_trajectory_text(messages, profile=profile)
 
     risk_rule_reason = await _risk_rule_precheck(
@@ -2230,6 +2231,45 @@ async def check_runtime_tool_call(
             session_context=trajectory_text,
         )
         return {"action": "block", "reason": deny_reason}
+
+    if force_approval:
+        result, pending = await _await_pending_approval(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            guard_verdict="manual_approval_required",
+            guard_raw="force_approval",
+            session_context=trajectory_text,
+            risk_source="Runtime approval request",
+            failure_mode=str(
+                params.get("reason")
+                or params.get("description")
+                or "Codex requested explicit approval before this tool runs."
+            ),
+            real_world_harm="Reviewer approval is required before this tool runs.",
+        )
+        observation_reason = (
+            "Approved by reviewer"
+            if pending.resolution == "approved"
+            else result.get("reason")
+        )
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action=result["action"],
+            reason=observation_reason,
+            guard_verdict=pending.guard_verdict,
+            guard_raw=pending.guard_raw,
+            session_context=trajectory_text,
+        )
+        return result
 
     tool_category, tool_policy = get_tool_policy_for_call(tool_name, params)
     if tool_policy == "allow":
@@ -2333,6 +2373,23 @@ async def check_runtime_tool_call(
         )
         return {"action": "allow"}
 
+    if verdict == "error" and platform == "codex" and normalized_mode == "blocking":
+        reason = "Guard model unavailable; Codex tool blocked by XSafeClaw"
+        _record_runtime_observation(
+            platform=platform,
+            instance_id=instance_id,
+            guard_mode=normalized_mode,
+            session_key=session_key,
+            tool_name=tool_name,
+            params=params,
+            action="block",
+            reason=reason,
+            guard_verdict="error",
+            guard_raw=raw,
+            session_context=trajectory_text,
+        )
+        return {"action": "block", "reason": reason}
+
     if verdict == "error":
         _record_runtime_observation(
             platform=platform,
@@ -2416,6 +2473,7 @@ _PROFILE_BY_PLATFORM = {
     "openclaw": "OpenClaw AI Agent",
     "hermes": "Hermes AI Agent",
     "nanobot": "nanobot AI Agent",
+    "codex": "Codex CLI Agent",
 }
 
 

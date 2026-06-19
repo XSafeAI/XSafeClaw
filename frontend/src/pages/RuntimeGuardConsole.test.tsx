@@ -742,7 +742,7 @@ describe('NewTaskModal', () => {
     });
   });
 
-  it('creates a backend Codex session shell from the Codex open button', async () => {
+  it('creates a pending Codex session from the Codex open button and relinks it on first send', async () => {
     const {
       startSessionSpy,
       smartStartSessionSpy,
@@ -776,28 +776,37 @@ describe('NewTaskModal', () => {
       expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('Codex');
     });
 
-    expect(startCodexConversationSpy).toHaveBeenCalledWith({
-      cwd: 'E:/configured-codex-workspace',
-      model: 'GPT-5.5',
-      permission_mode: 'workspace_write',
-    });
+    expect(startCodexConversationSpy).not.toHaveBeenCalled();
     expect(startSessionSpy).not.toHaveBeenCalled();
     expect(smartStartSessionSpy).not.toHaveBeenCalled();
     expect(getHistorySpy).not.toHaveBeenCalled();
     expect(container.querySelector('.rg-task-title h1')?.textContent).toBe('Codex');
 
-    const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
-    expect(savedSessions[0]).toEqual(expect.objectContaining({
-      agent: 'Codex',
-      displayName: 'Codex CLI',
-      historySessionId: 'thread-started',
-      instanceId: 'codex-cli',
-      platform: 'codex',
-      title: 'Codex',
-      workspacePath: 'E:/configured-codex-workspace',
-    }));
-    expect(savedSessions[0].frontendOnly).toBeFalsy();
-    expect(savedSessions[0].sessionKey).toBe('codex:thread-started');
+    await waitFor(() => {
+      const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+      expect(savedSessions[0]).toEqual(expect.objectContaining({
+        agent: 'Codex',
+        displayName: 'Codex CLI',
+        instanceId: 'codex-cli',
+        platform: 'codex',
+        title: 'Codex',
+        workspacePath: 'E:/configured-codex-workspace',
+        frontendOnly: true,
+      }));
+      expect(savedSessions[0].sessionKey).toMatch(/^codex:pending:/);
+    });
+
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: ${JSON.stringify({
+          type: 'codex_session_started',
+          thread_id: 'thread-started',
+          session_key: 'codex:thread-started',
+          cwd: 'E:/configured-codex-workspace',
+        })}\n\ndata: {"type":"final","text":"Task created"}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
 
     const composer = container.querySelector('.rg-codex-composer') as HTMLElement;
     fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
@@ -807,17 +816,17 @@ describe('NewTaskModal', () => {
 
     await waitFor(() => {
       expect(sendMessageStreamSpy).toHaveBeenCalledWith(
-        '/api/system/codex/conversations/codex%3Athread-started/turns/stream',
+        expect.stringMatching(/^\/api\/system\/codex\/conversations\/codex%3Apending%3A.+\/turns\/stream$/),
         expect.objectContaining({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
         }),
       );
     });
-    const [, codexRequest] = sendMessageStreamSpy.mock.calls[0];
-    expect(JSON.parse((codexRequest as RequestInit).body as string)).toEqual({
+    const [, firstCodexRequest] = sendMessageStreamSpy.mock.calls[0];
+    expect(JSON.parse((firstCodexRequest as RequestInit).body as string)).toEqual({
       message: 'hello Codex',
-      thread_id: 'thread-started',
+      thread_id: null,
       cwd: 'E:/configured-codex-workspace',
       model: 'gpt-5.5',
       reasoning_effort: 'xhigh',
@@ -830,6 +839,78 @@ describe('NewTaskModal', () => {
     expect(screen.getByText('hello Codex')).toBeTruthy();
     expect(await screen.findByText('Task created')).toBeTruthy();
     expect(screen.queryByText('This is a Codex frontend preview session. Backend data is not connected yet.')).toBeNull();
+
+    await waitFor(() => {
+      const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+      expect(savedSessions[0]).toEqual(expect.objectContaining({
+        agent: 'Codex',
+        displayName: 'Codex CLI',
+        historySessionId: 'thread-started',
+        instanceId: 'codex-cli',
+        platform: 'codex',
+        title: 'Codex',
+        workspacePath: 'E:/configured-codex-workspace',
+      }));
+      expect(savedSessions[0].frontendOnly).toBeFalsy();
+      expect(savedSessions[0].sessionKey).toBe('codex:thread-started');
+    });
+  });
+
+  it('rereads Codex configure localStorage for every new pending Codex session', async () => {
+    const { startCodexConversationSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/first-codex-workspace',
+      permissionMode: 'read_only',
+      defaultModel: 'GPT-5.4-Mini',
+      defaultReasoning: 'low',
+      defaultSpeed: 'fast',
+    }));
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+    await waitFor(() => {
+      const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+      expect(savedSessions[0]).toEqual(expect.objectContaining({
+        workspacePath: 'E:/first-codex-workspace',
+        frontendOnly: true,
+      }));
+      expect(savedSessions[0].sessionKey).toMatch(/^codex:pending:/);
+    });
+
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/second-codex-workspace',
+      permissionMode: 'full_access',
+      defaultModel: 'GPT-5.5',
+      defaultReasoning: 'medium',
+      defaultSpeed: 'fast',
+    }));
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+
+    await waitFor(() => {
+      const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+      expect(savedSessions[0]).toEqual(expect.objectContaining({
+        workspacePath: 'E:/second-codex-workspace',
+        frontendOnly: true,
+      }));
+      expect(savedSessions[1]).toEqual(expect.objectContaining({
+        workspacePath: 'E:/first-codex-workspace',
+        frontendOnly: true,
+      }));
+    });
+    expect(startCodexConversationSpy).not.toHaveBeenCalled();
+    expect((container.querySelector('.rg-codex-model-button') as HTMLElement).textContent).toContain('5.5');
   });
 
   it('sends Codex plan mode and renders streamed plan updates', async () => {
@@ -1093,6 +1174,11 @@ describe('NewTaskModal', () => {
     sendMessageStreamSpy.mockImplementationOnce(async () => (
       new Response(
         `data: ${JSON.stringify({
+          type: 'codex_session_started',
+          thread_id: 'thread-started',
+          session_key: 'codex:thread-started',
+          cwd: null,
+        })}\n\ndata: ${JSON.stringify({
           type: 'codex_goal_update',
           thread_id: 'thread-started',
           goal: {
@@ -1151,6 +1237,11 @@ describe('NewTaskModal', () => {
     sendMessageStreamSpy.mockImplementationOnce(async () => (
       new Response(
         `data: ${JSON.stringify({
+          type: 'codex_session_started',
+          thread_id: 'thread-started',
+          session_key: 'codex:thread-started',
+          cwd: null,
+        })}\n\ndata: ${JSON.stringify({
           type: 'codex_user_input_request',
           request_id: 'request-1',
           thread_id: 'thread-started',
@@ -1320,10 +1411,17 @@ describe('NewTaskModal', () => {
       target: { value: 'draft local Codex action' },
     });
     let closeStream = () => {};
+    const encoder = new TextEncoder();
     sendMessageStreamSpy
       .mockImplementationOnce(async () => (
         new Response(new ReadableStream<Uint8Array>({
           start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              type: 'codex_session_started',
+              thread_id: 'thread-started',
+              session_key: 'codex:thread-started',
+              cwd: null,
+            })}\n\n`));
             closeStream = () => controller.close();
           },
         }), {

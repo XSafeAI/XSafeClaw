@@ -254,7 +254,7 @@ export interface CodexConversationOpenResponse {
 
 export interface CodexConversationTurnRequest {
   message: string;
-  thread_id: string;
+  thread_id?: string | null;
   cwd?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;

@@ -56,7 +56,6 @@ import {
   type StartSessionResponse,
   type RuntimeSessionRecord,
   type CodexSessionRecord,
-  type CodexConversationOpenResponse,
   type CodexRateLimitWindow,
   type CodexRateLimitsResponse,
   type CodexRequestUserInputResponseRequest,
@@ -844,27 +843,6 @@ export function codexSessionRecordToRuntimeGuardSession(
     autoTitlePending: false,
     frontendOnly: true,
     codexHistory: true,
-  };
-}
-
-function codexConversationToRuntimeGuardSession(
-  data: CodexConversationOpenResponse,
-  fallbackTitle = 'Codex',
-): RuntimeGuardSession {
-  const now = new Date().toISOString();
-  return {
-    sessionKey: data.session_key || `codex:${data.thread_id}`,
-    historySessionId: data.thread_id,
-    agent: 'Codex',
-    platform: 'codex',
-    instanceId: 'codex-cli',
-    displayName: 'Codex CLI',
-    workspacePath: firstText(data.cwd) || undefined,
-    title: firstText(data.title) || fallbackTitle,
-    createdAt: now,
-    lastActivityAt: now,
-    status: data.status === 'ready' ? 'ready' : 'error',
-    autoTitlePending: false,
   };
 }
 
@@ -3370,15 +3348,30 @@ export default function RuntimeGuardConsole() {
 
   const addCodexConversationSession = useCallback(async () => {
     const currentCodexConfig = loadCodexConfig();
-    const payload = {
-      cwd: currentCodexConfig.workspaceDir.trim() || null,
-      model: codexModel,
-      permission_mode: codexPermissionMode,
-    };
-    const res = await systemAPI.startCodexConversation(payload);
+    const nextModel = currentCodexConfig.defaultModel;
+    const nextSpeed = codexModelSupportsFast(nextModel) ? currentCodexConfig.defaultSpeed : 'standard';
+    setCodexModel(nextModel);
+    setCodexReasoningLevel(currentCodexConfig.defaultReasoning);
+    setCodexSpeed(nextSpeed);
+    setCodexPermissionMode(currentCodexConfig.permissionMode);
+
+    const now = new Date().toISOString();
     const sameAgentCount = sessions.filter(session => session.agent === 'Codex').length + 1;
     const fallbackLabel = sameAgentCount === 1 ? 'Codex' : `Codex ${sameAgentCount}`;
-    const session = codexConversationToRuntimeGuardSession(res.data, fallbackLabel);
+    const session: RuntimeGuardSession = {
+      sessionKey: `codex:pending:${uuidv4()}`,
+      agent: 'Codex',
+      platform: 'codex',
+      instanceId: 'codex-cli',
+      displayName: 'Codex CLI',
+      workspacePath: currentCodexConfig.workspaceDir.trim() || undefined,
+      title: fallbackLabel,
+      createdAt: now,
+      lastActivityAt: now,
+      status: 'ready',
+      autoTitlePending: false,
+      frontendOnly: true,
+    };
 
     setSessions(current => [session, ...current]);
     setSessionHistoryItems(current => sortSessionsNewestFirst([session, ...current.filter(item => item.sessionKey !== session.sessionKey)]));
@@ -3387,7 +3380,7 @@ export default function RuntimeGuardConsole() {
     setActiveSessionId(session.sessionKey);
     setSelectedAgent('Codex');
     return session;
-  }, [codexModel, codexPermissionMode, sessions, setMessageMap]);
+  }, [sessions, setMessageMap]);
 
   const openSession = useCallback(async (agent: AgentName, installed = true) => {
     if (creatingAgent) return;
@@ -3772,6 +3765,9 @@ export default function RuntimeGuardConsole() {
     if (!text || (sendingMap[originalKey] ?? false) || inFlightKeysRef.current.has(originalKey)) return;
 
     if (session.agent === 'Codex') {
+      let activeKey = originalKey;
+      let activeThreadId: string | null = session.historySessionId
+        || (session.sessionKey.startsWith('codex:pending:') ? null : session.sessionKey.replace(/^codex:/, '') || null);
       const effectiveCodexPlanMode = options.codexPlanMode ?? codexPlanMode;
       const effectiveCodexGoalMode = options.codexGoalMode ?? codexGoalMode;
       const activity = new Date();
@@ -3803,16 +3799,15 @@ export default function RuntimeGuardConsole() {
       setMessageMap(prev => ({ ...prev, [originalKey]: [...(prev[originalKey] ?? []), userMsg, assistantMsg] }));
 
       try {
-        const threadId = session.historySessionId || session.sessionKey.replace(/^codex:/, '');
-        if (!threadId) {
+        if (!activeThreadId && !session.sessionKey.startsWith('codex:pending:')) {
           throw new Error('Codex thread id is missing.');
         }
-        const response = await fetch(`/api/system/codex/conversations/${encodeURIComponent(session.sessionKey)}/turns/stream`, {
+        const response = await fetch(`/api/system/codex/conversations/${encodeURIComponent(activeKey)}/turns/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: text,
-            thread_id: threadId,
+            thread_id: activeThreadId,
             cwd: session.workspacePath || null,
             model: codexModelId(codexModel),
             reasoning_effort: codexReasoningLevel,
@@ -3868,6 +3863,8 @@ export default function RuntimeGuardConsole() {
                 risk_level?: string;
                 request_id?: string;
                 thread_id?: string;
+                session_key?: string;
+                cwd?: string | null;
                 turn_id?: string;
                 item_id?: string;
                 questions?: ChatMessage['codex_questions'];
@@ -3879,10 +3876,10 @@ export default function RuntimeGuardConsole() {
 
               const appendBeforeAssistant = (message: ChatMessage) => {
                 setMessageMap(prev => {
-                  const messages = [...(prev[originalKey] ?? [])];
+                  const messages = [...(prev[activeKey] ?? [])];
                   const assistantIndex = messages.findIndex(item => item.id === pendingId);
                   messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, message);
-                  return { ...prev, [originalKey]: messages };
+                  return { ...prev, [activeKey]: messages };
                 });
               };
 
@@ -3891,22 +3888,67 @@ export default function RuntimeGuardConsole() {
                 buildMessage: (existing?: ChatMessage) => ChatMessage,
               ) => {
                 setMessageMap(prev => {
-                  const messages = [...(prev[originalKey] ?? [])];
+                  const messages = [...(prev[activeKey] ?? [])];
                   const existingIndex = messages.findIndex(item => item.id === messageId);
                   if (existingIndex >= 0) {
                     messages[existingIndex] = buildMessage(messages[existingIndex]);
-                    return { ...prev, [originalKey]: messages };
+                    return { ...prev, [activeKey]: messages };
                   }
                   const assistantIndex = messages.findIndex(item => item.id === pendingId);
                   messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, buildMessage());
-                  return { ...prev, [originalKey]: messages };
+                  return { ...prev, [activeKey]: messages };
                 });
               };
 
-              if (chunk.type === 'delta' && typeof chunk.text === 'string') {
+              if (chunk.type === 'codex_session_started') {
+                const nextKey = typeof chunk.session_key === 'string' && chunk.session_key ? chunk.session_key : undefined;
+                const nextThreadId = typeof chunk.thread_id === 'string' && chunk.thread_id ? chunk.thread_id : undefined;
+                if (nextThreadId) {
+                  activeThreadId = nextThreadId;
+                }
+                if (nextKey) {
+                  const previousKey = activeKey;
+                  if (nextKey !== previousKey) {
+                    renameSessionKey(previousKey, nextKey);
+                    chatStreamStore.setSending(previousKey, false);
+                    chatStreamStore.setSending(nextKey, true);
+                    inFlightKeysRef.current.delete(previousKey);
+                    inFlightKeysRef.current.add(nextKey);
+                    activeKey = nextKey;
+                  }
+                  setSessions(current => current.map(item => (
+                    item.sessionKey === nextKey
+                      ? {
+                          ...item,
+                          historySessionId: nextThreadId || item.historySessionId,
+                          frontendOnly: false,
+                          codexHistory: false,
+                          workspacePath: chunk.cwd || item.workspacePath,
+                        }
+                      : item
+                  )));
+                  setSessionHistoryItems(current => sortSessionsNewestFirst(current.map(item => (
+                    item.sessionKey === nextKey
+                      ? {
+                          ...item,
+                          historySessionId: nextThreadId || item.historySessionId,
+                          frontendOnly: false,
+                          codexHistory: false,
+                          workspacePath: chunk.cwd || item.workspacePath,
+                        }
+                      : item
+                  ))));
+                  setCodexGoalBySessionKey(current => {
+                    if (previousKey === nextKey || !(previousKey in current)) return current;
+                    const next = { ...current, [nextKey]: current[previousKey] };
+                    delete next[previousKey];
+                    return next;
+                  });
+                }
+              } else if (chunk.type === 'delta' && typeof chunk.text === 'string') {
                 setMessageMap(prev => ({
                   ...prev,
-                  [originalKey]: (prev[originalKey] ?? []).map(message => (
+                  [activeKey]: (prev[activeKey] ?? []).map(message => (
                     message.id === pendingId
                       ? { ...message, content: `${message.content || ''}${chunk.text}`, pending: false }
                       : message
@@ -3915,7 +3957,7 @@ export default function RuntimeGuardConsole() {
               } else if (chunk.type === 'final') {
                 setMessageMap(prev => ({
                   ...prev,
-                  [originalKey]: (prev[originalKey] ?? []).map(message => (
+                  [activeKey]: (prev[activeKey] ?? []).map(message => (
                     message.id === pendingId
                       ? { ...message, content: chunk.text || message.content || '[No response]', pending: false }
                       : message
@@ -3939,7 +3981,7 @@ export default function RuntimeGuardConsole() {
               } else if (chunk.type === 'tool_result') {
                 setMessageMap(prev => ({
                   ...prev,
-                  [originalKey]: (prev[originalKey] ?? []).map(message => (
+                  [activeKey]: (prev[activeKey] ?? []).map(message => (
                     message.role === 'tool_call' && chunk.tool_id && message.tool_id === chunk.tool_id
                       ? {
                           ...message,
@@ -4000,10 +4042,10 @@ export default function RuntimeGuardConsole() {
               } else if (chunk.type === 'codex_goal_update') {
                 const goal = {
                   ...(chunk.goal ?? {}),
-                  thread_id: chunk.goal?.thread_id || chunk.thread_id || threadId,
+                  thread_id: chunk.goal?.thread_id || chunk.thread_id || activeThreadId,
                 };
-                setCodexGoalBySessionKey(current => ({ ...current, [originalKey]: goal }));
-                const goalId = `codex-goal-${goal.thread_id || threadId || pendingId}`;
+                setCodexGoalBySessionKey(current => ({ ...current, [activeKey]: goal }));
+                const goalId = `codex-goal-${goal.thread_id || activeThreadId || pendingId}`;
                 upsertBeforeAssistant(goalId, existing => ({
                   id: goalId,
                   role: 'codex_goal',
@@ -4014,11 +4056,11 @@ export default function RuntimeGuardConsole() {
                   codex_goal: goal,
                 }));
               } else if (chunk.type === 'codex_goal_cleared') {
-                const clearedThreadId = chunk.thread_id || threadId;
-                setCodexGoalBySessionKey(current => ({ ...current, [originalKey]: null }));
+                const clearedThreadId = chunk.thread_id || activeThreadId || undefined;
+                setCodexGoalBySessionKey(current => ({ ...current, [activeKey]: null }));
                 setMessageMap(prev => ({
                   ...prev,
-                  [originalKey]: (prev[originalKey] ?? []).map(message => (
+                  [activeKey]: (prev[activeKey] ?? []).map(message => (
                     message.role === 'codex_goal'
                       && (!clearedThreadId || message.codex_goal?.thread_id === clearedThreadId || message.codex_thread_id === clearedThreadId)
                       ? { ...message, codex_goal: { ...(message.codex_goal ?? {}), thread_id: clearedThreadId, status: 'cleared' } }
@@ -4030,7 +4072,7 @@ export default function RuntimeGuardConsole() {
                 if (requestId) {
                   setMessageMap(prev => ({
                     ...prev,
-                    [originalKey]: (prev[originalKey] ?? []).map(message => (
+                    [activeKey]: (prev[activeKey] ?? []).map(message => (
                       message.role === 'codex_question' && message.codex_request_id === requestId
                         ? { ...message, codex_response_status: 'resolved' }
                         : message
@@ -4049,7 +4091,7 @@ export default function RuntimeGuardConsole() {
               } else if (chunk.type === 'error') {
                 setMessageMap(prev => ({
                   ...prev,
-                  [originalKey]: (prev[originalKey] ?? []).map(message => (
+                  [activeKey]: (prev[activeKey] ?? []).map(message => (
                     message.id === pendingId
                       ? { ...message, role: 'error' as const, content: chunk.text || 'Codex error', pending: false }
                       : message
@@ -4071,24 +4113,24 @@ export default function RuntimeGuardConsole() {
             timestamp: new Date(),
             codex_request_id: `local:${confirmationId}`,
             codex_question_kind: 'plan_confirmation',
-            codex_thread_id: threadId,
+            codex_thread_id: activeThreadId || undefined,
             codex_turn_id: latestCodexPlanTurnId || undefined,
             codex_item_id: latestCodexPlanItemId || undefined,
             codex_questions: [codexPlanConfirmationQuestion(locale)],
             codex_response_status: 'pending',
           };
           setMessageMap(prev => {
-            const messages = [...(prev[originalKey] ?? [])];
+            const messages = [...(prev[activeKey] ?? [])];
             if (messages.some(message => message.id === confirmationId)) return prev;
             const assistantIndex = messages.findIndex(message => message.id === pendingId);
             messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, confirmationMessage);
-            return { ...prev, [originalKey]: messages };
+            return { ...prev, [activeKey]: messages };
           });
         }
 
         setMessageMap(prev => ({
           ...prev,
-          [originalKey]: (prev[originalKey] ?? []).map(message => (
+          [activeKey]: (prev[activeKey] ?? []).map(message => (
             message.id === pendingId && message.pending
               ? { ...message, content: message.content || '[No response]', pending: false }
               : message
@@ -4097,7 +4139,7 @@ export default function RuntimeGuardConsole() {
       } catch (err: any) {
         setMessageMap(prev => ({
           ...prev,
-          [originalKey]: (prev[originalKey] ?? []).map(message => (
+          [activeKey]: (prev[activeKey] ?? prev[originalKey] ?? []).map(message => (
             message.id === pendingId
               ? { ...message, role: 'error' as const, content: `[Error] ${err.message}`, pending: false }
               : message
@@ -4105,7 +4147,9 @@ export default function RuntimeGuardConsole() {
         }));
       } finally {
         chatStreamStore.setSending(originalKey, false);
+        chatStreamStore.setSending(activeKey, false);
         inFlightKeysRef.current.delete(originalKey);
+        inFlightKeysRef.current.delete(activeKey);
         void refreshCodexRateLimits();
       }
       return;

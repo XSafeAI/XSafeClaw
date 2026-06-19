@@ -258,6 +258,7 @@ class RuntimeToolCheckRequest(BaseModel):
     tool_name: str
     params: dict = {}
     messages: list[dict[str, Any]] = []
+    force_approval: bool = False
 
 
 @router.post("/runtime-tool-check", response_model=ToolCheckResponse)
@@ -271,6 +272,7 @@ async def runtime_tool_check(body: RuntimeToolCheckRequest):
         tool_name=body.tool_name,
         params=body.params,
         messages=body.messages,
+        force_approval=body.force_approval,
     )
     return ToolCheckResponse(**result)
 

@@ -94,6 +94,56 @@ class FakeConversationProcess:
 
 
 class FakeTurnStdin(FakeConversationStdin):
+    def _remember_hook_command(self, message: dict) -> None:
+        config = message.get("params", {}).get("config")
+        try:
+            self._hook_command = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        except Exception:
+            self._hook_command = (
+                "python -m xsafeclaw.integrations.codex_guard_hook "
+                "--session-key codex:thread-existing"
+            )
+
+    def _enqueue_hooks_list(self, message: dict) -> None:
+        command = getattr(
+            self,
+            "_hook_command",
+            "python -m xsafeclaw.integrations.codex_guard_hook --session-key codex:thread-existing",
+        )
+        self._queue.put_nowait(
+            json.dumps(
+                {
+                    "id": message["id"],
+                    "result": {
+                        "data": [
+                            {
+                                "cwd": "E:/work/project",
+                                "warnings": [],
+                                "errors": [],
+                                "hooks": [
+                                    {
+                                        "eventName": "PreToolUse",
+                                        "command": command,
+                                        "source": "sessionFlags",
+                                        "enabled": True,
+                                        "trustStatus": "trusted",
+                                    },
+                                    {
+                                        "eventName": "PermissionRequest",
+                                        "command": command,
+                                        "source": "sessionFlags",
+                                        "enabled": True,
+                                        "trustStatus": "trusted",
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ).encode("utf-8")
+            + b"\n"
+        )
+
     def write(self, payload: bytes) -> None:
         message = json.loads(payload.decode("utf-8"))
         self._sent_messages.append(message)
@@ -102,7 +152,26 @@ class FakeTurnStdin(FakeConversationStdin):
             self._queue.put_nowait(
                 json.dumps({"id": message["id"], "result": {"serverInfo": {"name": "codex"}}}).encode("utf-8") + b"\n"
             )
+        elif method == "thread/start":
+            self._remember_hook_command(message)
+            self._queue.put_nowait(
+                json.dumps(
+                    {
+                        "id": message["id"],
+                        "result": {
+                            "thread": {
+                                "id": "thread-started",
+                                "sessionId": "session-started",
+                                "name": "Codex",
+                                "cwd": message.get("params", {}).get("cwd"),
+                            }
+                        },
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
         elif method == "thread/resume":
+            self._remember_hook_command(message)
             self._queue.put_nowait(
                 json.dumps(
                     {
@@ -119,7 +188,10 @@ class FakeTurnStdin(FakeConversationStdin):
                 ).encode("utf-8")
                 + b"\n"
             )
+        elif method == "hooks/list":
+            self._enqueue_hooks_list(message)
         elif method == "turn/start":
+            thread_id = message.get("params", {}).get("threadId") or "thread-existing"
             self._queue.put_nowait(
                 json.dumps(
                     {
@@ -139,7 +211,7 @@ class FakeTurnStdin(FakeConversationStdin):
                     {
                         "method": "item/agentMessage/delta",
                         "params": {
-                            "threadId": "thread-existing",
+                            "threadId": thread_id,
                             "turnId": "turn-1",
                             "itemId": "assistant-1",
                             "delta": "Hello from Codex",
@@ -153,7 +225,7 @@ class FakeTurnStdin(FakeConversationStdin):
                     {
                         "method": "turn/completed",
                         "params": {
-                            "threadId": "thread-existing",
+                            "threadId": thread_id,
                             "turn": {
                                 "id": "turn-1",
                                 "status": "completed",
@@ -178,16 +250,97 @@ class FakeTurnProcess(FakeConversationProcess):
         self.stderr = FakeConversationStderr()
 
 
+class FakeMissingHookTurnStdin(FakeTurnStdin):
+    def _enqueue_hooks_list(self, message: dict) -> None:
+        self._queue.put_nowait(
+            json.dumps({"id": message["id"], "result": {"data": [{"cwd": "E:/work/project", "hooks": []}]}}).encode("utf-8")
+            + b"\n"
+        )
+
+
+class FakeMissingHookTurnProcess(FakeConversationProcess):
+    def __init__(self, sent_messages: list[dict]):
+        self.returncode = None
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.stdin = FakeMissingHookTurnStdin(self._queue, sent_messages)
+        self.stdout = FakeConversationStdout(self._queue)
+        self.stderr = FakeConversationStderr()
+
+
+class FakeApprovalTurnStdin(FakeTurnStdin):
+    def write(self, payload: bytes) -> None:
+        message = json.loads(payload.decode("utf-8"))
+        if message.get("id") == "approval-1" and "result" in message:
+            self._sent_messages.append(message)
+            self._queue.put_nowait(
+                json.dumps(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "thread-existing",
+                            "turn": {"id": "turn-approval", "status": "completed"},
+                        },
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
+            return
+
+        self._sent_messages.append(message)
+        method = message.get("method")
+        if method in {"initialize", "thread/resume", "hooks/list"}:
+            # Reuse the standard fake behavior without appending twice.
+            self._sent_messages.pop()
+            return super().write(payload)
+        if method == "turn/start":
+            self._queue.put_nowait(
+                json.dumps({"id": message["id"], "result": {"turn": {"id": "turn-approval", "status": "running"}}}).encode("utf-8")
+                + b"\n"
+            )
+            self._queue.put_nowait(
+                json.dumps(
+                    {
+                        "id": "approval-1",
+                        "method": "item/commandExecution/requestApproval",
+                        "params": {
+                            "threadId": "thread-existing",
+                            "turnId": "turn-approval",
+                            "itemId": "command-1",
+                            "startedAtMs": 1710000000000,
+                            "command": "npm test",
+                            "cwd": "E:/work/project",
+                            "reason": "Run tests",
+                        },
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
+
+
+class FakeApprovalTurnProcess(FakeConversationProcess):
+    def __init__(self, sent_messages: list[dict]):
+        self.returncode = None
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.stdin = FakeApprovalTurnStdin(self._queue, sent_messages)
+        self.stdout = FakeConversationStdout(self._queue)
+        self.stderr = FakeConversationStderr()
+
+
 class FakeQuestionTurnStdin(FakeTurnStdin):
     def write(self, payload: bytes) -> None:
         message = json.loads(payload.decode("utf-8"))
-        self._sent_messages.append(message)
         method = message.get("method")
+        if method == "hooks/list":
+            self._sent_messages.append(message)
+            self._enqueue_hooks_list(message)
+            return
+        self._sent_messages.append(message)
         if method == "initialize":
             self._queue.put_nowait(
                 json.dumps({"id": message["id"], "result": {"serverInfo": {"name": "codex"}}}).encode("utf-8") + b"\n"
             )
         elif method == "thread/resume":
+            self._remember_hook_command(message)
             self._queue.put_nowait(
                 json.dumps(
                     {
@@ -267,13 +420,18 @@ class FakeQuestionTurnProcess(FakeConversationProcess):
 class FakePlanTurnStdin(FakeTurnStdin):
     def write(self, payload: bytes) -> None:
         message = json.loads(payload.decode("utf-8"))
-        self._sent_messages.append(message)
         method = message.get("method")
+        if method == "hooks/list":
+            self._sent_messages.append(message)
+            self._enqueue_hooks_list(message)
+            return
+        self._sent_messages.append(message)
         if method == "initialize":
             self._queue.put_nowait(
                 json.dumps({"id": message["id"], "result": {"serverInfo": {"name": "codex"}}}).encode("utf-8") + b"\n"
             )
         elif method == "thread/resume":
+            self._remember_hook_command(message)
             self._queue.put_nowait(
                 json.dumps({"id": message["id"], "result": {"thread": {"id": message.get("params", {}).get("threadId")}}}).encode("utf-8")
                 + b"\n"
@@ -385,13 +543,18 @@ class FakeNoPlanTurnProcess(FakeConversationProcess):
 class FakeGoalTurnStdin(FakeTurnStdin):
     def write(self, payload: bytes) -> None:
         message = json.loads(payload.decode("utf-8"))
-        self._sent_messages.append(message)
         method = message.get("method")
+        if method == "hooks/list":
+            self._sent_messages.append(message)
+            self._enqueue_hooks_list(message)
+            return
+        self._sent_messages.append(message)
         if method == "initialize":
             self._queue.put_nowait(
                 json.dumps({"id": message["id"], "result": {"serverInfo": {"name": "codex"}}}).encode("utf-8") + b"\n"
             )
         elif method == "thread/resume":
+            self._remember_hook_command(message)
             self._queue.put_nowait(
                 json.dumps({"id": message["id"], "result": {"thread": {"id": message.get("params", {}).get("threadId")}}}).encode("utf-8")
                 + b"\n"
@@ -607,6 +770,15 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
     assert len(resume_messages) == 1
     assert resume_messages[0]["params"]["threadId"] == "thread-existing"
     assert resume_messages[0]["params"]["developerInstructions"] == FakeInstructionBundle.text
+    hook_config = resume_messages[0]["params"]["config"]
+    assert hook_config["hooks"]["PreToolUse"][0]["matcher"] == "*"
+    assert hook_config["hooks"]["PermissionRequest"][0]["matcher"] == "*"
+    hook_command = hook_config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "xsafeclaw.integrations.codex_guard_hook" in hook_command
+    assert "--session-key codex:thread-existing" in hook_command
+
+    hooks_list_messages = [message for message in sent_messages if message.get("method") == "hooks/list"]
+    assert len(hooks_list_messages) == 1
 
     turn_messages = [message for message in sent_messages if message.get("method") == "turn/start"]
     assert len(turn_messages) == 1
@@ -626,6 +798,159 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
             "developer_instructions": None,
         },
     }
+
+
+def test_codex_turn_stream_starts_thread_for_pending_first_message(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sent_messages: list[dict] = []
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        assert list(args) == [codex_path, "app-server"]
+        assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
+        return FakeTurnProcess(sent_messages)
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/api/system/codex/conversations/codex%3Apending%3Aabc/turns/stream",
+        json={
+            "message": "create a real Codex thread",
+            "thread_id": None,
+            "cwd": "C:/Users/heng/Desktop/test",
+            "model": "GPT-5.5",
+            "reasoning_effort": "xhigh",
+            "speed": "fast",
+            "permission_mode": "workspace_write",
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    first_event = body.split("\n\n", 1)[0]
+    assert '"type": "codex_session_started"' in first_event
+    assert '"thread_id": "thread-started"' in first_event
+    assert '"session_key": "codex:thread-started"' in first_event
+    assert '"cwd": "C:/Users/heng/Desktop/test"' in first_event
+    assert 'data: {"type": "delta", "text": "Hello from Codex"}' in body
+    assert "data: [DONE]" in body
+
+    methods = [message.get("method") for message in sent_messages]
+    assert "thread/start" in methods
+    assert "thread/resume" not in methods
+    assert methods.index("initialize") < methods.index("thread/start") < methods.index("turn/start")
+
+    start_messages = [message for message in sent_messages if message.get("method") == "thread/start"]
+    assert len(start_messages) == 1
+    start_params = start_messages[0]["params"]
+    assert start_params["developerInstructions"] == FakeInstructionBundle.text
+    assert start_params["cwd"] == "C:/Users/heng/Desktop/test"
+    assert start_params["model"] == "gpt-5.5"
+    hook_command = start_params["config"]["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "--session-key codex:pending:abc" in hook_command
+
+    turn_messages = [message for message in sent_messages if message.get("method") == "turn/start"]
+    assert len(turn_messages) == 1
+    turn_params = turn_messages[0]["params"]
+    assert turn_params["threadId"] == "thread-started"
+    assert turn_params["input"] == [{"type": "text", "text": "create a real Codex thread", "text_elements": []}]
+    assert turn_params["cwd"] == "C:/Users/heng/Desktop/test"
+    assert turn_params["model"] == "gpt-5.5"
+    assert turn_params["effort"] == "xhigh"
+    assert turn_params["serviceTier"] == "fast"
+    assert turn_params["sandboxPolicy"]["type"] == "workspaceWrite"
+
+
+def test_codex_turn_stream_fails_closed_when_session_hooks_are_not_loaded(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sent_messages: list[dict] = []
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeMissingHookTurnProcess(sent_messages)
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/api/system/codex/conversations/codex%3Athread-existing/turns/stream",
+        json={"message": "hello Codex", "thread_id": "thread-existing"},
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "Codex session hooks are unavailable" in body
+    assert not any(message.get("method") == "turn/start" for message in sent_messages)
+
+
+def test_codex_native_command_approval_waits_for_guard_and_accepts(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sent_messages: list[dict] = []
+    guard_calls: list[dict] = []
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeApprovalTurnProcess(sent_messages)
+
+    async def fake_check_runtime_tool_call(**kwargs):
+        guard_calls.append(kwargs)
+        return {"action": "allow"}
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(system_routes.guard_service, "check_runtime_tool_call", fake_check_runtime_tool_call)
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/api/system/codex/conversations/codex%3Athread-existing/turns/stream",
+        json={"message": "run tests", "thread_id": "thread-existing"},
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "Codex tool approved" in body
+    assert guard_calls
+    assert guard_calls[0]["platform"] == "codex"
+    assert guard_calls[0]["force_approval"] is True
+    assert guard_calls[0]["tool_name"] == "Shell"
+    assert guard_calls[0]["params"]["command"] == "npm test"
+    approval_responses = [message for message in sent_messages if message.get("id") == "approval-1" and "result" in message]
+    assert approval_responses == [{"id": "approval-1", "result": {"decision": "accept"}}]
+
+
+def test_codex_native_command_approval_denies_when_guard_blocks(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sent_messages: list[dict] = []
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeApprovalTurnProcess(sent_messages)
+
+    async def fake_check_runtime_tool_call(**_kwargs):
+        return {"action": "block", "reason": "Denied by reviewer"}
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(system_routes.guard_service, "check_runtime_tool_call", fake_check_runtime_tool_call)
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/api/system/codex/conversations/codex%3Athread-existing/turns/stream",
+        json={"message": "run tests", "thread_id": "thread-existing"},
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "Codex tool blocked" in body
+    approval_responses = [message for message in sent_messages if message.get("id") == "approval-1" and "result" in message]
+    assert approval_responses == [{"id": "approval-1", "result": {"decision": "decline"}}]
 
 
 def test_codex_turn_stream_maps_request_user_input_and_resolved_notification(monkeypatch, tmp_path):

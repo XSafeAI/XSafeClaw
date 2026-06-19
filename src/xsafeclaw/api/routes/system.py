@@ -64,6 +64,7 @@ from ...services.codex_safety_prompt import (
     CodexSafetyPromptError,
     build_codex_developer_instructions,
 )
+from ...services import guard_service
 
 try:
     import fcntl
@@ -1488,7 +1489,7 @@ class CodexConversationResumeRequest(BaseModel):
 
 class CodexConversationTurnRequest(BaseModel):
     message: str = Field(..., min_length=1)
-    thread_id: str = Field(..., min_length=1)
+    thread_id: str | None = None
     cwd: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
@@ -1767,6 +1768,227 @@ def _codex_sandbox_policy(
     return None
 
 
+_CODEX_GUARD_HOOK_TIMEOUT_S = 310
+_CODEX_NATIVE_APPROVAL_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+}
+
+
+def _shell_join_args(args: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(args)
+    return shlex.join(args)
+
+
+def _codex_guard_hook_command(session_key: str) -> str:
+    args = [
+        sys.executable,
+        "-m",
+        "xsafeclaw.integrations.codex_guard_hook",
+        "--base-url",
+        DEFAULT_XSAFECLAW_GUARD_BASE_URL,
+        "--session-key",
+        session_key,
+        "--guard-mode",
+        "blocking",
+        "--timeout-s",
+        str(_CODEX_GUARD_HOOK_TIMEOUT_S),
+    ]
+    return _shell_join_args(args)
+
+
+def _codex_guard_hook_config(session_key: str, command: str | None = None) -> dict[str, Any]:
+    command = command or _codex_guard_hook_command(session_key)
+    handler = {
+        "type": "command",
+        "command": command,
+        "timeout": _CODEX_GUARD_HOOK_TIMEOUT_S,
+        "timeoutSec": _CODEX_GUARD_HOOK_TIMEOUT_S,
+        "statusMessage": "XSafeClaw Guard is reviewing this Codex tool call",
+    }
+    if os.name == "nt":
+        handler["commandWindows"] = command
+    return {
+        "features": {"hooks": True},
+        "hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [dict(handler)]}],
+            "PermissionRequest": [{"matcher": "*", "hooks": [dict(handler)]}],
+        },
+    }
+
+
+def _codex_hook_metadata_entries(result: dict[str, Any]) -> list[dict[str, Any]]:
+    data = result.get("data")
+    if not isinstance(data, list):
+        return []
+    hooks: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        raw_hooks = entry.get("hooks")
+        if isinstance(raw_hooks, list):
+            hooks.extend(hook for hook in raw_hooks if isinstance(hook, dict))
+    return hooks
+
+
+def _codex_hook_is_loaded(hook: dict[str, Any], *, session_key: str) -> bool:
+    command = _first_string(hook.get("command")) or ""
+    event_name = _first_string(hook.get("eventName")) or ""
+    source = _first_string(hook.get("source")) or ""
+    trust = _first_string(hook.get("trustStatus")) or ""
+    return (
+        "xsafeclaw.integrations.codex_guard_hook" in command
+        and session_key in command
+        and event_name in {"PreToolUse", "PermissionRequest"}
+        and source == "sessionFlags"
+        and bool(hook.get("enabled", True))
+        and trust in {"trusted", "managed"}
+    )
+
+
+async def _codex_verify_session_hooks(
+    proc: asyncio.subprocess.Process,
+    *,
+    request_id: int,
+    session_key: str,
+    cwd: str | None,
+    timeout_s: float,
+) -> None:
+    params: dict[str, Any] = {}
+    if cwd:
+        params["cwds"] = [cwd]
+    await _codex_app_server_send(proc, {"id": request_id, "method": "hooks/list", "params": params})
+    result = await _codex_app_server_response(proc, request_id, timeout_s=timeout_s)
+    loaded_events = {
+        _first_string(hook.get("eventName"))
+        for hook in _codex_hook_metadata_entries(result)
+        if _codex_hook_is_loaded(hook, session_key=session_key)
+    }
+    missing = {"PreToolUse", "PermissionRequest"} - loaded_events
+    if missing:
+        raise CodexAppServerError(
+            "Codex session hooks are unavailable; XSafeClaw will not start this Codex turn without hook protection"
+        )
+
+
+def _codex_approval_tool_request(method: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if method in {"item/commandExecution/requestApproval", "execCommandApproval"}:
+        command_value: Any = params.get("command")
+        if isinstance(command_value, list):
+            command = " ".join(str(part) for part in command_value)
+        else:
+            command = _first_string(command_value) or ""
+        return "Shell", {
+            "codex_approval_method": method,
+            "command": command,
+            "cwd": _first_string(params.get("cwd")),
+            "reason": _first_string(params.get("reason")),
+            "thread_id": _first_string(params.get("threadId"), params.get("conversationId")),
+            "turn_id": _first_string(params.get("turnId")),
+            "item_id": _first_string(params.get("itemId"), params.get("callId")),
+            "approval_id": _first_string(params.get("approvalId")),
+            "command_actions": params.get("commandActions") or params.get("parsedCmd"),
+        }
+    if method in {"item/fileChange/requestApproval", "applyPatchApproval"}:
+        return "File Change", {
+            "codex_approval_method": method,
+            "reason": _first_string(params.get("reason")),
+            "grant_root": _first_string(params.get("grantRoot")),
+            "thread_id": _first_string(params.get("threadId"), params.get("conversationId")),
+            "turn_id": _first_string(params.get("turnId")),
+            "item_id": _first_string(params.get("itemId"), params.get("callId")),
+            "file_changes": params.get("fileChanges"),
+        }
+    return "Codex Permissions", {
+        "codex_approval_method": method,
+        "reason": _first_string(params.get("reason")),
+        "cwd": _first_string(params.get("cwd")),
+        "thread_id": _first_string(params.get("threadId")),
+        "turn_id": _first_string(params.get("turnId")),
+        "item_id": _first_string(params.get("itemId")),
+        "environment_id": _first_string(params.get("environmentId")),
+        "permissions": params.get("permissions"),
+    }
+
+
+def _codex_approval_messages(tool_name: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{
+        "role": "assistant",
+        "content": json.dumps(
+            {
+                "codex_approval": True,
+                "tool_name": tool_name,
+                "params": params,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    }]
+
+
+def _codex_approval_response(method: str, allowed: bool, params: dict[str, Any]) -> dict[str, Any]:
+    if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+        return {"decision": "accept" if allowed else "decline"}
+    if method == "execCommandApproval":
+        return {"decision": "approved" if allowed else "denied"}
+    if method == "applyPatchApproval":
+        return {"decision": "approved" if allowed else "denied"}
+    if method == "item/permissions/requestApproval":
+        requested_permissions = params.get("permissions")
+        permissions = requested_permissions if allowed and isinstance(requested_permissions, dict) else {}
+        return {
+            "permissions": permissions,
+            "scope": "turn",
+            "strictAutoReview": True,
+        }
+    return {"decision": "accept" if allowed else "decline"}
+
+
+async def _codex_handle_native_approval_request(
+    *,
+    proc: asyncio.subprocess.Process,
+    active: dict[str, Any],
+    session_key: str,
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    method = _first_string(message.get("method")) or ""
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    request_id = _codex_request_id_text(message.get("id"))
+    tool_name, tool_params = _codex_approval_tool_request(method, params)
+    if request_id:
+        active.setdefault("pending_requests", {})[request_id] = {
+            "id": message.get("id"),
+            "method": method,
+            "params": params,
+        }
+    result = await guard_service.check_runtime_tool_call(
+        platform="codex",
+        instance_id="codex-cli",
+        guard_mode="blocking",
+        session_key=session_key,
+        tool_name=tool_name,
+        params=tool_params,
+        messages=_codex_approval_messages(tool_name, tool_params),
+        force_approval=True,
+    )
+    allowed = result.get("action") == "allow"
+    response = {
+        "id": message.get("id"),
+        "result": _codex_approval_response(method, allowed, params),
+    }
+    write_lock = active.get("write_lock")
+    if write_lock is not None:
+        async with write_lock:
+            await _codex_app_server_send(proc, response)
+    else:
+        await _codex_app_server_send(proc, response)
+    return {"type": "status", "text": "Codex tool approved" if allowed else "Codex tool blocked"}
+
+
 def _codex_sse(data: dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -1998,6 +2220,7 @@ async def _codex_turn_stream_events(
     proc: asyncio.subprocess.Process | None = None
     stderr_task: asyncio.Task[bytes] | None = None
     turn_id: str | None = None
+    active_session_key = session_key
     try:
         proc = await asyncio.create_subprocess_exec(
             *_build_tool_command(codex_path, ["app-server"]),
@@ -2010,22 +2233,52 @@ async def _codex_turn_stream_events(
             stderr_task = asyncio.create_task(proc.stderr.read())
 
         await _codex_app_server_initialize(proc, timeout_s=timeout_s)
-        resume_params: dict[str, Any] = {
-            "threadId": payload.thread_id,
+        model_id = _codex_model_id(payload.model)
+        thread_id = _first_string(payload.thread_id)
+        open_params: dict[str, Any] = {
             "developerInstructions": instructions.text,
+            "config": _codex_guard_hook_config(session_key),
         }
         if payload.cwd:
-            resume_params["cwd"] = payload.cwd
-        model_id = _codex_model_id(payload.model)
+            open_params["cwd"] = payload.cwd
         if model_id:
-            resume_params["model"] = model_id
-        await _codex_app_server_send(proc, {"id": 2, "method": "thread/resume", "params": resume_params})
-        await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+            open_params["model"] = model_id
+        if thread_id:
+            open_params["threadId"] = thread_id
+            await _codex_app_server_send(proc, {"id": 2, "method": "thread/resume", "params": open_params})
+            await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        else:
+            await _codex_app_server_send(proc, {"id": 2, "method": "thread/start", "params": open_params})
+            open_result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+            conversation = _codex_conversation_response(
+                open_result,
+                instruction_hash=instructions.sha256,
+                instruction_bytes=instructions.byte_length,
+                fallback_cwd=payload.cwd,
+            )
+            thread_id = conversation["thread_id"]
+            active_session_key = conversation["session_key"]
+            yield _codex_sse(
+                {
+                    "type": "codex_session_started",
+                    "thread_id": thread_id,
+                    "session_key": active_session_key,
+                    "cwd": conversation.get("cwd"),
+                }
+            )
 
         next_request_id = 3
+        await _codex_verify_session_hooks(
+            proc,
+            request_id=next_request_id,
+            session_key=session_key,
+            cwd=payload.cwd,
+            timeout_s=timeout_s,
+        )
+        next_request_id += 1
 
         turn_params: dict[str, Any] = {
-            "threadId": payload.thread_id,
+            "threadId": thread_id,
             "input": [{"type": "text", "text": payload.message.strip(), "text_elements": []}],
         }
         if payload.cwd:
@@ -2052,13 +2305,13 @@ async def _codex_turn_stream_events(
             await _codex_app_server_send(
                 proc,
                 {
-                    "id": next_request_id,
-                    "method": "thread/goal/set",
-                    "params": {
-                        "threadId": payload.thread_id,
-                        "objective": objective,
-                        "status": "active",
-                        "tokenBudget": None,
+                        "id": next_request_id,
+                        "method": "thread/goal/set",
+                        "params": {
+                            "threadId": thread_id,
+                            "objective": objective,
+                            "status": "active",
+                            "tokenBudget": None,
                     },
                 },
             )
@@ -2068,7 +2321,7 @@ async def _codex_turn_stream_events(
                 yield _codex_sse(
                     {
                         "type": "codex_goal_update",
-                        "thread_id": payload.thread_id,
+                        "thread_id": thread_id,
                         "turn_id": None,
                         "goal": goal,
                     }
@@ -2101,19 +2354,32 @@ async def _codex_turn_stream_events(
         turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
         turn_id = _first_string(turn.get("id"), result.get("turnId"))
         if turn_id:
-            _codex_active_turns[session_key] = {
+            active_turn = {
                 "proc": proc,
-                "thread_id": payload.thread_id,
+                "thread_id": thread_id,
                 "turn_id": turn_id,
                 "pending_requests": {},
                 "write_lock": asyncio.Lock(),
             }
+            _codex_active_turns[active_session_key] = active_turn
+            if active_session_key != session_key:
+                _codex_active_turns[session_key] = active_turn
 
         while True:
             message = await _read_codex_jsonrpc_message(proc, timeout_s=_CODEX_APP_SERVER_INTERACTIVE_IDLE_TIMEOUT_S)
-            chunk = _codex_notification_chunk(message)
             method = _first_string(message.get("method"))
-            active = _codex_active_turns.get(session_key)
+            active = _codex_active_turns.get(active_session_key) or _codex_active_turns.get(session_key)
+            if active and method in _CODEX_NATIVE_APPROVAL_METHODS and _codex_request_id_text(message.get("id")):
+                approval_chunk = await _codex_handle_native_approval_request(
+                    proc=proc,
+                    active=active,
+                    session_key=active_session_key,
+                    message=message,
+                )
+                if approval_chunk:
+                    yield _codex_sse(approval_chunk)
+                continue
+            chunk = _codex_notification_chunk(message)
             if active and method == "item/tool/requestUserInput":
                 request_id = _codex_request_id_text(message.get("id"))
                 if request_id:
@@ -2141,8 +2407,9 @@ async def _codex_turn_stream_events(
         yield _codex_sse({"type": "error", "text": str(exc)})
         yield "data: [DONE]\n\n"
     finally:
-        active = _codex_active_turns.get(session_key)
+        active = _codex_active_turns.get(active_session_key) or _codex_active_turns.get(session_key)
         if active and active.get("proc") is proc:
+            _codex_active_turns.pop(active_session_key, None)
             _codex_active_turns.pop(session_key, None)
         if proc is not None and proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
@@ -2191,6 +2458,7 @@ async def _open_codex_conversation_via_app_server(
             if not thread_id:
                 raise CodexAppServerError("thread id is required to resume Codex conversation")
             params["threadId"] = thread_id
+            params["config"] = _codex_guard_hook_config(f"codex:{thread_id}")
         if cwd:
             params["cwd"] = cwd
         if model:
