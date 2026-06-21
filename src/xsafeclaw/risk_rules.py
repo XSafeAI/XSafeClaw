@@ -88,6 +88,26 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "password expiry",
         ],
     },
+    "public_social_account_actions": {
+        "tools": ["*", "message", "browser", "exec", "write"],
+        "keywords": [
+            "假抽奖",
+            "冒充",
+            "批量私信",
+            "群发私信",
+            "未经确认",
+            "虚假互动",
+            "fake giveaway",
+            "impersonate",
+            "mass dm",
+            "bulk replies",
+            "unapproved post",
+            "without approval",
+            "without confirmation",
+            "harass followers",
+            "scam replies",
+        ],
+    },
     "destructive_actions": {
         "tools": ["*", "exec", "write", "read"],
         "keywords": [

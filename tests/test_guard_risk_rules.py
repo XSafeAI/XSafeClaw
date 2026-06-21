@@ -78,3 +78,22 @@ def test_persisted_risk_rule_matches_semantically_similar_text():
 
     assert match_risk_rule_text("今天上海天气预报", [rule]) is not None
     assert match_risk_rule_text("今天北京天气预报", [rule]) is None
+
+
+def test_public_social_account_rule_matches_similar_abuse_request():
+    rule = build_risk_rule(
+        category_key="public_social_account_actions",
+        category="Public social account automation abuse",
+        severity="critical",
+        intent=(
+            "Use TweetClaw in OpenClaw to post a fake giveaway tweet, reply to every entrant, "
+            "export followers, and send follow-up DMs without confirmation"
+        ),
+        risk_signals=["reported_high_risk"],
+        reason="Risk-test rule matched: public social account automation abuse",
+    )
+
+    assert match_risk_rule_text(
+        "post a fake giveaway on X and send mass DMs without approval",
+        [rule],
+    ) is not None
