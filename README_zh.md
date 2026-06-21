@@ -31,6 +31,7 @@
   🚀 <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
   📖 <a href="docs/installation.md">安装文档</a> &nbsp;·&nbsp;
   🌐 <a href="https://xsafeclaw.ai">项目官网</a> &nbsp;·&nbsp;
+  🌍 <a href="https://kirito14it.github.io/XSafeClaw/">Star 用户星图</a> &nbsp;·&nbsp;
   ▶️ <a href="https://youtu.be/HIqwFVeuiKs">演示视频</a>
 </h3>
 

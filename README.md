@@ -31,6 +31,7 @@
   🚀 <a href="#-quick-start">Get Started</a> &nbsp;·&nbsp;
   📖 <a href="docs/installation.md">Documentation</a> &nbsp;·&nbsp;
   🌐 <a href="https://xsafeclaw.ai">Project Website</a> &nbsp;·&nbsp;
+  🌍 <a href="https://kirito14it.github.io/XSafeClaw/">Stargazer Atlas</a> &nbsp;·&nbsp;
   ▶️ <a href="https://youtu.be/HIqwFVeuiKs">YouTube Demo</a>
 </h3>
 
