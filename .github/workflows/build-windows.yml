@@ -1,0 +1,60 @@
+name: Build Windows Desktop App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - app
+    paths:
+      - ".github/workflows/build-windows.yml"
+      - "frontend/**"
+
+jobs:
+  build-windows:
+    name: Build Windows NSIS installer
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run desktop shell tests
+        run: npm run test -- App.test.tsx --run
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build NSIS installer
+        run: npm run desktop:build
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: XSafeClaw-windows-nsis
+          path: frontend/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Upload raw release exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: XSafeClaw-windows-release-exe
+          path: frontend/src-tauri/target/release/*.exe
+          if-no-files-found: error

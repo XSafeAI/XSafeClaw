@@ -1,19 +1,4 @@
-"""XSafeClaw CLI — ``xsafeclaw start`` launches the server.
-
-Since §42 (Hermes-as-a-first-class-citizen) the §38 framework picker is gone.
-XSafeClaw monitors OpenClaw, Hermes and Nanobot simultaneously through the
-multi-runtime registry, and the user picks per-session which runtime to
-talk to from Agent Town.
-
-The shared ``_supervisor.run_server`` helper now just wraps ``uvicorn.run``
-with the small bit of platform-pin propagation we need; both this command
-and ``python -m xsafeclaw`` (``__main__.py``) call into it so behaviour
-stays in lock-step.
-
-The ``--platform`` flag is preserved as a *default-instance hint* for the
-registry — it picks which runtime is shown first in Agent Town but does not
-hide the others. ``--no-browser`` and ``--reload`` keep their old meanings.
-"""
+"""XSafeClaw CLI: ``xsafeclaw start`` launches the server."""
 
 import json
 import urllib.error
@@ -28,7 +13,7 @@ from ._supervisor import DATA_DIR, run_server
 
 app = typer.Typer(
     name="xsafeclaw",
-    help="XSafeClaw — Keeping Your Claw Safe.",
+    help="XSafeClaw - Keeping Your Claw Safe.",
     add_completion=False,
 )
 console = Console()
@@ -42,16 +27,14 @@ def _package_version() -> str:
 
 
 def _open_browser_landing(host: str, port: int) -> None:
-    """Always land the user on the Setup wizard.
+    """Open the minimal app shell.
 
-    Per product spec (§57): ``xsafeclaw start`` must always open ``/setup``
-    regardless of whether OpenClaw / Hermes / Nanobot are already installed
-    or configured.  The Setup screen itself now surfaces the "enter town"
-    / "enter backend" shortcuts for already-installed runtimes, so we no
-    longer need to branch on ``install-status`` here.
+    The new shell starts as a two-action placeholder for Monitor and Store.
+    The older setup/configuration screens remain in the codebase, but they
+    are no longer the default browser destination.
 
     We still keep a guarded ``urlopen`` probe to wait until the backend is
-    reachable; on any error we still fall back to opening ``/setup``.
+    reachable; on any error we still fall back to opening the app root.
     """
     base = f"http://{host}:{port}"
     try:
@@ -63,7 +46,7 @@ def _open_browser_landing(host: str, port: int) -> None:
             pass
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
         pass
-    webbrowser.open(f"{base}/setup")
+    webbrowser.open(base)
 
 
 @app.command()
@@ -84,7 +67,7 @@ def start(
 ) -> None:
     """Start the XSafeClaw server."""
     url = f"http://{host}:{port}"
-    console.print(f"[bold green]🐾 XSafeClaw[/bold green] starting at [link={url}]{url}[/link]")
+    console.print(f"[bold green]XSafeClaw[/bold green] starting at [link={url}]{url}[/link]")
     console.print(f"   Database: {DATA_DIR / 'data.db'}")
 
     def _on_server_start() -> None:
