@@ -64,7 +64,7 @@ from ...services.codex_safety_prompt import (
     CodexSafetyPromptError,
     build_codex_developer_instructions,
 )
-from ...services import guard_service
+from ...services import agent_store_catalog, guard_service
 
 try:
     import fcntl
@@ -3321,6 +3321,12 @@ async def codex_session_messages(thread_id: str):
             "message": "",
             "error": str(exc),
         }
+
+
+@router.get("/agent-store/catalog")
+async def get_agent_store_catalog(refresh: bool = Query(False)):
+    """Return remote Agent Store package metadata."""
+    return await agent_store_catalog.get_agent_store_catalog(force_refresh=refresh)
 
 
 @router.get("/install-status")

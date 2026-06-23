@@ -127,6 +127,22 @@ export interface InstallStatusResponse {
   node_version: string;
 }
 
+export interface AgentStoreCatalogAgent {
+  id: string;
+  version: string | null;
+  sizeBytes?: number | null;
+  sizeLabel: string | null;
+  source?: string | null;
+  status: 'ready' | 'unknown' | string;
+  error?: string | null;
+}
+
+export interface AgentStoreCatalogResponse {
+  agents: AgentStoreCatalogAgent[];
+  generatedAt: string;
+  stale: boolean;
+}
+
 export type CodexAuthStatus = 'logged_in' | 'logged_out' | 'missing' | 'error';
 export type CodexAuthMode = 'chatgpt' | 'api_key' | 'access_token' | 'unknown' | null;
 export type CodexRuntimeStatus = 'missing' | 'installed' | 'needs_login' | 'ready' | 'warning' | 'error';
@@ -961,6 +977,9 @@ export const systemAPI = {
 
   /** Fast install/config probe used by setup and route guards. */
   installStatus: () => api.get<InstallStatusResponse>('/system/install-status', { timeout: 10000 }),
+
+  /** Remote Agent Store package metadata. */
+  agentStoreCatalog: () => api.get<AgentStoreCatalogResponse>('/system/agent-store/catalog', { timeout: 15000 }),
 
   /** Read Codex CLI ChatGPT login state. */
   getCodexAuthStatus: () =>
