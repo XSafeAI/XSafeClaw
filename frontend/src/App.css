@@ -279,6 +279,56 @@
   overflow: hidden;
 }
 
+.workspace-content {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 196px 64px 64px;
+}
+
+.placeholder-card {
+  width: min(620px, 100%);
+  min-height: 238px;
+  border: 1px solid #e7e7e5;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+  padding: 36px 40px;
+}
+
+.placeholder-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #111;
+  background: #efefef;
+}
+
+.placeholder-kicker {
+  margin: 26px 0 0;
+  color: #969697;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.placeholder-card h1 {
+  margin: 6px 0 0;
+  font-size: 34px;
+  line-height: 1.2;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.placeholder-text {
+  margin: 14px 0 0;
+  color: #777778;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .growth-pill {
   position: absolute;
   top: 14px;

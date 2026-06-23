@@ -1,61 +1,58 @@
+import { useState } from 'react';
 import {
-  Bot,
-  Boxes,
-  BriefcaseBusiness,
   ChevronDown,
-  ChevronRight,
-  CircleDotDashed,
-  CirclePlus,
-  FlaskConical,
-  Grid2X2,
-  Headphones,
   HelpCircle,
   Link2,
   Maximize2,
-  Mic,
   Minimize,
+  Monitor,
   PanelLeft,
-  Rocket,
   Search,
-  Send,
-  Sparkles,
+  Settings,
+  Store,
   Target,
-  WandSparkles,
   Workflow,
   X,
-  Zap,
 } from 'lucide-react';
-import mascot from './assets/assistant-mascot.png';
 import './App.css';
 
-const primaryNav = [
-  { label: '新建任务', Icon: CirclePlus, active: true },
-  { label: '助理', Icon: Bot },
-  { label: '项目', Icon: Workflow },
-  { label: '专家', Icon: Headphones, aside: '技能·连接器' },
-  { label: '自动化', Icon: Target },
-  { label: '更多', Icon: Boxes, aside: '资料库·灵感' },
-];
+type SectionId = 'monitor' | 'store' | 'setting';
 
-const modeTabs = [
-  { label: '日常办公', Icon: BriefcaseBusiness, active: true },
-  { label: '代码开发', Icon: FlaskConical },
-  { label: '设计创意', Icon: HelpCircle },
-];
+const text = {
+  edit: '\u7f16\u8f91(E)',
+  window: '\u7a97\u53e3(W)',
+  help: '\u5e2e\u52a9(H)',
+  space: '\u7a7a\u95f4 (1)',
+  guide: '\u9879\u76ee\u65b0\u624b\u6307\u5f15',
+  task: '\u751f\u6210\u9879\u76ee\u529f\u80fd\u4ecb\u7ecd',
+  twoHoursAgo: '2\u5c0f\u65f6\u524d',
+  user: '\u8861',
+};
 
-const quickChips = [
-  { label: '文档处理', Icon: BriefcaseBusiness },
-  { label: '金融服务', Icon: BriefcaseBusiness },
-  { label: '高手帮帮你', Icon: Grid2X2 },
-  { label: '更多' },
-];
-
-const composerTools = [
-  { label: 'Craft', Icon: WandSparkles },
-  { label: '自动', Icon: CircleDotDashed },
-  { label: '技能', Icon: Zap },
-  { label: '连应用', Icon: Link2 },
-  { label: '默认权限', Icon: Target },
+const sections: Array<{
+  id: SectionId;
+  label: string;
+  Icon: typeof Monitor;
+  summary: string;
+}> = [
+  {
+    id: 'monitor',
+    label: 'Monitor',
+    Icon: Monitor,
+    summary: 'Monitor placeholder',
+  },
+  {
+    id: 'store',
+    label: 'Store',
+    Icon: Store,
+    summary: 'Store placeholder',
+  },
+  {
+    id: 'setting',
+    label: 'Setting',
+    Icon: Settings,
+    summary: 'Setting placeholder',
+  },
 ];
 
 async function handleWindowAction(action: 'minimize' | 'maximize' | 'close') {
@@ -72,6 +69,10 @@ async function handleWindowAction(action: 'minimize' | 'maximize' | 'close') {
 }
 
 function App() {
+  const [activeSection, setActiveSection] = useState<SectionId>('monitor');
+  const currentSection = sections.find((section) => section.id === activeSection) ?? sections[0];
+  const CurrentIcon = currentSection.Icon;
+
   return (
     <div className="desktop-app">
       <header className="titlebar" data-tauri-drag-region>
@@ -79,19 +80,19 @@ function App() {
           <img className="titlebar-logo" src="/favicon-32.png" alt="" />
           <span className="titlebar-brand">XSafeClaw</span>
           <nav className="titlebar-menu" aria-label="Application menu">
-            <button type="button">编辑(E)</button>
-            <button type="button">窗口(W)</button>
-            <button type="button">帮助(H)</button>
+            <button type="button">{text.edit}</button>
+            <button type="button">{text.window}</button>
+            <button type="button">{text.help}</button>
           </nav>
         </div>
         <div className="titlebar-controls">
-            <button type="button" aria-label="Minimize window" onClick={() => void handleWindowAction('minimize')}>
+          <button type="button" aria-label="Minimize window" onClick={() => void handleWindowAction('minimize')}>
             <Minimize size={13} strokeWidth={1.8} />
           </button>
-            <button type="button" aria-label="Maximize window" onClick={() => void handleWindowAction('maximize')}>
+          <button type="button" aria-label="Maximize window" onClick={() => void handleWindowAction('maximize')}>
             <Maximize2 size={12} strokeWidth={1.8} />
           </button>
-            <button type="button" aria-label="Close window" onClick={() => void handleWindowAction('close')}>
+          <button type="button" aria-label="Close window" onClick={() => void handleWindowAction('close')}>
             <X size={14} strokeWidth={1.8} />
           </button>
         </div>
@@ -118,39 +119,44 @@ function App() {
           </div>
 
           <nav className="primary-nav" aria-label="Primary navigation">
-            {primaryNav.map(({ label, Icon, active, aside }) => (
-              <button key={label} type="button" className={active ? 'nav-item active' : 'nav-item'}>
+            {sections.map(({ id, label, Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className={activeSection === id ? 'nav-item active' : 'nav-item'}
+                aria-pressed={activeSection === id}
+                onClick={() => setActiveSection(id)}
+              >
                 <span className="nav-main">
                   <Icon size={16} strokeWidth={1.8} />
                   <span>{label}</span>
                 </span>
-                {aside && <span className="nav-aside">{aside}</span>}
               </button>
             ))}
           </nav>
 
           <section className="space-list" aria-label="Spaces">
             <button type="button" className="space-heading">
-              <span>空间 (1)</span>
+              <span>{text.space}</span>
               <ChevronDown size={13} />
             </button>
             <button type="button" className="project-row">
               <span className="project-title">
                 <Workflow size={15} strokeWidth={1.8} />
-                项目新手指引
+                {text.guide}
               </span>
               <ChevronDown size={13} />
             </button>
             <button type="button" className="task-row">
-              <span>生成项目功能介绍</span>
-              <span>2小时前</span>
+              <span>{text.task}</span>
+              <span>{text.twoHoursAgo}</span>
             </button>
           </section>
 
           <div className="sidebar-footer">
             <button type="button" className="user-chip" aria-label="User profile">
               <img src="/favicon-48.png" alt="" />
-              <span>衡</span>
+              <span>{text.user}</span>
             </button>
             <div className="footer-actions">
               <button type="button" aria-label="Notifications">
@@ -163,84 +169,14 @@ function App() {
           </div>
         </aside>
 
-        <main className="main-panel" aria-label="XSafeClaw home">
-          <div className="growth-pill">
-            <span className="growth-icon">
-              <Rocket size={17} fill="currentColor" />
-            </span>
-            <span>来成长计划赚积分</span>
-            <ChevronRight size={15} />
-          </div>
-
-          <section className="hero">
-            <div className="hero-copy">
-              <h1>
-                XSafeClaw
-                <span>你的职场超能力</span>
-              </h1>
-
-              <div className="mode-tabs" role="group" aria-label="Assistant modes">
-                {modeTabs.map(({ label, Icon, active }) => (
-                  <button key={label} type="button" className={active ? 'mode-tab active' : 'mode-tab'}>
-                    <Icon size={15} strokeWidth={1.8} />
-                    {label}
-                  </button>
-                ))}
-              </div>
+        <main className="main-panel workspace-content" aria-label="XSafeClaw workspace">
+          <section className="placeholder-card" aria-live="polite">
+            <div className="placeholder-icon">
+              <CurrentIcon size={24} strokeWidth={1.8} />
             </div>
-
-            <div className="composer-zone">
-              <div className="quick-chip-row" role="group" aria-label="Quick tasks">
-                {quickChips.map(({ label, Icon }) => (
-                  <button key={label} type="button" className="quick-chip">
-                    {Icon && <Icon size={15} strokeWidth={1.8} />}
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mascot-peek">
-                <img src={mascot} alt="XSafeClaw assistant mascot" />
-              </div>
-
-              <div className="composer-card">
-                <textarea
-                  aria-label="Prompt input"
-                  placeholder="今天帮你做些什么？ @ 引用对话文件，/ 调用技能与指令"
-                />
-                <div className="composer-toolbar">
-                  <div className="composer-left-tools">
-                    {composerTools.map(({ label, Icon }) => (
-                      <button key={label} type="button" className="tool-button">
-                        <Icon size={15} strokeWidth={1.75} />
-                        <span>{label}</span>
-                        <ChevronDown size={12} />
-                      </button>
-                    ))}
-                  </div>
-                  <div className="composer-right-tools">
-                    <button type="button" aria-label="Add">
-                      <CirclePlus size={19} strokeWidth={1.6} />
-                    </button>
-                    <button type="button" aria-label="Magic">
-                      <Sparkles size={17} strokeWidth={1.7} />
-                    </button>
-                    <button type="button" aria-label="Voice">
-                      <Mic size={18} strokeWidth={1.7} />
-                    </button>
-                    <button type="button" className="send-button" aria-label="Send">
-                      <Send size={18} fill="currentColor" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <button type="button" className="workspace-picker">
-                <BriefcaseBusiness size={15} />
-                <span>选择工作空间</span>
-                <ChevronRight size={13} />
-              </button>
-            </div>
+            <p className="placeholder-kicker">XSafeClaw</p>
+            <h1>{currentSection.label}</h1>
+            <p className="placeholder-text">{currentSection.summary}</p>
           </section>
         </main>
       </div>
