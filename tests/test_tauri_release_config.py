@@ -22,6 +22,34 @@ def test_tauri_release_config_builds_nsis_installer_with_webview_bootstrapper():
     assert "icons/icon.ico" in bundle["icon"]
 
 
+def test_tauri_release_config_bundles_backend_sidecar_and_uses_manual_window():
+    config_path = _project_root() / "frontend" / "src-tauri" / "tauri.conf.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "binaries/xsafeclaw-backend" in config["bundle"]["externalBin"]
+    assert config["app"].get("windows", []) == []
+
+
+def test_tauri_rust_shell_starts_backend_sidecar_before_main_window():
+    tauri_root = _project_root() / "frontend" / "src-tauri"
+    cargo_toml = (tauri_root / "Cargo.toml").read_text(encoding="utf-8")
+    lib_rs = (tauri_root / "src" / "lib.rs").read_text(encoding="utf-8")
+
+    assert "tauri-plugin-shell" in cargo_toml
+    assert "tauri_plugin_shell" in lib_rs
+    assert "ShellExt" in lib_rs
+    assert 'sidecar("xsafeclaw-backend")' in lib_rs
+    assert '"--host"' in lib_rs
+    assert '"--port"' in lib_rs
+    assert '"127.0.0.1"' in lib_rs
+    assert "/api/system/install-status" in lib_rs
+    assert "find_available_port" in lib_rs
+    assert "wait_for_backend" in lib_rs
+    assert "WebviewWindowBuilder::new" in lib_rs
+    assert "WebviewUrl::External" in lib_rs
+    assert "kill_backend_sidecar" in lib_rs
+
+
 def test_frontend_package_exposes_separate_dev_and_release_desktop_scripts():
     package_path = _project_root() / "frontend" / "package.json"
     package = json.loads(package_path.read_text(encoding="utf-8"))

@@ -18,6 +18,12 @@ const storeText = {
   search: '\u641c\u7d22 Agent',
   details: '\u67e5\u770b\u8be6\u60c5',
   install: '\u5b89\u88c5',
+  cancel: '\u53d6\u6d88',
+  startInstall: '\u5f00\u59cb\u5b89\u88c5',
+  canInstall: '\u53ef\u4ee5\u5b89\u88c5',
+  currentDevice: '\u5f53\u524d\u8bbe\u5907',
+  downloadSize: '\u4e0b\u8f7d\u5927\u5c0f',
+  possibleUse: '\u53ef\u80fd\u4f7f\u7528\uff1a',
   sizeUnknown: '\u5927\u5c0f\u672a\u77e5',
   versionUnknown: '\u7248\u672c\u672a\u77e5',
 };
@@ -30,6 +36,26 @@ function renderApp() {
       <App />
     </I18nProvider>,
   );
+}
+
+function openStore() {
+  const mainPanel = screen.getByLabelText('XSafeClaw workspace');
+  const primaryNav = screen.getByLabelText('Primary navigation');
+
+  fireEvent.click(within(primaryNav).getByRole('button', { name: 'Store' }));
+
+  return mainPanel;
+}
+
+function getAgentCard(agentName: string) {
+  const heading = screen.getByRole('heading', { name: agentName });
+  const card = heading.closest('article');
+  expect(card).toBeTruthy();
+  return card as HTMLElement;
+}
+
+function clickInstall(agentName: string) {
+  fireEvent.click(within(getAgentCard(agentName)).getByRole('button', { name: storeText.install }));
 }
 
 describe('XSafeClaw desktop home screen', () => {
@@ -72,10 +98,7 @@ describe('XSafeClaw desktop home screen', () => {
   it('renders the static Agent Store page after Store is selected', () => {
     renderApp();
 
-    const mainPanel = screen.getByLabelText('XSafeClaw workspace');
-    const primaryNav = screen.getByLabelText('Primary navigation');
-
-    fireEvent.click(within(primaryNav).getByRole('button', { name: 'Store' }));
+    const mainPanel = openStore();
 
     expect(within(mainPanel).getByRole('heading', { name: 'Agent Store' })).toBeTruthy();
     expect(within(mainPanel).getByText(storeText.subtitle)).toBeTruthy();
@@ -86,6 +109,9 @@ describe('XSafeClaw desktop home screen', () => {
 
     for (const agentName of ['OpenClaw', 'Hermes', 'Nanobot', 'Codex']) {
       expect(within(mainPanel).getByRole('heading', { name: agentName })).toBeTruthy();
+      const card = getAgentCard(agentName);
+      expect(within(card).getByText('0')).toBeTruthy();
+      expect(within(card).getByText('0.0')).toBeTruthy();
     }
 
     expect(within(mainPanel).getAllByRole('button', { name: storeText.details })).toHaveLength(4);
@@ -93,7 +119,24 @@ describe('XSafeClaw desktop home screen', () => {
     expect(within(mainPanel).getAllByText(storeText.sizeUnknown)).toHaveLength(4);
     expect(within(mainPanel).getAllByText(storeText.versionUnknown)).toHaveLength(4);
 
-    for (const fakeValue of ['124 MB', '98 MB', '256 MB', '152 MB', 'v1.4.2', 'v2.1.0', 'v0.9.3', 'v3.0.1']) {
+    for (const fakeValue of [
+      '128.6K',
+      '85.3K',
+      '32.1K',
+      '210.7K',
+      '4.7',
+      '4.5',
+      '4.2',
+      '4.8',
+      '124 MB',
+      '98 MB',
+      '256 MB',
+      '152 MB',
+      'v1.4.2',
+      'v2.1.0',
+      'v0.9.3',
+      'v3.0.1',
+    ]) {
       expect(within(mainPanel).queryByText(fakeValue)).toBeNull();
     }
   });
@@ -113,10 +156,7 @@ describe('XSafeClaw desktop home screen', () => {
     } as any);
     renderApp();
 
-    const mainPanel = screen.getByLabelText('XSafeClaw workspace');
-    const primaryNav = screen.getByLabelText('Primary navigation');
-
-    fireEvent.click(within(primaryNav).getByRole('button', { name: 'Store' }));
+    const mainPanel = openStore();
 
     await waitFor(() => expect(within(mainPanel).getByText('86.6 MB')).toBeTruthy());
 
@@ -131,13 +171,102 @@ describe('XSafeClaw desktop home screen', () => {
     vi.mocked(systemAPI.agentStoreCatalog).mockRejectedValueOnce(new Error('registry offline'));
     renderApp();
 
-    const mainPanel = screen.getByLabelText('XSafeClaw workspace');
-    const primaryNav = screen.getByLabelText('Primary navigation');
-
-    fireEvent.click(within(primaryNav).getByRole('button', { name: 'Store' }));
+    const mainPanel = openStore();
 
     await waitFor(() => expect(systemAPI.agentStoreCatalog).toHaveBeenCalledTimes(1));
     expect(within(mainPanel).getAllByText(storeText.sizeUnknown)).toHaveLength(4);
     expect(within(mainPanel).getAllByText(storeText.versionUnknown)).toHaveLength(4);
+  });
+
+  it('opens an install confirmation dialog with catalog size and OpenClaw permissions', async () => {
+    vi.mocked(systemAPI.agentStoreCatalog).mockResolvedValueOnce({
+      data: {
+        agents: [
+          { id: 'openclaw', version: '2026.6.9', sizeLabel: '86.6 MB', status: 'ready' },
+        ],
+        generatedAt: '2026-06-23T00:00:00Z',
+        stale: false,
+      },
+    } as any);
+    renderApp();
+    openStore();
+
+    await waitFor(() => expect(screen.getByText('86.6 MB')).toBeTruthy());
+    clickInstall('OpenClaw');
+
+    const dialog = screen.getByRole('dialog', { name: '安装 OpenClaw' });
+    expect(within(dialog).getByRole('heading', { name: '安装 OpenClaw' })).toBeTruthy();
+    expect(within(dialog).getByText('即将下载并安装 OpenClaw。')).toBeTruthy();
+    expect(within(dialog).getByText(storeText.downloadSize)).toBeTruthy();
+    expect(within(dialog).getByText('86.6 MB')).toBeTruthy();
+    expect(within(dialog).getByText(storeText.currentDevice)).toBeTruthy();
+    expect(within(dialog).getByText(storeText.canInstall)).toBeTruthy();
+    expect(within(dialog).getByText(storeText.possibleUse)).toBeTruthy();
+    for (const permission of ['网络访问', '工作目录', '本地命令执行']) {
+      expect(within(dialog).getByText(permission)).toBeTruthy();
+    }
+
+    fireEvent.click(within(dialog).getByRole('button', { name: storeText.startInstall }));
+    expect(screen.getByRole('dialog', { name: '安装 OpenClaw' })).toBeTruthy();
+    expect(systemAPI.agentStoreCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses unknown size in the install dialog when catalog size is unavailable', async () => {
+    vi.mocked(systemAPI.agentStoreCatalog).mockRejectedValueOnce(new Error('registry offline'));
+    renderApp();
+    openStore();
+
+    await waitFor(() => expect(systemAPI.agentStoreCatalog).toHaveBeenCalledTimes(1));
+    clickInstall('OpenClaw');
+
+    const dialog = screen.getByRole('dialog', { name: '安装 OpenClaw' });
+    expect(within(dialog).getByText(storeText.sizeUnknown)).toBeTruthy();
+  });
+
+  it('switches install dialog permissions for each agent', async () => {
+    renderApp();
+    openStore();
+
+    clickInstall('Hermes');
+    let dialog = screen.getByRole('dialog', { name: '安装 Hermes' });
+    expect(within(dialog).getByText('即将下载并安装 Hermes。')).toBeTruthy();
+    for (const permission of ['网络访问', '终端执行', '消息网关']) {
+      expect(within(dialog).getByText(permission)).toBeTruthy();
+    }
+    fireEvent.click(within(dialog).getByLabelText('关闭安装弹窗'));
+
+    clickInstall('Nanobot');
+    dialog = screen.getByRole('dialog', { name: '安装 Nanobot' });
+    for (const permission of ['网络访问', '工作目录', '后台网关']) {
+      expect(within(dialog).getByText(permission)).toBeTruthy();
+    }
+    fireEvent.click(within(dialog).getByLabelText('关闭安装弹窗'));
+
+    clickInstall('Codex');
+    dialog = screen.getByRole('dialog', { name: '安装 Codex' });
+    for (const permission of ['代码目录', '本地命令执行', '联网需确认']) {
+      expect(within(dialog).getByText(permission)).toBeTruthy();
+    }
+  });
+
+  it('closes the install dialog from cancel, close button, Escape, and backdrop', () => {
+    renderApp();
+    openStore();
+
+    clickInstall('OpenClaw');
+    fireEvent.click(within(screen.getByRole('dialog', { name: '安装 OpenClaw' })).getByRole('button', { name: storeText.cancel }));
+    expect(screen.queryByRole('dialog', { name: '安装 OpenClaw' })).toBeNull();
+
+    clickInstall('Hermes');
+    fireEvent.click(within(screen.getByRole('dialog', { name: '安装 Hermes' })).getByLabelText('关闭安装弹窗'));
+    expect(screen.queryByRole('dialog', { name: '安装 Hermes' })).toBeNull();
+
+    clickInstall('Nanobot');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '安装 Nanobot' })).toBeNull();
+
+    clickInstall('Codex');
+    fireEvent.click(screen.getByLabelText('关闭安装确认遮罩'));
+    expect(screen.queryByRole('dialog', { name: '安装 Codex' })).toBeNull();
   });
 });

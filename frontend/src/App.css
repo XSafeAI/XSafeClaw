@@ -655,6 +655,230 @@
   background: #0e58da;
 }
 
+.secondary-action:active {
+  background: #eeeeef;
+}
+
+.primary-action:active {
+  background: #0b4fc6;
+}
+
+.install-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 34px;
+}
+
+.install-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(246, 247, 249, 0.72);
+  cursor: default;
+}
+
+.install-dialog {
+  position: relative;
+  z-index: 1;
+  width: min(820px, calc(100vw - 68px));
+  max-height: calc(100vh - 68px);
+  overflow: auto;
+  border: 1px solid #dcdde2;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 18px 44px rgba(17, 24, 39, 0.18), 0 2px 8px rgba(17, 24, 39, 0.08);
+}
+
+.install-dialog-header {
+  min-height: 121px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e2e3e7;
+  padding: 0 42px 0 45px;
+}
+
+.install-dialog-header h2 {
+  margin: 0;
+  color: #111426;
+  font-size: 31px;
+  line-height: 1.15;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.install-dialog-close {
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  color: #111426;
+  background: transparent;
+  cursor: default;
+}
+
+.install-dialog-close:hover {
+  background: #f4f4f5;
+}
+
+.install-dialog-body {
+  padding: 36px 42px 41px 45px;
+}
+
+.install-agent-summary {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 32px;
+  align-items: center;
+}
+
+.install-agent-logo {
+  width: 90px;
+  height: 90px;
+  border-radius: 18px;
+}
+
+.install-agent-summary h3 {
+  margin: 0;
+  color: #080a12;
+  font-size: 28px;
+  line-height: 1.2;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.install-agent-summary p {
+  margin: 20px 0 0;
+  color: #6a6d7d;
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 500;
+}
+
+.install-dialog-divider {
+  height: 1px;
+  margin: 36px 0;
+  background: #e2e3e7;
+}
+
+.install-info-row,
+.install-permissions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  color: #111426;
+  font-size: 25px;
+  line-height: 1.2;
+}
+
+.install-info-row > span,
+.install-permissions-row > span {
+  flex: 0 0 auto;
+  font-weight: 500;
+}
+
+.install-info-row strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 11px;
+  min-width: 0;
+  color: #111426;
+  font-size: 25px;
+  font-weight: 520;
+  white-space: nowrap;
+}
+
+.install-info-row .unknown-stat {
+  color: #8a8d98;
+}
+
+.install-compatible {
+  color: #14b879 !important;
+  font-weight: 700 !important;
+}
+
+.install-permissions-row {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.install-permission-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  min-width: 0;
+}
+
+.install-permission-chips span {
+  min-height: 51px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dadce2;
+  border-radius: 10px;
+  background: #f4f5f7;
+  color: #232838;
+  font-size: 21px;
+  font-weight: 560;
+  line-height: 1;
+  padding: 0 22px;
+  white-space: nowrap;
+}
+
+.install-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 25px;
+  margin-top: 50px;
+}
+
+.install-dialog-actions button {
+  min-width: 168px;
+  height: 84px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 28px;
+  font-weight: 700;
+  cursor: default;
+}
+
+.install-cancel-button {
+  border: 1px solid #d8dbe2;
+  color: #111426;
+  background: #fff;
+}
+
+.install-cancel-button:hover {
+  background: #f7f7f8;
+}
+
+.install-cancel-button:active {
+  background: #eeeeef;
+}
+
+.install-start-button {
+  border: 1px solid #0f61ee;
+  color: #fff;
+  background: #1263ee;
+}
+
+.install-start-button:hover {
+  background: #0e58da;
+}
+
+.install-start-button:active {
+  background: #0b4fc6;
+}
+
 @media (max-width: 1180px) {
   .agent-grid {
     grid-template-columns: 1fr;
@@ -668,6 +892,91 @@
   .store-search {
     width: min(340px, 100%);
     flex-basis: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .install-dialog-layer {
+    align-items: flex-start;
+    padding: 18px;
+  }
+
+  .install-dialog {
+    width: calc(100vw - 36px);
+    max-height: calc(100vh - 36px);
+  }
+
+  .install-dialog-header {
+    min-height: 82px;
+    padding: 0 20px 0 22px;
+  }
+
+  .install-dialog-header h2 {
+    font-size: 24px;
+  }
+
+  .install-dialog-body {
+    padding: 24px 22px 26px;
+  }
+
+  .install-agent-summary {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 18px;
+  }
+
+  .install-agent-logo {
+    width: 72px;
+    height: 72px;
+  }
+
+  .install-agent-summary h3 {
+    font-size: 23px;
+  }
+
+  .install-agent-summary p,
+  .install-info-row,
+  .install-permissions-row,
+  .install-info-row strong {
+    font-size: 18px;
+  }
+
+  .install-agent-summary p {
+    margin-top: 10px;
+  }
+
+  .install-dialog-divider {
+    margin: 24px 0;
+  }
+
+  .install-info-row,
+  .install-permissions-row {
+    gap: 16px;
+  }
+
+  .install-permissions-row {
+    flex-direction: column;
+  }
+
+  .install-permission-chips {
+    gap: 10px;
+  }
+
+  .install-permission-chips span {
+    min-height: 38px;
+    font-size: 15px;
+    padding: 0 13px;
+  }
+
+  .install-dialog-actions {
+    gap: 12px;
+    margin-top: 32px;
+  }
+
+  .install-dialog-actions button {
+    min-width: 0;
+    flex: 1;
+    height: 56px;
+    font-size: 20px;
   }
 }
 

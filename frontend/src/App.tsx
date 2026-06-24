@@ -40,6 +40,7 @@ type StoreAgent = {
   capabilities: Array<{ label: string; Icon: typeof Monitor; positive?: boolean }>;
   downloads: string;
   rating: string;
+  installPermissions: string[];
   size?: string | null;
   version?: string | null;
 };
@@ -64,6 +65,14 @@ const text = {
   compatible: '\u5f53\u524d\u8bbe\u5907\u517c\u5bb9',
   details: '\u67e5\u770b\u8be6\u60c5',
   install: '\u5b89\u88c5',
+  cancel: '\u53d6\u6d88',
+  startInstall: '\u5f00\u59cb\u5b89\u88c5',
+  downloadSize: '\u4e0b\u8f7d\u5927\u5c0f',
+  currentDevice: '\u5f53\u524d\u8bbe\u5907',
+  canInstall: '\u53ef\u4ee5\u5b89\u88c5',
+  possibleUse: '\u53ef\u80fd\u4f7f\u7528\uff1a',
+  closeInstallDialog: '\u5173\u95ed\u5b89\u88c5\u5f39\u7a97',
+  closeInstallBackdrop: '\u5173\u95ed\u5b89\u88c5\u786e\u8ba4\u906e\u7f69',
   sizeUnknown: '\u5927\u5c0f\u672a\u77e5',
   versionUnknown: '\u7248\u672c\u672a\u77e5',
 };
@@ -111,8 +120,9 @@ const storeAgents: StoreAgent[] = [
       { label: '\u9700 API Key', Icon: Package },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
-    downloads: '128.6K',
-    rating: '4.7',
+    downloads: '0',
+    rating: '0.0',
+    installPermissions: ['\u7f51\u7edc\u8bbf\u95ee', '\u5de5\u4f5c\u76ee\u5f55', '\u672c\u5730\u547d\u4ee4\u6267\u884c'],
   },
   {
     id: 'hermes',
@@ -129,8 +139,9 @@ const storeAgents: StoreAgent[] = [
       { label: '\u684c\u9762\u5e94\u7528', Icon: Monitor },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
-    downloads: '85.3K',
-    rating: '4.5',
+    downloads: '0',
+    rating: '0.0',
+    installPermissions: ['\u7f51\u7edc\u8bbf\u95ee', '\u7ec8\u7aef\u6267\u884c', '\u6d88\u606f\u7f51\u5173'],
   },
   {
     id: 'nanobot',
@@ -148,8 +159,9 @@ const storeAgents: StoreAgent[] = [
       { label: '\u9700 Docker', Icon: Package },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
-    downloads: '32.1K',
-    rating: '4.2',
+    downloads: '0',
+    rating: '0.0',
+    installPermissions: ['\u7f51\u7edc\u8bbf\u95ee', '\u5de5\u4f5c\u76ee\u5f55', '\u540e\u53f0\u7f51\u5173'],
   },
   {
     id: 'codex',
@@ -167,8 +179,9 @@ const storeAgents: StoreAgent[] = [
       { label: '\u9700 API Key', Icon: Package },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
-    downloads: '210.7K',
-    rating: '4.8',
+    downloads: '0',
+    rating: '0.0',
+    installPermissions: ['\u4ee3\u7801\u76ee\u5f55', '\u672c\u5730\u547d\u4ee4\u6267\u884c', '\u8054\u7f51\u9700\u786e\u8ba4'],
   },
 ];
 
@@ -200,7 +213,7 @@ function PlaceholderPanel({ section }: { section: (typeof sections)[number] }) {
   );
 }
 
-function AgentCard({ agent }: { agent: StoreAgent }) {
+function AgentCard({ agent, onInstall }: { agent: StoreAgent; onInstall: (agent: StoreAgent) => void }) {
   const AgentIcon = agent.Icon;
   const hasKnownSize = Boolean(agent.size?.trim());
   const hasKnownVersion = Boolean(agent.version?.trim());
@@ -261,7 +274,7 @@ function AgentCard({ agent }: { agent: StoreAgent }) {
         <button type="button" className="secondary-action">
           {text.details}
         </button>
-        <button type="button" className="primary-action">
+        <button type="button" className="primary-action" onClick={() => onInstall(agent)}>
           {text.install}
         </button>
       </div>
@@ -269,8 +282,96 @@ function AgentCard({ agent }: { agent: StoreAgent }) {
   );
 }
 
+function InstallConfirmDialog({ agent, onClose }: { agent: StoreAgent; onClose: () => void }) {
+  const AgentIcon = agent.Icon;
+  const title = `${text.install} ${agent.name}`;
+  const hasKnownSize = Boolean(agent.size?.trim());
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="install-dialog-layer">
+      <button
+        type="button"
+        className="install-dialog-backdrop"
+        aria-label={text.closeInstallBackdrop}
+        onClick={onClose}
+      />
+      <section className="install-dialog" role="dialog" aria-modal="true" aria-labelledby="install-dialog-title">
+        <header className="install-dialog-header">
+          <h2 id="install-dialog-title">{title}</h2>
+          <button type="button" className="install-dialog-close" aria-label={text.closeInstallDialog} onClick={onClose}>
+            <X size={30} strokeWidth={1.7} />
+          </button>
+        </header>
+
+        <div className="install-dialog-body">
+          <div className="install-agent-summary">
+            <div className={`agent-logo install-agent-logo agent-logo-${agent.tone}`}>
+              <AgentIcon size={44} strokeWidth={2.3} />
+            </div>
+            <div>
+              <h3>{agent.name}</h3>
+              <p>{`\u5373\u5c06\u4e0b\u8f7d\u5e76\u5b89\u88c5 ${agent.name}\u3002`}</p>
+            </div>
+          </div>
+
+          <div className="install-dialog-divider" />
+
+          <div className="install-info-row">
+            <span>{text.downloadSize}</span>
+            <strong className={hasKnownSize ? undefined : 'unknown-stat'}>
+              {hasKnownSize ? agent.size : text.sizeUnknown}
+            </strong>
+          </div>
+
+          <div className="install-dialog-divider" />
+
+          <div className="install-info-row">
+            <span>{text.currentDevice}</span>
+            <strong className="install-compatible">
+              <CheckCircle2 size={28} strokeWidth={1.8} />
+              {text.canInstall}
+            </strong>
+          </div>
+
+          <div className="install-dialog-divider" />
+
+          <div className="install-permissions-row">
+            <span>{text.possibleUse}</span>
+            <div className="install-permission-chips">
+              {agent.installPermissions.map((permission) => (
+                <span key={`${agent.id}-${permission}`}>{permission}</span>
+              ))}
+            </div>
+          </div>
+
+          <footer className="install-dialog-actions">
+            <button type="button" className="install-cancel-button" onClick={onClose}>
+              {text.cancel}
+            </button>
+            <button type="button" className="install-start-button">
+              {text.startInstall}
+            </button>
+          </footer>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function StorePage() {
   const [catalogById, setCatalogById] = useState<Record<string, AgentStoreCatalogAgent>>({});
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -308,6 +409,7 @@ function StorePage() {
       size: catalogSize || agent.size,
     };
   });
+  const selectedAgent = displayAgents.find((agent) => agent.id === selectedAgentId) ?? null;
 
   return (
     <section className="store-page">
@@ -332,9 +434,11 @@ function StorePage() {
 
       <div className="agent-grid">
         {displayAgents.map((agent) => (
-          <AgentCard key={agent.name} agent={agent} />
+          <AgentCard key={agent.name} agent={agent} onInstall={() => setSelectedAgentId(agent.id)} />
         ))}
       </div>
+
+      {selectedAgent ? <InstallConfirmDialog agent={selectedAgent} onClose={() => setSelectedAgentId(null)} /> : null}
     </section>
   );
 }
