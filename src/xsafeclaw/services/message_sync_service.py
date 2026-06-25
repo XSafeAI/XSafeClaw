@@ -109,7 +109,7 @@ class RuntimeSyncWorker:
         self._running = True
         self._file_task = asyncio.create_task(self._batched_file_sync_loop())
         self._event_task = asyncio.create_task(self._debounced_event_sync_loop())
-        print(f"✅ Sync worker ready: {self.instance.instance_id} -> {self.sessions_dir}")
+        print(f"[sync] Worker ready: {self.instance.instance_id} -> {self.sessions_dir}")
 
     async def stop(self) -> None:
         if not self._running:
@@ -187,7 +187,7 @@ class RuntimeSyncWorker:
                 for session_id in stale:
                     await self._delete_session_data_by_internal_id(db, session_id)
         except Exception as exc:
-            print(f"❌ Failed stale cleanup for {self.instance.instance_id}: {exc}")
+            print(f"[sync] Failed stale cleanup for {self.instance.instance_id}: {exc}")
 
     async def _delete_session_data_by_internal_id(
         self,
@@ -280,7 +280,7 @@ class RuntimeSyncWorker:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                print(f"❌ Sync batch failed for {self.instance.instance_id}: {exc}")
+                print(f"[sync] Sync batch failed for {self.instance.instance_id}: {exc}")
 
     async def _debounced_event_sync_loop(self) -> None:
         while self._running:
@@ -295,7 +295,7 @@ class RuntimeSyncWorker:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                print(f"❌ Event sync failed for {self.instance.instance_id}: {exc}")
+                print(f"[sync] Event sync failed for {self.instance.instance_id}: {exc}")
 
     async def _parse_file(self, file_path: Path, start_line: int) -> ParsedSessionBatch:
         if self.instance.platform == "openclaw":
@@ -693,7 +693,7 @@ class MessageSyncService:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                print(f"❌ Runtime refresh failed: {exc}")
+                print(f"[sync] Runtime refresh failed: {exc}")
 
     async def _initial_scan(self) -> None:
         """Manually trigger a full re-scan for every active worker."""

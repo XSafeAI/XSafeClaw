@@ -84,7 +84,7 @@ class SessionFileWatcher:
         # Ensure directory exists, create if not
         if not self.watch_directory.exists():
             self.watch_directory.mkdir(parents=True, exist_ok=True)
-            print(f"📁 Created watch directory: {self.watch_directory}")
+            print(f"[watcher] Created watch directory: {self.watch_directory}")
 
         # Create event handler
         self.event_handler = SessionFileEventHandler(self.on_file_event)
@@ -98,7 +98,7 @@ class SessionFileWatcher:
         self.observer.start()
         self._running = True
 
-        print(f"📁 Started watching: {self.watch_directory} (poll={poll_interval}s)")
+        print(f"[watcher] Started watching: {self.watch_directory} (poll={poll_interval}s)")
 
     async def stop(self) -> None:
         """Stop watching directory."""
@@ -108,7 +108,7 @@ class SessionFileWatcher:
         self.observer.stop()
         self.observer.join(timeout=5)
         self._running = False
-        print("🛑 Stopped file watcher")
+        print("[watcher] Stopped file watcher")
 
     def is_running(self) -> bool:
         """Check if watcher is running."""

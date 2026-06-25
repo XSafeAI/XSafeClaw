@@ -34,7 +34,6 @@ type StoreAgent = {
   name: string;
   Icon: typeof Monitor;
   tone: AgentTone;
-  description: string;
   badges: Array<{ label: string; variant: BadgeVariant }>;
   tags: string[];
   capabilities: Array<{ label: string; Icon: typeof Monitor; positive?: boolean }>;
@@ -109,7 +108,6 @@ const storeAgents: StoreAgent[] = [
     name: 'OpenClaw',
     Icon: PawPrint,
     tone: 'teal',
-    description: '\u901a\u7528\u578b Agent\uff0c\u9002\u7528\u4e8e\u591a\u79cd\u4efb\u52a1\u573a\u666f\uff0c\u7075\u6d3b\u6269\u5c55\uff0c\u6613\u4e8e\u96c6\u6210\u3002',
     badges: [
       { label: text.official, variant: 'official' },
       { label: text.verified, variant: 'verified' },
@@ -129,7 +127,6 @@ const storeAgents: StoreAgent[] = [
     name: 'Hermes',
     Icon: Feather,
     tone: 'purple',
-    description: '\u8f7b\u91cf\u534f\u540c\u578b Agent\uff0c\u4e13\u6ce8\u4e8e\u9ad8\u6548\u901a\u4fe1\u4e0e\u534f\u540c\u3002',
     badges: [
       { label: text.official, variant: 'official' },
       { label: text.verified, variant: 'verified' },
@@ -148,7 +145,6 @@ const storeAgents: StoreAgent[] = [
     name: 'Nanobot',
     Icon: Bot,
     tone: 'yellow',
-    description: '\u81ea\u6211\u8fdb\u5316\u5b9e\u9a8c\u6027 Agent\uff0c\u64c5\u957f\u63a2\u7d22\u3001\u5b66\u4e60\u4e0e\u81ea\u52a8\u5316\u6267\u884c\u3002',
     badges: [
       { label: text.official, variant: 'official' },
       { label: text.experimental, variant: 'experimental' },
@@ -168,7 +164,6 @@ const storeAgents: StoreAgent[] = [
     name: 'Codex',
     Icon: Code2,
     tone: 'blue',
-    description: '\u9762\u5411\u5f00\u53d1\u8005\u7684\u7f16\u7a0b Agent\uff0c\u7406\u89e3\u4ee3\u7801\u3001\u751f\u6210\u4ee3\u7801\u3001\u8f85\u52a9\u8c03\u8bd5\u3002',
     badges: [
       { label: text.official, variant: 'official' },
       { label: text.verified, variant: 'verified' },
@@ -235,7 +230,6 @@ function AgentCard({ agent, onInstall }: { agent: StoreAgent; onInstall: (agent:
               ))}
             </div>
           </div>
-          <p className="agent-description">{agent.description}</p>
           <div className="agent-tags">
             {agent.tags.map((tag) => (
               <span key={`${agent.name}-${tag}`}>{tag}</span>

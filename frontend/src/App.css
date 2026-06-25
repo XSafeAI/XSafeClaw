@@ -540,17 +540,6 @@
   background: #fff6e8;
 }
 
-.agent-description {
-  margin: 16px 0 0;
-  color: #555a69;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.45;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .agent-tags {
   gap: 9px;
   margin-top: 13px;

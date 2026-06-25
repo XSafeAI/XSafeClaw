@@ -55,18 +55,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global message_sync_service
 
     # Startup
-    print("🚀 Starting XSafeClaw Application...")
+    print("[startup] Starting XSafeClaw Application...")
 
     from .routes.system import (
         _ensure_hermes_api_key_synced,
         sanitize_legacy_openclaw_config,
     )
     if sanitize_legacy_openclaw_config():
-        print("🧹 Removed legacy XSafeClaw config keys from openclaw.json")
+        print("[startup] Removed legacy XSafeClaw config keys from openclaw.json")
     
     # Initialize database
     await init_db()
-    print("✅ Database initialized")
+    print("[startup] Database initialized")
 
     # Mirror an existing Hermes API key into runtime settings without
     # implicitly generating one when both sides are empty.
@@ -77,9 +77,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         message_sync_service = MessageSyncService()
         await message_sync_service.start()
     else:
-        print("⚠️  File watcher disabled")
+        print("[startup] File watcher disabled")
     
-    print(f"✅ API server ready at http://{settings.api_host}:{settings.api_port}")
+    print(f"[startup] API server ready at http://{settings.api_host}:{settings.api_port}")
 
     # Preload onboard-scan data in background (openclaw models list is slow)
     from .routes.system import trigger_onboard_scan_preload
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                               if v.get("status") in ("started", "failed")}
                 if noteworthy:
                     parts = [f"{k}={v['status']}" for k, v in noteworthy.items()]
-                    print(f"🧩 Runtime autostart: {', '.join(parts)}")
+                    print(f"[startup] Runtime autostart: {', '.join(parts)}")
                     # Surface failure detail so the operator can see *why*
                     # (e.g. "nanobot CLI missing on PATH") instead of just the
                     # one-word status. Kept on separate lines because some
@@ -111,22 +111,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         if info.get("status") == "failed":
                             detail = str(info.get("detail", "")).strip()
                             if detail:
-                                print(f"   ↳ {name} failed: {detail[:400]}")
+                                print(f"   -> {name} failed: {detail[:400]}")
             except Exception as exc:
-                print(f"⚠️  Runtime autostart raised {type(exc).__name__}: {exc}")
+                print(f"[startup] Runtime autostart raised {type(exc).__name__}: {exc}")
 
         _asyncio.create_task(_safe_autostart())
 
     yield
     
     # Shutdown
-    print("🛑 Shutting down XSafeClaw Application...")
+    print("[shutdown] Shutting down XSafeClaw Application...")
     
     if message_sync_service:
         await message_sync_service.stop()
     
     await close_db()
-    print("✅ Shutdown complete")
+    print("[shutdown] Shutdown complete")
 
 
 # Create FastAPI app
