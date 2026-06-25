@@ -318,6 +318,24 @@ def _find_openclaw_binary() -> str | None:
             if scripts.exists():
                 search_bases.append(scripts)
             search_bases.append(prefix)
+        for p in [
+            Path.home() / ".local" / "bin",
+            Path(os.environ["APPDATA"]) / "npm"
+            if os.environ.get("APPDATA")
+            else None,
+            Path(os.environ["LOCALAPPDATA"]) / "OpenClaw" / "deps" / "portable-node"
+            if os.environ.get("LOCALAPPDATA")
+            else None,
+            Path(os.environ["LOCALAPPDATA"])
+            / "OpenClaw"
+            / "deps"
+            / "portable-node"
+            / "bin"
+            if os.environ.get("LOCALAPPDATA")
+            else None,
+        ]:
+            if p is not None and p.exists():
+                search_bases.append(p)
     else:
         for p in [
             Path("/opt/homebrew/bin"),

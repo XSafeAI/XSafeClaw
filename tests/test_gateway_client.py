@@ -40,6 +40,44 @@ def test_client_platform_uses_openclaw_node_names(monkeypatch):
     assert gateway_client._client_platform() == "linux"
 
 
+def test_find_openclaw_binary_checks_windows_npm_global_shim(monkeypatch, tmp_path):
+    if gateway_client.os.name != "nt":
+        return
+
+    npm_bin = tmp_path / "Roaming" / "npm"
+    npm_bin.mkdir(parents=True)
+    openclaw_cmd = npm_bin / "openclaw.cmd"
+    openclaw_cmd.write_text("@echo off\n", encoding="utf-8")
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setattr(gateway_client.Path, "home", lambda: tmp_path / "home")
+
+    assert gateway_client._find_openclaw_binary() == str(openclaw_cmd)
+
+
+def test_find_openclaw_binary_checks_windows_portable_node_prefix(monkeypatch, tmp_path):
+    if gateway_client.os.name != "nt":
+        return
+
+    portable_node = tmp_path / "LocalAppData" / "OpenClaw" / "deps" / "portable-node"
+    portable_node.mkdir(parents=True)
+    openclaw_cmd = portable_node / "openclaw.cmd"
+    openclaw_cmd.write_text("@echo off\n", encoding="utf-8")
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setattr(gateway_client.Path, "home", lambda: tmp_path / "home")
+
+    assert gateway_client._find_openclaw_binary() == str(openclaw_cmd)
+
+
 def test_load_device_identity_uses_xsafeclaw_specific_path(monkeypatch, tmp_path):
     generated = _make_identity()
     identity_path = tmp_path / ".xsafeclaw" / "openclaw-device.json"

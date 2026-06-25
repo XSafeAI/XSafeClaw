@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
+import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import {
   Bot,
-  ChevronDown,
   CheckCircle2,
   Code2,
   Download,
@@ -20,47 +20,50 @@ import {
   Star,
   Store,
   Target,
-  Workflow,
   X,
 } from 'lucide-react';
 import './App.css';
-import { systemAPI, type AgentStoreCatalogAgent } from './services/api';
+import Configure from './pages/Configure';
+import CodexConfigure from './pages/CodexConfigure';
+import ConfigureSelector from './pages/ConfigureSelector';
+import NanobotConfigure from './pages/NanobotConfigure';
+import RuntimeGuardConsole from './pages/RuntimeGuardConsole';
+import Setup from './pages/Setup';
+import { systemAPI, type AgentStoreCatalogAgent, type InstallStatusResponse } from './services/api';
+import StoreConfigPage from './StoreConfigPage';
+import { isConfigurableStoreAgentId, type ConfigurableAgentId, type StoreAgentId } from './storeConfigTypes';
 
 type SectionId = 'monitor' | 'store' | 'setting';
-type BadgeVariant = 'official' | 'verified' | 'experimental';
+type StoreFilter = 'all' | 'installed' | 'not-installed';
 type AgentTone = 'teal' | 'purple' | 'yellow' | 'blue';
+type AgentConfigStatus = 'configured' | 'needs-configure';
 type StoreAgent = {
-  id: string;
+  id: StoreAgentId;
   name: string;
   Icon: typeof Monitor;
   tone: AgentTone;
-  badges: Array<{ label: string; variant: BadgeVariant }>;
   tags: string[];
   capabilities: Array<{ label: string; Icon: typeof Monitor; positive?: boolean }>;
   downloads: string;
   rating: string;
   installPermissions: string[];
+  installed?: boolean;
+  configStatus?: AgentConfigStatus | null;
   size?: string | null;
   version?: string | null;
 };
 
 const text = {
-  edit: '\u7f16\u8f91(E)',
-  window: '\u7a97\u53e3(W)',
-  help: '\u5e2e\u52a9(H)',
-  space: '\u7a7a\u95f4 (1)',
-  guide: '\u9879\u76ee\u65b0\u624b\u6307\u5f15',
-  task: '\u751f\u6210\u9879\u76ee\u529f\u80fd\u4ecb\u7ecd',
-  twoHoursAgo: '2\u5c0f\u65f6\u524d',
   user: '\u8861',
   storeSubtitle: '\u53d1\u73b0\u3001\u5b89\u88c5\u5e76\u7ba1\u7406\u53ef\u7531 XSafeClaw \u76d1\u63a7\u7684 Agent',
   browse: '\u6d4f\u89c8',
   installed: '\u5df2\u5b89\u88c5',
-  updates: '\u66f4\u65b0',
+  notInstalled: '\u672a\u5b89\u88c5',
+  configured: '\u5df2\u914d\u7f6e',
+  needsConfigure: '\u5f85\u914d\u7f6e',
+  configure: '\u914d\u7f6e',
+  goConfigure: '\u53bb\u914d\u7f6e',
   searchAgent: '\u641c\u7d22 Agent',
-  official: '\u5b98\u65b9',
-  verified: '\u5df2\u9a8c\u8bc1',
-  experimental: '\u5b9e\u9a8c\u6027',
   compatible: '\u5f53\u524d\u8bbe\u5907\u517c\u5bb9',
   details: '\u67e5\u770b\u8be6\u60c5',
   install: '\u5b89\u88c5',
@@ -74,6 +77,11 @@ const text = {
   closeInstallBackdrop: '\u5173\u95ed\u5b89\u88c5\u786e\u8ba4\u906e\u7f69',
   sizeUnknown: '\u5927\u5c0f\u672a\u77e5',
   versionUnknown: '\u7248\u672c\u672a\u77e5',
+  installing: '\u6b63\u5728\u5b89\u88c5',
+  installComplete: '\u5b89\u88c5\u5b8c\u6210',
+  installFailed: '\u5b89\u88c5\u5931\u8d25',
+  installReady: '\u5df2\u51c6\u5907\u5f00\u59cb\u5b89\u88c5',
+  installUnavailable: '\u6682\u65e0\u81ea\u52a8\u5b89\u88c5\u63a5\u53e3',
 };
 
 const sections: Array<{
@@ -108,14 +116,10 @@ const storeAgents: StoreAgent[] = [
     name: 'OpenClaw',
     Icon: PawPrint,
     tone: 'teal',
-    badges: [
-      { label: text.official, variant: 'official' },
-      { label: text.verified, variant: 'verified' },
-    ],
-    tags: ['\u901a\u7528', '\u81ea\u52a8\u5316', '\u5f00\u53d1'],
+    tags: ['\u81ea\u6258\u7ba1', '\u591a\u6e20\u9053', '\u7f51\u5173'],
     capabilities: [
+      { label: 'Windows \u5b89\u88c5\u5668', Icon: Package },
       { label: 'CLI', Icon: SquareTerminal },
-      { label: '\u9700 API Key', Icon: Package },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
     downloads: '0',
@@ -127,13 +131,10 @@ const storeAgents: StoreAgent[] = [
     name: 'Hermes',
     Icon: Feather,
     tone: 'purple',
-    badges: [
-      { label: text.official, variant: 'official' },
-      { label: text.verified, variant: 'verified' },
-    ],
-    tags: ['\u534f\u540c', '\u901a\u4fe1', '\u6548\u7387'],
+    tags: ['\u81ea\u8fdb\u5316', '\u957f\u671f\u8bb0\u5fc6', '\u591a\u5e73\u53f0'],
     capabilities: [
-      { label: '\u684c\u9762\u5e94\u7528', Icon: Monitor },
+      { label: 'Windows \u5b89\u88c5\u5668', Icon: Package },
+      { label: 'CLI \u670d\u52a1', Icon: SquareTerminal },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
     downloads: '0',
@@ -145,14 +146,10 @@ const storeAgents: StoreAgent[] = [
     name: 'Nanobot',
     Icon: Bot,
     tone: 'yellow',
-    badges: [
-      { label: text.official, variant: 'official' },
-      { label: text.experimental, variant: 'experimental' },
-    ],
-    tags: ['\u5b9e\u9a8c', '\u5b66\u4e60', '\u81ea\u52a8\u5316'],
+    tags: ['\u8f7b\u91cf\u5185\u6838', '\u53ef\u8bfb\u6e90\u7801', '\u4e2a\u4eba Agent'],
     capabilities: [
-      { label: 'Docker', Icon: SquareTerminal },
-      { label: '\u9700 Docker', Icon: Package },
+      { label: 'uv tool', Icon: SquareTerminal },
+      { label: 'Python \u5305', Icon: Package },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
     downloads: '0',
@@ -164,14 +161,10 @@ const storeAgents: StoreAgent[] = [
     name: 'Codex',
     Icon: Code2,
     tone: 'blue',
-    badges: [
-      { label: text.official, variant: 'official' },
-      { label: text.verified, variant: 'verified' },
-    ],
-    tags: ['\u7f16\u7a0b', '\u5f00\u53d1\u8005\u5de5\u5177', 'AI \u52a9\u624b'],
+    tags: ['\u4ee3\u7801\u4ee3\u7406', '\u672c\u5730\u7ec8\u7aef', '\u4ed3\u5e93\u7f16\u8f91'],
     capabilities: [
+      { label: 'Windows \u5b89\u88c5\u5668', Icon: Package },
       { label: 'CLI', Icon: SquareTerminal },
-      { label: '\u9700 API Key', Icon: Package },
       { label: text.compatible, Icon: CheckCircle2, positive: true },
     ],
     downloads: '0',
@@ -193,6 +186,102 @@ async function handleWindowAction(action: 'minimize' | 'maximize' | 'close') {
   }
 }
 
+function getAgentInstallUrl(agentId: string) {
+  if (isAgentAutoInstallable(agentId)) return systemAPI.agentStoreInstallUrl(agentId);
+  return null;
+}
+
+function isAgentAutoInstallable(agentId: string) {
+  return agentId === 'openclaw' || agentId === 'nanobot' || agentId === 'hermes' || agentId === 'codex';
+}
+
+function isStoreAgentInstalled(agentId: StoreAgentId, status: InstallStatusResponse | null) {
+  if (!status) return false;
+  if (agentId === 'openclaw') return Boolean(status.openclaw_installed);
+  if (agentId === 'hermes') return Boolean(status.hermes_installed);
+  if (agentId === 'nanobot') return Boolean(status.nanobot_installed);
+  if (agentId === 'codex') return Boolean(status.codex_installed);
+  return false;
+}
+
+function getStoreAgentConfigStatus(agentId: StoreAgentId, status: InstallStatusResponse | null): AgentConfigStatus | null {
+  if (!status) return null;
+
+  if (agentId === 'openclaw') {
+    return status.config_exists ? 'configured' : 'needs-configure';
+  }
+
+  if (agentId === 'hermes') {
+    if (typeof status.requires_hermes_configure === 'boolean') {
+      return status.requires_hermes_configure ? 'needs-configure' : 'configured';
+    }
+    if (typeof status.hermes_config_exists === 'boolean' || typeof status.hermes_model_configured === 'boolean') {
+      return status.hermes_config_exists && status.hermes_model_configured ? 'configured' : 'needs-configure';
+    }
+    return null;
+  }
+
+  if (agentId === 'nanobot') {
+    if (typeof status.requires_nanobot_configure === 'boolean') {
+      return status.requires_nanobot_configure ? 'needs-configure' : 'configured';
+    }
+    if (typeof status.nanobot_config_exists === 'boolean' || typeof status.nanobot_model_configured === 'boolean') {
+      return status.nanobot_config_exists && status.nanobot_model_configured ? 'configured' : 'needs-configure';
+    }
+  }
+
+  return null;
+}
+
+type InstallStreamEvent = {
+  type?: string;
+  text?: string;
+  message?: string;
+  success?: boolean;
+  exit_code?: number;
+};
+
+async function runAgentInstallStream(
+  url: string,
+  onEvent: (event: InstallStreamEvent) => void,
+) {
+  const response = await fetch(url, { method: 'POST' });
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let succeeded = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() ?? '';
+
+    for (const part of parts) {
+      const line = part.trim();
+      if (!line.startsWith('data:')) continue;
+
+      try {
+        const event = JSON.parse(line.slice(5).trim()) as InstallStreamEvent;
+        onEvent(event);
+        if (event.type === 'done') {
+          succeeded = Boolean(event.success);
+        }
+      } catch {
+        // Ignore malformed stream chunks and continue reading later events.
+      }
+    }
+  }
+
+  return succeeded;
+}
+
 function PlaceholderPanel({ section }: { section: (typeof sections)[number] }) {
   const CurrentIcon = section.Icon;
 
@@ -208,10 +297,27 @@ function PlaceholderPanel({ section }: { section: (typeof sections)[number] }) {
   );
 }
 
-function AgentCard({ agent, onInstall }: { agent: StoreAgent; onInstall: (agent: StoreAgent) => void }) {
+function AgentCard({
+  agent,
+  onInstall,
+  onConfigure,
+}: {
+  agent: StoreAgent;
+  onInstall: (agent: StoreAgent) => void;
+  onConfigure: (agent: StoreAgent) => void;
+}) {
   const AgentIcon = agent.Icon;
   const hasKnownSize = Boolean(agent.size?.trim());
   const hasKnownVersion = Boolean(agent.version?.trim());
+  const installStateLabel = agent.installed ? text.installed : text.notInstalled;
+  const installStateClass = agent.installed ? 'installed' : 'not-installed';
+  const configStateLabel = agent.configStatus === 'configured'
+    ? text.configured
+    : agent.configStatus === 'needs-configure'
+      ? text.needsConfigure
+      : null;
+  const showConfigureAction = Boolean(agent.installed && isConfigurableStoreAgentId(agent.id));
+  const configureActionLabel = agent.configStatus === 'needs-configure' ? text.goConfigure : text.configure;
 
   return (
     <article className="agent-card">
@@ -223,11 +329,10 @@ function AgentCard({ agent, onInstall }: { agent: StoreAgent; onInstall: (agent:
           <div className="agent-title-row">
             <h2>{agent.name}</h2>
             <div className="agent-badges">
-              {agent.badges.map((badge) => (
-                <span key={`${agent.name}-${badge.label}`} className={`agent-badge ${badge.variant}`}>
-                  {badge.label}
-                </span>
-              ))}
+              <span className={`agent-badge ${installStateClass}`}>{installStateLabel}</span>
+              {configStateLabel ? (
+                <span className={`agent-badge ${agent.configStatus}`}>{configStateLabel}</span>
+              ) : null}
             </div>
           </div>
           <div className="agent-tags">
@@ -268,18 +373,74 @@ function AgentCard({ agent, onInstall }: { agent: StoreAgent; onInstall: (agent:
         <button type="button" className="secondary-action">
           {text.details}
         </button>
-        <button type="button" className="primary-action" onClick={() => onInstall(agent)}>
-          {text.install}
+        <button
+          type="button"
+          className="primary-action"
+          onClick={() => {
+            if (showConfigureAction) {
+              onConfigure(agent);
+            } else {
+              onInstall(agent);
+            }
+          }}
+        >
+          {showConfigureAction ? configureActionLabel : text.install}
         </button>
       </div>
     </article>
   );
 }
 
-function InstallConfirmDialog({ agent, onClose }: { agent: StoreAgent; onClose: () => void }) {
+function InstallConfirmDialog({
+  agent,
+  onClose,
+  onInstallComplete,
+}: {
+  agent: StoreAgent;
+  onClose: () => void;
+  onInstallComplete: () => void;
+}) {
   const AgentIcon = agent.Icon;
   const title = `${text.install} ${agent.name}`;
   const hasKnownSize = Boolean(agent.size?.trim());
+  const [installState, setInstallState] = useState<'idle' | 'installing' | 'success' | 'error'>('idle');
+  const [installLogs, setInstallLogs] = useState<string[]>([]);
+  const canAutoInstall = isAgentAutoInstallable(agent.id);
+
+  const handleStartInstall = async () => {
+    const installUrl = getAgentInstallUrl(agent.id);
+    if (!installUrl) {
+      setInstallState('error');
+      setInstallLogs([text.installUnavailable]);
+      return;
+    }
+
+    setInstallState('installing');
+    setInstallLogs([]);
+
+    try {
+      const success = await runAgentInstallStream(installUrl, (event) => {
+        if (event.type === 'output' && event.text) {
+          setInstallLogs((logs) => [...logs, event.text as string]);
+        } else if (event.type === 'error' && event.message) {
+          setInstallLogs((logs) => [...logs, event.message as string]);
+        } else if (event.type === 'done' && event.success === false) {
+          const exitDetail = event.exit_code === undefined ? '' : ` (${event.exit_code})`;
+          setInstallLogs((logs) => [...logs, `${text.installFailed}${exitDetail}`]);
+        }
+      });
+
+      if (success) {
+        setInstallState('success');
+        onInstallComplete();
+      } else {
+        setInstallState('error');
+      }
+    } catch (error) {
+      setInstallState('error');
+      setInstallLogs((logs) => [...logs, error instanceof Error ? error.message : String(error)]);
+    }
+  };
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -349,12 +510,40 @@ function InstallConfirmDialog({ agent, onClose }: { agent: StoreAgent; onClose: 
             </div>
           </div>
 
+          <div className={`install-status-box ${installState}`}>
+            <div className="install-status-line">
+              <span>
+                {installState === 'installing'
+                  ? text.installing
+                  : installState === 'success'
+                    ? text.installComplete
+                    : installState === 'error'
+                      ? text.installFailed
+                      : canAutoInstall
+                        ? text.installReady
+                        : text.installUnavailable}
+              </span>
+            </div>
+            {installLogs.length > 0 ? (
+              <div className="install-log" aria-label="Install log">
+                {installLogs.map((log, index) => (
+                  <p key={`${agent.id}-install-log-${index}`}>{log}</p>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <footer className="install-dialog-actions">
-            <button type="button" className="install-cancel-button" onClick={onClose}>
+            <button type="button" className="install-cancel-button" onClick={onClose} disabled={installState === 'installing'}>
               {text.cancel}
             </button>
-            <button type="button" className="install-start-button">
-              {text.startInstall}
+            <button
+              type="button"
+              className="install-start-button"
+              onClick={() => void handleStartInstall()}
+              disabled={installState === 'installing' || !canAutoInstall}
+            >
+              {installState === 'installing' ? text.installing : text.startInstall}
             </button>
           </footer>
         </div>
@@ -365,7 +554,20 @@ function InstallConfirmDialog({ agent, onClose }: { agent: StoreAgent; onClose: 
 
 function StorePage() {
   const [catalogById, setCatalogById] = useState<Record<string, AgentStoreCatalogAgent>>({});
+  const [installStatus, setInstallStatus] = useState<InstallStatusResponse | null>(null);
+  const [activeStoreFilter, setActiveStoreFilter] = useState<StoreFilter>('all');
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [configAgentId, setConfigAgentId] = useState<ConfigurableAgentId | null>(null);
+
+  const refreshInstallStatus = () => {
+    systemAPI.installStatus()
+      .then((response) => {
+        setInstallStatus(response.data);
+      })
+      .catch(() => {
+        setInstallStatus(null);
+      });
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -392,18 +594,68 @@ function StorePage() {
     };
   }, []);
 
+  useEffect(() => {
+    let isMounted = true;
+
+    systemAPI.installStatus()
+      .then((response) => {
+        if (!isMounted) return;
+        setInstallStatus(response.data);
+      })
+      .catch(() => {
+        if (isMounted) {
+          setInstallStatus(null);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const displayAgents = storeAgents.map((agent) => {
     const catalogAgent = catalogById[agent.id];
     const catalogVersion = catalogAgent?.status === 'ready' ? catalogAgent.version?.trim() : '';
     const catalogSize = catalogAgent?.status === 'ready' ? catalogAgent.sizeLabel?.trim() : '';
+    const installed = isStoreAgentInstalled(agent.id, installStatus);
+    const configStatus = installed ? getStoreAgentConfigStatus(agent.id, installStatus) : null;
 
     return {
       ...agent,
+      installed,
+      configStatus,
       version: catalogVersion || agent.version,
       size: catalogSize || agent.size,
     };
   });
+  const filteredAgents = displayAgents.filter((agent) => {
+    if (activeStoreFilter === 'installed') return agent.installed;
+    if (activeStoreFilter === 'not-installed') return !agent.installed;
+    return true;
+  });
   const selectedAgent = displayAgents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const configAgent = configAgentId
+    ? displayAgents.find((agent) => agent.id === configAgentId && isConfigurableStoreAgentId(agent.id)) ?? null
+    : null;
+  const storeTabs: Array<{ id: StoreFilter; label: string }> = [
+    { id: 'all', label: text.browse },
+    { id: 'installed', label: text.installed },
+    { id: 'not-installed', label: text.notInstalled },
+  ];
+
+  if (configAgentId && configAgent) {
+    return (
+      <section className="store-page">
+        <StoreConfigPage
+          agentId={configAgentId}
+          installed={Boolean(configAgent.installed)}
+          configured={configAgent.configStatus === 'configured'}
+          onBack={() => setConfigAgentId(null)}
+          onSaved={refreshInstallStatus}
+        />
+      </section>
+    );
+  }
 
   return (
     <section className="store-page">
@@ -419,25 +671,46 @@ function StorePage() {
       </header>
 
       <div className="store-tabs" role="group" aria-label="Agent Store tabs">
-        <button type="button" className="active">
-          {text.browse}
-        </button>
-        <button type="button">{text.installed}</button>
-        <button type="button">{text.updates}</button>
-      </div>
-
-      <div className="agent-grid">
-        {displayAgents.map((agent) => (
-          <AgentCard key={agent.name} agent={agent} onInstall={() => setSelectedAgentId(agent.id)} />
+        {storeTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={activeStoreFilter === tab.id ? 'active' : undefined}
+            aria-pressed={activeStoreFilter === tab.id}
+            onClick={() => setActiveStoreFilter(tab.id)}
+          >
+            {tab.label}
+          </button>
         ))}
       </div>
 
-      {selectedAgent ? <InstallConfirmDialog agent={selectedAgent} onClose={() => setSelectedAgentId(null)} /> : null}
+      <div className="agent-grid">
+        {filteredAgents.map((agent) => (
+          <AgentCard
+            key={agent.name}
+            agent={agent}
+            onInstall={() => setSelectedAgentId(agent.id)}
+            onConfigure={(targetAgent) => {
+              if (isConfigurableStoreAgentId(targetAgent.id)) {
+                setConfigAgentId(targetAgent.id);
+              }
+            }}
+          />
+        ))}
+      </div>
+
+      {selectedAgent ? (
+        <InstallConfirmDialog
+          agent={selectedAgent}
+          onClose={() => setSelectedAgentId(null)}
+          onInstallComplete={refreshInstallStatus}
+        />
+      ) : null}
     </section>
   );
 }
 
-function App() {
+function DesktopHome() {
   const [activeSection, setActiveSection] = useState<SectionId>('monitor');
   const currentSection = sections.find((section) => section.id === activeSection) ?? sections[0];
 
@@ -447,11 +720,6 @@ function App() {
         <div className="titlebar-left" data-tauri-drag-region>
           <img className="titlebar-logo" src="/favicon-32.png" alt="" />
           <span className="titlebar-brand">XSafeClaw</span>
-          <nav className="titlebar-menu" aria-label="Application menu">
-            <button type="button">{text.edit}</button>
-            <button type="button">{text.window}</button>
-            <button type="button">{text.help}</button>
-          </nav>
         </div>
         <div className="titlebar-controls">
           <button type="button" aria-label="Minimize window" onClick={() => void handleWindowAction('minimize')}>
@@ -503,24 +771,6 @@ function App() {
             ))}
           </nav>
 
-          <section className="space-list" aria-label="Spaces">
-            <button type="button" className="space-heading">
-              <span>{text.space}</span>
-              <ChevronDown size={13} />
-            </button>
-            <button type="button" className="project-row">
-              <span className="project-title">
-                <Workflow size={15} strokeWidth={1.8} />
-                {text.guide}
-              </span>
-              <ChevronDown size={13} />
-            </button>
-            <button type="button" className="task-row">
-              <span>{text.task}</span>
-              <span>{text.twoHoursAgo}</span>
-            </button>
-          </section>
-
           <div className="sidebar-footer">
             <button type="button" className="user-chip" aria-label="User profile">
               <img src="/favicon-48.png" alt="" />
@@ -545,6 +795,25 @@ function App() {
         </main>
       </div>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<DesktopHome />} />
+        <Route path="/setup" element={<Setup />} />
+        <Route path="/configure_select" element={<ConfigureSelector />} />
+        <Route path="/configure" element={<Configure />} />
+        <Route path="/openclaw_configure" element={<Configure />} />
+        <Route path="/hermes_configure" element={<Configure />} />
+        <Route path="/nanobot_configure" element={<NanobotConfigure />} />
+        <Route path="/codex_configure" element={<CodexConfigure />} />
+        <Route path="/backend" element={<RuntimeGuardConsole />} />
+        <Route path="*" element={<DesktopHome />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 

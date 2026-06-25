@@ -1091,6 +1091,12 @@ export const systemAPI = {
   /** SSE URL for npm install stream (use with fetch). */
   installUrl: () => '/api/system/install',
 
+  /** SSE URL for Store-managed install stream (use with fetch). */
+  agentStoreInstallUrl: (agentId: string, method?: 'auto' | 'native' | 'legacy') => {
+    const query = method ? `?method=${encodeURIComponent(method)}` : '';
+    return `/api/system/agent-store/${encodeURIComponent(agentId)}/install${query}`;
+  },
+
   /** SSE URL for nanobot install stream (use with fetch). */
   nanobotInstallUrl: () => '/api/system/nanobot/install',
 

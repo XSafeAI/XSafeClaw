@@ -302,10 +302,20 @@ def _common_user_bin_dirs(env: dict | None = None) -> list[Path]:
     _append_unique_path(dirs, seen, home / ".local" / "bin")
     _append_unique_path(dirs, seen, home / ".cargo" / "bin")
 
-    if os.name == "nt":
+    if _host_is_windows():
+        appdata = search_env.get("APPDATA")
+        if appdata:
+            _append_unique_path(dirs, seen, Path(appdata) / "npm")
+
         local_appdata = search_env.get("LOCALAPPDATA")
         if local_appdata:
-            _append_unique_path(dirs, seen, Path(local_appdata) / "Programs" / "uv" / "bin")
+            local_appdata_path = Path(local_appdata)
+            _append_unique_path(dirs, seen, local_appdata_path / "Programs" / "uv" / "bin")
+            openclaw_portable_node = (
+                local_appdata_path / "OpenClaw" / "deps" / "portable-node"
+            )
+            _append_unique_path(dirs, seen, openclaw_portable_node)
+            _append_unique_path(dirs, seen, openclaw_portable_node / "bin")
 
     return dirs
 
@@ -319,6 +329,19 @@ def _path_env_dirs(env: dict | None = None) -> list[Path]:
         if value:
             _append_unique_path(dirs, seen, value)
     return dirs
+
+
+def _path_env_contains(path_value: str, directory: str) -> bool:
+    """Return True when PATH already contains directory as a full entry."""
+    if not directory:
+        return False
+    target = os.path.normcase(os.path.normpath(directory))
+    for entry in path_value.split(_PATH_SEP):
+        if not entry:
+            continue
+        if os.path.normcase(os.path.normpath(entry)) == target:
+            return True
+    return False
 
 
 def _find_executable_in_dirs(executables: tuple[str, ...], dirs: list[Path]) -> Optional[str]:
@@ -464,7 +487,7 @@ def _build_env() -> dict:
         if v22_dirs:
             v22_bin = str(v22_dirs[0] / "bin")
             current_path = env.get("PATH", "")
-            if v22_bin not in current_path:
+            if not _path_env_contains(current_path, v22_bin):
                 env["PATH"] = v22_bin + path_sep + current_path
 
     # nvm-windows: %NVM_HOME% symlinks to current Node, versions under %NVM_HOME%\..\versions\node
@@ -481,7 +504,7 @@ def _build_env() -> dict:
                 # On Windows nvm-windows, Node.exe lives directly in the version dir (no /bin subfolder)
                 v22_bin = str(v22_dirs[0])
                 current_path = env.get("PATH", "")
-                if v22_bin not in current_path:
+                if not _path_env_contains(current_path, v22_bin):
                     env["PATH"] = v22_bin + path_sep + current_path
 
     # Match install_openclaw: global npm packages live next to bundled Node when Setup
@@ -491,13 +514,13 @@ def _build_env() -> dict:
         plat, _ = _node_platform_arch()
         node_bin = str(_node_dir) if plat == "win" else str(_node_dir / "bin")
         current_path = env.get("PATH", "")
-        if node_bin not in current_path:
+        if not _path_env_contains(current_path, node_bin):
             env["PATH"] = node_bin + _PATH_SEP + current_path
 
     for extra_dir in reversed(_common_user_bin_dirs(env) + _python_user_script_dirs()):
         extra_dir_str = str(extra_dir)
         current_path = env.get("PATH", "")
-        if extra_dir_str and extra_dir_str not in current_path:
+        if extra_dir_str and not _path_env_contains(current_path, extra_dir_str):
             env["PATH"] = extra_dir_str + _PATH_SEP + current_path
     return env
 
@@ -719,6 +742,18 @@ def _find_hermes() -> Optional[str]:
     local_bin = Path.home() / ".local" / "bin"
     if local_bin.is_dir():
         extra_dirs.append(str(local_bin))
+    if _host_is_windows():
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            hermes_home = Path(local_appdata) / "hermes"
+            for directory in (
+                hermes_home / "bin",
+                hermes_home / "Scripts",
+                hermes_home / "hermes-agent" / "venv" / "Scripts",
+                hermes_home / "venv" / "Scripts",
+            ):
+                if directory.is_dir():
+                    extra_dirs.append(str(directory))
     # Official install.sh defaults to ~/.hermes/hermes-agent (older docs mentioned ~/hermes-agent).
     for venv_bin in (
         Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin",
@@ -730,7 +765,7 @@ def _find_hermes() -> Optional[str]:
 
     search_path = env.get("PATH", "")
     for d in extra_dirs:
-        if d not in search_path:
+        if not _path_env_contains(search_path, d):
             search_path = d + _PATH_SEP + search_path
 
     for d in search_path.split(_PATH_SEP):
@@ -858,10 +893,32 @@ def _find_nanobot(*, env: dict | None = None) -> Optional[str]:
     return shutil.which("nanobot", path=(env or _build_env()).get("PATH"))
 
 
+def _codex_candidate_dirs(env: dict | None = None) -> list[Path]:
+    """Return Codex CLI search directories, including standalone installer paths."""
+    search_env = env or _build_env()
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    if _host_is_windows():
+        _append_unique_path(dirs, seen, search_env.get("CODEX_INSTALL_DIR"))
+        local_appdata = search_env.get("LOCALAPPDATA")
+        if local_appdata:
+            _append_unique_path(
+                dirs,
+                seen,
+                Path(local_appdata) / "Programs" / "OpenAI" / "Codex" / "bin",
+            )
+
+    for directory in _candidate_search_dirs(search_env):
+        _append_unique_path(dirs, seen, directory)
+
+    return dirs
+
+
 def _find_codex(*, env: dict | None = None) -> Optional[str]:
     """Locate the Codex CLI binary without reading Codex credential files."""
     search_env = env or _build_env()
-    for d in _candidate_search_dirs(search_env):
+    for d in _codex_candidate_dirs(search_env):
         if not d:
             continue
         for executable in _CODEX_EXECUTABLES:
@@ -5653,6 +5710,116 @@ async def _install_node(env: dict):
         yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to install Node.js: {exc}'})}\n\n"
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
+
+
+def _agent_store_windows_install_args(agent_id: str) -> list[str] | None:
+    """Return the official Windows-native installer command for a Store agent."""
+    shell = _find_available_launcher(("pwsh", "powershell"), fallback="powershell") or "powershell"
+    if agent_id == "openclaw":
+        command = "iwr -useb https://openclaw.ai/install.ps1 | iex"
+    elif agent_id == "hermes":
+        command = "iex (irm https://hermes-agent.nousresearch.com/install.ps1)"
+    elif agent_id == "codex":
+        command = "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex"
+    else:
+        return None
+    return [
+        shell,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]
+
+
+async def _generate_agent_store_windows_install(agent_id: str, env: dict):
+    args = _agent_store_windows_install_args(agent_id)
+    if not args:
+        yield f"data: {json.dumps({'type': 'error', 'message': f'No Windows installer is configured for {agent_id}.'})}\n\n"
+        return
+
+    process_env = dict(env)
+    if agent_id == "codex":
+        process_env["CODEX_NON_INTERACTIVE"] = "1"
+
+    yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_format_command(args)}'})}\n\n"
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL,
+            env=process_env,
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = _decode_subprocess_output(line).rstrip()
+            if text:
+                yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+        await proc.wait()
+        if proc.returncode == 0:
+            trigger_onboard_scan_preload()
+            yield f"data: {json.dumps({'type': 'done', 'success': True})}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': proc.returncode})}\n\n"
+    except Exception as exc:
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+
+def _agent_store_install_stream(generator):
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/agent-store/{agent_id}/install")
+async def install_agent_store_agent(
+    agent_id: str,
+    method: Literal["auto", "native", "legacy"] = Query("auto"),
+):
+    """Install a Store agent using the platform-preferred flow.
+
+    Windows OpenClaw/Hermes installs use the official PowerShell installers.
+    Legacy endpoints remain available for Linux/macOS/WSL and explicit
+    fallback testing.
+    """
+    normalized_agent = agent_id.strip().lower()
+    if normalized_agent == "nanobot":
+        return await install_nanobot()
+
+    if normalized_agent not in {"openclaw", "hermes", "codex"}:
+        raise HTTPException(status_code=404, detail=f"Unsupported Store agent: {agent_id}")
+
+    if normalized_agent == "codex":
+        if method in {"auto", "native"} and _host_is_windows():
+            return _agent_store_install_stream(
+                _generate_agent_store_windows_install(normalized_agent, _build_env())
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="Native Codex install is only available on Windows.",
+        )
+
+    if method == "legacy" or (method == "auto" and not _host_is_windows()):
+        if normalized_agent == "openclaw":
+            return await install_openclaw()
+        return await install_hermes()
+
+    if method in {"auto", "native"} and _host_is_windows():
+        return _agent_store_install_stream(
+            _generate_agent_store_windows_install(normalized_agent, _build_env())
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Native install is only available on Windows for {normalized_agent}.",
+    )
 
 
 @router.post("/install")

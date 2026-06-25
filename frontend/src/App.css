@@ -36,13 +36,6 @@
   margin-right: 8px;
 }
 
-.titlebar-menu {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.titlebar-menu button,
 .titlebar-controls button,
 .sidebar-actions button,
 .footer-actions button {
@@ -55,14 +48,6 @@
   cursor: default;
 }
 
-.titlebar-menu button {
-  height: 26px;
-  padding: 0 8px;
-  font-size: 12px;
-  border-radius: 4px;
-}
-
-.titlebar-menu button:hover,
 .sidebar-actions button:hover,
 .footer-actions button:hover {
   background: rgba(0, 0, 0, 0.06);
@@ -143,9 +128,6 @@
 }
 
 .nav-item,
-.space-heading,
-.project-row,
-.task-row,
 .mode-tab,
 .quick-chip,
 .tool-button,
@@ -186,57 +168,6 @@
 
 .nav-aside {
   color: #b2b2b3;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.space-list {
-  margin-top: 27px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.space-heading {
-  color: #9c9c9d;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 3px;
-  padding: 0 12px;
-  height: 25px;
-  font-size: 12px;
-}
-
-.project-row {
-  height: 27px;
-  padding: 0 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.project-title {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.task-row {
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-left: 36px;
-  padding-right: 12px;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.task-row span:last-child {
-  color: #ababac;
   font-size: 12px;
   font-weight: 500;
 }
@@ -522,22 +453,28 @@
   padding: 0 12px;
 }
 
-.agent-badge.official {
+.agent-badge.installed {
   color: #198754;
   border: 1px solid #cbead9;
   background: #eaf8ef;
 }
 
-.agent-badge.verified {
-  color: #1a66c9;
-  border: 1px solid #d9e8ff;
-  background: #eff6ff;
+.agent-badge.not-installed {
+  color: #60646c;
+  border: 1px solid #dfe2e7;
+  background: #f6f7f9;
 }
 
-.agent-badge.experimental {
-  color: #df8a00;
-  border: 1px solid #ffdca5;
-  background: #fff6e8;
+.agent-badge.configured {
+  color: #126f43;
+  border: 1px solid #ccebd8;
+  background: #effaf3;
+}
+
+.agent-badge.needs-configure {
+  color: #9a5b00;
+  border: 1px solid #f4d48f;
+  background: #fff7e8;
 }
 
 .agent-tags {
@@ -650,6 +587,374 @@
 
 .primary-action:active {
   background: #0b4fc6;
+}
+
+.store-config-page {
+  width: min(1060px, 100%);
+  margin: 0 auto;
+}
+
+.store-config-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 18px 24px;
+  align-items: end;
+}
+
+.store-config-back {
+  grid-column: 1 / -1;
+  width: fit-content;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #d8dbe2;
+  border-radius: 7px;
+  background: #fff;
+  color: #20222d;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 650;
+  padding: 0 12px 0 9px;
+  cursor: default;
+}
+
+.store-config-back:hover {
+  background: #f7f7f8;
+}
+
+.store-config-hero {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 18px;
+}
+
+.store-config-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  flex: 0 0 64px;
+}
+
+.store-config-title-block {
+  min-width: 0;
+}
+
+.store-config-title-block h1 {
+  margin: 0;
+  color: #10121f;
+  font-size: 30px;
+  line-height: 1.15;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.store-config-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.store-config-mode-switch {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #dfe2e7;
+  border-radius: 9px;
+  background: #f6f7f9;
+  padding: 4px;
+}
+
+.store-config-mode-switch button {
+  height: 32px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #4b5161;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 0 14px;
+  cursor: default;
+}
+
+.store-config-mode-switch button.active {
+  background: #1263ee;
+  color: #fff;
+}
+
+.store-config-shell {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  gap: 22px;
+  margin-top: 26px;
+  align-items: start;
+}
+
+.store-config-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid #e1e2e6;
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+}
+
+.store-config-step {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: #3f4351;
+  font-size: 14px;
+  font-weight: 650;
+  text-align: left;
+  padding: 8px 10px;
+  cursor: default;
+}
+
+.store-config-step strong {
+  font: inherit;
+}
+
+.store-config-step span {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #edf5ff;
+  color: #1263ee;
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.store-config-step.active {
+  background: #eef5ff;
+  color: #1263ee;
+}
+
+.store-config-step.active span {
+  background: #1263ee;
+  color: #fff;
+}
+
+.store-config-panel {
+  min-height: 438px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border: 1px solid #e1e2e6;
+  border-radius: 14px;
+  background: #fff;
+  padding: 30px;
+}
+
+.store-config-kicker {
+  margin: 0;
+  color: #1263ee;
+  font-size: 13px;
+  font-weight: 780;
+}
+
+.store-config-panel h2 {
+  margin: 10px 0 0;
+  color: #10121f;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.store-config-placeholder {
+  margin: 18px 0 0;
+  max-width: 620px;
+  color: #626675;
+  font-size: 15px;
+  line-height: 1.65;
+  font-weight: 500;
+}
+
+.store-config-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.store-config-form.nested {
+  margin-top: 0;
+}
+
+.store-config-two-column {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.store-config-span-two {
+  grid-column: 1 / -1;
+}
+
+.store-config-field {
+  display: grid;
+  gap: 7px;
+  color: #252936;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.store-config-field-hint {
+  color: #6b7080;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.45;
+}
+
+.store-config-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #d8dbe2;
+  border-radius: 8px;
+  background: #fff;
+  color: #20222d;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  padding: 0 12px;
+}
+
+.store-config-input::placeholder {
+  color: #aaaeb8;
+}
+
+.store-config-input:focus-visible {
+  outline: 2px solid #111;
+  outline-offset: 2px;
+}
+
+.store-config-summary {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #dfe2e7;
+  border-radius: 8px;
+  background: #f8f9fb;
+  color: #3f4351;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  padding: 13px 14px;
+}
+
+.store-config-summary p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.store-config-choice-grid,
+.store-config-checkbox-list {
+  display: grid;
+  gap: 9px;
+}
+
+.store-config-choice-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.store-config-choice,
+.store-config-checkbox {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid #dfe2e7;
+  border-radius: 8px;
+  background: #fff;
+  color: #252936;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  padding: 11px 12px;
+}
+
+.store-config-choice:has(input:checked),
+.store-config-checkbox:has(input:checked) {
+  border-color: #bcd2ff;
+  background: #f3f7ff;
+  color: #1263ee;
+}
+
+.store-config-choice input,
+.store-config-checkbox input {
+  margin-top: 2px;
+}
+
+.store-config-choice small {
+  display: block;
+  margin-top: 3px;
+  color: #6b7080;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.store-config-subsection {
+  display: grid;
+  gap: 10px;
+  border-left: 3px solid #f0c46a;
+  padding-left: 14px;
+}
+
+.store-config-subsection > p,
+.store-config-empty {
+  margin: 0;
+  color: #6b7080;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.store-config-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 38px;
+}
+
+.store-config-actions button {
+  min-width: 104px;
+  height: 38px;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: default;
+  padding: 0 14px;
+}
+
+.store-config-actions button:disabled {
+  opacity: 0.48;
+}
+
+.store-config-status {
+  margin: 14px 0 0;
+  color: #168358;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.store-config-status.error {
+  color: #bd3030;
+}
+
+.store-config-status.warning {
+  color: #b06f00;
 }
 
 .install-dialog-layer {
@@ -823,6 +1128,65 @@
   white-space: nowrap;
 }
 
+.install-status-box {
+  margin-top: 36px;
+  border: 1px solid #e0e3ea;
+  border-radius: 12px;
+  background: #f8f9fb;
+  padding: 14px 16px;
+}
+
+.install-status-box.installing {
+  border-color: #bfd4ff;
+  background: #f3f7ff;
+}
+
+.install-status-box.success {
+  border-color: #cbead9;
+  background: #effaf4;
+}
+
+.install-status-box.error {
+  border-color: #f2c5c5;
+  background: #fff5f5;
+}
+
+.install-status-line {
+  color: #2d3344;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.install-status-box.success .install-status-line {
+  color: #168358;
+}
+
+.install-status-box.error .install-status-line {
+  color: #bd3030;
+}
+
+.install-log {
+  max-height: 126px;
+  overflow: auto;
+  margin-top: 10px;
+  border-radius: 8px;
+  background: #111827;
+  padding: 10px 12px;
+}
+
+.install-log p {
+  margin: 0;
+  color: #d9e2f1;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.install-log p + p {
+  margin-top: 4px;
+}
+
 .install-dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -838,6 +1202,11 @@
   font-size: 28px;
   font-weight: 700;
   cursor: default;
+}
+
+.install-dialog-actions button:disabled {
+  cursor: default;
+  opacity: 0.58;
 }
 
 .install-cancel-button {
@@ -882,9 +1251,44 @@
     width: min(340px, 100%);
     flex-basis: auto;
   }
+
+  .store-config-header {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .store-config-mode-switch {
+    justify-self: start;
+  }
+
+  .store-config-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .store-config-steps {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
+  .store-config-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .store-config-panel {
+    min-height: 360px;
+    padding: 22px;
+  }
+
+  .store-config-actions {
+    justify-content: stretch;
+  }
+
+  .store-config-actions button {
+    flex: 1 1 140px;
+  }
+
   .install-dialog-layer {
     align-items: flex-start;
     padding: 18px;
