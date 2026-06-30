@@ -1584,10 +1584,7 @@ _DENYLIST_FILE = settings.data_dir / "denylist.json"
 _DENYLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
 _RISK_RULES_FILE = settings.data_dir / "risk_rules.json"
 _RISK_RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-_TOOL_POLICY_FILE = settings.data_dir / "tool_policies.json"
-_TOOL_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-TOOL_POLICY_CATEGORIES = ("shell", "file_system", "browser", "network", "git")
 TIMELINE_TOOL_CATEGORIES = ("shell", "file_system", "browser", "network", "git", "mcp", "unknown")
 TIMELINE_TOOL_ACTIONS = (
     "execute",
@@ -1601,34 +1598,26 @@ TIMELINE_TOOL_ACTIONS = (
     "inspect",
     "unknown",
 )
-TOOL_POLICY_VALUES = ("allow", "guard", "ask")
-DEFAULT_TOOL_POLICIES = {
-    "shell": "guard",
-    "file_system": "guard",
-    "browser": "guard",
-    "network": "guard",
-    "git": "guard",
-}
 
-_EXEC_TOOL_POLICY_NAMES = {
+_EXEC_TOOL_NAMES = {
     "exec", "exec_command", "shell", "bash", "terminal", "run_command",
     "execute_command", "execute_shell_command",
 }
 _COMMON_SHELL_COMMAND_TOOL_NAMES = {
     "ls", "pwd", "cat", "grep", "rg", "python", "python3", "node", "npm", "pip",
 }
-_FILE_TOOL_POLICY_NAMES = {
+_FILE_TOOL_NAMES = {
     "read", "read_file", "file_read", "view_file", "open_file",
     "write", "write_file", "file_write", "edit", "edit_file", "file_edit",
     "replace", "append", "create", "create_file", "mkdir", "copy", "move",
     "rename", "delete", "delete_file", "remove", "remove_file", "rm", "rmdir",
     "unlink",
 }
-_BROWSER_TOOL_POLICY_NAMES = {
+_BROWSER_TOOL_NAMES = {
     "browser", "browser_open", "browser_click", "browser_type", "browser_wait",
     "browser_snapshot", "browser_screenshot", "browser_navigate",
 }
-_NETWORK_TOOL_POLICY_NAMES = {
+_NETWORK_TOOL_NAMES = {
     "web_search", "web_fetch", "fetch", "http", "http_request", "request",
     "download", "url_fetch", "get_url", "curl", "wget", "search_web",
 }
@@ -1668,53 +1657,6 @@ def _load_internal_denylist() -> dict[str, set[str]]:
 
 def _load_risk_rules() -> list[dict[str, Any]]:
     return load_risk_rules(_RISK_RULES_FILE)
-
-
-def _normalize_tool_policy_value(value: Any) -> str | None:
-    normalized = str(value or "").strip().lower()
-    if normalized == "allowed":
-        normalized = "allow"
-    elif normalized == "asked":
-        normalized = "ask"
-    return normalized if normalized in TOOL_POLICY_VALUES else None
-
-
-def _normalize_tool_policies(policies: dict[str, Any] | None) -> dict[str, str]:
-    normalized = dict(DEFAULT_TOOL_POLICIES)
-    if not isinstance(policies, dict):
-        return normalized
-
-    for category in TOOL_POLICY_CATEGORIES:
-        value = _normalize_tool_policy_value(policies.get(category))
-        if value:
-            normalized[category] = value
-    return normalized
-
-
-def load_tool_policies() -> dict[str, str]:
-    """Load persisted tool policy settings, falling back to safe defaults."""
-    if not _TOOL_POLICY_FILE.exists():
-        return dict(DEFAULT_TOOL_POLICIES)
-
-    try:
-        raw = json.loads(_TOOL_POLICY_FILE.read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return dict(DEFAULT_TOOL_POLICIES)
-
-    if isinstance(raw, dict) and isinstance(raw.get("policies"), dict):
-        raw = raw["policies"]
-    return _normalize_tool_policies(raw if isinstance(raw, dict) else None)
-
-
-def save_tool_policies(policies: dict[str, Any]) -> dict[str, str]:
-    """Persist tool policy settings after normalizing the known categories."""
-    normalized = _normalize_tool_policies(policies)
-    _TOOL_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _TOOL_POLICY_FILE.write_text(
-        json.dumps({"policies": normalized}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return normalized
 
 
 def _normalize_tool_name(tool_name: str) -> str:
@@ -1811,7 +1753,7 @@ def classify_tool_category(tool_name: str, params: dict[str, Any] | None = None)
     first_shell_command = _first_actual_shell_command(shell_command) if shell_command else ""
 
     has_file_operation = bool(extract_tool_operations(tool_name, safe_params))
-    if normalized_tool in _FILE_TOOL_POLICY_NAMES or has_file_operation:
+    if normalized_tool in _FILE_TOOL_NAMES or has_file_operation:
         return "file_system"
     if (
         normalized_tool == "git"
@@ -1820,14 +1762,14 @@ def classify_tool_category(tool_name: str, params: dict[str, Any] | None = None)
     ):
         return "git"
     if (
-        normalized_tool in _NETWORK_TOOL_POLICY_NAMES
+        normalized_tool in _NETWORK_TOOL_NAMES
         or normalized_tool.startswith(("web_", "http_"))
         or first_shell_command in _NETWORK_COMMAND_NAMES
     ):
         return "network"
-    if normalized_tool in _BROWSER_TOOL_POLICY_NAMES or normalized_tool.startswith("browser_"):
+    if normalized_tool in _BROWSER_TOOL_NAMES or normalized_tool.startswith("browser_"):
         return "browser"
-    if normalized_tool in _EXEC_TOOL_POLICY_NAMES or normalized_tool in _COMMON_SHELL_COMMAND_TOOL_NAMES:
+    if normalized_tool in _EXEC_TOOL_NAMES or normalized_tool in _COMMON_SHELL_COMMAND_TOOL_NAMES:
         return "shell"
     if _is_mcp_tool_name(normalized_tool):
         return "mcp"
@@ -1988,17 +1930,6 @@ def enrich_timeline_event(event: dict[str, Any]) -> dict[str, Any]:
         resolution=str(event.get("resolution") or ""),
     )
     return {**event, **{key: event.get(key) or value for key, value in metadata.items()}}
-
-
-def get_tool_policy_for_call(
-    tool_name: str,
-    params: dict[str, Any] | None = None,
-) -> tuple[str, str]:
-    category = classify_tool_category(tool_name, params)
-    if category == "unknown":
-        return category, "guard"
-    policies = load_tool_policies()
-    return category, policies.get(category, "guard")
 
 
 def is_guard_enabled() -> bool:
@@ -2271,63 +2202,6 @@ async def check_runtime_tool_call(
         )
         return result
 
-    tool_category, tool_policy = get_tool_policy_for_call(tool_name, params)
-    if tool_policy == "allow":
-        _record_runtime_observation(
-            platform=platform,
-            instance_id=instance_id,
-            guard_mode=normalized_mode,
-            session_key=session_key,
-            tool_name=tool_name,
-            params=params,
-            action="allow",
-            reason="Allowed by tool policy",
-            guard_verdict="tool_policy_allow",
-            guard_raw=f"tool_policy:{tool_category}=allow",
-            session_context=trajectory_text,
-        )
-        return {"action": "allow"}
-
-    if tool_policy == "ask" or (tool_policy == "guard" and not _guard_enabled):
-        approval_reason = (
-            "Guard is disabled; tool policy requires manual approval"
-            if tool_policy == "guard"
-            else "Tool policy requires manual approval"
-        )
-        result, pending = await _await_pending_approval(
-            platform=platform,
-            instance_id=instance_id,
-            guard_mode=normalized_mode,
-            session_key=session_key,
-            tool_name=tool_name,
-            params=params,
-            guard_verdict="policy_ask",
-            guard_raw=f"tool_policy:{tool_category}={tool_policy}",
-            session_context=trajectory_text,
-            risk_source="Tool policy",
-            failure_mode=approval_reason,
-            real_world_harm="Reviewer approval is required before this tool runs.",
-        )
-        observation_reason = (
-            "Approved by reviewer"
-            if pending.resolution == "approved"
-            else result.get("reason")
-        )
-        _record_runtime_observation(
-            platform=platform,
-            instance_id=instance_id,
-            guard_mode=normalized_mode,
-            session_key=session_key,
-            tool_name=tool_name,
-            params=params,
-            action=result["action"],
-            reason=observation_reason,
-            guard_verdict=pending.guard_verdict,
-            guard_raw=pending.guard_raw,
-            session_context=trajectory_text,
-        )
-        return result
-
     if not _guard_enabled:
         _record_runtime_observation(
             platform=platform,
@@ -2517,10 +2391,6 @@ async def check_tool_call(
     if deny_reason:
         return {"action": "block", "reason": deny_reason}
 
-    tool_category, tool_policy = get_tool_policy_for_call(tool_name, params)
-    if tool_policy == "allow":
-        return {"action": "allow"}
-
     profile = _PROFILE_BY_PLATFORM.get(platform, "OpenClaw AI Agent")
 
     async def build_tool_check_trajectory(fetch_history: bool) -> str:
@@ -2545,29 +2415,6 @@ async def check_tool_call(
             f"\n[AGENT]:\n"
             f"[ACTION]: {action_json}\n"
         )
-
-    if tool_policy == "ask" or (tool_policy == "guard" and not _guard_enabled):
-        approval_reason = (
-            "Guard is disabled; tool policy requires manual approval"
-            if tool_policy == "guard"
-            else "Tool policy requires manual approval"
-        )
-        trajectory_text = await build_tool_check_trajectory(fetch_history=False)
-        result, _ = await _await_pending_approval(
-            platform=platform,
-            instance_id=instance_id,
-            guard_mode="blocking",
-            session_key=session_key,
-            tool_name=tool_name,
-            params=params,
-            guard_verdict="policy_ask",
-            guard_raw=f"tool_policy:{tool_category}={tool_policy}",
-            session_context=trajectory_text,
-            risk_source="Tool policy",
-            failure_mode=approval_reason,
-            real_world_harm="Reviewer approval is required before this tool runs.",
-        )
-        return result
 
     if not _guard_enabled:
         return {"action": "allow"}

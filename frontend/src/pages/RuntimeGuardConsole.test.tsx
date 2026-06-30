@@ -20,7 +20,6 @@ import RuntimeGuardConsole, {
   NewTaskModal,
   SessionHistoryViewAllModal,
   TimelineMessage,
-  ToolsViewAllModal,
   formatRuntimeGuardSessionTitle,
   getTimelineAppearance,
   mergeSessionHistorySessions,
@@ -41,10 +40,6 @@ import type { MiddleApprovalCard } from './runtimeGuardApproval';
 import {
   buildGuardStatusRows,
   calculateGuardStatusSummary,
-  runtimeGuardToolPermissionLabel,
-  toolPermissionsFromPolicies,
-  toolPoliciesFromPermissions,
-  type RuntimeGuardToolPermissions,
 } from './runtimeGuardToolPolicy';
 
 beforeEach(() => {
@@ -294,17 +289,6 @@ function mockRuntimeGuardApis() {
   vi.spyOn(guardAPI, 'pending').mockResolvedValue({ data: [] } as any);
   vi.spyOn(guardAPI, 'observations').mockResolvedValue({ data: [] } as any);
   vi.spyOn(guardAPI, 'getEnabled').mockResolvedValue({ data: { enabled: false } } as any);
-  vi.spyOn(guardAPI, 'toolPolicies').mockResolvedValue({
-    data: {
-      policies: {
-        shell: 'guard',
-        file_system: 'guard',
-        browser: 'guard',
-        network: 'guard',
-        git: 'guard',
-      },
-    },
-  } as any);
 
   return {
     startSessionSpy,
@@ -320,7 +304,7 @@ function mockRuntimeGuardApis() {
   };
 }
 
-function renderRuntimeGuardConsole() {
+function renderRuntimeGuardConsole(initialEntry = '/backend') {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
@@ -335,7 +319,7 @@ function renderRuntimeGuardConsole() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={['/backend']}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <RuntimeGuardConsole />
         <LocationProbe />
       </MemoryRouter>
@@ -487,6 +471,112 @@ describe('NewTaskModal', () => {
     });
   });
 
+  it('opens a Codex session confirmation modal when smart routing selects Codex', async () => {
+    const { startSessionSpy, smartStartSessionSpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/configured-codex-workspace',
+      permissionMode: 'workspace_write',
+      defaultModel: 'GPT-5.5',
+      defaultReasoning: 'xhigh',
+      defaultSpeed: 'standard',
+    }));
+    smartStartSessionSpy.mockResolvedValueOnce({
+      data: {
+        session_key: 'codex:pending:smart-router',
+        status: 'ready',
+        instance_id: 'codex-cli',
+        platform: 'codex',
+        selected_agent: 'Codex',
+        smart: true,
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Use the best coding agent' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(smartStartSessionSpy).toHaveBeenCalledWith({ message: 'Use the best coding agent' });
+    });
+    expect(startSessionSpy).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Configure Codex session' })).toBeTruthy();
+    });
+    expect(sendMessageStreamSpy).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('E:/configured-codex-workspace')).toBeTruthy();
+    expect(screen.getByText('GPT-5.5')).toBeTruthy();
+    expect(screen.getByText('XHigh')).toBeTruthy();
+    expect(screen.getByText('Standard')).toBeTruthy();
+    expect(screen.getByText('Workspace write')).toBeTruthy();
+  });
+
+  it('requires a Codex workspace before confirming and then sends with the session snapshot', async () => {
+    const { smartStartSessionSpy, sendMessageStreamSpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: '',
+      permissionMode: 'full_access',
+      defaultModel: 'GPT-5.4-Mini',
+      defaultReasoning: 'high',
+      defaultSpeed: 'fast',
+    }));
+    smartStartSessionSpy.mockResolvedValueOnce({
+      data: {
+        session_key: 'codex:pending:smart-router',
+        status: 'ready',
+        instance_id: 'codex-cli',
+        platform: 'codex',
+        selected_agent: 'Codex',
+        smart: true,
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Build a Codex feature' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Configure Codex session' });
+    const createSessionButton = within(dialog).getByRole('button', { name: 'Create session' }) as HTMLButtonElement;
+    expect(createSessionButton.disabled).toBe(true);
+
+    fireEvent.change(within(dialog).getByLabelText('Codex workspace directory'), {
+      target: { value: 'E:/tmp/codex-task' },
+    });
+    expect(createSessionButton.disabled).toBe(false);
+    fireEvent.click(createSessionButton);
+
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^\/api\/system\/codex\/conversations\/codex%3Apending%3A/),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    const codexCall = sendMessageStreamSpy.mock.calls.find(([url]) => String(url).includes('/api/system/codex/conversations/'));
+    const body = JSON.parse((codexCall?.[1] as RequestInit).body as string);
+    expect(body).toEqual(expect.objectContaining({
+      message: 'Build a Codex feature',
+      thread_id: null,
+      cwd: 'E:/tmp/codex-task',
+      model: 'gpt-5.4-mini',
+      reasoning_effort: 'high',
+      speed: 'standard',
+      permission_mode: 'full_access',
+    }));
+  });
+
+  it('shows the static Codex new-task mock from the demo query without routing', async () => {
+    const { smartStartSessionSpy } = mockRuntimeGuardApis();
+    renderRuntimeGuardConsole('/backend?demoCodexNewTask=1');
+
+    const dialog = await screen.findByRole('dialog', { name: 'Configure Codex session' });
+    expect(within(dialog).getByText('Review the Codex settings before creating this session.')).toBeTruthy();
+    expect(within(dialog).getByDisplayValue('C:\\Users\\heng\\Desktop\\test')).toBeTruthy();
+    expect(smartStartSessionSpy).not.toHaveBeenCalled();
+  });
+
   it('does not show agent options even when only some agents are available', async () => {
     const { startSessionSpy, smartStartSessionSpy } = mockRuntimeGuardApis();
     vi.mocked(budgetAPI.listRuntimeBudgets).mockResolvedValue({
@@ -575,7 +665,7 @@ describe('NewTaskModal', () => {
     });
   });
 
-  it('shows Codex as the fourth sidebar agent before tool permissions', async () => {
+  it('shows Codex first and hides Nanobot in the sidebar agents list', async () => {
     mockRuntimeGuardApis();
     vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
       data: {
@@ -593,13 +683,22 @@ describe('NewTaskModal', () => {
     const sidebar = container.querySelector('.rg-sidebar') as HTMLElement;
     const agentRows = Array.from(sidebar.querySelectorAll('.rg-agent-row'));
     expect(agentRows.map(row => row.querySelector('.rg-agent-name')?.textContent)).toEqual([
+      'Codex',
       'OpenClaw',
       'Hermes',
-      'Nanobot',
-      'Codex',
     ]);
-    expect(agentRows[3].querySelector('.rg-agent-badge')).toHaveClass('agent-codex');
-    expect((sidebar.textContent ?? '').indexOf('Codex')).toBeLessThan((sidebar.textContent ?? '').indexOf('TOOL PERMISSION'));
+    expect(agentRows[0].querySelector('.rg-agent-badge')).toHaveClass('agent-codex');
+    expect(sidebar.textContent).not.toContain('Nanobot');
+    expect(sidebar.textContent).not.toContain('TOOL PERMISSION');
+    expect(sidebar.textContent).toContain('Session history');
+    expect(sidebar.querySelector('.rg-left-history')).toBeTruthy();
+    expect(sidebar.querySelector('.rg-tools')).toBeNull();
+    expect(sidebar.querySelector('.rg-safety-links')).toBeNull();
+
+    const rightTools = container.querySelector('.rg-right-tools') as HTMLElement;
+    expect(within(rightTools).getByText('SAFETY TOOLS')).toBeTruthy();
+    expect(within(rightTools).getByText('File Protection')).toBeTruthy();
+    expect(within(rightTools).getByText('Risk Test')).toBeTruthy();
   });
 
   it('switches the budget card to Codex CLI remaining usage when Codex is selected', async () => {
@@ -773,14 +872,14 @@ describe('NewTaskModal', () => {
     fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
 
     await waitFor(() => {
-      expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('Codex');
+      expect(container.querySelector('.rg-task-title h1')?.textContent).toBe('Codex');
     });
 
     expect(startCodexConversationSpy).not.toHaveBeenCalled();
     expect(startSessionSpy).not.toHaveBeenCalled();
     expect(smartStartSessionSpy).not.toHaveBeenCalled();
     expect(getHistorySpy).not.toHaveBeenCalled();
-    expect(container.querySelector('.rg-task-title h1')?.textContent).toBe('Codex');
+    expect(container.querySelector('.rg-tabs')).toBeNull();
 
     await waitFor(() => {
       const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
@@ -1513,7 +1612,7 @@ describe('NewTaskModal', () => {
     });
 
     expect(getHistorySpy).not.toHaveBeenCalled();
-    expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('Codex');
+    expect(container.querySelector('.rg-tabs')).toBeNull();
     const codexRow = Array.from(container.querySelectorAll('.rg-agent-row'))
       .find(row => row.querySelector('.rg-agent-name')?.textContent === 'Codex') as HTMLElement;
     expect(codexRow).toHaveClass('is-selected');
@@ -1591,7 +1690,7 @@ describe('NewTaskModal', () => {
       expect(systemAPI.listCodexSessions).toHaveBeenCalledWith({ limit: 100 });
     });
 
-    fireEvent.click(container.querySelector('.rg-session-history-head button') as HTMLElement);
+    fireEvent.click(container.querySelector('.rg-left-history-title button') as HTMLElement);
     const dialog = screen.getByRole('dialog', { name: 'Session history' });
     fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
     expect(within(dialog).getByText('Codex CLI history')).toBeTruthy();
@@ -1684,7 +1783,7 @@ describe('NewTaskModal', () => {
     });
     expect(getCodexSessionMessagesSpy).not.toHaveBeenCalled();
 
-    fireEvent.click(container.querySelector('.rg-session-history-head button') as HTMLElement);
+    fireEvent.click(container.querySelector('.rg-left-history-title button') as HTMLElement);
     const dialog = screen.getByRole('dialog', { name: 'Session history' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Codex' }));
     fireEvent.click(within(dialog).getByText('Codex CLI history').closest('button') as HTMLElement);
@@ -1734,7 +1833,7 @@ describe('NewTaskModal', () => {
     await waitFor(() => {
       expect(systemAPI.listCodexSessions).toHaveBeenCalledWith({ limit: 100 });
     });
-    fireEvent.click(container.querySelector('.rg-session-history-head button') as HTMLElement);
+    fireEvent.click(container.querySelector('.rg-left-history-title button') as HTMLElement);
     expect(within(screen.getByRole('dialog', { name: 'Session history' })).getByText('OpenClaw real history')).toBeTruthy();
   });
 
@@ -1810,7 +1909,7 @@ describe('NewTaskModal', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Weather lookup' })).toBeTruthy();
     });
-    expect(container.querySelector('.rg-chat-tab-title')?.textContent).toBe('OpenClaw');
+    expect(container.querySelector('.rg-tabs')).toBeNull();
     const meta = container.querySelector('.rg-session-meta')?.textContent ?? '';
     expect(meta).toContain('3 minutes ago workspace:/srv/xsafeclaw/weather');
     expect(meta).not.toContain('OpenClaw Agent');
@@ -1837,7 +1936,6 @@ describe('RuntimeGuardConsole i18n', () => {
     await waitFor(() => {
       expect(window.localStorage.getItem('xsafeclaw:locale')).toBe('zh');
       expect(screen.getByText('新建任务')).toBeTruthy();
-      expect(screen.getByText('工具权限')).toBeTruthy();
       expect(screen.getByRole('option', { name: '小时' })).toBeTruthy();
       expect(screen.getByRole('option', { name: '天' })).toBeTruthy();
     });
@@ -1851,6 +1949,17 @@ describe('RuntimeGuardConsole i18n', () => {
 });
 
 describe('RuntimeGuardConsole sidebar layout', () => {
+  it('renders the main conversation area without the session tab strip', async () => {
+    mockRuntimeGuardApis();
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(container.querySelector('.rg-task-panel')).toBeTruthy();
+    });
+    expect(container.querySelector('.rg-tabs')).toBeNull();
+    expect(container.querySelector('.rg-session-tabs')).toBeNull();
+  });
+
   it('aligns the budget card with the middle session panel and distributes sidebar gaps evenly', () => {
     const metrics = runtimeGuardSidebarLayoutMetrics();
 
@@ -2399,148 +2508,25 @@ describe('runtimeGuardStartSessionPayload', () => {
   });
 });
 
-describe('ToolsViewAllModal', () => {
-  it('calculates Guard Status from guard mode, tool permissions, and pending approvals', () => {
-    const defaultPermissions: RuntimeGuardToolPermissions = {
-      shell: 'Guard',
-      fileSystem: 'Guard',
-      browser: 'Guard',
-      network: 'Guard',
-      git: 'Guard',
-    };
-
-    expect(calculateGuardStatusSummary('On', defaultPermissions, []).score).toBe(100);
-    expect(calculateGuardStatusSummary('Off', defaultPermissions, []).score).toBe(80);
-    expect(calculateGuardStatusSummary('On', defaultPermissions, [
-      approval({ id: 'pending-1' }),
-      approval({ id: 'pending-2' }),
-    ]).score).toBe(100);
-    expect(calculateGuardStatusSummary('Off', {
-      shell: 'Allowed',
-      fileSystem: 'Allowed',
-      browser: 'Allowed',
-      network: 'Allowed',
-      git: 'Allowed',
-    }, [
-      approval({ id: 'pending-1' }),
-      approval({ id: 'pending-2' }),
-      approval({ id: 'pending-3' }),
-      approval({ id: 'pending-4' }),
-    ]).score).toBe(80);
+describe('RuntimeGuard status helpers', () => {
+  it('calculates Guard Status from guard mode only', () => {
+    expect(calculateGuardStatusSummary('On').score).toBe(100);
+    expect(calculateGuardStatusSummary('Off').score).toBe(80);
   });
 
   it('builds Guard Status display rows from guard mode', () => {
-    const rows = buildGuardStatusRows('Off', {
-      shell: 'Allowed',
-      fileSystem: 'Asked',
-      browser: 'Allowed',
-      network: 'Guard',
-      git: 'Allowed',
-    }, 2);
-
-    expect(rows).toEqual([
+    expect(buildGuardStatusRows('Off')).toEqual([
       { label: 'Prompt Injection', status: 'off', tone: 'muted' },
       { label: 'Data Leakage', status: 'off', tone: 'muted' },
       { label: 'Tool Call', status: 'off', tone: 'muted' },
       { label: 'Skill Injection', status: 'off', tone: 'muted' },
     ]);
-  });
-
-  it('maps backend tool policies to frontend permissions and back', () => {
-    const permissions = toolPermissionsFromPolicies({
-      shell: 'ask',
-      file_system: 'allow',
-      browser: 'guard',
-      network: 'allow',
-      git: 'ask',
-    });
-
-    expect(permissions).toEqual({
-      shell: 'Asked',
-      fileSystem: 'Allowed',
-      browser: 'Guard',
-      network: 'Allowed',
-      git: 'Asked',
-    });
-    expect(toolPoliciesFromPermissions(permissions)).toEqual({
-      shell: 'ask',
-      file_system: 'allow',
-      browser: 'guard',
-      network: 'allow',
-      git: 'ask',
-    });
-  });
-
-  it('renders configurable tool permissions and updates the selected state', () => {
-    function Harness() {
-      const [permissions, setPermissions] = useState<RuntimeGuardToolPermissions>({
-        shell: 'Allowed',
-        fileSystem: 'Guard',
-        browser: 'Allowed',
-        network: 'Guard',
-        git: 'Guard',
-      });
-
-      return (
-        <>
-          <span data-testid="sidebar-shell">{runtimeGuardToolPermissionLabel(permissions.shell)}</span>
-          <ToolsViewAllModal
-            permissions={permissions}
-            onClose={vi.fn()}
-            onPermissionChange={(toolId, permission) => {
-              setPermissions(current => ({ ...current, [toolId]: permission }));
-            }}
-          />
-        </>
-      );
-    }
-
-    render(<Harness />);
-
-    expect(screen.getByRole('dialog', { name: 'Tool permissions' })).toBeTruthy();
-    expect(screen.queryByText('TOOLS')).toBeNull();
-    expect(document.querySelectorAll('.rg-tool-permission-mark')).toHaveLength(5);
-
-    const shellGroup = screen.getByRole('group', { name: 'Shell permission' });
-    const fileSystemGroup = screen.getByRole('group', { name: 'File System permission' });
-    const browserGroup = screen.getByRole('group', { name: 'Browser permission' });
-    const networkGroup = screen.getByRole('group', { name: 'Network permission' });
-    const gitGroup = screen.getByRole('group', { name: 'Git permission' });
-
-    expect(within(shellGroup).getByRole('button', { name: 'Allow' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(fileSystemGroup).getByRole('button', { name: 'Guard' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(browserGroup).getByRole('button', { name: 'Allow' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(networkGroup).getByRole('button', { name: 'Guard' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(gitGroup).getByRole('button', { name: 'Guard' })).toHaveAttribute('aria-pressed', 'true');
-
-    fireEvent.click(within(shellGroup).getByRole('button', { name: 'Ask' }));
-
-    expect(screen.getByTestId('sidebar-shell')).toHaveTextContent('Ask');
-    expect(within(shellGroup).getByRole('button', { name: 'Ask' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(shellGroup).getByRole('button', { name: 'Allow' })).toHaveAttribute('aria-pressed', 'false');
-  });
-
-  it('supports close interactions', () => {
-    const onClose = vi.fn();
-    const { container } = render(
-      <ToolsViewAllModal
-        permissions={{ shell: 'Allowed', fileSystem: 'Guard', browser: 'Allowed', network: 'Guard', git: 'Guard' }}
-        onClose={onClose}
-        onPermissionChange={vi.fn()}
-      />,
-    );
-
-    fireEvent.mouseDown(screen.getByRole('dialog', { name: 'Tool permissions' }));
-    expect(onClose).not.toHaveBeenCalled();
-
-    fireEvent.mouseDown(container.querySelector('.rg-modal-backdrop') as HTMLElement);
-    expect(onClose).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(screen.getByTitle('Close tool permissions'));
-    expect(onClose).toHaveBeenCalledTimes(2);
-
-    fireEvent.keyDown(window, { key: 'Escape' });
-    expect(onClose).toHaveBeenCalledTimes(3);
+    expect(buildGuardStatusRows('On')).toEqual([
+      { label: 'Prompt Injection', status: 'on', tone: 'success' },
+      { label: 'Data Leakage', status: 'on', tone: 'success' },
+      { label: 'Tool Call', status: 'on', tone: 'success' },
+      { label: 'Skill Injection', status: 'on', tone: 'success' },
+    ]);
   });
 });
 

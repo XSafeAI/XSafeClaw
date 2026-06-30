@@ -32,7 +32,6 @@ from xsafeclaw.services import runtime_autostart
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_instances_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr(guard_service, "_TOOL_POLICY_FILE", tmp_path / "tool_policies.json")
     runtime_helpers.invalidate_instances_cache()
     yield
     runtime_helpers.invalidate_instances_cache()
@@ -1936,7 +1935,7 @@ def test_nanobot_chat_start_session_uses_gateway_websocket_chat_id(monkeypatch, 
 
     assert response.status_code == 200
     data = response.json()
-    assert data["session_key"] == "nanobot::nanobot-default::chat-123"
+    assert data["session_key"] == "nanobot::nanobot-default::websocket:chat-123"
     assert data["platform"] == "nanobot"
     assert data["session_key"] in chat_routes._nanobot_gateway_sessions
     chat_routes._nanobot_gateway_sessions.clear()
@@ -2043,7 +2042,7 @@ def test_nanobot_stream_relinks_missing_websocket_session(monkeypatch, tmp_path)
     ]
     assert events[0] == {
         "type": "session_relinked",
-        "session_key": "nanobot::nanobot-default::chat-new",
+        "session_key": "nanobot::nanobot-default::websocket:chat-new",
     }
     assert events[-1]["type"] == "final"
     assert FakeNanobotGatewayClient.instances[-1].sent == ["continue"]
@@ -2052,7 +2051,7 @@ def test_nanobot_stream_relinks_missing_websocket_session(monkeypatch, tmp_path)
     cloned_lines = cloned.read_text(encoding="utf-8").splitlines()
     assert json.loads(cloned_lines[0])["key"] == "websocket:chat-new"
     assert json.loads(cloned_lines[1])["content"] == "old prompt"
-    assert "nanobot::nanobot-default::chat-new" in chat_routes._nanobot_gateway_sessions
+    assert "nanobot::nanobot-default::websocket:chat-new" in chat_routes._nanobot_gateway_sessions
     chat_routes._nanobot_gateway_sessions.clear()
 
 
@@ -2089,8 +2088,6 @@ async def test_nanobot_health_probe_ignores_environment_ssl_settings(monkeypatch
 
 @pytest.mark.asyncio
 async def test_runtime_tool_check_observe_records_unsafe_without_blocking(monkeypatch):
-    guard_service.save_tool_policies({"shell": "guard"})
-
     async def fake_call_guard_model(_trajectory_text: str, **_kwargs) -> str:
         return (
             "unsafe\n"

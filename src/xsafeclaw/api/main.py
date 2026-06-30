@@ -189,6 +189,8 @@ if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
         redeploying the embedded bundle is visible on the next page load
         without the user having to manually clear the browser cache.
         """
+        if path == "api" or path.startswith("api/"):
+            return Response(status_code=404)
         file = STATIC_DIR / path
         if file.is_file() and not path.startswith("api"):
             headers = _HTML_NO_CACHE_HEADERS if file.suffix.lower() in {".html", ".htm"} else None

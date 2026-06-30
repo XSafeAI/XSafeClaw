@@ -8,7 +8,7 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import {
   type LucideIcon,
@@ -42,12 +42,14 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  assetsAPI,
   budgetAPI,
   chatAPI,
   guardAPI,
   sessionsAPI,
   systemAPI,
   type BudgetPeriodUnit,
+  type DirectoryBrowseEntry,
   type GuardPendingApproval,
   type GuardRuntimeObservation,
   type RuntimeBudgetPlatform,
@@ -82,15 +84,9 @@ import {
 import {
   buildGuardStatusRows,
   calculateGuardStatusSummary,
-  defaultToolPermissions,
-  toolPermissionsFromPolicies,
-  toolPoliciesFromPermissions,
   type GuardStatusRowTone,
-  type RuntimeGuardToolId,
-  type RuntimeGuardToolPermission,
-  type RuntimeGuardToolPermissions,
 } from './runtimeGuardToolPolicy';
-import { loadCodexConfig, type CodexPermissionMode } from './CodexConfigure';
+import { loadCodexConfig, type CodexLocalConfig, type CodexPermissionMode } from './CodexConfigure';
 import './RuntimeGuardConsole.css';
 
 export type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot' | 'Codex';
@@ -125,6 +121,16 @@ export type RuntimeGuardSession = {
   autoTitlePending?: boolean;
   frontendOnly?: boolean;
   codexHistory?: boolean;
+  codexModel?: CodexModelOption;
+  codexReasoningLevel?: CodexReasoningLevel;
+  codexSpeed?: CodexSpeedOption;
+  codexPermissionMode?: CodexPermissionMode;
+};
+type PendingCodexNewTask = {
+  requestText: string;
+  seed?: Partial<StartSessionResponse>;
+  config: CodexLocalConfig;
+  workspaceDir: string;
 };
 type InstallMap = Record<AgentName, boolean | null>;
 type AgentDisplay = {
@@ -134,7 +140,7 @@ type AgentDisplay = {
   installed: boolean;
   runtimeBacked: boolean;
 };
-type RuntimeGuardModal = 'tools' | 'sessions' | 'approvals' | 'blocked' | null;
+type RuntimeGuardModal = 'sessions' | 'approvals' | 'blocked' | null;
 type SessionHistoryAgentFilter = 'All' | AgentName;
 export type BlockedModalRange = '24h' | '7d' | 'all';
 
@@ -167,8 +173,10 @@ const sidebarAgentDefinitions: Array<{
   className: string;
   runtimeBacked: boolean;
 }> = [
-  ...agentDefinitions.map(agent => ({ ...agent, runtimeBacked: true })),
   { name: 'Codex', className: 'agent-codex', runtimeBacked: false },
+  ...agentDefinitions
+    .filter(agent => agent.name !== 'Nanobot')
+    .map(agent => ({ ...agent, runtimeBacked: true })),
 ];
 
 const RUNTIME_GUARD_SIDEBAR_LAYOUT = {
@@ -177,18 +185,12 @@ const RUNTIME_GUARD_SIDEBAR_LAYOUT = {
   agentRowsTop: 18,
   agentRowGap: 36,
   agentRowHeight: 34,
-  toolsTop: 263,
-  toolRowsTop: 20,
-  toolRowGap: 23,
-  toolRowHeight: 15,
-  toolCount: 3,
-  safetyTop: 354,
-  safetyLastRowTop: 55,
-  safetyRowHeight: 28,
+  historyTop: 239,
+  historyHeight: 186,
   budgetTop: 446,
   budgetHeight: 92,
-  taskPanelTopBase: 88,
-  taskPanelHeightBase: 450,
+  taskPanelTopBase: 50,
+  taskPanelHeightBase: 488,
 } as const;
 
 export function runtimeGuardSidebarLayoutMetrics() {
@@ -196,20 +198,14 @@ export function runtimeGuardSidebarLayoutMetrics() {
     + RUNTIME_GUARD_SIDEBAR_LAYOUT.agentRowsTop
     + (sidebarAgentDefinitions.length - 1) * RUNTIME_GUARD_SIDEBAR_LAYOUT.agentRowGap
     + RUNTIME_GUARD_SIDEBAR_LAYOUT.agentRowHeight;
-  const toolsVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.toolsTop
-    + RUNTIME_GUARD_SIDEBAR_LAYOUT.toolRowsTop
-    + (RUNTIME_GUARD_SIDEBAR_LAYOUT.toolCount - 1) * RUNTIME_GUARD_SIDEBAR_LAYOUT.toolRowGap
-    + RUNTIME_GUARD_SIDEBAR_LAYOUT.toolRowHeight;
-  const safetyVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyTop
-    + RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyLastRowTop
-    + RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyRowHeight;
+  const historyVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.historyTop
+    + RUNTIME_GUARD_SIDEBAR_LAYOUT.historyHeight;
   return {
     budgetBottom: RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop + RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetHeight,
     middleSessionPanelBottom: RUNTIME_GUARD_SIDEBAR_LAYOUT.taskPanelTopBase + RUNTIME_GUARD_SIDEBAR_LAYOUT.taskPanelHeightBase,
     visibleGaps: [
-      RUNTIME_GUARD_SIDEBAR_LAYOUT.toolsTop - agentsVisibleBottom,
-      RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyTop - toolsVisibleBottom,
-      RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop - safetyVisibleBottom,
+      RUNTIME_GUARD_SIDEBAR_LAYOUT.historyTop - agentsVisibleBottom,
+      RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop - historyVisibleBottom,
     ],
   };
 }
@@ -269,7 +265,6 @@ function runtimeBudgetRemainingMs(status: RuntimeBudgetStatus, now = Date.now())
   return Math.max(0, Number(status.remainingMs) || 0);
 }
 
-const toolPermissionOptions: RuntimeGuardToolPermission[] = ['Allowed', 'Guard', 'Asked'];
 type RuntimeGuardCopy = ReturnType<typeof useI18n>['t']['runtimeGuard'];
 
 function rgText(template: string, values: Record<string, string | number> = {}): string {
@@ -325,16 +320,6 @@ function formatCodexQuotaRefresh(
   });
 }
 
-function toolDisplayName(toolId: RuntimeGuardToolId, copy: RuntimeGuardCopy): string {
-  return copy.toolsModal.toolNames[toolId];
-}
-
-function permissionDisplayLabel(permission: RuntimeGuardToolPermission, copy: RuntimeGuardCopy): string {
-  if (permission === 'Allowed') return copy.toolsModal.permissions.allow;
-  if (permission === 'Asked') return copy.toolsModal.permissions.ask;
-  return copy.toolsModal.permissions.guard;
-}
-
 function agentStatusDisplay(status: AgentStatus, copy: RuntimeGuardCopy): string {
   if (status === 'Running') return copy.agentStatus.running;
   if (status === 'Not installed') return copy.agentStatus.notInstalled;
@@ -375,15 +360,7 @@ function guardStatusRowStatus(status: string, copy: RuntimeGuardCopy): string {
   if (status === 'Clear') return copy.guardStatus.clear;
   const waiting = status.match(/^(\d+) waiting$/);
   if (waiting) return rgText(copy.guardStatus.waiting, { count: waiting[1] });
-  return status
-    .split('/')
-    .map(part => {
-      if (part === 'Allow') return copy.toolsModal.permissions.allow;
-      if (part === 'Ask') return copy.toolsModal.permissions.ask;
-      if (part === 'Guard') return copy.toolsModal.permissions.guard;
-      return part;
-    })
-    .join('/');
+  return status;
 }
 
 function guardScoreTone(score: number): 'green' | 'orange' | 'red' {
@@ -400,18 +377,6 @@ function guardScoreRingDegrees(score: number): number {
   const scoreRatio = (clampedScore - GUARD_SCORE_RING_BASE_SCORE) / (100 - GUARD_SCORE_RING_BASE_SCORE);
   return GUARD_SCORE_RING_BASE_DEGREES + scoreRatio * (360 - GUARD_SCORE_RING_BASE_DEGREES);
 }
-
-const configurableTools: Array<{
-  id: RuntimeGuardToolId;
-  icon: LucideIcon;
-  name: string;
-}> = [
-  { id: 'shell', icon: Terminal, name: 'Shell' },
-  { id: 'fileSystem', icon: FolderOpen, name: 'File System' },
-  { id: 'browser', icon: Globe2, name: 'Browser' },
-  { id: 'network', icon: Network, name: 'Network' },
-  { id: 'git', icon: GitBranch, name: 'Git' },
-];
 
 const traceTypes = new Set([
   'trace_start',
@@ -1320,6 +1285,13 @@ function codexModelSupportsFast(model: CodexModelOption): boolean {
   return model === 'GPT-5.5' || model === 'GPT-5.4';
 }
 
+function normalizeCodexSessionConfig(config: CodexLocalConfig): CodexLocalConfig {
+  return {
+    ...config,
+    defaultSpeed: codexModelSupportsFast(config.defaultModel) ? config.defaultSpeed : 'standard',
+  };
+}
+
 function configureRouteForAgent(agent: AgentName): string {
   if (agent === 'Hermes') return '/hermes_configure';
   if (agent === 'Nanobot') return '/nanobot_configure';
@@ -1343,7 +1315,8 @@ function agentIconComponent(agent: AgentName): LucideIcon {
 }
 
 function agentClassName(agent: AgentName): string {
-  return sidebarAgentDefinitions.find(item => item.name === agent)?.className ?? 'agent-openclaw';
+  if (agent === 'Codex') return 'agent-codex';
+  return agentDefinitions.find(item => item.name === agent)?.className ?? 'agent-openclaw';
 }
 
 export function AgentIconBadge({
@@ -1362,16 +1335,6 @@ export function AgentIconBadge({
       <Icon />
     </span>
   );
-}
-
-function toolPermissionTone(permission: RuntimeGuardToolPermission): 'success' | 'warning' | 'asked' {
-  if (permission === 'Allowed') return 'success';
-  if (permission === 'Guard') return 'warning';
-  return 'asked';
-}
-
-function toolPermissionButtonLabel(permission: RuntimeGuardToolPermission, copy: RuntimeGuardCopy): string {
-  return permissionDisplayLabel(permission, copy);
 }
 
 function runtimeUnavailableMessage(instance: RuntimeInstance, copy?: RuntimeGuardCopy) {
@@ -1834,6 +1797,163 @@ export function NewTaskModal({
   );
 }
 
+export function CodexNewTaskModal({
+  draft,
+  workspaceDir,
+  onWorkspaceChange,
+  onCreate,
+  onClose,
+  onConfigure,
+  creating = false,
+}: {
+  draft: PendingCodexNewTask;
+  workspaceDir: string;
+  onWorkspaceChange: (workspaceDir: string) => void;
+  onCreate: () => void;
+  onClose: () => void;
+  onConfigure: () => void;
+  creating?: boolean;
+}) {
+  const { t } = useI18n();
+  const copy = t.runtimeGuard;
+  const codexCopy = copy.codexComposer;
+  const normalizedConfig = normalizeCodexSessionConfig(draft.config);
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browsePath, setBrowsePath] = useState('');
+  const [browseEntries, setBrowseEntries] = useState<DirectoryBrowseEntry[]>([]);
+  const [browseParentPath, setBrowseParentPath] = useState<string | null>(null);
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState('');
+  useRuntimeGuardModalEscape(onClose);
+
+  const loadBrowsePath = useCallback(async (path?: string) => {
+    setBrowseLoading(true);
+    setBrowseError('');
+    try {
+      const { data } = await assetsAPI.browseDirectories(path);
+      setBrowsePath(data.current_path);
+      setBrowseParentPath(data.parent_path);
+      setBrowseEntries(data.entries);
+    } catch {
+      setBrowseError(copy.newTask.codexBrowseError);
+    } finally {
+      setBrowseLoading(false);
+    }
+  }, [copy.newTask.codexBrowseError]);
+
+  const openBrowse = () => {
+    setBrowseOpen(true);
+    void loadBrowsePath(workspaceDir.trim() || undefined);
+  };
+
+  const settings = [
+    { label: copy.newTask.codexModel, value: normalizedConfig.defaultModel },
+    { label: copy.newTask.codexReasoning, value: codexCopy.reasoning[normalizedConfig.defaultReasoning] },
+    { label: copy.newTask.codexSpeed, value: codexCopy.speed[normalizedConfig.defaultSpeed] },
+    { label: copy.newTask.codexPermission, value: codexCopy.permission[normalizedConfig.permissionMode] },
+  ];
+  const createDisabled = creating || !workspaceDir.trim();
+
+  return (
+    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <div className="rg-list-modal rg-codex-new-task-modal" role="dialog" aria-modal="true" aria-label={copy.newTask.codexDialogLabel} onMouseDown={(event) => event.stopPropagation()}>
+        <button className="rg-modal-close" type="button" title={copy.newTask.codexCloseTitle} onClick={onClose}>
+          <X />
+        </button>
+        <h2>{copy.newTask.codexTitle}</h2>
+        <div className="rg-list-modal-subtitle">{copy.newTask.codexSubtitle}</div>
+
+        <div className="rg-codex-new-task-body">
+          <section className="rg-codex-new-task-card">
+            <span>{copy.newTask.codexTaskLabel}</span>
+            <p>{draft.requestText}</p>
+          </section>
+
+          <label className="rg-codex-new-task-field">
+            <span>{copy.newTask.codexWorkspaceLabel}</span>
+            <div className="rg-codex-new-task-workspace-row">
+              <input
+                aria-label={copy.newTask.codexWorkspaceAria}
+                onChange={event => onWorkspaceChange(event.target.value)}
+                placeholder={copy.newTask.codexWorkspacePlaceholder}
+                value={workspaceDir}
+              />
+              <button type="button" onClick={openBrowse}>
+                <FolderOpen />
+                {copy.newTask.codexBrowse}
+              </button>
+            </div>
+          </label>
+
+          {browseOpen && (
+            <div className="rg-codex-new-task-browser">
+              <div className="rg-codex-new-task-browser-head">
+                <strong>{copy.newTask.codexBrowseTitle}</strong>
+                <button type="button" onClick={() => setBrowseOpen(false)}>{copy.newTask.codexBrowseClose}</button>
+              </div>
+              <div className="rg-codex-new-task-browser-path">{browsePath || copy.newTask.codexWorkspacePlaceholder}</div>
+              <div className="rg-codex-new-task-browser-actions">
+                <button disabled={!browseParentPath || browseLoading} onClick={() => browseParentPath && void loadBrowsePath(browseParentPath)} type="button">
+                  {copy.newTask.codexBrowseUp}
+                </button>
+                <button disabled={!browsePath || browseLoading} onClick={() => browsePath && void loadBrowsePath(browsePath)} type="button">
+                  {browseLoading ? copy.newTask.codexBrowseLoading : copy.newTask.codexBrowseRefresh}
+                </button>
+                <button disabled={!browsePath} onClick={() => { onWorkspaceChange(browsePath); setBrowseOpen(false); }} type="button">
+                  {copy.newTask.codexUseFolder}
+                </button>
+              </div>
+              {browseError ? (
+                <div className="rg-codex-new-task-browser-empty">{browseError}</div>
+              ) : browseEntries.length > 0 ? (
+                <div className="rg-codex-new-task-browser-list">
+                  {browseEntries.map(entry => (
+                    <button key={entry.path} onClick={() => void loadBrowsePath(entry.path)} type="button">
+                      <FolderOpen />
+                      <span>{entry.name}</span>
+                      {entry.is_hidden && <em>{copy.newTask.codexHidden}</em>}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rg-codex-new-task-browser-empty">
+                  {browseLoading ? copy.newTask.codexBrowseLoading : copy.newTask.codexBrowseEmpty}
+                </div>
+              )}
+            </div>
+          )}
+
+          <section className="rg-codex-new-task-card">
+            <div className="rg-codex-new-task-card-head">
+              <span>{copy.newTask.codexDefaultsTitle}</span>
+              <button type="button" onClick={onConfigure}>{copy.newTask.codexConfigure}</button>
+            </div>
+            <div className="rg-codex-new-task-settings">
+              {settings.map(item => (
+                <div key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+
+        <div className="rg-codex-new-task-actions">
+          <button className="rg-codex-new-task-secondary" type="button" onClick={onClose}>
+            {copy.newTask.codexCancel}
+          </button>
+          <button className="rg-new-task-create rg-codex-new-task-primary" disabled={createDisabled} onClick={onCreate} type="button">
+            {creating ? copy.newTask.codexCreatingSession : copy.newTask.codexCreateSession}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SessionHistoryViewAllModal({
   sessions,
   loading,
@@ -1974,59 +2094,6 @@ export function SessionHistoryViewAllModal({
                   : copy.sessionHistory.noMatch}
             </div>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function ToolsViewAllModal({
-  permissions,
-  onPermissionChange,
-  onClose,
-}: {
-  permissions: RuntimeGuardToolPermissions;
-  onPermissionChange: (toolId: RuntimeGuardToolId, permission: RuntimeGuardToolPermission) => void;
-  onClose: () => void;
-}) {
-  const { t } = useI18n();
-  const copy = t.runtimeGuard;
-  useRuntimeGuardModalEscape(onClose);
-
-  return (
-    <div className="rg-modal-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
-      <div className="rg-list-modal rg-tools-list-modal" role="dialog" aria-modal="true" aria-labelledby="rg-tools-modal-title" onMouseDown={(event) => event.stopPropagation()}>
-        <button className="rg-modal-close" type="button" title={copy.toolsModal.closeTitle} onClick={onClose}>
-          <X />
-        </button>
-        <h2 id="rg-tools-modal-title">{copy.toolsModal.title}</h2>
-        <div className="rg-list-modal-scroll rg-tools-modal-scroll">
-          {configurableTools.map(tool => {
-            const ToolIcon = tool.icon;
-            const permission = permissions[tool.id];
-            const toolName = toolDisplayName(tool.id, copy);
-            return (
-              <article className="rg-tool-permission-row" key={tool.id}>
-                <span className="rg-tool-permission-mark"><ToolIcon /></span>
-                <strong>{toolName}</strong>
-                <div className="rg-permission-segment" role="group" aria-label={rgText(copy.toolsModal.permissionAria, { tool: toolName })}>
-                  {toolPermissionOptions.map(option => (
-                    <button
-                      aria-pressed={permission === option}
-                      className={permission === option ? 'is-active' : ''}
-                      key={option}
-                      onClick={() => onPermissionChange(tool.id, option)}
-                      type="button"
-                    >
-                      {toolPermissionButtonLabel(option, copy)}
-                    </button>
-                  ))}
-                </div>
-              </article>
-            );
-          })}
         </div>
       </div>
     </div>
@@ -2532,6 +2599,7 @@ export default function RuntimeGuardConsole() {
   const { t, locale, setLocale } = useI18n();
   const copy = t.runtimeGuard;
   const navigate = useNavigate();
+  const location = useLocation();
   const runtimeInstancesQuery = useRuntimeInstances();
   const subscribeToChatStore = useCallback((listener: () => void) => chatStreamStore.subscribe(listener), []);
   const messageMap = useSyncExternalStore(subscribeToChatStore, () => chatStreamStore.getSnapshot());
@@ -2556,6 +2624,8 @@ export default function RuntimeGuardConsole() {
   const [newTaskModalOpen, setNewTaskModalOpen] = useState(false);
   const [newTaskRequest, setNewTaskRequest] = useState('');
   const [newTaskCreating, setNewTaskCreating] = useState(false);
+  const [codexNewTaskDraft, setCodexNewTaskDraft] = useState<PendingCodexNewTask | null>(null);
+  const [codexNewTaskCreating, setCodexNewTaskCreating] = useState(false);
   const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
   const [isComposing, setIsComposing] = useState(false);
   const [approvalItems, setApprovalItems] = useState<GuardPendingApproval[]>([]);
@@ -2566,7 +2636,6 @@ export default function RuntimeGuardConsole() {
   const [blockedLoading, setBlockedLoading] = useState(true);
   const [activeRuntimeGuardModal, setActiveRuntimeGuardModal] = useState<RuntimeGuardModal>(null);
   const [blockedModalRange, setBlockedModalRange] = useState<BlockedModalRange>('24h');
-  const [toolPermissions, setToolPermissions] = useState<RuntimeGuardToolPermissions>(() => ({ ...defaultToolPermissions }));
   const [placeholder, setPlaceholder] = useState('');
   const [guardMode, setGuardMode] = useState<GuardMode>('Off');
   const [guardModeSyncing, setGuardModeSyncing] = useState(false);
@@ -2639,6 +2708,33 @@ export default function RuntimeGuardConsole() {
   const inFlightKeysRef = useRef<Set<string>>(new Set());
   const approvalRefreshTimerRef = useRef<number | null>(null);
   const codexRateLimitsRequestRef = useRef(0);
+  const demoCodexNewTaskShownRef = useRef(false);
+
+  const demoCodexNewTask = useMemo(
+    () => new URLSearchParams(location.search).get('demoCodexNewTask') === '1',
+    [location.search],
+  );
+
+  useEffect(() => {
+    if (!demoCodexNewTask || demoCodexNewTaskShownRef.current) return;
+    demoCodexNewTaskShownRef.current = true;
+    const loadedConfig = loadCodexConfig();
+    const config = normalizeCodexSessionConfig({
+      ...loadedConfig,
+      workspaceDir: loadedConfig.workspaceDir.trim() || 'C:\\Users\\heng\\Desktop\\test',
+    });
+    setNewTaskModalOpen(false);
+    setCodexNewTaskDraft({
+      requestText: 'Use Codex for this task and confirm the session workspace before starting.',
+      seed: {
+        session_key: 'codex:pending:demo',
+        instance_id: 'codex-cli',
+        platform: 'codex',
+      },
+      config,
+      workspaceDir: config.workspaceDir,
+    });
+  }, [demoCodexNewTask]);
 
   const refreshCodexRateLimits = useCallback(async () => {
     const requestId = codexRateLimitsRequestRef.current + 1;
@@ -2695,10 +2791,7 @@ export default function RuntimeGuardConsole() {
     () => mergeSessionHistorySessions(sessionHistoryItems, sessions),
     [sessionHistoryItems, sessions],
   );
-  const sessionHistoryPreviewItems = useMemo(
-    () => visibleSessionHistoryItems.slice(0, 2),
-    [visibleSessionHistoryItems],
-  );
+  const sidebarSessionHistoryItems = visibleSessionHistoryItems;
   const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
   const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
   const codexComposerCopy = copy.codexComposer;
@@ -2737,33 +2830,6 @@ export default function RuntimeGuardConsole() {
   const activeBudgetPlatform = isRuntimeBudgetPlatform(activeSession?.platform)
     ? activeSession.platform
     : agentToPlatform(selectedAgent);
-  const sidebarTools = useMemo(() => ([
-    ...configurableTools.map(tool => {
-      const permission = toolPermissions[tool.id];
-      return {
-        ...tool,
-        name: toolDisplayName(tool.id, copy),
-        status: permissionDisplayLabel(permission, copy),
-        tone: toolPermissionTone(permission),
-      };
-    }).filter(tool => tool.id === 'shell' || tool.id === 'fileSystem' || tool.id === 'browser'),
-  ]), [copy, toolPermissions]);
-  const updateToolPermission = useCallback((toolId: RuntimeGuardToolId, permission: RuntimeGuardToolPermission) => {
-    if (toolPermissions[toolId] === permission) return;
-    const previousPermissions = toolPermissions;
-    const nextPermissions = { ...toolPermissions, [toolId]: permission };
-    setToolPermissions(nextPermissions);
-    guardAPI.setToolPolicies(toolPoliciesFromPermissions(nextPermissions))
-      .then(({ data }) => {
-        setToolPermissions(toolPermissionsFromPolicies(data.policies));
-      })
-      .catch(() => {
-        setToolPermissions(previousPermissions);
-        setPlaceholder('Failed to save tool permission.');
-        window.setTimeout(() => setPlaceholder(''), 2600);
-      });
-  }, [toolPermissions]);
-
   useEffect(() => {
     const updateLayoutFit = () => {
       const availableWidth = Math.max(1, window.innerWidth - RUNTIME_GUARD_RIGHT_EDGE_GUARD);
@@ -2846,26 +2912,6 @@ export default function RuntimeGuardConsole() {
     }, 10_000);
     return () => window.clearInterval(timer);
   }, [fetchSessionHistory]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    guardAPI.toolPolicies()
-      .then(({ data }) => {
-        if (!cancelled) {
-          setToolPermissions(toolPermissionsFromPolicies(data.policies));
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setPlaceholder('Failed to load tool permissions.');
-        window.setTimeout(() => setPlaceholder(''), 2600);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     if (activeSessionId && sessions.some(session => session.sessionKey === activeSessionId)) return;
@@ -3046,12 +3092,12 @@ export default function RuntimeGuardConsole() {
     [allBlockedItems],
   );
   const guardStatusSummary = useMemo(
-    () => calculateGuardStatusSummary(guardMode, toolPermissions, unresolvedApprovalItems),
-    [guardMode, toolPermissions, unresolvedApprovalItems],
+    () => calculateGuardStatusSummary(guardMode),
+    [guardMode],
   );
   const guardStatusRows = useMemo(
-    () => buildGuardStatusRows(guardMode, toolPermissions, unresolvedApprovalItems.length),
-    [guardMode, toolPermissions, unresolvedApprovalItems.length],
+    () => buildGuardStatusRows(guardMode),
+    [guardMode],
   );
   const agents: AgentDisplay[] = useMemo(
     () => sidebarAgentDefinitions.map(agent => {
@@ -3346,10 +3392,13 @@ export default function RuntimeGuardConsole() {
     return session;
   }, [sessions, setMessageMap]);
 
-  const addCodexConversationSession = useCallback(async () => {
-    const currentCodexConfig = loadCodexConfig();
+  const addCodexConversationSession = useCallback(async (
+    seed?: Partial<StartSessionResponse>,
+    configOverride?: CodexLocalConfig,
+  ) => {
+    const currentCodexConfig = normalizeCodexSessionConfig(configOverride ?? loadCodexConfig());
     const nextModel = currentCodexConfig.defaultModel;
-    const nextSpeed = codexModelSupportsFast(nextModel) ? currentCodexConfig.defaultSpeed : 'standard';
+    const nextSpeed = currentCodexConfig.defaultSpeed;
     setCodexModel(nextModel);
     setCodexReasoningLevel(currentCodexConfig.defaultReasoning);
     setCodexSpeed(nextSpeed);
@@ -3358,12 +3407,15 @@ export default function RuntimeGuardConsole() {
     const now = new Date().toISOString();
     const sameAgentCount = sessions.filter(session => session.agent === 'Codex').length + 1;
     const fallbackLabel = sameAgentCount === 1 ? 'Codex' : `Codex ${sameAgentCount}`;
+    const seedSessionKey = typeof seed?.session_key === 'string' && seed.session_key.startsWith('codex:')
+      ? seed.session_key
+      : '';
     const session: RuntimeGuardSession = {
-      sessionKey: `codex:pending:${uuidv4()}`,
+      sessionKey: seedSessionKey || `codex:pending:${uuidv4()}`,
       agent: 'Codex',
       platform: 'codex',
-      instanceId: 'codex-cli',
-      displayName: 'Codex CLI',
+      instanceId: seed?.instance_id || 'codex-cli',
+      displayName: seed?.instance?.display_name || 'Codex CLI',
       workspacePath: currentCodexConfig.workspaceDir.trim() || undefined,
       title: fallbackLabel,
       createdAt: now,
@@ -3371,6 +3423,10 @@ export default function RuntimeGuardConsole() {
       status: 'ready',
       autoTitlePending: false,
       frontendOnly: true,
+      codexModel: nextModel,
+      codexReasoningLevel: currentCodexConfig.defaultReasoning,
+      codexSpeed: nextSpeed,
+      codexPermissionMode: currentCodexConfig.permissionMode,
     };
 
     setSessions(current => [session, ...current]);
@@ -3444,10 +3500,6 @@ export default function RuntimeGuardConsole() {
     showToast,
   ]);
 
-  const openSelectedAgentSession = () => {
-    openSession(selectedAgent, agents.find(agent => agent.name === selectedAgent)?.installed ?? true);
-  };
-
   const openNewTaskModal = () => {
     setNewTaskRequest('');
     setNewTaskModalOpen(true);
@@ -3465,6 +3517,17 @@ export default function RuntimeGuardConsole() {
     setNewTaskCreating(true);
     try {
       const res = await chatAPI.smartStartSession({ message: requestText });
+      if (res.data.selected_agent === 'Codex' || res.data.platform === 'codex') {
+        const config = normalizeCodexSessionConfig(loadCodexConfig());
+        setCodexNewTaskDraft({
+          requestText,
+          seed: res.data,
+          config,
+          workspaceDir: config.workspaceDir.trim(),
+        });
+        closeNewTaskModal();
+        return;
+      }
       const platform = normalizeRuntimePlatform(res.data.platform);
       const agent = platformToAgent(platform);
       const createdSession = addCreatedRuntimeSession(agent, res.data, findRuntimeForAgent(agent));
@@ -3477,6 +3540,29 @@ export default function RuntimeGuardConsole() {
     } finally {
       setNewTaskCreating(false);
       setCreatingAgent(null);
+    }
+  };
+
+  const confirmCodexNewTask = async () => {
+    if (!codexNewTaskDraft || codexNewTaskCreating) return;
+    const workspaceDir = codexNewTaskDraft.workspaceDir.trim();
+    if (!workspaceDir) return;
+
+    setCodexNewTaskCreating(true);
+    try {
+      const config = normalizeCodexSessionConfig({
+        ...codexNewTaskDraft.config,
+        workspaceDir,
+      });
+      const createdSession = await addCodexConversationSession(codexNewTaskDraft.seed, config);
+      const requestText = codexNewTaskDraft.requestText;
+      setCodexNewTaskDraft(null);
+      void sendMessageForSession(createdSession, requestText);
+    } catch (err: any) {
+      const detail = String(err?.response?.data?.detail || err?.message || copy.toasts.failedCreateSession);
+      showToast(detail);
+    } finally {
+      setCodexNewTaskCreating(false);
     }
   };
 
@@ -3768,6 +3854,12 @@ export default function RuntimeGuardConsole() {
       let activeKey = originalKey;
       let activeThreadId: string | null = session.historySessionId
         || (session.sessionKey.startsWith('codex:pending:') ? null : session.sessionKey.replace(/^codex:/, '') || null);
+      const sessionCodexModel = session.codexModel ?? codexModel;
+      const sessionCodexReasoningLevel = session.codexReasoningLevel ?? codexReasoningLevel;
+      const sessionCodexSpeed: CodexSpeedOption = codexModelSupportsFast(sessionCodexModel)
+        ? (session.codexSpeed ?? codexSpeed)
+        : 'standard';
+      const sessionCodexPermissionMode = session.codexPermissionMode ?? codexPermissionMode;
       const effectiveCodexPlanMode = options.codexPlanMode ?? codexPlanMode;
       const effectiveCodexGoalMode = options.codexGoalMode ?? codexGoalMode;
       const activity = new Date();
@@ -3809,10 +3901,10 @@ export default function RuntimeGuardConsole() {
             message: text,
             thread_id: activeThreadId,
             cwd: session.workspacePath || null,
-            model: codexModelId(codexModel),
-            reasoning_effort: codexReasoningLevel,
-            speed: codexEffectiveSpeed,
-            permission_mode: codexPermissionMode,
+            model: codexModelId(sessionCodexModel),
+            reasoning_effort: sessionCodexReasoningLevel,
+            speed: sessionCodexSpeed,
+            permission_mode: sessionCodexPermissionMode,
             plan_mode: effectiveCodexPlanMode,
             goal_mode: effectiveCodexGoalMode,
             goal_objective: effectiveCodexGoalMode ? text : null,
@@ -4562,6 +4654,19 @@ export default function RuntimeGuardConsole() {
           creating={newTaskCreating}
         />
       )}
+      {codexNewTaskDraft && (
+        <CodexNewTaskModal
+          draft={codexNewTaskDraft}
+          workspaceDir={codexNewTaskDraft.workspaceDir}
+          onWorkspaceChange={(workspaceDir) => setCodexNewTaskDraft(current => (
+            current ? { ...current, workspaceDir } : current
+          ))}
+          onCreate={() => void confirmCodexNewTask()}
+          onClose={() => setCodexNewTaskDraft(null)}
+          onConfigure={() => navigate('/codex_configure')}
+          creating={codexNewTaskCreating}
+        />
+      )}
       {budgetModalOpen && (
         <div className="rg-modal-backdrop" role="presentation">
           <div className="rg-budget-modal" role="dialog" aria-modal="true" aria-labelledby="rg-budget-modal-title">
@@ -4642,13 +4747,6 @@ export default function RuntimeGuardConsole() {
             </div>
           </div>
         </div>
-      )}
-      {activeRuntimeGuardModal === 'tools' && (
-        <ToolsViewAllModal
-          permissions={toolPermissions}
-          onPermissionChange={updateToolPermission}
-          onClose={() => setActiveRuntimeGuardModal(null)}
-        />
       )}
       {activeRuntimeGuardModal === 'sessions' && (
         <SessionHistoryViewAllModal
@@ -4766,37 +4864,52 @@ export default function RuntimeGuardConsole() {
           ))}
         </section>
 
-        <section className="rg-tools" style={{ top: RUNTIME_GUARD_SIDEBAR_LAYOUT.toolsTop }}>
-          <div className="rg-tools-title">
-            <span>{copy.sidebar.toolPermission}</span>
-            <button type="button" onClick={() => setActiveRuntimeGuardModal('tools')}>{copy.sidebar.set}</button>
+        <section
+          className="rg-left-history"
+          style={{
+            top: RUNTIME_GUARD_SIDEBAR_LAYOUT.historyTop,
+            height: RUNTIME_GUARD_SIDEBAR_LAYOUT.historyHeight,
+          }}
+        >
+          <div className="rg-left-history-title">
+            <span>{copy.sessionHistory.title}</span>
+            <button
+              type="button"
+              onClick={() => {
+                void fetchSessionHistory(false);
+                setActiveRuntimeGuardModal('sessions');
+              }}
+            >
+              {copy.sidebar.manage}
+            </button>
           </div>
-          {sidebarTools.map((tool, index) => {
-            const ToolIcon = tool.icon;
-            return (
-              <div className="rg-tool-row" data-tool={tool.id} key={tool.name} style={{ top: 20 + index * 23 }}>
-                <ToolIcon />
-                <span>{tool.name}</span>
-                <span className={`rg-tool-${tool.tone}`}>{tool.status}</span>
+          <div className="rg-left-history-list">
+            {sidebarSessionHistoryItems.length > 0 ? (
+              sidebarSessionHistoryItems.map(session => {
+                const status = sessionHistoryStatus(session, activeSessionId);
+                const baseTitle = runtimeGuardSessionBaseTitle(session);
+                return (
+                  <button
+                    className={`rg-left-history-row ${status === 'Active' ? 'is-active' : ''}`}
+                    key={session.sessionKey}
+                    onClick={() => openHistorySession(session)}
+                    type="button"
+                  >
+                    <AgentIconBadge agent={session.agent} size="compact" />
+                    <span className="rg-left-history-main">
+                      <strong>{session.agent}:</strong>
+                      <span>{baseTitle}</span>
+                    </span>
+                    <span className="rg-left-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="rg-left-history-empty">
+                {sessionHistoryLoading ? copy.main.loadingHistory : copy.sessionHistory.empty}
               </div>
-            );
-          })}
-        </section>
-
-        <section className="rg-safety-links" style={{ top: RUNTIME_GUARD_SIDEBAR_LAYOUT.safetyTop }}>
-          <div className="rg-section-title">
-            <span>{copy.sidebar.safetyTools}</span>
+            )}
           </div>
-          <button className="rg-safety-row rg-safety-row-asset" onClick={() => navigate('/assets')} style={{ top: 22 }} type="button">
-            <Shield />
-            <span>{copy.sidebar.assetShield}</span>
-            <ChevronRight />
-          </button>
-          <button className="rg-safety-row rg-safety-row-risk" onClick={() => navigate('/risk-test')} style={{ top: 55 }} type="button">
-            <AlertTriangle />
-            <span>{copy.sidebar.riskTest}</span>
-            <ChevronRight />
-          </button>
         </section>
 
         <div
@@ -4849,47 +4962,6 @@ export default function RuntimeGuardConsole() {
 
       <div className="rg-main-fluid" style={mainFluidStyle}>
       <main className="rg-main">
-        <div className="rg-tabs">
-          <div className="rg-session-tabs">
-            {sessions.map(session => (
-                <button
-                  className={`rg-chat-tab ${session.sessionKey === activeSessionId ? 'is-active' : ''}`}
-                  key={session.sessionKey}
-                  onClick={() => {
-                    setActiveSessionId(session.sessionKey);
-                    setSelectedAgent(session.agent);
-                  }}
-                  type="button"
-                >
-                  <span className="rg-chat-tab-agent">
-                    <AgentIconBadge agent={session.agent} size="compact" />
-                  </span>
-                  <span className="rg-chat-tab-title">{session.agent}</span>
-                  <span
-                    className="rg-chat-tab-close"
-                    role="button"
-                    tabIndex={0}
-                    title={copy.main.closeSessionTitle}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      closeSession(session.sessionKey);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        closeSession(session.sessionKey);
-                      }
-                    }}
-                  >
-                    <X />
-                  </span>
-                </button>
-            ))}
-            <button className="rg-tab-add" type="button" onClick={openSelectedAgentSession} disabled={Boolean(creatingAgent)}>+</button>
-          </div>
-        </div>
-
         <section className="rg-task-title">
           <h1>{activeSession ? formatRuntimeGuardSessionTitle(activeSession) : copy.main.noSessionTitle}</h1>
           <p className="rg-session-meta">
@@ -5231,45 +5303,21 @@ export default function RuntimeGuardConsole() {
       </main>
       </div>
       <div className="rg-right-scale" style={rightScaleStyle}>
-        <section className="rg-session-history">
-          <div className="rg-card-head rg-session-history-head">
-            <span>{copy.sessionHistory.title.toUpperCase()}</span>
-            <button
-              type="button"
-              onClick={() => {
-                void fetchSessionHistory(false);
-                setActiveRuntimeGuardModal('sessions');
-              }}
-            >
-              {copy.sidebar.manage}
-            </button>
+        <section className="rg-right-tools">
+          <div className="rg-card-head rg-right-tools-head">
+            <span>{copy.sidebar.safetyTools}</span>
           </div>
-          <div className="rg-session-history-list">
-            {sessionHistoryPreviewItems.length > 0 ? (
-              sessionHistoryPreviewItems.map(session => {
-                const status = sessionHistoryStatus(session, activeSessionId);
-                const baseTitle = runtimeGuardSessionBaseTitle(session);
-                return (
-                  <button
-                    className="rg-session-history-row"
-                    key={session.sessionKey}
-                    onClick={() => openHistorySession(session)}
-                    type="button"
-                  >
-                    <span className="rg-session-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
-                    <div className="rg-session-history-main">
-                      <strong>{session.agent}:</strong>
-                      <span>{baseTitle}</span>
-                    </div>
-                    <em className={status === 'Active' ? 'is-active' : ''}>{sessionStatusDisplay(status, copy)}</em>
-                  </button>
-                );
-              })
-            ) : (
-              <div className="rg-session-history-empty">
-                {sessionHistoryLoading ? copy.main.loadingHistory : copy.sessionHistory.empty}
-              </div>
-            )}
+          <div className="rg-right-tools-list">
+            <button className="rg-right-tool-row rg-safety-row-asset" onClick={() => navigate('/assets')} type="button">
+              <Shield />
+              <span>{copy.sidebar.assetShield}</span>
+              <ChevronRight />
+            </button>
+            <button className="rg-right-tool-row rg-safety-row-risk" onClick={() => navigate('/risk-test')} type="button">
+              <AlertTriangle />
+              <span>{copy.sidebar.riskTest}</span>
+              <ChevronRight />
+            </button>
           </div>
         </section>
         <aside className="rg-right-panel">

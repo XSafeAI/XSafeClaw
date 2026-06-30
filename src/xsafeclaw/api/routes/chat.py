@@ -3,7 +3,9 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
+import shutil
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -2436,8 +2438,12 @@ class SmartStartSessionRequest(BaseModel):
     message: str = Field(..., description="User request used only for smart routing")
 
 
+SmartAgentName = Literal["Codex", "OpenClaw", "Hermes"]
+SmartCandidate = tuple[SmartAgentName, RuntimeInstance | None]
+
+
 class SmartStartSessionResponse(StartSessionResponse):
-    selected_agent: Literal["OpenClaw", "Hermes", "Nanobot"]
+    selected_agent: SmartAgentName
     smart: bool = True
     router_source: str | None = None
 
@@ -2447,11 +2453,11 @@ _TIMESTAMP_LABEL_AGENT_NAMES = {
     "hermes": "Hermes",
 }
 
-_SMART_AGENT_NAMES = ("OpenClaw", "Hermes", "Nanobot")
+_SMART_AGENT_NAMES: tuple[SmartAgentName, ...] = ("Codex", "OpenClaw", "Hermes")
 _SMART_AGENT_PLATFORM_TO_NAME = {
+    "codex": "Codex",
     "openclaw": "OpenClaw",
     "hermes": "Hermes",
-    "nanobot": "Nanobot",
 }
 _SMART_AGENT_NAME_TO_PLATFORM = {
     name: platform for platform, name in _SMART_AGENT_PLATFORM_TO_NAME.items()
@@ -2471,6 +2477,15 @@ _SMART_ROUTER_SYSTEM_PROMPT = (
     "Do not return JSON, markdown, prose, explanations, or an agent name.\n"
     "Never choose an Agent that is not in candidate_options."
 )
+_SMART_CODEX_EXECUTABLES = (
+    ("codex.cmd", "codex.exe", "codex.bat", "codex.ps1", "codex")
+    if os.name == "nt"
+    else ("codex",)
+)
+
+
+def _smart_codex_available() -> bool:
+    return any(shutil.which(name) for name in _SMART_CODEX_EXECUTABLES)
 
 
 def _start_session_runtime_label(
@@ -2537,10 +2552,12 @@ async def _smart_runtime_budget_allows(platform: str) -> bool:
 
 async def _smart_available_agent_candidates(
     instances: list[RuntimeInstance] | None = None,
-) -> list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]]:
+) -> list[SmartCandidate]:
     known_instances = instances if instances is not None else await list_instances()
-    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]] = []
-    for platform in ("openclaw", "hermes", "nanobot"):
+    candidates: list[SmartCandidate] = []
+    if _smart_codex_available():
+        candidates.append(("Codex", None))
+    for platform in ("openclaw", "hermes"):
         instance = _smart_pick_platform_instance(known_instances, platform)
         if instance is None:
             continue
@@ -2584,14 +2601,14 @@ def _smart_router_source_instances(
 
 def _build_smart_router_prompt(
     message: str,
-    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
+    candidates: list[SmartCandidate],
 ) -> str:
     candidate_options = [
         {
             "id": chr(ord("A") + index),
             "agent": agent_name,
-            "platform": instance.platform,
-            "displayName": instance.display_name,
+            "platform": instance.platform if instance is not None else "codex",
+            "displayName": instance.display_name if instance is not None else "Codex CLI",
         }
         for index, (agent_name, instance) in enumerate(candidates)
     ]
@@ -2615,8 +2632,8 @@ def _strip_json_code_fence(text: str) -> str:
 def _parse_smart_router_agent(
     raw_output: str,
     allowed_agents: set[str],
-    candidate_ids: dict[str, Literal["OpenClaw", "Hermes", "Nanobot"]] | None = None,
-) -> Literal["OpenClaw", "Hermes", "Nanobot"]:
+    candidate_ids: dict[str, SmartAgentName] | None = None,
+) -> SmartAgentName:
     def normalize_agent(raw_agent: str) -> str:
         normalized = raw_agent.strip()
         exact = next((agent for agent in allowed_agents if agent == normalized), "")
@@ -2686,8 +2703,8 @@ def _parse_smart_router_agent(
 
 
 def _fallback_smart_router_agent(
-    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
-) -> tuple[Literal["OpenClaw", "Hermes", "Nanobot"], str]:
+    candidates: list[SmartCandidate],
+) -> tuple[SmartAgentName, str]:
     if not candidates:
         raise _smart_routing_exception(503)
     return candidates[0][0], _SMART_ROUTER_FALLBACK_SOURCE
@@ -2695,10 +2712,10 @@ def _fallback_smart_router_agent(
 
 async def _route_smart_agent(
     message: str,
-    candidates: list[tuple[Literal["OpenClaw", "Hermes", "Nanobot"], RuntimeInstance]],
+    candidates: list[SmartCandidate],
     *,
     instances: list[RuntimeInstance],
-) -> tuple[Literal["OpenClaw", "Hermes", "Nanobot"], str]:
+) -> tuple[SmartAgentName, str]:
     allowed_agents = {agent_name for agent_name, _ in candidates}
     candidate_ids = {
         chr(ord("A") + index): agent_name
@@ -2754,6 +2771,23 @@ async def _route_smart_agent(
         f"falling back to {candidates[0][0]} last_error={last_error}"
     )
     return _fallback_smart_router_agent(candidates)
+
+
+def _smart_codex_pending_session(router_source: str | None = None) -> SmartStartSessionResponse:
+    return SmartStartSessionResponse(
+        session_key=f"codex:pending:{uuid.uuid4()}",
+        status="ready",
+        instance_id="codex-cli",
+        platform="codex",
+        instance={
+            "instance_id": "codex-cli",
+            "platform": "codex",
+            "display_name": "Codex CLI",
+        },
+        selected_agent="Codex",
+        smart=True,
+        router_source=router_source,
+    )
 
 
 class ImageAttachment(BaseModel):
@@ -3547,11 +3581,13 @@ async def smart_start_session(request: SmartStartSessionRequest):
             candidates,
             instances=instances,
         )
+        if selected_agent == "Codex":
+            return _smart_codex_pending_session(router_source)
         selected_platform = _SMART_AGENT_NAME_TO_PLATFORM.get(selected_agent)
         selected_instance = next(
             (
                 instance for agent_name, instance in candidates
-                if agent_name == selected_agent and instance.platform == selected_platform
+                if agent_name == selected_agent and instance is not None and instance.platform == selected_platform
             ),
             None,
         )
@@ -3561,6 +3597,9 @@ async def smart_start_session(request: SmartStartSessionRequest):
                 f"agent={selected_agent} platform={selected_platform}"
             )
             raise _smart_routing_exception(502)
+
+    if selected_agent == "Codex":
+        return _smart_codex_pending_session(router_source)
 
     session = await _create_chat_session(
         StartSessionRequest(

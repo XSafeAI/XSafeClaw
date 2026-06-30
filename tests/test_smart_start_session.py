@@ -9,6 +9,11 @@ from xsafeclaw.api.routes import chat as chat_routes
 from xsafeclaw.runtime.models import RuntimeInstance, empty_capabilities
 
 
+@pytest.fixture(autouse=True)
+def _smart_codex_unavailable_by_default(monkeypatch):
+    monkeypatch.setattr(chat_routes, "_smart_codex_available", lambda: False)
+
+
 def _runtime(
     platform: str,
     *,
@@ -66,7 +71,7 @@ async def test_smart_start_with_no_available_agents_fails_without_creating(monke
 
 @pytest.mark.asyncio
 async def test_smart_start_single_available_agent_skips_router_model(monkeypatch):
-    instance = _runtime("nanobot")
+    instance = _runtime("openclaw")
     captured: dict[str, object] = {}
 
     async def fake_list_instances():
@@ -94,11 +99,11 @@ async def test_smart_start_single_available_agent_skips_router_model(monkeypatch
 
     request = captured["request"]
     assert isinstance(request, chat_routes.StartSessionRequest)
-    assert request.instance_id == "nanobot-default"
-    assert request.label_mode is None
-    assert captured["budget_platform"] == "nanobot"
-    assert response.selected_agent == "Nanobot"
-    assert response.platform == "nanobot"
+    assert request.instance_id == "openclaw-default"
+    assert request.label_mode == "server_timestamp"
+    assert captured["budget_platform"] == "openclaw"
+    assert response.selected_agent == "OpenClaw"
+    assert response.platform == "openclaw"
     assert response.router_source is None
 
 
@@ -155,6 +160,53 @@ async def test_smart_start_routes_multiple_agents_with_openclaw_source(monkeypat
     assert request.label_mode == "server_timestamp"
     assert response.selected_agent == "Hermes"
     assert response.router_source == "openclaw"
+
+
+@pytest.mark.asyncio
+async def test_smart_start_routes_between_codex_openclaw_and_hermes(monkeypatch):
+    openclaw = _runtime("openclaw")
+    hermes = _runtime("hermes")
+    captured: dict[str, object] = {}
+
+    async def fake_list_instances():
+        return [openclaw, hermes]
+
+    async def fake_budget_allows(_platform: str):
+        return True
+
+    async def fake_router(
+        prompt: str,
+        *,
+        platform: str,
+        instance_id: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+    ):
+        _ = platform, instance_id, max_tokens, system_prompt
+        captured["prompt"] = prompt
+        return "A"
+
+    async def fail_create(_request):
+        raise AssertionError("Codex smart routing should return a pending Codex session shell")
+
+    monkeypatch.setattr(chat_routes, "_smart_codex_available", lambda: True, raising=False)
+    monkeypatch.setattr(chat_routes, "list_instances", fake_list_instances)
+    monkeypatch.setattr(chat_routes, "_smart_runtime_budget_allows", fake_budget_allows)
+    monkeypatch.setattr(chat_routes, "call_runtime_model_prompt", fake_router)
+    monkeypatch.setattr(chat_routes, "_create_chat_session", fail_create)
+
+    response = await chat_routes.smart_start_session(
+        chat_routes.SmartStartSessionRequest(message="choose the best coding agent")
+    )
+
+    prompt = str(captured["prompt"])
+    assert '"agent": "Codex"' in prompt
+    assert '"agent": "OpenClaw"' in prompt
+    assert '"agent": "Hermes"' in prompt
+    assert "Nanobot" not in prompt
+    assert response.selected_agent == "Codex"
+    assert response.platform == "codex"
+    assert response.session_key.startswith("codex:pending:")
 
 
 @pytest.mark.asyncio
@@ -447,6 +499,4 @@ async def test_smart_available_candidates_exclude_budget_and_unreachable(monkeyp
         [openclaw, hermes, nanobot]
     )
 
-    assert [(agent, instance.platform) for agent, instance in candidates] == [
-        ("Nanobot", "nanobot")
-    ]
+    assert candidates == []

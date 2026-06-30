@@ -20,10 +20,9 @@ async def _wait_for_pending() -> guard_service.PendingApproval:
 
 
 @pytest.fixture(autouse=True)
-def _tool_policy_state(tmp_path, monkeypatch):
+def _guard_runtime_state(tmp_path, monkeypatch):
     original_enabled = guard_service._guard_enabled
     original_timeout = guard_service._PENDING_TIMEOUT
-    monkeypatch.setattr(guard_service, "_TOOL_POLICY_FILE", tmp_path / "tool_policies.json")
     monkeypatch.setattr(guard_service, "_DENYLIST_FILE", tmp_path / "denylist.json")
     monkeypatch.setattr(guard_service, "_RISK_RULES_FILE", tmp_path / "risk_rules.json")
     guard_service._pending.clear()
@@ -36,44 +35,13 @@ def _tool_policy_state(tmp_path, monkeypatch):
     guard_service._PENDING_TIMEOUT = original_timeout
 
 
-def test_tool_policies_default_and_persistence():
-    assert guard_service.load_tool_policies() == {
-        "shell": "guard",
-        "file_system": "guard",
-        "browser": "guard",
-        "network": "guard",
-        "git": "guard",
-    }
-
-    saved = guard_service.save_tool_policies({"shell": "ask", "network": "allow"})
-
-    assert saved["shell"] == "ask"
-    assert saved["network"] == "allow"
-    assert guard_service.load_tool_policies() == saved
-    assert json.loads(guard_service._TOOL_POLICY_FILE.read_text("utf-8")) == {"policies": saved}
-
-
-def test_tool_policy_api_get_put_roundtrip():
+def test_tool_policy_api_is_removed():
     client = TestClient(app)
 
-    put_response = client.put(
-        "/api/guard/tool-policies",
-        json={"policies": {"shell": "ask", "file_system": "allow"}},
-    )
-    assert put_response.status_code == 200
-    payload = put_response.json()
-    assert payload["policies"]["shell"] == "ask"
-    assert payload["policies"]["file_system"] == "allow"
-
-    get_response = client.get("/api/guard/tool-policies")
-    assert get_response.status_code == 200
-    assert get_response.json()["policies"] == payload["policies"]
-
-    invalid_response = client.put(
-        "/api/guard/tool-policies",
-        json={"policies": {"secrets": "allow", "shell": "always"}},
-    )
-    assert invalid_response.status_code == 422
+    paths = {route.path for route in app.routes}
+    assert "/api/guard/tool-policies" not in paths
+    assert client.get("/api/guard/tool-policies").status_code == 404
+    assert client.put("/api/guard/tool-policies", json={"policies": {"shell": "allow"}}).status_code in {404, 405}
 
 
 @pytest.mark.parametrize(
@@ -173,22 +141,93 @@ def test_pending_and_observation_responses_include_timeline_metadata():
 
 
 @pytest.mark.asyncio
-async def test_allow_policy_skips_guard_model_but_not_risk_rule(monkeypatch):
-    guard_service.save_tool_policies({"shell": "allow"})
+async def test_runtime_tool_check_calls_guard_model_without_policy_shortcut(monkeypatch):
+    seen = {"called": False}
 
-    async def fail_guard_model(*_args, **_kwargs):
-        raise AssertionError("guard model should not be called for allow policy")
+    async def fake_guard_model(*_args, **_kwargs):
+        seen["called"] = True
+        return "safe"
 
-    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
+    monkeypatch.setattr(guard_service, "_call_guard_model", fake_guard_model)
+    monkeypatch.setattr(guard_service, "_guard_enabled", True)
 
-    allowed = await guard_service.check_tool_call(
-        "exec",
-        {"command": "echo ok"},
-        "normal-session",
-        platform="hermes",
+    result = await guard_service.check_runtime_tool_call(
+        platform="codex",
+        instance_id="codex-cli",
+        guard_mode="blocking",
+        session_key="codex:thread-1",
+        tool_name="exec",
+        params={"command": "echo ok"},
         messages=[],
     )
-    assert allowed == {"action": "allow"}
+
+    assert result == {"action": "allow"}
+    assert seen["called"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_check_guard_disabled_keeps_existing_allow_semantics(monkeypatch):
+    async def fail_guard_model(*_args, **_kwargs):
+        raise AssertionError("guard model should not run when Guard is disabled")
+
+    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
+    monkeypatch.setattr(guard_service, "_guard_enabled", False)
+
+    result = await guard_service.check_runtime_tool_call(
+        platform="codex",
+        instance_id="codex-cli",
+        guard_mode="blocking",
+        session_key="codex:thread-1",
+        tool_name="exec",
+        params={"command": "echo ok"},
+        messages=[],
+    )
+
+    assert result == {"action": "allow"}
+    observation = guard_service.get_all_observations()[0]
+    assert observation.guard_verdict == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_check_unsafe_blocking_creates_pending(monkeypatch):
+    async def fake_guard_model(*_args, **_kwargs):
+        return (
+            "unsafe\n"
+            "Risk Source: command execution\n"
+            "Failure Mode: risky command\n"
+            "Real World Harm: project damage"
+        )
+
+    monkeypatch.setattr(guard_service, "_call_guard_model", fake_guard_model)
+    monkeypatch.setattr(guard_service, "_guard_enabled", True)
+
+    task = asyncio.create_task(
+        guard_service.check_runtime_tool_call(
+            platform="codex",
+            instance_id="codex-cli",
+            guard_mode="blocking",
+            session_key="codex:thread-1",
+            tool_name="exec",
+            params={"command": "echo guarded"},
+            messages=[{"role": "user", "content": "run a command"}],
+        )
+    )
+    pending = await _wait_for_pending()
+
+    assert pending.platform == "codex"
+    assert pending.guard_verdict == "unsafe"
+    assert pending.failure_mode == "risky command"
+
+    guard_service.resolve_pending(pending.id, "approved")
+    assert await task == {"action": "allow"}
+
+
+@pytest.mark.asyncio
+async def test_guard_flow_still_honors_risk_rules_before_model(monkeypatch):
+    async def fail_guard_model(*_args, **_kwargs):
+        raise AssertionError("risk-rule precheck should run before guard model")
+
+    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
 
     blocked = await guard_service.check_tool_call(
         "exec",
@@ -197,13 +236,13 @@ async def test_allow_policy_skips_guard_model_but_not_risk_rule(monkeypatch):
         platform="hermes",
         messages=[],
     )
+
     assert blocked["action"] == "block"
     assert "dry-run" in blocked["reason"]
 
 
 @pytest.mark.asyncio
-async def test_allow_policy_does_not_bypass_denylist(tmp_path, monkeypatch):
-    guard_service.save_tool_policies({"file_system": "allow"})
+async def test_denylist_still_blocks_before_model(tmp_path, monkeypatch):
     protected_dir = tmp_path / "protected"
     protected_dir.mkdir()
     protected_file = protected_dir / "secret.txt"
@@ -214,7 +253,7 @@ async def test_allow_policy_does_not_bypass_denylist(tmp_path, monkeypatch):
     )
 
     async def fail_guard_model(*_args, **_kwargs):
-        raise AssertionError("guard model should not be called before denylist block")
+        raise AssertionError("denylist precheck should run before guard model")
 
     monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
 
@@ -227,148 +266,3 @@ async def test_allow_policy_does_not_bypass_denylist(tmp_path, monkeypatch):
     )
 
     assert result["action"] == "block"
-
-
-@pytest.mark.asyncio
-async def test_ask_policy_creates_pending_in_guard_on(monkeypatch):
-    guard_service.save_tool_policies({"shell": "ask"})
-
-    async def fail_guard_model(*_args, **_kwargs):
-        raise AssertionError("guard model should not be called for ask policy")
-
-    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
-
-    task = asyncio.create_task(
-        guard_service.check_tool_call(
-            "exec",
-            {"command": "echo needs review"},
-            "session-ask",
-            platform="hermes",
-            messages=[],
-        )
-    )
-    pending = await _wait_for_pending()
-
-    assert pending.guard_verdict == "policy_ask"
-    assert pending.failure_mode == "Tool policy requires manual approval"
-
-    guard_service.resolve_pending(pending.id, "approved")
-    assert await task == {"action": "allow"}
-
-
-@pytest.mark.asyncio
-async def test_duplicate_pending_tool_call_reuses_existing_approval(monkeypatch):
-    guard_service.save_tool_policies({"shell": "ask"})
-
-    async def fail_guard_model(*_args, **_kwargs):
-        raise AssertionError("guard model should not be called for ask policy")
-
-    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
-
-    first = asyncio.create_task(
-        guard_service.check_tool_call(
-            "exec",
-            {"command": "echo duplicate"},
-            "session-duplicate",
-            platform="hermes",
-            messages=[],
-        )
-    )
-    second = asyncio.create_task(
-        guard_service.check_tool_call(
-            "exec",
-            {"command": "echo duplicate"},
-            "session-duplicate",
-            platform="hermes",
-            messages=[],
-        )
-    )
-    pending = await _wait_for_pending()
-
-    assert len(guard_service.get_all_pending()) == 1
-
-    guard_service.resolve_pending(pending.id, "approved")
-    assert await first == {"action": "allow"}
-    assert await second == {"action": "allow"}
-
-
-@pytest.mark.asyncio
-async def test_guard_policy_degrades_to_ask_when_guard_off(monkeypatch):
-    guard_service.save_tool_policies({"shell": "guard"})
-    guard_service._guard_enabled = False
-
-    async def fail_guard_model(*_args, **_kwargs):
-        raise AssertionError("guard model should not be called when guard is off")
-
-    monkeypatch.setattr(guard_service, "_call_guard_model", fail_guard_model)
-
-    task = asyncio.create_task(
-        guard_service.check_tool_call(
-            "exec",
-            {"command": "echo guard off"},
-            "session-guard-off",
-            platform="hermes",
-            messages=[],
-        )
-    )
-    pending = await _wait_for_pending()
-
-    assert pending.guard_verdict == "policy_ask"
-    assert pending.failure_mode == "Guard is disabled; tool policy requires manual approval"
-
-    guard_service.resolve_pending(pending.id, "rejected")
-    result = await task
-    assert result["action"] == "block"
-    assert "rejected by the safety reviewer" in result["reason"]
-
-
-@pytest.mark.asyncio
-async def test_guard_policy_uses_existing_model_when_guard_on(monkeypatch):
-    guard_service.save_tool_policies({"shell": "guard"})
-    seen = {"called": False}
-
-    async def fake_guard_model(*_args, **_kwargs):
-        seen["called"] = True
-        return (
-            "unsafe\n"
-            "Risk Source: command execution\n"
-            "Failure Mode: risky command\n"
-            "Real World Harm: project damage"
-        )
-
-    monkeypatch.setattr(guard_service, "_call_guard_model", fake_guard_model)
-
-    task = asyncio.create_task(
-        guard_service.check_tool_call(
-            "exec",
-            {"command": "echo guarded"},
-            "session-guard-on",
-            platform="hermes",
-            messages=[{"role": "user", "content": "run a command"}],
-        )
-    )
-    pending = await _wait_for_pending()
-
-    assert seen["called"] is True
-    assert pending.guard_verdict == "unsafe"
-    assert pending.failure_mode == "risky command"
-
-    guard_service.resolve_pending(pending.id, "approved")
-    assert await task == {"action": "allow"}
-
-
-@pytest.mark.asyncio
-async def test_ask_policy_timeout_blocks():
-    guard_service.save_tool_policies({"shell": "ask"})
-    guard_service._PENDING_TIMEOUT = 0.01
-
-    result = await guard_service.check_tool_call(
-        "exec",
-        {"command": "echo timeout"},
-        "session-timeout",
-        platform="hermes",
-        messages=[],
-    )
-
-    assert result["action"] == "block"
-    assert guard_service.get_all_pending()[0].resolution == "rejected"

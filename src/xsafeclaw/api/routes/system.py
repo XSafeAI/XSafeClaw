@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
 import uuid
@@ -173,6 +174,8 @@ _UV_EXECUTABLES = (
     else ("uv",)
 )
 _CODEX_PROBE_CACHE_TTL_S = 15.0
+_CODEX_INSTALL_PS1_URL = "https://chatgpt.com/codex/install.ps1"
+_CODEX_INSTALL_SH_URL = "https://chatgpt.com/codex/install.sh"
 _codex_probe_cache: tuple[float, str, dict[str, Any]] | None = None
 _NANOBOT_PROVIDER_OPTIONS = [
     {"id": "minimax", "name": "MiniMax", "default_model": "MiniMax-M2.7"},
@@ -1253,6 +1256,84 @@ def _invalidate_codex_probe_cache() -> None:
     _codex_probe_cache = None
 
 
+def _codex_windows_visible_bin_dir(env: dict[str, str] | None = None) -> Path:
+    search_env = env or os.environ
+    local_appdata = search_env.get("LOCALAPPDATA")
+    if local_appdata:
+        return Path(local_appdata) / "Programs" / "OpenAI" / "Codex" / "bin"
+    return Path.home() / "AppData" / "Local" / "Programs" / "OpenAI" / "Codex" / "bin"
+
+
+def _prepend_path_entry(env: dict[str, str], entry: str | Path) -> dict[str, str]:
+    next_env = dict(env)
+    entry_text = str(entry)
+    current = next_env.get("PATH", "")
+    entry_key = os.path.normcase(entry_text.rstrip("\\/"))
+    already_present = any(
+        segment and os.path.normcase(segment.rstrip("\\/")) == entry_key
+        for segment in current.split(_PATH_SEP)
+    )
+    if not already_present:
+        next_env["PATH"] = entry_text + (_PATH_SEP + current if current else "")
+    return next_env
+
+
+def _codex_install_verify_env(env: dict[str, str]) -> dict[str, str]:
+    if not _host_is_windows():
+        return dict(env)
+    return _prepend_path_entry(env, _codex_windows_visible_bin_dir(env))
+
+
+def _codex_install_steps(env: dict[str, str], temp_dir: Path) -> tuple[list[tuple[str, list[str]]], str | None]:
+    if _host_is_windows():
+        curl = shutil.which("curl.exe", path=env.get("PATH")) or shutil.which("curl", path=env.get("PATH"))
+        shell = _find_available_launcher(("pwsh", "powershell"), fallback="powershell") or "powershell"
+        if curl:
+            script_path = temp_dir / "codex-install.ps1"
+            return [
+                (
+                    "Download Codex CLI installer",
+                    [curl, "-L", "--fail", "--show-error", "-o", str(script_path), _CODEX_INSTALL_PS1_URL],
+                ),
+                (
+                    "Run Codex CLI installer",
+                    [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                ),
+            ], None
+        return [
+            (
+                "Run Codex CLI installer",
+                [
+                    shell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    f"irm {_CODEX_INSTALL_PS1_URL} | iex",
+                ],
+            )
+        ], None
+
+    sh = shutil.which("sh", path=env.get("PATH")) or "/bin/sh"
+    curl = shutil.which("curl", path=env.get("PATH"))
+    if curl:
+        return [
+            (
+                "Run Codex CLI installer",
+                [sh, "-c", f"curl -fsSL {_CODEX_INSTALL_SH_URL} | CODEX_NON_INTERACTIVE=1 sh"],
+            )
+        ], None
+    wget = shutil.which("wget", path=env.get("PATH"))
+    if wget:
+        return [
+            (
+                "Run Codex CLI installer",
+                [sh, "-c", f"wget -qO- {_CODEX_INSTALL_SH_URL} | CODEX_NON_INTERACTIVE=1 sh"],
+            )
+        ], None
+    return [], "Codex CLI install requires curl or wget on this host."
+
+
 def _codex_auth_env() -> dict:
     env = _build_env()
     env.pop("CI", None)
@@ -1468,6 +1549,73 @@ async def codex_runtime_status(refresh: bool = False):
     codex_path = _find_codex(env=env)
     status = await _probe_codex_install_async(codex_path, env=env)
     return _codex_runtime_response(status)
+
+
+@router.post("/codex/install")
+async def install_codex_cli():
+    """Install or update Codex CLI with the official platform installer. Streams SSE."""
+    env = _build_env()
+    env["CODEX_NON_INTERACTIVE"] = "1"
+
+    async def generate():
+        try:
+            yield f"data: {json.dumps({'type': 'output', 'text': 'Installing Codex CLI with the official OpenAI installer.'})}\n\n"
+            with tempfile.TemporaryDirectory(prefix="xsafeclaw-codex-install-") as temp_dir_text:
+                steps, error = _codex_install_steps(env, Path(temp_dir_text))
+                if error:
+                    yield f"data: {json.dumps({'type': 'error', 'message': error})}\n\n"
+                    return
+
+                for label, args in steps:
+                    yield f"data: {json.dumps({'type': 'output', 'text': label})}\n\n"
+                    yield f"data: {json.dumps({'type': 'output', 'text': f'Running: {_format_command(args)}'})}\n\n"
+                    proc = await asyncio.create_subprocess_exec(
+                        *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        env=env,
+                    )
+                    assert proc.stdout is not None
+                    while True:
+                        line = await proc.stdout.readline()
+                        if not line:
+                            break
+                        text = _decode_subprocess_output(line).rstrip()
+                        if text:
+                            yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+                    await proc.wait()
+                    rc = proc.returncode or 0
+                    if rc != 0:
+                        yield f"data: {json.dumps({'type': 'done', 'success': False, 'exit_code': rc})}\n\n"
+                        return
+
+            _invalidate_codex_probe_cache()
+            verify_env = _codex_install_verify_env(env)
+            codex_path = _find_codex(env=verify_env)
+            status = await _probe_codex_install_async(
+                codex_path,
+                env=verify_env,
+                version_timeout_s=15.0,
+                doctor_timeout_s=15.0,
+            )
+            if not status.get("installed"):
+                detail = status.get("error") or "Codex CLI installer completed, but codex is still not detectable."
+                yield f"data: {json.dumps({'type': 'done', 'success': False, 'detail': detail})}\n\n"
+                return
+
+            version_text = status.get("version") or ""
+            success_text = f"Codex CLI {version_text} installed successfully.".strip()
+            yield f"data: {json.dumps({'type': 'output', 'text': success_text})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'success': True, 'version': status.get('version'), 'path': status.get('path'), 'status': status.get('status')})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 class CodexAppServerError(RuntimeError):

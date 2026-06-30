@@ -325,7 +325,7 @@ export interface UpdateRuntimeBudgetPayload {
   periodUnit: BudgetPeriodUnit;
 }
 
-export type RuntimeBudgetAgentName = 'OpenClaw' | 'Hermes' | 'Nanobot';
+export type RuntimeBudgetAgentName = 'Codex' | 'OpenClaw' | 'Hermes' | 'Nanobot';
 
 export interface StartSessionPayload {
   instance_id?: string;
@@ -339,7 +339,7 @@ export interface StartSessionResponse {
   session_key: string;
   status: string;
   instance_id: string;
-  platform: RuntimeInstance['platform'];
+  platform: RuntimeInstance['platform'] | 'codex';
   instance?: RuntimeInstance;
 }
 
@@ -910,15 +910,6 @@ export interface GuardRuntimeObservation {
   risk_level?: string | null;
 }
 
-export type GuardToolPolicy = 'allow' | 'guard' | 'ask';
-export type GuardToolPolicyCategory = 'shell' | 'file_system' | 'browser' | 'network' | 'git';
-
-export type GuardToolPolicies = Record<GuardToolPolicyCategory, GuardToolPolicy>;
-
-export interface GuardToolPoliciesResponse {
-  policies: GuardToolPolicies;
-}
-
 // Guard API
 export const guardAPI = {
   pending: (resolved?: boolean) =>
@@ -934,10 +925,6 @@ export const guardAPI = {
 
   getEnabled: () => api.get<{ enabled: boolean }>('/guard/enabled'),
   setEnabled: (enabled: boolean) => api.post<{ enabled: boolean }>('/guard/enabled', { enabled }),
-
-  toolPolicies: () => api.get<GuardToolPoliciesResponse>('/guard/tool-policies'),
-  setToolPolicies: (policies: Partial<GuardToolPolicies>) =>
-    api.put<GuardToolPoliciesResponse>('/guard/tool-policies', { policies }),
 };
 
 // System API (agent install / onboard / status)
@@ -1074,6 +1061,9 @@ export const systemAPI = {
 
   /** SSE URL for nanobot install stream (use with fetch). */
   nanobotInstallUrl: () => '/api/system/nanobot/install',
+
+  /** SSE URL for official Codex CLI install stream (use with fetch). */
+  codexInstallUrl: () => '/api/system/codex/install',
 
   /** Create a skeleton nanobot config/workspace for compatibility flows. */
   nanobotInitDefault: () =>

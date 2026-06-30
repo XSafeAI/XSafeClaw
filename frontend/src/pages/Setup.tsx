@@ -12,7 +12,7 @@ import {
 import { systemAPI } from '../services/api';
 import { useI18n } from '../i18n';
 
-type Stage = 'checking' | 'selecting' | 'downloading_node' | 'installing_openclaw' | 'installing_nanobot' | 'installing_hermes' | 'install_failed' | 'install_hermes_failed';
+type Stage = 'checking' | 'selecting' | 'downloading_node' | 'installing_openclaw' | 'installing_nanobot' | 'installing_hermes' | 'installing_codex' | 'install_failed' | 'install_hermes_failed';
 type Platform = 'openclaw' | 'nanobot' | 'hermes' | 'codex';
 type HostOs = 'windows' | 'macos' | 'linux';
 
@@ -71,7 +71,15 @@ function StepBar({ active, steps }: { active: number; steps: { id: number; label
 
 function TerminalLog({ lines, waitingText }: { lines: LogLine[]; waitingText?: string }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' }); }, [lines]);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    if (typeof node.scrollTo === 'function') {
+      node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' });
+    } else {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [lines]);
   return (
     <div ref={ref} className="bg-[#0d0d0d] border border-border rounded-xl p-4 font-mono text-[12px] leading-5 h-40 overflow-y-auto space-y-0.5">
       {lines.length === 0 && <span className="text-text-muted">{waitingText}</span>}
@@ -271,7 +279,13 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
       {installing && (
         <div className="mt-4 flex items-center gap-2 text-[12px] text-text-muted">
           <Loader2 className="w-4 h-4 animate-spin" />
-          {isOpenClaw ? t.setup.installing : isHermes ? ((t.setup as any).hermesInstalling || 'Installing Hermes Agent...') : t.setup.nanobotInstalling}
+          {isOpenClaw
+            ? t.setup.installing
+            : isHermes
+              ? ((t.setup as any).hermesInstalling || 'Installing Hermes Agent...')
+              : isCodex
+                ? (t.setup.codexInstalling || 'Installing Codex CLI...')
+                : t.setup.nanobotInstalling}
         </div>
       )}
     </div>
@@ -281,6 +295,7 @@ function SetupCard({ platform, info, installing, onInstall, onConfigure, t }: Se
 export default function Setup() {
   const navigate = useNavigate();
   const { t } = useI18n();
+  const setupText = t.setup as any;
   const hostOs = detectClientOs();
   const manualNanobot = nanobotManualSteps(hostOs);
   const [stage, setStage] = useState<Stage>('checking');
@@ -532,8 +547,66 @@ export default function Setup() {
     }
   };
 
-  const handleInstallCodex = () => {
-    window.open('https://github.com/openai/codex#installing-and-running-codex-cli', '_blank', 'noopener,noreferrer');
+  const handleInstallCodex = async () => {
+    setInstallingPlatform('codex');
+    setStage('installing_codex');
+    setLogs([]);
+    addLog(setupText.codexInstallStart || 'Installing Codex CLI with the official installer.', 'info');
+
+    try {
+      const resp = await fetch(systemAPI.codexInstallUrl(), { method: 'POST' });
+      if (!resp.ok || !resp.body) {
+        addLog(`HTTP ${resp.status} ${resp.statusText}`, 'error');
+        setStage('install_failed');
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let success = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop() ?? '';
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          try {
+            const d = JSON.parse(line.slice(5).trim());
+            if (d.type === 'output' && d.text) {
+              addLog(d.text);
+            } else if (d.type === 'done') {
+              success = Boolean(d.success);
+              if (success) {
+                addLog(setupText.codexInstallComplete || 'Codex CLI installation complete.', 'success');
+                setCodexInfo(prev => ({ ...prev, installed: true, version: d.version || prev.version, configured: false }));
+              } else {
+                const detail = d.detail || d.message || (d.exit_code !== undefined ? `Install exited with code ${d.exit_code}` : 'Codex CLI installation failed.');
+                addLog(String(detail), 'error');
+              }
+            } else if (d.type === 'error') {
+              addLog(d.message || 'Codex CLI installation failed.', 'error');
+              success = false;
+            }
+          } catch {}
+        }
+      }
+
+      if (success) {
+        setTimeout(() => navigate('/codex_configure', { replace: true }), 1200);
+      } else {
+        setStage('install_failed');
+      }
+    } catch (err: any) {
+      addLog(String(err), 'error');
+      setStage('install_failed');
+    } finally {
+      setInstallingPlatform(null);
+    }
   };
 
   const handleRetry = () => {
@@ -657,6 +730,8 @@ export default function Setup() {
                     <p className="text-text-secondary mt-1 leading-5 not-italic font-sans">{t.setup.nanobotOfficialFlowHint}</p>
                     <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{(t.setup as any).commentHermes}</span></p>
                     <p className="text-blue-400 select-all break-all">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</p>
+                    <p className="text-text-secondary mt-2"><span className="text-text-muted select-none"># </span><span className="text-sky-400">{setupText.commentCodex || 'Codex CLI'}</span></p>
+                    <p className="text-blue-400 select-all break-all">{hostOs === 'windows' ? 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://chatgpt.com/codex/install.ps1 | iex"' : 'curl -fsSL https://chatgpt.com/codex/install.sh | sh'}</p>
                   </div>
                 </div>
               )}
@@ -781,6 +856,20 @@ export default function Setup() {
                 <div>
                   <p className="text-sm font-semibold text-text-primary">{(t.setup as any).hermesInstalling}</p>
                   <p className="text-[12px] text-text-muted">{(t.setup as any).hermesInstallingDesc}</p>
+                </div>
+              </div>
+              <TerminalLog lines={logs} waitingText={t.setup.waiting} />
+            </div>
+          )}
+
+          {/* Installing Codex CLI */}
+          {stage === 'installing_codex' && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-3">
+                <Loader2 className="w-5 h-5 text-emerald-300 animate-spin flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-text-primary">{setupText.codexInstalling || 'Installing Codex CLI...'}</p>
+                  <p className="text-[12px] text-text-muted">{setupText.codexInstallingDesc || 'Using the official installer for this operating system.'}</p>
                 </div>
               </div>
               <TerminalLog lines={logs} waitingText={t.setup.waiting} />

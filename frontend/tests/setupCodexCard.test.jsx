@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -9,6 +9,7 @@ import { systemAPI } from '../src/services/api';
 vi.mock('../src/services/api', () => ({
   systemAPI: {
     installStatus: vi.fn(),
+    codexInstallUrl: vi.fn(() => '/api/system/codex/install'),
   },
 }));
 
@@ -30,8 +31,11 @@ function renderSetup() {
 
 describe('Setup Codex card', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     localStorage.setItem('xsafeclaw:locale', 'en');
     vi.mocked(systemAPI.installStatus).mockReset();
+    vi.mocked(systemAPI.codexInstallUrl).mockReset();
+    vi.mocked(systemAPI.codexInstallUrl).mockReturnValue('/api/system/codex/install');
   });
 
   test('shows installed Codex CLI with the same shortcut actions as installed runtimes', async () => {
@@ -92,5 +96,43 @@ describe('Setup Codex card', () => {
     expect(await screen.findByText('Codex CLI')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Install Codex/ })).toBeInTheDocument();
     expect(screen.queryByText(/Backend detection and setup will be connected later/i)).not.toBeInTheDocument();
+  });
+
+  test('runs the Codex CLI installer stream instead of opening external docs', async () => {
+    vi.mocked(systemAPI.installStatus).mockResolvedValue({
+      data: {
+        openclaw_installed: false,
+        nanobot_installed: false,
+        hermes_installed: false,
+        codex_installed: false,
+      },
+    });
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"output","text":"Installing Codex CLI"}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: {"type":"done","success":true,"version":"0.139.0"}\n\n'));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      body: stream,
+    });
+
+    renderSetup();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Install Codex/ }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/system/codex/install', { method: 'POST' });
+    });
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText('Installing Codex CLI')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('location-path').textContent).toBe('/codex_configure');
+    }, { timeout: 2000 });
   });
 });
