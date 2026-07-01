@@ -20,18 +20,27 @@ import {
   assetsAPI,
   systemAPI,
   type CodexAuthStatusResponse,
+  type CodexModelCatalogItem,
   type CodexRuntimeStatusResponse,
   type DirectoryBrowseEntry,
 } from '../services/api';
+import {
+  catalogModelsOrFallback,
+  codexReasoningOptionsForModel,
+  codexSpeedOptionsForModel,
+  FALLBACK_CODEX_MODEL_CATALOG,
+  findCodexModel,
+  normalizeCodexSelection,
+} from './codexModelCatalog';
 
 export const CODEX_CONFIG_STORAGE_KEY = 'xsafeclaw:codex_config';
 const CODEX_CONFIG_VERSION = 2;
 
 export type CodexCliPathMode = 'auto' | 'manual';
 export type CodexPermissionMode = 'read_only' | 'workspace_write' | 'full_access';
-export type CodexDefaultModel = 'GPT-5.5' | 'GPT-5.4' | 'GPT-5.4-Mini' | 'GPT-5.3-Codex-Spark';
-export type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh';
-export type CodexSpeedOption = 'standard' | 'fast';
+export type CodexDefaultModel = string;
+export type CodexReasoningLevel = string;
+export type CodexSpeedOption = string;
 
 export interface CodexLocalConfig {
   configVersion: number;
@@ -54,14 +63,12 @@ export const DEFAULT_CODEX_CONFIG: CodexLocalConfig = {
   cliPathMode: 'auto',
   cliPath: 'codex',
   permissionMode: 'workspace_write',
-  defaultModel: 'GPT-5.5',
+  defaultModel: 'gpt-5.5',
   defaultReasoning: 'xhigh',
   defaultSpeed: 'standard',
 };
 
-const modelOptions: CodexDefaultModel[] = ['GPT-5.5', 'GPT-5.4', 'GPT-5.4-Mini', 'GPT-5.3-Codex-Spark'];
 const reasoningOptions: CodexReasoningLevel[] = ['low', 'medium', 'high', 'xhigh'];
-const speedOptions: CodexSpeedOption[] = ['standard', 'fast'];
 const permissionOptions: CodexPermissionMode[] = ['read_only', 'workspace_write', 'full_access'];
 
 function isOneOf<T extends string>(value: unknown, options: readonly T[]): value is T {
@@ -76,7 +83,7 @@ export function loadCodexConfig(): CodexLocalConfig {
     const parsed = JSON.parse(raw) as Partial<CodexLocalConfig>;
     const isLegacyImplicitWorkspace = parsed.configVersion !== CODEX_CONFIG_VERSION
       && parsed.workspaceDir === '~/workspace';
-    return {
+    return normalizeCodexSelection({
       configVersion: CODEX_CONFIG_VERSION,
       chatgptLoggedIn: typeof parsed.chatgptLoggedIn === 'boolean'
         ? parsed.chatgptLoggedIn
@@ -96,16 +103,16 @@ export function loadCodexConfig(): CodexLocalConfig {
       permissionMode: isOneOf(parsed.permissionMode, permissionOptions)
         ? parsed.permissionMode
         : DEFAULT_CODEX_CONFIG.permissionMode,
-      defaultModel: isOneOf(parsed.defaultModel, modelOptions)
+      defaultModel: typeof parsed.defaultModel === 'string' && parsed.defaultModel.trim()
         ? parsed.defaultModel
         : DEFAULT_CODEX_CONFIG.defaultModel,
       defaultReasoning: isOneOf(parsed.defaultReasoning, reasoningOptions)
         ? parsed.defaultReasoning
         : DEFAULT_CODEX_CONFIG.defaultReasoning,
-      defaultSpeed: isOneOf(parsed.defaultSpeed, speedOptions)
+      defaultSpeed: typeof parsed.defaultSpeed === 'string' && parsed.defaultSpeed.trim()
         ? parsed.defaultSpeed
         : DEFAULT_CODEX_CONFIG.defaultSpeed,
-    };
+    }, FALLBACK_CODEX_MODEL_CATALOG);
   } catch {
     return DEFAULT_CODEX_CONFIG;
   }
@@ -277,11 +284,14 @@ function reasoningLabel(level: CodexReasoningLevel, labels: typeof copy.en) {
   if (level === 'low') return labels.reasoningLow;
   if (level === 'medium') return labels.reasoningMedium;
   if (level === 'high') return labels.reasoningHigh;
-  return labels.reasoningXhigh;
+  if (level === 'xhigh') return labels.reasoningXhigh;
+  return level;
 }
 
 function speedLabel(speed: CodexSpeedOption, labels: typeof copy.en) {
-  return speed === 'fast' ? labels.speedFast : labels.speedStandard;
+  if (speed === 'standard') return labels.speedStandard;
+  if (speed === 'fast' || speed === 'priority') return labels.speedFast;
+  return speed;
 }
 
 function permissionLabel(mode: CodexPermissionMode, labels: typeof copy.en) {
@@ -323,6 +333,7 @@ export default function CodexConfigure() {
   const [runtimeStatus, setRuntimeStatus] = useState<CodexRuntimeStatusResponse | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(true);
   const [runtimeError, setRuntimeError] = useState('');
+  const [codexModels, setCodexModels] = useState<CodexModelCatalogItem[]>(FALLBACK_CODEX_MODEL_CATALOG);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
@@ -370,8 +381,29 @@ export default function CodexConfigure() {
     void refreshCodexRuntimeStatus();
   }, [refreshCodexAuthStatus, refreshCodexRuntimeStatus]);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadModels() {
+      try {
+        const response = await systemAPI.getCodexModels();
+        const models = catalogModelsOrFallback(response.data.models);
+        if (cancelled) return;
+        setCodexModels(models);
+        setConfig(current => normalizeCodexSelection(current, models));
+      } catch {
+        if (cancelled) return;
+        setCodexModels(FALLBACK_CODEX_MODEL_CATALOG);
+        setConfig(current => normalizeCodexSelection(current, FALLBACK_CODEX_MODEL_CATALOG));
+      }
+    }
+    void loadModels();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const updateConfig = (patch: Partial<CodexLocalConfig>) => {
-    setConfig(current => ({ ...current, ...patch }));
+    setConfig(current => normalizeCodexSelection({ ...current, ...patch }, codexModels));
     setSaved(false);
   };
 
@@ -439,9 +471,13 @@ export default function CodexConfigure() {
   };
 
   const handleSave = () => {
-    saveCodexConfig(config);
+    saveCodexConfig(normalizeCodexSelection(config, codexModels));
     setSaved(true);
   };
+
+  const selectedCodexModel = findCodexModel(codexModels, config.defaultModel);
+  const dynamicReasoningOptions = codexReasoningOptionsForModel(selectedCodexModel);
+  const dynamicSpeedOptions = codexSpeedOptionsForModel(selectedCodexModel);
 
   const codexLoggedIn = Boolean(authStatus?.logged_in);
   const authBusy = authLoading || authAction !== null;
@@ -564,7 +600,9 @@ export default function CodexConfigure() {
                     onChange={(event) => updateConfig({ defaultModel: event.target.value as CodexDefaultModel })}
                     className="block w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
                   >
-                    {modelOptions.map(option => <option key={option} value={option}>{option}</option>)}
+                    {codexModels.map(option => (
+                      <option key={option.id} value={option.id}>{option.display_name || option.model || option.id}</option>
+                    ))}
                   </select>
                 </label>
                 <label className="grid gap-2 text-[12px] font-semibold text-text-secondary sm:grid-cols-[120px_minmax(0,1fr)] sm:items-center" htmlFor="codex-default-reasoning">
@@ -576,7 +614,7 @@ export default function CodexConfigure() {
                     onChange={(event) => updateConfig({ defaultReasoning: event.target.value as CodexReasoningLevel })}
                     className="block w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
                   >
-                    {reasoningOptions.map(option => (
+                    {dynamicReasoningOptions.map(option => (
                       <option key={option} value={option}>{reasoningLabel(option, labels)}</option>
                     ))}
                   </select>
@@ -590,8 +628,8 @@ export default function CodexConfigure() {
                     onChange={(event) => updateConfig({ defaultSpeed: event.target.value as CodexSpeedOption })}
                     className="block w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm text-text-primary outline-none focus:border-accent"
                   >
-                    {speedOptions.map(option => (
-                      <option key={option} value={option}>{speedLabel(option, labels)}</option>
+                    {dynamicSpeedOptions.map(option => (
+                      <option key={option.id} value={option.id}>{speedLabel(option.id, labels)}</option>
                     ))}
                   </select>
                 </label>

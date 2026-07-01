@@ -165,6 +165,56 @@ function codexRateLimitsResponse(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function codexModelsResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    data: {
+      installed: true,
+      status: 'ready',
+      source: 'app_server',
+      models: [
+        {
+          id: 'gpt-5.5',
+          model: 'gpt-5.5',
+          display_name: 'GPT-5.5',
+          is_default: true,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: ['low', 'medium', 'high', 'xhigh'],
+          service_tiers: [
+            { id: 'standard', name: 'Standard', description: 'Default speed', service_tier: null },
+            { id: 'priority', name: 'Fast', description: '1.5x speed, increased usage', service_tier: 'priority' },
+          ],
+        },
+        {
+          id: 'gpt-5.4-mini',
+          model: 'gpt-5.4-mini',
+          display_name: 'GPT-5.4-Mini',
+          is_default: false,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: ['low', 'medium', 'high'],
+          service_tiers: [
+            { id: 'standard', name: 'Standard', description: 'Default speed', service_tier: null },
+          ],
+        },
+        {
+          id: 'gpt-5.4',
+          model: 'gpt-5.4',
+          display_name: 'GPT-5.4',
+          is_default: false,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: ['low', 'medium', 'high', 'xhigh'],
+          service_tiers: [
+            { id: 'standard', name: 'Standard', description: 'Default speed', service_tier: null },
+            { id: 'priority', name: 'Fast', description: '1.5x speed, increased usage', service_tier: 'priority' },
+          ],
+        },
+      ],
+      message: '',
+      error: null,
+      ...overrides,
+    },
+  };
+}
+
 function mockRuntimeGuardApis() {
   const sendMessageStreamSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => (
     new Response('data: {"type":"final","text":"Task created"}\n\ndata: [DONE]\n\n', {
@@ -285,6 +335,11 @@ function mockRuntimeGuardApis() {
     },
   } as any);
   const codexRateLimitsSpy = vi.spyOn(systemAPI, 'getCodexRateLimits').mockResolvedValue(codexRateLimitsResponse() as any);
+  const codexModelsTarget = systemAPI as any;
+  if (!codexModelsTarget.getCodexModels) {
+    codexModelsTarget.getCodexModels = vi.fn();
+  }
+  const getCodexModelsSpy = vi.spyOn(codexModelsTarget, 'getCodexModels').mockResolvedValue(codexModelsResponse() as any);
   vi.spyOn(budgetAPI, 'listRuntimeBudgets').mockResolvedValue({ data: { budgets: [] } } as any);
   vi.spyOn(guardAPI, 'pending').mockResolvedValue({ data: [] } as any);
   vi.spyOn(guardAPI, 'observations').mockResolvedValue({ data: [] } as any);
@@ -301,6 +356,7 @@ function mockRuntimeGuardApis() {
     respondCodexUserInputRequestSpy,
     clearCodexGoalSpy,
     codexRateLimitsSpy,
+    getCodexModelsSpy,
   };
 }
 
@@ -506,10 +562,15 @@ describe('NewTaskModal', () => {
     });
     expect(sendMessageStreamSpy).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue('E:/configured-codex-workspace')).toBeTruthy();
-    expect(screen.getByText('GPT-5.5')).toBeTruthy();
-    expect(screen.getByText('XHigh')).toBeTruthy();
-    expect(screen.getByText('Standard')).toBeTruthy();
-    expect(screen.getByText('Workspace write')).toBeTruthy();
+    const dialog = screen.getByRole('dialog', { name: 'Configure Codex session' });
+    expect(within(dialog).queryByRole('button', { name: 'Go to configure' })).toBeNull();
+    const modelSelect = within(dialog).getByLabelText('Model') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('gpt-5.5');
+    expect(modelSelect).toHaveClass('rg-codex-new-task-select');
+    expect(Array.from(modelSelect.options).every(option => option.classList.contains('rg-codex-new-task-select-option'))).toBe(true);
+    expect((within(dialog).getByLabelText('Reasoning') as HTMLSelectElement).value).toBe('xhigh');
+    expect((within(dialog).getByLabelText('Speed') as HTMLSelectElement).value).toBe('standard');
+    expect((within(dialog).getByLabelText('Permission') as HTMLSelectElement).value).toBe('workspace_write');
   });
 
   it('requires a Codex workspace before confirming and then sends with the session snapshot', async () => {
@@ -545,6 +606,10 @@ describe('NewTaskModal', () => {
     fireEvent.change(within(dialog).getByLabelText('Codex workspace directory'), {
       target: { value: 'E:/tmp/codex-task' },
     });
+    fireEvent.change(within(dialog).getByLabelText('Model'), { target: { value: 'gpt-5.4' } });
+    fireEvent.change(within(dialog).getByLabelText('Reasoning'), { target: { value: 'low' } });
+    fireEvent.change(within(dialog).getByLabelText('Speed'), { target: { value: 'priority' } });
+    fireEvent.change(within(dialog).getByLabelText('Permission'), { target: { value: 'read_only' } });
     expect(createSessionButton.disabled).toBe(false);
     fireEvent.click(createSessionButton);
 
@@ -560,10 +625,57 @@ describe('NewTaskModal', () => {
       message: 'Build a Codex feature',
       thread_id: null,
       cwd: 'E:/tmp/codex-task',
-      model: 'gpt-5.4-mini',
-      reasoning_effort: 'high',
-      speed: 'standard',
-      permission_mode: 'full_access',
+      model: 'gpt-5.4',
+      reasoning_effort: 'low',
+      speed: 'priority',
+      permission_mode: 'read_only',
+    }));
+  });
+
+  it('uses the dynamic Codex model catalog and sends the selected service tier id', async () => {
+    const { smartStartSessionSpy, sendMessageStreamSpy, getCodexModelsSpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/configured-codex-workspace',
+      permissionMode: 'workspace_write',
+      defaultModel: 'gpt-5.5',
+      defaultReasoning: 'xhigh',
+      defaultSpeed: 'priority',
+    }));
+    smartStartSessionSpy.mockResolvedValueOnce({
+      data: {
+        session_key: 'codex:pending:smart-router',
+        status: 'ready',
+        instance_id: 'codex-cli',
+        platform: 'codex',
+        selected_agent: 'Codex',
+        smart: true,
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByText('New Task').closest('button') as HTMLElement);
+    fireEvent.change(screen.getByLabelText('New task request'), { target: { value: 'Use Codex with fast tier' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Configure Codex session' });
+    await waitFor(() => expect(getCodexModelsSpy).toHaveBeenCalled());
+    expect((within(dialog).getByLabelText('Model') as HTMLSelectElement).value).toBe('gpt-5.5');
+    expect((within(dialog).getByLabelText('Speed') as HTMLSelectElement).value).toBe('priority');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create session' }));
+
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^\/api\/system\/codex\/conversations\/codex%3Apending%3A/),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    const codexCall = sendMessageStreamSpy.mock.calls.find(([url]) => String(url).includes('/api/system/codex/conversations/'));
+    const body = JSON.parse((codexCall?.[1] as RequestInit).body as string);
+    expect(body).toEqual(expect.objectContaining({
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      speed: 'priority',
     }));
   });
 
@@ -699,6 +811,46 @@ describe('NewTaskModal', () => {
     expect(within(rightTools).getByText('SAFETY TOOLS')).toBeTruthy();
     expect(within(rightTools).getByText('File Protection')).toBeTruthy();
     expect(within(rightTools).getByText('Risk Test')).toBeTruthy();
+  });
+
+  it('shows only the icon and session title in sidebar history rows', async () => {
+    mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
+      {
+        sessionKey: 'codex:thread-login',
+        agent: 'Codex',
+        platform: 'codex',
+        instanceId: 'codex-cli',
+        title: '我现在的登录情况',
+        createdAt: '2026-06-15T14:30:00.000Z',
+        lastActivityAt: '2026-06-15T14:30:00.000Z',
+        status: 'ready',
+      },
+      {
+        sessionKey: 'hermes-session',
+        agent: 'Hermes',
+        platform: 'hermes',
+        instanceId: 'runtime-hermes',
+        title: 'sess-local',
+        createdAt: '2026-06-15T08:18:00.000Z',
+        lastActivityAt: '2026-06-15T08:18:00.000Z',
+        status: 'ready',
+      },
+    ]));
+    const { container } = renderRuntimeGuardConsole();
+
+    const rows = await waitFor(() => {
+      const nextRows = Array.from(container.querySelectorAll('.rg-left-history-row')) as HTMLElement[];
+      expect(nextRows.length).toBeGreaterThanOrEqual(2);
+      return nextRows;
+    });
+
+    expect(rows[0].querySelector('.rg-agent-badge')).toBeTruthy();
+    expect(rows[0].textContent).toContain('我现在的登录情况');
+    expect(rows[0].textContent).not.toContain('Codex:');
+    expect(rows[1].querySelector('.rg-agent-badge')).toBeTruthy();
+    expect(rows[1].textContent).toContain('sess-local');
+    expect(rows[1].textContent).not.toContain('Hermes:');
   });
 
   it('switches the budget card to Codex CLI remaining usage when Codex is selected', async () => {
@@ -1706,7 +1858,7 @@ describe('NewTaskModal', () => {
     expect(resumeCodexConversationSpy).toHaveBeenCalledWith({
       thread_id: 'thread-abcdef123456',
       cwd: 'E:/work/codex-demo',
-      model: 'GPT-5.5',
+      model: 'gpt-5.5',
       permission_mode: 'workspace_write',
     });
     await waitFor(() => {

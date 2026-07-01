@@ -153,6 +153,34 @@ export interface CodexRuntimeStatusResponse {
   error: string | null;
 }
 
+export type CodexModelCatalogStatus = 'ready' | 'missing' | 'error' | string;
+
+export interface CodexSpeedTierOption {
+  id: string;
+  name: string;
+  description: string | null;
+  service_tier: string | null;
+}
+
+export interface CodexModelCatalogItem {
+  id: string;
+  model: string;
+  display_name: string;
+  is_default: boolean;
+  default_reasoning_effort: string | null;
+  supported_reasoning_efforts: string[];
+  service_tiers: CodexSpeedTierOption[];
+}
+
+export interface CodexModelCatalogResponse {
+  installed: boolean;
+  status: CodexModelCatalogStatus;
+  source: string | null;
+  models: CodexModelCatalogItem[];
+  message: string;
+  error: string | null;
+}
+
 export type CodexRateLimitStatus = 'ready' | 'missing' | 'logged_out' | 'unsupported' | 'error' | string;
 
 export interface CodexRateLimitWindow {
@@ -258,7 +286,7 @@ export interface CodexConversationTurnRequest {
   cwd?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
-  speed?: 'standard' | 'fast' | null;
+  speed?: string | null;
   permission_mode?: 'read_only' | 'workspace_write' | 'full_access' | null;
   plan_mode?: boolean;
   goal_mode?: boolean;
@@ -963,6 +991,10 @@ export const systemAPI = {
   /** Read Codex CLI ChatGPT rolling rate limits through app-server. */
   getCodexRateLimits: () =>
     api.get<CodexRateLimitsResponse>('/system/codex/rate-limits', { timeout: 15000 }),
+
+  /** Read the current Codex CLI model catalog through app-server. */
+  getCodexModels: () =>
+    api.get<CodexModelCatalogResponse>('/system/codex/models', { timeout: 15000 }),
 
   /** Start the official Codex CLI login flow in the system browser. */
   loginCodexAuth: () =>

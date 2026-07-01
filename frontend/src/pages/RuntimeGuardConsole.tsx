@@ -58,6 +58,7 @@ import {
   type StartSessionResponse,
   type RuntimeSessionRecord,
   type CodexSessionRecord,
+  type CodexModelCatalogItem,
   type CodexRateLimitWindow,
   type CodexRateLimitsResponse,
   type CodexRequestUserInputResponseRequest,
@@ -87,6 +88,21 @@ import {
   type GuardStatusRowTone,
 } from './runtimeGuardToolPolicy';
 import { loadCodexConfig, type CodexLocalConfig, type CodexPermissionMode } from './CodexConfigure';
+import {
+  catalogModelsOrFallback,
+  CODEX_STANDARD_SPEED_ID,
+  codexModelDisplayName,
+  codexReasoningOptionsForModel,
+  codexSpeedOptionsForModel,
+  codexSpeedServiceTier,
+  FALLBACK_CODEX_MODEL_CATALOG,
+  findCodexModel,
+  normalizeCodexSelection,
+  shortCodexModelDisplay,
+  type CodexModelOption,
+  type CodexReasoningLevel,
+  type CodexSpeedOption,
+} from './codexModelCatalog';
 import './RuntimeGuardConsole.css';
 
 export type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot' | 'Codex';
@@ -96,9 +112,6 @@ type RuntimeGuardSessionPlatform = RuntimePlatform | 'codex';
 type RuntimeBudgetStatusMap = Record<RuntimeBudgetPlatform, RuntimeBudgetStatus>;
 type GuardMode = 'Off' | 'On';
 type AgentStatus = 'Running' | 'Idle' | 'Not installed';
-type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh';
-type CodexModelOption = 'GPT-5.5' | 'GPT-5.4' | 'GPT-5.4-Mini' | 'GPT-5.3-Codex-Spark';
-type CodexSpeedOption = 'standard' | 'fast';
 type CodexComposerMenu = 'options' | 'model' | 'permission' | null;
 type CodexSubmenu = 'model' | 'speed' | null;
 type CodexRateLimitsState = {
@@ -212,9 +225,6 @@ export function runtimeGuardSidebarLayoutMetrics() {
 
 const sessionHistoryFilters: SessionHistoryAgentFilter[] = ['All', 'OpenClaw', 'Hermes', 'Nanobot', 'Codex'];
 const runtimeBudgetPlatforms: RuntimeBudgetPlatform[] = ['openclaw', 'hermes', 'nanobot'];
-const codexReasoningOptions: CodexReasoningLevel[] = ['low', 'medium', 'high', 'xhigh'];
-const codexModelOptions: CodexModelOption[] = ['GPT-5.5', 'GPT-5.4', 'GPT-5.4-Mini', 'GPT-5.3-Codex-Spark'];
-const codexSpeedOptions: CodexSpeedOption[] = ['standard', 'fast'];
 const codexPermissionOptions: CodexPermissionMode[] = ['read_only', 'workspace_write', 'full_access'];
 const DEFAULT_BUDGET_PERIOD_MS = 24 * 60 * 60 * 1000;
 
@@ -1267,29 +1277,25 @@ function agentToPlatform(agent: AgentName): RuntimePlatform {
   return agentDefinitions.find(item => item.name === agent)?.platform ?? 'openclaw';
 }
 
-function shortCodexModelLabel(model: CodexModelOption): string {
-  if (model === 'GPT-5.5') return '5.5';
-  if (model === 'GPT-5.4') return '5.4';
-  if (model === 'GPT-5.4-Mini') return '5.4-Mini';
-  return '5.3 Spark';
+function normalizeCodexSessionConfig(config: CodexLocalConfig, models = FALLBACK_CODEX_MODEL_CATALOG): CodexLocalConfig {
+  return normalizeCodexSelection(config, models);
 }
 
-function codexModelId(model: CodexModelOption): string {
-  if (model === 'GPT-5.5') return 'gpt-5.5';
-  if (model === 'GPT-5.4') return 'gpt-5.4';
-  if (model === 'GPT-5.4-Mini') return 'gpt-5.4-mini';
-  return 'gpt-5.3-codex-spark';
+function codexReasoningLabel(reasoning: string, copy: RuntimeGuardCopy): string {
+  const labels = copy.codexComposer.reasoning as Record<string, string>;
+  return labels[reasoning] ?? reasoning;
 }
 
-function codexModelSupportsFast(model: CodexModelOption): boolean {
-  return model === 'GPT-5.5' || model === 'GPT-5.4';
+function codexSpeedLabel(speed: string, copy: RuntimeGuardCopy): string {
+  const labels = copy.codexComposer.speed as Record<string, string>;
+  if (speed === 'priority') return labels.fast ?? 'Fast';
+  return labels[speed] ?? speed;
 }
 
-function normalizeCodexSessionConfig(config: CodexLocalConfig): CodexLocalConfig {
-  return {
-    ...config,
-    defaultSpeed: codexModelSupportsFast(config.defaultModel) ? config.defaultSpeed : 'standard',
-  };
+function codexSpeedDescription(speed: string, copy: RuntimeGuardCopy, description?: string | null): string {
+  const labels = copy.codexComposer.speedHint as Record<string, string>;
+  if (speed === 'priority') return description || labels.fast || '';
+  return description || labels[speed] || '';
 }
 
 function configureRouteForAgent(agent: AgentName): string {
@@ -1801,23 +1807,28 @@ export function CodexNewTaskModal({
   draft,
   workspaceDir,
   onWorkspaceChange,
+  onConfigChange,
   onCreate,
   onClose,
-  onConfigure,
+  codexModels,
   creating = false,
 }: {
   draft: PendingCodexNewTask;
   workspaceDir: string;
   onWorkspaceChange: (workspaceDir: string) => void;
+  onConfigChange: (config: CodexLocalConfig) => void;
   onCreate: () => void;
   onClose: () => void;
-  onConfigure: () => void;
+  codexModels: CodexModelCatalogItem[];
   creating?: boolean;
 }) {
   const { t } = useI18n();
   const copy = t.runtimeGuard;
   const codexCopy = copy.codexComposer;
-  const normalizedConfig = normalizeCodexSessionConfig(draft.config);
+  const normalizedConfig = normalizeCodexSessionConfig(draft.config, codexModels);
+  const selectedCodexModel = findCodexModel(codexModels, normalizedConfig.defaultModel);
+  const reasoningOptionsForModel = codexReasoningOptionsForModel(selectedCodexModel);
+  const speedOptionsForModel = codexSpeedOptionsForModel(selectedCodexModel);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browsePath, setBrowsePath] = useState('');
   const [browseEntries, setBrowseEntries] = useState<DirectoryBrowseEntry[]>([]);
@@ -1846,12 +1857,12 @@ export function CodexNewTaskModal({
     void loadBrowsePath(workspaceDir.trim() || undefined);
   };
 
-  const settings = [
-    { label: copy.newTask.codexModel, value: normalizedConfig.defaultModel },
-    { label: copy.newTask.codexReasoning, value: codexCopy.reasoning[normalizedConfig.defaultReasoning] },
-    { label: copy.newTask.codexSpeed, value: codexCopy.speed[normalizedConfig.defaultSpeed] },
-    { label: copy.newTask.codexPermission, value: codexCopy.permission[normalizedConfig.permissionMode] },
-  ];
+  const updateConfig = (patch: Partial<CodexLocalConfig>) => {
+    onConfigChange(normalizeCodexSessionConfig({
+      ...draft.config,
+      ...patch,
+    }, codexModels));
+  };
   const createDisabled = creating || !workspaceDir.trim();
 
   return (
@@ -1928,15 +1939,66 @@ export function CodexNewTaskModal({
           <section className="rg-codex-new-task-card">
             <div className="rg-codex-new-task-card-head">
               <span>{copy.newTask.codexDefaultsTitle}</span>
-              <button type="button" onClick={onConfigure}>{copy.newTask.codexConfigure}</button>
             </div>
             <div className="rg-codex-new-task-settings">
-              {settings.map(item => (
-                <div key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
-                </div>
-              ))}
+              <label>
+                <span>{copy.newTask.codexModel}</span>
+                <select
+                  aria-label={copy.newTask.codexModel}
+                  className="rg-codex-new-task-select"
+                  onChange={event => updateConfig({ defaultModel: event.target.value as CodexModelOption })}
+                  value={normalizedConfig.defaultModel}
+                >
+                  {codexModels.map(model => (
+                    <option className="rg-codex-new-task-select-option" key={model.id} value={model.id}>
+                      {model.display_name || model.model || model.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{copy.newTask.codexReasoning}</span>
+                <select
+                  aria-label={copy.newTask.codexReasoning}
+                  className="rg-codex-new-task-select"
+                  onChange={event => updateConfig({ defaultReasoning: event.target.value as CodexReasoningLevel })}
+                  value={normalizedConfig.defaultReasoning}
+                >
+                  {reasoningOptionsForModel.map(reasoning => (
+                    <option className="rg-codex-new-task-select-option" key={reasoning} value={reasoning}>
+                      {codexReasoningLabel(reasoning, copy)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{copy.newTask.codexSpeed}</span>
+                <select
+                  aria-label={copy.newTask.codexSpeed}
+                  className="rg-codex-new-task-select"
+                  onChange={event => updateConfig({ defaultSpeed: event.target.value as CodexSpeedOption })}
+                  value={normalizedConfig.defaultSpeed}
+                >
+                  {speedOptionsForModel.map(speed => (
+                    <option className="rg-codex-new-task-select-option" key={speed.id} value={speed.id}>
+                      {codexSpeedLabel(speed.id, copy)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{copy.newTask.codexPermission}</span>
+                <select
+                  aria-label={copy.newTask.codexPermission}
+                  className="rg-codex-new-task-select"
+                  onChange={event => updateConfig({ permissionMode: event.target.value as CodexPermissionMode })}
+                  value={normalizedConfig.permissionMode}
+                >
+                  {codexPermissionOptions.map(permission => (
+                    <option className="rg-codex-new-task-select-option" key={permission} value={permission}>{codexCopy.permission[permission]}</option>
+                  ))}
+                </select>
+              </label>
             </div>
           </section>
         </div>
@@ -2646,7 +2708,8 @@ export default function RuntimeGuardConsole() {
   const [budgetAmountInput, setBudgetAmountInput] = useState('');
   const [budgetPeriodInput, setBudgetPeriodInput] = useState('');
   const [budgetPeriodUnit, setBudgetPeriodUnit] = useState<BudgetPeriodUnit>('hour');
-  const initialCodexConfig = useMemo(() => loadCodexConfig(), []);
+  const initialCodexConfig = useMemo(() => normalizeCodexSessionConfig(loadCodexConfig(), FALLBACK_CODEX_MODEL_CATALOG), []);
+  const [codexModels, setCodexModels] = useState<CodexModelCatalogItem[]>(FALLBACK_CODEX_MODEL_CATALOG);
   const [codexComposerMenu, setCodexComposerMenu] = useState<CodexComposerMenu>(null);
   const [codexSubmenu, setCodexSubmenu] = useState<CodexSubmenu>(null);
   const [codexPlanMode, setCodexPlanMode] = useState(false);
@@ -2663,11 +2726,37 @@ export default function RuntimeGuardConsole() {
   });
 
   useEffect(() => {
-    if (!codexModelSupportsFast(codexModel) && codexSpeed !== 'standard') {
-      setCodexSpeed('standard');
+    let cancelled = false;
+    async function loadCodexModels() {
+      try {
+        const { data } = await systemAPI.getCodexModels();
+        if (cancelled) return;
+        setCodexModels(catalogModelsOrFallback(data.models));
+      } catch {
+        if (cancelled) return;
+        setCodexModels(FALLBACK_CODEX_MODEL_CATALOG);
+      }
+    }
+    void loadCodexModels();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const normalized = normalizeCodexSessionConfig({
+      ...initialCodexConfig,
+      defaultModel: codexModel,
+      defaultReasoning: codexReasoningLevel,
+      defaultSpeed: codexSpeed,
+    }, codexModels);
+    if (normalized.defaultModel !== codexModel) setCodexModel(normalized.defaultModel);
+    if (normalized.defaultReasoning !== codexReasoningLevel) setCodexReasoningLevel(normalized.defaultReasoning);
+    if (normalized.defaultSpeed !== codexSpeed) {
+      setCodexSpeed(normalized.defaultSpeed);
       setCodexSubmenu(current => (current === 'speed' ? null : current));
     }
-  }, [codexModel, codexSpeed]);
+  }, [codexModels, codexModel, codexReasoningLevel, codexSpeed, initialCodexConfig]);
 
   useEffect(() => {
     if (!codexComposerMenu) return undefined;
@@ -2722,7 +2811,7 @@ export default function RuntimeGuardConsole() {
     const config = normalizeCodexSessionConfig({
       ...loadedConfig,
       workspaceDir: loadedConfig.workspaceDir.trim() || 'C:\\Users\\heng\\Desktop\\test',
-    });
+    }, codexModels);
     setNewTaskModalOpen(false);
     setCodexNewTaskDraft({
       requestText: 'Use Codex for this task and confirm the session workspace before starting.',
@@ -2734,7 +2823,7 @@ export default function RuntimeGuardConsole() {
       config,
       workspaceDir: config.workspaceDir,
     });
-  }, [demoCodexNewTask]);
+  }, [codexModels, demoCodexNewTask]);
 
   const refreshCodexRateLimits = useCallback(async () => {
     const requestId = codexRateLimitsRequestRef.current + 1;
@@ -2795,9 +2884,15 @@ export default function RuntimeGuardConsole() {
   const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
   const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
   const codexComposerCopy = copy.codexComposer;
+  const selectedCodexModel = findCodexModel(codexModels, codexModel);
+  const codexAvailableReasoningOptions = codexReasoningOptionsForModel(selectedCodexModel);
+  const codexAvailableSpeedOptions = codexSpeedOptionsForModel(selectedCodexModel);
   const codexPermissionLabel = codexComposerCopy.permission[codexPermissionMode];
-  const codexEffectiveSpeed: CodexSpeedOption = codexModelSupportsFast(codexModel) ? codexSpeed : 'standard';
-  const codexModelSummary = `${shortCodexModelLabel(codexModel)} ${codexComposerCopy.reasoning[codexReasoningLevel]}`;
+  const codexEffectiveSpeed: CodexSpeedOption = codexAvailableSpeedOptions.some(option => option.id === codexSpeed)
+    ? codexSpeed
+    : CODEX_STANDARD_SPEED_ID;
+  const codexEffectiveSpeedIsFast = codexEffectiveSpeed !== CODEX_STANDARD_SPEED_ID;
+  const codexModelSummary = `${shortCodexModelDisplay(codexModels, codexModel)} ${codexReasoningLabel(codexReasoningLevel, copy)}`;
   const activeCodexGoal = activeSessionKey ? codexGoalBySessionKey[activeSessionKey] : null;
   const toggleCodexPlanMode = () => {
     const nextPlanMode = !codexPlanMode;
@@ -3396,7 +3491,7 @@ export default function RuntimeGuardConsole() {
     seed?: Partial<StartSessionResponse>,
     configOverride?: CodexLocalConfig,
   ) => {
-    const currentCodexConfig = normalizeCodexSessionConfig(configOverride ?? loadCodexConfig());
+    const currentCodexConfig = normalizeCodexSessionConfig(configOverride ?? loadCodexConfig(), codexModels);
     const nextModel = currentCodexConfig.defaultModel;
     const nextSpeed = currentCodexConfig.defaultSpeed;
     setCodexModel(nextModel);
@@ -3436,7 +3531,7 @@ export default function RuntimeGuardConsole() {
     setActiveSessionId(session.sessionKey);
     setSelectedAgent('Codex');
     return session;
-  }, [sessions, setMessageMap]);
+  }, [codexModels, sessions, setMessageMap]);
 
   const openSession = useCallback(async (agent: AgentName, installed = true) => {
     if (creatingAgent) return;
@@ -3518,7 +3613,7 @@ export default function RuntimeGuardConsole() {
     try {
       const res = await chatAPI.smartStartSession({ message: requestText });
       if (res.data.selected_agent === 'Codex' || res.data.platform === 'codex') {
-        const config = normalizeCodexSessionConfig(loadCodexConfig());
+        const config = normalizeCodexSessionConfig(loadCodexConfig(), codexModels);
         setCodexNewTaskDraft({
           requestText,
           seed: res.data,
@@ -3553,7 +3648,7 @@ export default function RuntimeGuardConsole() {
       const config = normalizeCodexSessionConfig({
         ...codexNewTaskDraft.config,
         workspaceDir,
-      });
+      }, codexModels);
       const createdSession = await addCodexConversationSession(codexNewTaskDraft.seed, config);
       const requestText = codexNewTaskDraft.requestText;
       setCodexNewTaskDraft(null);
@@ -3854,11 +3949,15 @@ export default function RuntimeGuardConsole() {
       let activeKey = originalKey;
       let activeThreadId: string | null = session.historySessionId
         || (session.sessionKey.startsWith('codex:pending:') ? null : session.sessionKey.replace(/^codex:/, '') || null);
-      const sessionCodexModel = session.codexModel ?? codexModel;
-      const sessionCodexReasoningLevel = session.codexReasoningLevel ?? codexReasoningLevel;
-      const sessionCodexSpeed: CodexSpeedOption = codexModelSupportsFast(sessionCodexModel)
-        ? (session.codexSpeed ?? codexSpeed)
-        : 'standard';
+      const normalizedSessionCodexConfig = normalizeCodexSessionConfig({
+        ...initialCodexConfig,
+        defaultModel: session.codexModel ?? codexModel,
+        defaultReasoning: session.codexReasoningLevel ?? codexReasoningLevel,
+        defaultSpeed: session.codexSpeed ?? codexSpeed,
+      }, codexModels);
+      const sessionCodexModel = normalizedSessionCodexConfig.defaultModel;
+      const sessionCodexReasoningLevel = normalizedSessionCodexConfig.defaultReasoning;
+      const sessionCodexSpeed = codexSpeedServiceTier(codexModels, sessionCodexModel, normalizedSessionCodexConfig.defaultSpeed);
       const sessionCodexPermissionMode = session.codexPermissionMode ?? codexPermissionMode;
       const effectiveCodexPlanMode = options.codexPlanMode ?? codexPlanMode;
       const effectiveCodexGoalMode = options.codexGoalMode ?? codexGoalMode;
@@ -3901,7 +4000,7 @@ export default function RuntimeGuardConsole() {
             message: text,
             thread_id: activeThreadId,
             cwd: session.workspacePath || null,
-            model: codexModelId(sessionCodexModel),
+            model: sessionCodexModel,
             reasoning_effort: sessionCodexReasoningLevel,
             speed: sessionCodexSpeed,
             permission_mode: sessionCodexPermissionMode,
@@ -4661,9 +4760,12 @@ export default function RuntimeGuardConsole() {
           onWorkspaceChange={(workspaceDir) => setCodexNewTaskDraft(current => (
             current ? { ...current, workspaceDir } : current
           ))}
+          onConfigChange={(config) => setCodexNewTaskDraft(current => (
+            current ? { ...current, config } : current
+          ))}
           onCreate={() => void confirmCodexNewTask()}
           onClose={() => setCodexNewTaskDraft(null)}
-          onConfigure={() => navigate('/codex_configure')}
+          codexModels={codexModels}
           creating={codexNewTaskCreating}
         />
       )}
@@ -4897,8 +4999,7 @@ export default function RuntimeGuardConsole() {
                   >
                     <AgentIconBadge agent={session.agent} size="compact" />
                     <span className="rg-left-history-main">
-                      <strong>{session.agent}:</strong>
-                      <span>{baseTitle}</span>
+                      <span className="rg-left-history-session-title">{baseTitle}</span>
                     </span>
                     <span className="rg-left-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
                   </button>
@@ -5154,28 +5255,28 @@ export default function RuntimeGuardConsole() {
                       <div className="rg-codex-model-wrap">
                       <button
                         aria-label={`${codexComposerCopy.modelAria}: ${codexModelSummary}`}
-                        className={`rg-codex-model-button ${codexEffectiveSpeed === 'fast' ? 'is-fast' : 'is-standard'}`}
+                        className={`rg-codex-model-button ${codexEffectiveSpeedIsFast ? 'is-fast' : 'is-standard'}`}
                         onClick={() => {
                           setCodexSubmenu(null);
                           setCodexComposerMenu(current => (current === 'model' ? null : 'model'));
                         }}
                         type="button"
                       >
-                        {codexEffectiveSpeed === 'fast' && <Zap />}
+                        {codexEffectiveSpeedIsFast && <Zap />}
                         <span>{codexModelSummary}</span>
                         <ChevronDown />
                       </button>
                       {codexComposerMenu === 'model' && (
                         <div className="rg-codex-menu rg-codex-model-menu">
                           <span className="rg-codex-menu-label">{codexComposerCopy.reasoningSection}</span>
-                          {codexReasoningOptions.map(option => (
+                          {codexAvailableReasoningOptions.map(option => (
                             <button
                               className="rg-codex-option-row"
                               key={option}
                               onClick={() => setCodexReasoningLevel(option)}
                               type="button"
                             >
-                              <span>{codexComposerCopy.reasoning[option]}</span>
+                              <span>{codexReasoningLabel(option, copy)}</span>
                               {codexReasoningLevel === option && <Check />}
                             </button>
                           ))}
@@ -5185,10 +5286,10 @@ export default function RuntimeGuardConsole() {
                             onClick={() => setCodexSubmenu(current => (current === 'model' ? null : 'model'))}
                             type="button"
                           >
-                            <span>{codexEffectiveSpeed === 'fast' && <Zap />} {codexModel}</span>
+                            <span>{codexEffectiveSpeedIsFast && <Zap />} {codexModelDisplayName(codexModels, codexModel)}</span>
                             <ChevronRight />
                           </button>
-                          {codexModelSupportsFast(codexModel) && (
+                          {codexAvailableSpeedOptions.length > 1 && (
                             <button
                               className="rg-codex-option-row"
                               onClick={() => setCodexSubmenu(current => (current === 'speed' ? null : 'speed'))}
@@ -5201,40 +5302,48 @@ export default function RuntimeGuardConsole() {
                           {codexSubmenu === 'model' && (
                             <div className="rg-codex-submenu is-model">
                               <span className="rg-codex-menu-label">{codexComposerCopy.modelSection}</span>
-                              {codexModelOptions.map(option => (
+                              {codexModels.map(option => (
                                 <button
                                   className="rg-codex-option-row"
-                                  key={option}
+                                  key={option.id}
                                   onClick={() => {
-                                    setCodexModel(option);
+                                    const normalized = normalizeCodexSessionConfig({
+                                      ...initialCodexConfig,
+                                      defaultModel: option.id,
+                                      defaultReasoning: codexReasoningLevel,
+                                      defaultSpeed: codexSpeed,
+                                    }, codexModels);
+                                    setCodexModel(normalized.defaultModel);
+                                    setCodexReasoningLevel(normalized.defaultReasoning);
+                                    setCodexSpeed(normalized.defaultSpeed);
                                     setCodexSubmenu(null);
                                   }}
                                   type="button"
                                 >
-                                  <span>{option}</span>
-                                  {codexModel === option && <Check />}
+                                  <span>{option.display_name || option.model || option.id}</span>
+                                  {selectedCodexModel.id === option.id && <Check />}
                                 </button>
                               ))}
                             </div>
                           )}
-                          {codexSubmenu === 'speed' && codexModelSupportsFast(codexModel) && (
+                          {codexSubmenu === 'speed' && codexAvailableSpeedOptions.length > 1 && (
                             <div className="rg-codex-submenu is-speed">
                               <span className="rg-codex-menu-label">{codexComposerCopy.speedSection}</span>
-                              {codexSpeedOptions.map(option => (
+                              {codexAvailableSpeedOptions.map(option => (
                                 <button
                                   className="rg-codex-option-row rg-codex-speed-row"
-                                  key={option}
+                                  key={option.id}
                                   onClick={() => {
-                                    setCodexSpeed(option);
+                                    setCodexSpeed(option.id);
                                     setCodexSubmenu(null);
                                   }}
                                   type="button"
                                 >
                                   <span className="rg-codex-speed-copy">
-                                    <strong>{codexComposerCopy.speed[option]}</strong>
-                                    <small>{codexComposerCopy.speedHint[option]}</small>
+                                    <strong>{codexSpeedLabel(option.id, copy)}</strong>
+                                    <small>{codexSpeedDescription(option.id, copy, option.description)}</small>
                                   </span>
-                                  {codexSpeed === option && <Check />}
+                                  {codexEffectiveSpeed === option.id && <Check />}
                                 </button>
                               ))}
                             </div>

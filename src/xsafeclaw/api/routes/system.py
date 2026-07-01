@@ -1641,7 +1641,7 @@ class CodexConversationTurnRequest(BaseModel):
     cwd: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
-    speed: Literal["standard", "fast"] | None = "standard"
+    speed: str | None = "standard"
     permission_mode: Literal["read_only", "workspace_write", "full_access"] | None = None
     plan_mode: bool = False
     goal_mode: bool = False
@@ -1671,7 +1671,6 @@ _CODEX_MODEL_IDS: dict[str, str] = {
     "GPT-5.4-Mini": "gpt-5.4-mini",
     "GPT-5.3-Codex-Spark": "gpt-5.3-codex-spark",
 }
-_CODEX_FAST_MODE_MODELS = {"gpt-5.5", "gpt-5.4"}
 _CODEX_APP_SERVER_INTERACTIVE_IDLE_TIMEOUT_S = 30 * 60
 _codex_active_turns: dict[str, dict[str, Any]] = {}
 
@@ -1867,11 +1866,11 @@ def _codex_model_id(value: str | None) -> str | None:
 
 
 def _codex_service_tier(speed: str | None, model_id: str | None) -> str | None:
-    if speed != "fast":
+    del model_id
+    text = (speed or "").strip()
+    if not text or text == "standard":
         return None
-    if model_id not in _CODEX_FAST_MODE_MODELS:
-        raise CodexAppServerError("fast mode is only supported for GPT-5.5 and GPT-5.4")
-    return "fast"
+    return text
 
 
 def _codex_collaboration_mode(
@@ -3082,6 +3081,234 @@ async def _read_codex_rate_limits_via_app_server(
                 await stderr_task
 
 
+def _codex_model_catalog_items(result: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("models", "items", "data"):
+        value = result.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    catalog = result.get("catalog")
+    if isinstance(catalog, dict):
+        for key in ("models", "items", "data"):
+            value = catalog.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _codex_reasoning_effort_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        return _first_string(
+            value.get("id"),
+            value.get("effort"),
+            value.get("reasoningEffort"),
+            value.get("reasoning_effort"),
+            value.get("name"),
+        )
+    return None
+
+
+def _codex_reasoning_efforts(raw_model: dict[str, Any]) -> list[str]:
+    raw_efforts = (
+        raw_model.get("supportedReasoningEfforts")
+        or raw_model.get("supported_reasoning_efforts")
+        or raw_model.get("supportedReasoning")
+        or raw_model.get("reasoningEfforts")
+    )
+    if not isinstance(raw_efforts, list):
+        return []
+    efforts: list[str] = []
+    for raw_effort in raw_efforts:
+        effort = _codex_reasoning_effort_id(raw_effort)
+        if effort and effort not in efforts:
+            efforts.append(effort)
+    return efforts
+
+
+def _codex_service_tier_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        return _first_string(value.get("id"), value.get("serviceTier"), value.get("service_tier"), value.get("name"))
+    return None
+
+
+def _codex_model_service_tiers(raw_model: dict[str, Any]) -> list[dict[str, Any]]:
+    tiers = [{"id": "standard", "name": "Standard", "description": "Default speed", "service_tier": None}]
+    raw_tiers = raw_model.get("serviceTiers") or raw_model.get("service_tiers") or raw_model.get("tiers")
+    if not isinstance(raw_tiers, list):
+        return tiers
+    seen = {"standard"}
+    for raw_tier in raw_tiers:
+        tier_id = _codex_service_tier_id(raw_tier)
+        if not tier_id or tier_id in seen:
+            continue
+        seen.add(tier_id)
+        if isinstance(raw_tier, dict):
+            name = _first_string(raw_tier.get("name"), raw_tier.get("label"), tier_id) or tier_id
+            description = _first_string(raw_tier.get("description"), raw_tier.get("subtitle"), raw_tier.get("detail"))
+        else:
+            name = tier_id
+            description = None
+        tiers.append({"id": tier_id, "name": name, "description": description, "service_tier": tier_id})
+    return tiers
+
+
+def _codex_model_catalog_entry(raw_model: dict[str, Any]) -> dict[str, Any] | None:
+    hidden = bool(raw_model.get("hidden")) or _first_string(raw_model.get("visibility")) == "hidden"
+    if hidden:
+        return None
+    model_id = _first_string(raw_model.get("model"), raw_model.get("id"), raw_model.get("slug"))
+    if not model_id:
+        return None
+    display_name = _first_string(
+        raw_model.get("displayName"),
+        raw_model.get("display_name"),
+        raw_model.get("name"),
+        raw_model.get("label"),
+        model_id,
+    ) or model_id
+    return {
+        "id": model_id,
+        "model": model_id,
+        "display_name": display_name,
+        "is_default": bool(raw_model.get("isDefault", raw_model.get("is_default", False))),
+        "default_reasoning_effort": _first_string(
+            raw_model.get("defaultReasoningEffort"),
+            raw_model.get("default_reasoning_effort"),
+            raw_model.get("defaultReasoning"),
+        ),
+        "supported_reasoning_efforts": _codex_reasoning_efforts(raw_model),
+        "service_tiers": _codex_model_service_tiers(raw_model),
+    }
+
+
+def _codex_model_catalog_response(
+    models: list[dict[str, Any]],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "installed": True,
+        "status": "ready",
+        "source": source,
+        "models": models,
+        "message": "",
+        "error": None,
+    }
+
+
+def _codex_model_catalog_error_response(
+    *,
+    installed: bool,
+    status: str,
+    error: str | None,
+    message: str = "",
+) -> dict[str, Any]:
+    return {
+        "installed": installed,
+        "status": status,
+        "source": None,
+        "models": [],
+        "message": message,
+        "error": error,
+    }
+
+
+async def _read_codex_models_via_app_server(
+    codex_path: str,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+
+        await _codex_app_server_initialize(proc, timeout_s=timeout_s)
+        await _codex_app_server_send(
+            proc,
+            {
+                "id": 2,
+                "method": "model/list",
+                "params": {"includeHidden": False, "limit": 100},
+            },
+        )
+        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        models = [
+            model
+            for item in _codex_model_catalog_items(result)
+            if (model := _codex_model_catalog_entry(item)) is not None
+        ]
+        if not models:
+            raise CodexAppServerError("codex model catalog is empty")
+        return _codex_model_catalog_response(models, source="app_server")
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+async def _read_codex_models_via_debug_models(
+    codex_path: str,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    proc = await asyncio.create_subprocess_exec(
+        *_build_tool_command(codex_path, ["debug", "models", "--bundled"]),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env or _build_env(),
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise CodexAppServerError("codex debug models timed out") from None
+    if proc.returncode != 0:
+        detail = _decode_subprocess_output(stderr).strip() or _decode_subprocess_output(stdout).strip()
+        raise CodexAppServerError(detail or f"codex debug models exited with {proc.returncode}")
+    try:
+        result = json.loads(_decode_subprocess_output(stdout))
+    except json.JSONDecodeError as exc:
+        raise CodexAppServerError(f"codex debug models returned invalid JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise CodexAppServerError("codex debug models returned an unexpected payload")
+    models = [
+        model
+        for item in _codex_model_catalog_items(result)
+        if (model := _codex_model_catalog_entry(item)) is not None
+    ]
+    if not models:
+        raise CodexAppServerError("codex debug models catalog is empty")
+    return _codex_model_catalog_response(models, source="debug_models")
+
+
 async def _list_codex_cli_sessions_via_app_server(
     codex_path: str,
     *,
@@ -3354,6 +3581,40 @@ async def codex_conversation_interrupt(session_key: str, payload: CodexConversat
     else:
         await _codex_app_server_send(proc, interrupt_message)
     return {"status": "interrupted", "interrupted": True}
+
+
+@router.get("/codex/models")
+async def codex_models():
+    """Read the current Codex CLI model catalog through app-server, with debug fallback."""
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        return _codex_model_catalog_error_response(
+            installed=False,
+            status="missing",
+            error="codex executable not found",
+        )
+
+    app_server_error: str | None = None
+    try:
+        return await _read_codex_models_via_app_server(codex_path, env=env)
+    except TimeoutError:
+        app_server_error = "codex app-server timed out"
+    except Exception as exc:
+        app_server_error = str(exc)
+
+    try:
+        return await _read_codex_models_via_debug_models(codex_path, env=env)
+    except Exception as exc:
+        debug_error = str(exc)
+        detail = debug_error
+        if app_server_error:
+            detail = f"{app_server_error}; fallback failed: {debug_error}"
+        return _codex_model_catalog_error_response(
+            installed=True,
+            status="error",
+            error=detail,
+        )
 
 
 @router.get("/codex/rate-limits")

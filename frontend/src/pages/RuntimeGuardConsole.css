@@ -640,19 +640,12 @@
   overflow: hidden;
 }
 
-.rg-left-history-main strong {
-  flex: 0 0 auto;
-  color: #dce6ed;
-  font-size: 7.5px;
-  font-weight: 700;
-  line-height: 11px;
-}
-
 .rg-left-history-main span {
   min-width: 0;
   overflow: hidden;
-  color: #8fa0ab;
-  font-size: 7px;
+  color: #dce6ed;
+  font-size: 7.5px;
+  font-weight: 700;
   line-height: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3373,7 +3366,7 @@
   margin-top: calc(9px * var(--rg-modal-scale));
 }
 
-.rg-codex-new-task-settings div {
+.rg-codex-new-task-settings label {
   min-width: 0;
   border: 1px solid #20313d;
   border-radius: calc(5px * var(--rg-modal-scale));
@@ -3387,14 +3380,38 @@
   font-size: calc(7px * var(--rg-modal-scale));
 }
 
-.rg-codex-new-task-settings strong {
+.rg-codex-new-task-settings select {
   display: block;
+  width: 100%;
+  min-width: 0;
+  height: calc(18px * var(--rg-modal-scale));
   overflow: hidden;
   margin-top: calc(4px * var(--rg-modal-scale));
+  border: 0;
+  outline: 0;
+  background: transparent;
   color: #d8e4eb;
+  color-scheme: dark;
   font-size: calc(8px * var(--rg-modal-scale));
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rg-codex-new-task-settings select:focus {
+  color: #ffffff;
+}
+
+.rg-codex-new-task-select option,
+.rg-codex-new-task-select-option {
+  background-color: #07111a;
+  color: #dce7ee;
+}
+
+.rg-codex-new-task-select option:checked,
+.rg-codex-new-task-select-option:checked {
+  background-color: #0f3f64;
+  color: #ffffff;
 }
 
 .rg-codex-new-task-actions {

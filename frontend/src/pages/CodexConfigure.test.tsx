@@ -12,6 +12,7 @@ vi.mock('../services/api', () => ({
   systemAPI: {
     getCodexAuthStatus: vi.fn(),
     getCodexRuntimeStatus: vi.fn(),
+    getCodexModels: vi.fn(),
     loginCodexAuth: vi.fn(),
     logoutCodexAuth: vi.fn(),
   },
@@ -33,6 +34,7 @@ describe('CodexConfigure', () => {
     window.localStorage.setItem('xsafeclaw:locale', 'en');
     vi.mocked(systemAPI.getCodexAuthStatus).mockReset();
     vi.mocked(systemAPI.getCodexRuntimeStatus).mockReset();
+    vi.mocked(systemAPI.getCodexModels).mockReset();
     vi.mocked(systemAPI.loginCodexAuth).mockReset();
     vi.mocked(systemAPI.logoutCodexAuth).mockReset();
     vi.mocked(assetsAPI.browseDirectories).mockReset();
@@ -57,6 +59,40 @@ describe('CodexConfigure', () => {
         entry_path: 'C:\\Users\\heng\\AppData\\Roaming\\npm\\codex.cmd',
         install_context: 'npm',
         warnings: [],
+        error: null,
+      },
+    } as any);
+    vi.mocked(systemAPI.getCodexModels).mockResolvedValue({
+      data: {
+        installed: true,
+        status: 'ready',
+        source: 'app_server',
+        models: [
+          {
+            id: 'gpt-5.5',
+            model: 'gpt-5.5',
+            display_name: 'GPT-5.5',
+            is_default: true,
+            default_reasoning_effort: 'medium',
+            supported_reasoning_efforts: ['low', 'medium', 'high', 'xhigh'],
+            service_tiers: [
+              { id: 'standard', name: 'Standard', description: 'Default speed', service_tier: null },
+              { id: 'priority', name: 'Fast', description: '1.5x speed, increased usage', service_tier: 'priority' },
+            ],
+          },
+          {
+            id: 'gpt-5.4-mini',
+            model: 'gpt-5.4-mini',
+            display_name: 'GPT-5.4-Mini',
+            is_default: false,
+            default_reasoning_effort: 'medium',
+            supported_reasoning_efforts: ['low', 'medium', 'high'],
+            service_tiers: [
+              { id: 'standard', name: 'Standard', description: 'Default speed', service_tier: null },
+            ],
+          },
+        ],
+        message: '',
         error: null,
       },
     } as any);
@@ -208,13 +244,13 @@ describe('CodexConfigure', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Full access' }));
     fireEvent.change(screen.getByLabelText('Default model'), {
-      target: { value: 'GPT-5.4-Mini' },
+      target: { value: 'gpt-5.4-mini' },
     });
     fireEvent.change(screen.getByLabelText('Default reasoning'), {
       target: { value: 'high' },
     });
     fireEvent.change(screen.getByLabelText('Default speed'), {
-      target: { value: 'fast' },
+      target: { value: 'priority' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save configuration' }));
 
@@ -223,9 +259,9 @@ describe('CodexConfigure', () => {
       cliPathMode: 'manual',
       cliPath: 'C:\\Tools\\codex.exe',
       permissionMode: 'full_access',
-      defaultModel: 'GPT-5.4-Mini',
+      defaultModel: 'gpt-5.4-mini',
       defaultReasoning: 'high',
-      defaultSpeed: 'fast',
+      defaultSpeed: 'standard',
     });
     expect(screen.getByText('Codex configuration saved locally.')).toBeTruthy();
 
@@ -235,9 +271,9 @@ describe('CodexConfigure', () => {
     expect(screen.getByLabelText('Default workspace directory')).toHaveValue('E:\\Projects\\Demo');
     expect(screen.getByLabelText('Codex CLI path')).toHaveValue('C:\\Tools\\codex.exe');
     expect(screen.getByRole('button', { name: 'Full access' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByLabelText('Default model')).toHaveValue('GPT-5.4-Mini');
+    expect(screen.getByLabelText('Default model')).toHaveValue('gpt-5.4-mini');
     expect(screen.getByLabelText('Default reasoning')).toHaveValue('high');
-    expect(screen.getByLabelText('Default speed')).toHaveValue('fast');
+    expect(screen.getByLabelText('Default speed')).toHaveValue('standard');
   });
 
   it('shows backend auth errors without blocking local configuration saves', async () => {
