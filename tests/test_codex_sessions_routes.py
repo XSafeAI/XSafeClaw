@@ -167,6 +167,11 @@ class FakeAppServerStdin:
                 ).encode("utf-8")
                 + b"\n"
             )
+        elif method == "thread/archive":
+            self._queue.put_nowait(
+                json.dumps({"id": message["id"], "result": {"archived": True}}).encode("utf-8")
+                + b"\n"
+            )
 
     async def drain(self) -> None:
         return None
@@ -454,3 +459,84 @@ def test_codex_session_messages_route_reports_app_server_error(monkeypatch, tmp_
     assert data["thread_id"] == "thread-123"
     assert data["messages"] == []
     assert data["error"] == "thread read failed"
+
+
+def test_codex_session_delete_archives_cli_thread_and_removes_rollout(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sessions_root = tmp_path / ".codex" / "sessions"
+    rollout_path = sessions_root / "2026" / "06" / "15" / "rollout-thread-delete-123.jsonl"
+    rollout_path.parent.mkdir(parents=True)
+    rollout_path.write_text("{}\n", encoding="utf-8")
+    sent_messages: list[dict] = []
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "_codex_session_history_roots", lambda: [sessions_root, tmp_path / ".codex" / "archived_sessions"])
+    monkeypatch.setattr(system_routes, "_read_codex_deleted_thread_ids", lambda: set())
+    deleted_tombstones: list[dict] = []
+    monkeypatch.setattr(system_routes, "_write_codex_deleted_thread_tombstone", lambda payload: deleted_tombstones.append(payload))
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeAppServerProcess(
+            sent_messages,
+            thread_read_result={
+                "thread": {
+                    "id": "thread-delete-123",
+                    "sessionId": "session-delete",
+                    "source": {"kind": "cli"},
+                    "path": str(rollout_path),
+                    "status": {"type": "idle"},
+                }
+            },
+        )
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = TestClient(app).delete("/api/system/codex/sessions/thread-delete-123")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["thread_id"] == "thread-delete-123"
+    assert data["archived"] is True
+    assert data["deleted_file"] is True
+    assert not rollout_path.exists()
+    assert [message["method"] for message in sent_messages if "method" in message] == [
+        "initialize",
+        "initialized",
+        "thread/read",
+        "thread/archive",
+    ]
+    assert deleted_tombstones == [
+        {
+            "thread_id": "thread-delete-123",
+            "source": "cli",
+            "path": str(rollout_path),
+        }
+    ]
+
+
+def test_codex_session_delete_rejects_non_cli_thread(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    rollout_path = tmp_path / ".codex" / "sessions" / "rollout-thread-vscode-123.jsonl"
+    rollout_path.parent.mkdir(parents=True)
+    rollout_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "_codex_session_history_roots", lambda: [rollout_path.parent])
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeAppServerProcess(
+            [],
+            thread_read_result={
+                "thread": {
+                    "id": "thread-vscode-123",
+                    "source": {"kind": "vscode"},
+                    "path": str(rollout_path),
+                }
+            },
+        )
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = TestClient(app).delete("/api/system/codex/sessions/thread-vscode-123")
+
+    assert response.status_code == 400
+    assert "CLI" in response.json()["detail"]
+    assert rollout_path.exists()

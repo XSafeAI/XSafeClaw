@@ -29,8 +29,11 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
 
 from ...config import settings
+from ...database import get_db_context
+from ...models import DeletedSessionTombstone, Event, Message, Session, ToolCall, utc_now
 from ..runtime_helpers import (
     get_instance,
     list_instances,
@@ -977,6 +980,13 @@ def _build_tool_command(executable_path: str, args: list[str]) -> list[str]:
     return [executable_path, *args]
 
 
+def _build_codex_app_server_command(codex_path: str, *, bypass_hook_trust: bool = False) -> list[str]:
+    args = ["app-server"]
+    if bypass_hook_trust:
+        args.insert(0, "--dangerously-bypass-hook-trust")
+    return _build_tool_command(codex_path, args)
+
+
 def _build_agent_command(agent_path: str, args: list[str]) -> list[str]:
     """Build a subprocess command for the active platform binary."""
     return _build_openclaw_command(agent_path, args)
@@ -1151,6 +1161,32 @@ async def _probe_nanobot_install_async(
     return False, None, first_line or f"nanobot exited with code {proc.returncode}"
 
 
+async def _terminate_process_tree(proc: asyncio.subprocess.Process, *, timeout_s: float = 3.0) -> None:
+    """Terminate a subprocess and its children, including Windows CLI wrappers."""
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" and pid:
+        taskkill = shutil.which("taskkill.exe") or shutil.which("taskkill")
+        if taskkill:
+            try:
+                killer = await asyncio.create_subprocess_exec(
+                    taskkill,
+                    "/PID",
+                    str(pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=timeout_s)
+                return
+            except Exception:
+                pass
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+
+
 async def _run_tool_capture_async(
     args: list[str],
     *,
@@ -1169,11 +1205,7 @@ async def _run_tool_capture_async(
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
     except TimeoutError:
         if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
+            await _terminate_process_tree(proc)
         return None, "", f"{Path(args[0]).name} timed out"
     except Exception as exc:
         return None, "", str(exc)
@@ -1505,7 +1537,8 @@ async def _probe_codex_install_async(
         env=env,
         timeout_s=doctor_timeout_s,
     )
-    if doctor_code == 0 and doctor_output:
+    doctor_output_lstrip = doctor_output.lstrip()
+    if doctor_output_lstrip.startswith(("{", "[")):
         try:
             doctor = json.loads(doctor_output)
             result = _codex_status_from_doctor(
@@ -1547,7 +1580,12 @@ async def codex_runtime_status(refresh: bool = False):
         _invalidate_codex_probe_cache()
     env = _build_env()
     codex_path = _find_codex(env=env)
-    status = await _probe_codex_install_async(codex_path, env=env)
+    status = await _probe_codex_install_async(
+        codex_path,
+        env=env,
+        version_timeout_s=10.0 if refresh else 5.0,
+        doctor_timeout_s=25.0 if refresh else 5.0,
+    )
     return _codex_runtime_response(status)
 
 
@@ -1982,18 +2020,29 @@ def _codex_hook_metadata_entries(result: dict[str, Any]) -> list[dict[str, Any]]
     return hooks
 
 
-def _codex_hook_is_loaded(hook: dict[str, Any], *, session_key: str) -> bool:
+def _codex_hook_is_loaded(
+    hook: dict[str, Any],
+    *,
+    session_key: str,
+    expected_command: str | None = None,
+    bypass_hook_trust: bool = False,
+) -> bool:
     command = _first_string(hook.get("command")) or ""
     event_name = _first_string(hook.get("eventName")) or ""
     source = _first_string(hook.get("source")) or ""
     trust = _first_string(hook.get("trustStatus")) or ""
+    trusted_statuses = {"trusted", "managed"}
+    if bypass_hook_trust:
+        trusted_statuses.update({"untrusted", "modified"})
+    command_matches = command == expected_command if expected_command is not None else (
+        "xsafeclaw.integrations.codex_guard_hook" in command and session_key in command
+    )
     return (
-        "xsafeclaw.integrations.codex_guard_hook" in command
-        and session_key in command
+        command_matches
         and event_name in {"PreToolUse", "PermissionRequest"}
         and source == "sessionFlags"
         and bool(hook.get("enabled", True))
-        and trust in {"trusted", "managed"}
+        and trust in trusted_statuses
     )
 
 
@@ -2004,6 +2053,8 @@ async def _codex_verify_session_hooks(
     session_key: str,
     cwd: str | None,
     timeout_s: float,
+    expected_command: str | None = None,
+    bypass_hook_trust: bool = False,
 ) -> None:
     params: dict[str, Any] = {}
     if cwd:
@@ -2013,7 +2064,12 @@ async def _codex_verify_session_hooks(
     loaded_events = {
         _first_string(hook.get("eventName"))
         for hook in _codex_hook_metadata_entries(result)
-        if _codex_hook_is_loaded(hook, session_key=session_key)
+        if _codex_hook_is_loaded(
+            hook,
+            session_key=session_key,
+            expected_command=expected_command,
+            bypass_hook_trust=bypass_hook_trust,
+        )
     }
     missing = {"PreToolUse", "PermissionRequest"} - loaded_events
     if missing:
@@ -2368,9 +2424,10 @@ async def _codex_turn_stream_events(
     stderr_task: asyncio.Task[bytes] | None = None
     turn_id: str | None = None
     active_session_key = session_key
+    hook_command = _codex_guard_hook_command(session_key)
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_build_tool_command(codex_path, ["app-server"]),
+            *_build_codex_app_server_command(codex_path, bypass_hook_trust=True),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -2384,7 +2441,7 @@ async def _codex_turn_stream_events(
         thread_id = _first_string(payload.thread_id)
         open_params: dict[str, Any] = {
             "developerInstructions": instructions.text,
-            "config": _codex_guard_hook_config(session_key),
+            "config": _codex_guard_hook_config(session_key, command=hook_command),
         }
         if payload.cwd:
             open_params["cwd"] = payload.cwd
@@ -2421,6 +2478,8 @@ async def _codex_turn_stream_events(
             session_key=session_key,
             cwd=payload.cwd,
             timeout_s=timeout_s,
+            expected_command=hook_command,
+            bypass_hook_trust=True,
         )
         next_request_id += 1
 
@@ -2559,15 +2618,7 @@ async def _codex_turn_stream_events(
             _codex_active_turns.pop(active_session_key, None)
             _codex_active_turns.pop(session_key, None)
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await _terminate_process_tree(proc)
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -2589,7 +2640,7 @@ async def _open_codex_conversation_via_app_server(
     stderr_task: asyncio.Task[bytes] | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_build_tool_command(codex_path, ["app-server"]),
+            *_build_codex_app_server_command(codex_path, bypass_hook_trust=True),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -2622,15 +2673,7 @@ async def _open_codex_conversation_via_app_server(
         )
     finally:
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await _terminate_process_tree(proc)
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -2880,15 +2923,7 @@ async def _read_codex_cli_session_messages_via_app_server(
         }
     finally:
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await _terminate_process_tree(proc)
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -3066,15 +3101,7 @@ async def _read_codex_rate_limits_via_app_server(
         return _codex_rate_limits_response_from_snapshot(snapshot)
     finally:
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await _terminate_process_tree(proc)
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -3255,15 +3282,7 @@ async def _read_codex_models_via_app_server(
         return _codex_model_catalog_response(models, source="app_server")
     finally:
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await _terminate_process_tree(proc)
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -3372,15 +3391,458 @@ async def _list_codex_cli_sessions_via_app_server(
         }
     finally:
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await _terminate_process_tree(proc)
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _runtime_history_defaults(platform: str) -> tuple[str, str, Path]:
+    if platform == "openclaw":
+        return "openclaw", "openclaw-default", Path(settings.openclaw_sessions_dir).expanduser()
+    if platform == "hermes":
+        return "hermes", "hermes-default", Path(settings.hermes_sessions_dir).expanduser()
+    raise HTTPException(status_code=400, detail="platform must be openclaw or hermes")
+
+
+async def _runtime_sessions_dir(platform: str, instance_id: str | None = None) -> tuple[str, Path]:
+    normalized_platform, default_instance_id, default_dir = _runtime_history_defaults(platform)
+    requested_instance_id = (instance_id or "").strip()
+    try:
+        instances = await runtime_registry.discover()
+    except Exception:
+        instances = []
+    for instance in instances:
+        if instance.platform != normalized_platform:
+            continue
+        if requested_instance_id and instance.instance_id != requested_instance_id:
+            continue
+        path = instance.sessions_path_obj or default_dir
+        return instance.instance_id or default_instance_id, path.expanduser()
+    return requested_instance_id or default_instance_id, default_dir
+
+
+def _runtime_sessions_index_path(sessions_dir: Path) -> Path:
+    return sessions_dir / "sessions.json"
+
+
+def _load_runtime_sessions_index(sessions_dir: Path) -> dict[str, Any]:
+    index_path = _runtime_sessions_index_path(sessions_dir)
+    if not index_path.is_file():
+        return {}
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"failed to read sessions.json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=500, detail="sessions.json must be an object")
+    return data
+
+
+def _runtime_index_session_id(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return _first_string(
+            value.get("sessionId"),
+            value.get("session_id"),
+            value.get("sourceSessionId"),
+            value.get("id"),
+        )
+    return ""
+
+
+def _resolve_runtime_session_jsonl(sessions_dir: Path, session_id: str) -> Path:
+    if not session_id or "/" in session_id or "\\" in session_id:
+        raise HTTPException(status_code=400, detail="invalid source session id")
+    candidate = (sessions_dir / f"{session_id}.jsonl").resolve()
+    root = sessions_dir.resolve()
+    if not _path_is_within(candidate, root):
+        raise HTTPException(status_code=400, detail="session file is outside sessions directory")
+    if candidate.suffix != ".jsonl" or candidate.name != f"{session_id}.jsonl":
+        raise HTTPException(status_code=400, detail="session file name does not match source session id")
+    return candidate
+
+
+def _runtime_entry_timestamp_to_iso(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        raw = value.strip()
+        if raw.endswith("Z"):
+            return raw
+        if raw.endswith("+00:00"):
+            return raw[:-6] + "Z"
+        return raw
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000.0
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return None
+
+
+def _runtime_text_from_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = _first_string(item.get("text"), item.get("content"), item.get("value"))
+                if text:
+                    parts.append(text)
+        return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    if isinstance(value, dict):
+        return _first_string(value.get("text"), value.get("content"), value.get("value"))
+    return ""
+
+
+def _runtime_entry_role(entry: dict[str, Any]) -> str:
+    return _first_string(
+        entry.get("role"),
+        entry.get("type"),
+        (entry.get("message") or {}).get("role") if isinstance(entry.get("message"), dict) else None,
+    ).lower()
+
+
+def _runtime_entry_text(entry: dict[str, Any]) -> str:
+    direct = _runtime_text_from_value(entry.get("content"))
+    if direct:
+        return direct
+    message = entry.get("message")
+    if isinstance(message, dict):
+        return _runtime_text_from_value(message.get("content"))
+    return _first_string(entry.get("text"), entry.get("summary"), entry.get("title"))
+
+
+def _runtime_jsonl_summary(path: Path, *, fallback_title: str) -> dict[str, Any]:
+    created_at: str | None = None
+    updated_at: str | None = None
+    cwd: str | None = None
+    title: str | None = None
+    if path.is_file():
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    timestamp = _runtime_entry_timestamp_to_iso(
+                        entry.get("timestamp")
+                        or entry.get("created_at")
+                        or entry.get("createdAt")
+                        or entry.get("time")
+                    )
+                    if timestamp and not created_at:
+                        created_at = timestamp
+                    if timestamp:
+                        updated_at = timestamp
+                    cwd = cwd or _first_string(entry.get("cwd"), entry.get("workspace"), entry.get("workspacePath"))
+                    if title is None and _runtime_entry_role(entry) in {"user", "human", "usermessage"}:
+                        title = _runtime_entry_text(entry)
+                    if title is None:
+                        candidate = _runtime_entry_text(entry)
+                        if candidate:
+                            title = candidate
+        except OSError:
+            pass
+        if not created_at or not updated_at:
+            stat_time = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            created_at = created_at or stat_time
+            updated_at = updated_at or stat_time
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "title": (title or fallback_title).replace("\n", " ").strip()[:160],
+        "cwd": cwd,
+        "created_at": created_at or now,
+        "updated_at": updated_at or created_at or now,
+        "path_available": path.is_file(),
+    }
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+
+
+async def _cleanup_runtime_session_cache(
+    *,
+    platform: str,
+    instance_id: str,
+    source_session_id: str,
+    session_key: str | None,
+    jsonl_path: Path,
+) -> None:
+    try:
+        async with get_db_context() as db:
+            result = await db.execute(
+                select(Session).where(Session.platform == platform)
+                .where(Session.instance_id == instance_id)
+                .where(Session.source_session_id == source_session_id)
+            )
+            sessions = list(result.scalars().all())
+            for session in sessions:
+                db.add(
+                    DeletedSessionTombstone(
+                        platform=platform,
+                        instance_id=instance_id,
+                        source_session_id=source_session_id,
+                        session_id=session.session_id,
+                        session_key=session.session_key or session_key,
+                        jsonl_file_path=str(jsonl_path),
+                    )
+                )
+            session_ids = [session.session_id for session in sessions]
+            await db.execute(
+                delete(ToolCall)
+                .where(ToolCall.platform == platform)
+                .where(ToolCall.instance_id == instance_id)
+                .where(ToolCall.source_session_id == source_session_id)
+            )
+            if session_ids:
+                await db.execute(delete(Event).where(Event.session_id.in_(session_ids)))
+                await db.execute(delete(Message).where(Message.session_id.in_(session_ids)))
+                await db.execute(delete(Session).where(Session.session_id.in_(session_ids)))
+    except Exception:
+        # The local history file deletion is the source of truth. Database cleanup
+        # is best-effort because tests and first-run installs may not have tables yet.
+        return
+
+
+async def _runtime_local_session_records(platform: str, *, instance_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+    normalized_platform, _, _ = _runtime_history_defaults(platform)
+    resolved_instance_id, sessions_dir = await _runtime_sessions_dir(normalized_platform, instance_id)
+    index = _load_runtime_sessions_index(sessions_dir)
+    records: list[dict[str, Any]] = []
+    for session_key, raw in index.items():
+        source_session_id = _runtime_index_session_id(raw)
+        if not source_session_id:
+            continue
+        try:
+            jsonl_path = _resolve_runtime_session_jsonl(sessions_dir, source_session_id)
+        except HTTPException:
+            continue
+        summary = _runtime_jsonl_summary(jsonl_path, fallback_title=str(session_key) or source_session_id)
+        records.append(
+            {
+                "platform": normalized_platform,
+                "instance_id": resolved_instance_id,
+                "source_session_id": source_session_id,
+                "session_key": str(session_key),
+                **summary,
+            }
+        )
+    records.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    return {
+        "platform": normalized_platform,
+        "instance_id": resolved_instance_id,
+        "sessions": records[:limit],
+        "total": len(records),
+    }
+
+
+@router.get("/runtime-sessions")
+async def runtime_local_sessions(
+    platform: Literal["openclaw", "hermes"] = Query(...),
+    instance_id: str | None = Query(default=None),
+    limit: int = Query(100, ge=1, le=100),
+):
+    """List local OpenClaw/Hermes history directly from runtime session files."""
+    return await _runtime_local_session_records(platform, instance_id=instance_id, limit=limit)
+
+
+@router.delete("/runtime-sessions/{platform}/{source_session_id:path}")
+async def runtime_local_session_delete(
+    platform: Literal["openclaw", "hermes"],
+    source_session_id: str,
+    instance_id: str | None = Query(default=None),
+):
+    """Safely delete one OpenClaw/Hermes local session file and index entry."""
+    normalized_platform, _, _ = _runtime_history_defaults(platform)
+    resolved_instance_id, sessions_dir = await _runtime_sessions_dir(normalized_platform, instance_id)
+    index = _load_runtime_sessions_index(sessions_dir)
+    matching_key: str | None = None
+    for session_key, raw in index.items():
+        if _runtime_index_session_id(raw) == source_session_id:
+            matching_key = str(session_key)
+            break
+    if matching_key is None:
+        raise HTTPException(status_code=404, detail="runtime session not found")
+
+    jsonl_path = _resolve_runtime_session_jsonl(sessions_dir, source_session_id)
+    if jsonl_path.exists() and not jsonl_path.is_file():
+        raise HTTPException(status_code=400, detail="session target is not a file")
+    deleted_file = False
+    if jsonl_path.exists():
+        jsonl_path.unlink()
+        deleted_file = True
+    next_index = {key: value for key, value in index.items() if str(key) != matching_key}
+    _atomic_write_json(_runtime_sessions_index_path(sessions_dir), next_index)
+    await _cleanup_runtime_session_cache(
+        platform=normalized_platform,
+        instance_id=resolved_instance_id,
+        source_session_id=source_session_id,
+        session_key=matching_key,
+        jsonl_path=jsonl_path,
+    )
+    return {
+        "platform": normalized_platform,
+        "instance_id": resolved_instance_id,
+        "source_session_id": source_session_id,
+        "session_key": matching_key,
+        "deleted_file": deleted_file,
+        "updated_index": True,
+    }
+
+
+def _codex_deleted_threads_path() -> Path:
+    return Path(settings.data_dir).expanduser() / "codex-deleted-threads.json"
+
+
+def _read_codex_deleted_thread_ids() -> set[str]:
+    path = _codex_deleted_threads_path()
+    if not path.is_file():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    threads = payload.get("threads") if isinstance(payload, dict) else None
+    if isinstance(threads, dict):
+        return {str(thread_id) for thread_id in threads.keys()}
+    if isinstance(threads, list):
+        return {str(thread_id) for thread_id in threads}
+    return set()
+
+
+def _write_codex_deleted_thread_tombstone(payload: dict[str, Any]) -> None:
+    path = _codex_deleted_threads_path()
+    current: dict[str, Any] = {}
+    if path.is_file():
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                current = loaded
+    threads = current.get("threads")
+    if not isinstance(threads, dict):
+        threads = {}
+    thread_id = str(payload.get("thread_id") or "")
+    if not thread_id:
+        return
+    threads[thread_id] = {
+        **payload,
+        "deleted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    _atomic_write_json(path, {"threads": threads})
+
+
+def _codex_session_history_roots() -> list[Path]:
+    codex_home = Path.home() / ".codex"
+    return [codex_home / "sessions", codex_home / "archived_sessions"]
+
+
+def _validate_codex_rollout_path(path_value: str, thread_id: str) -> Path:
+    if not path_value:
+        raise HTTPException(status_code=400, detail="Codex thread path is missing")
+    path = Path(path_value).expanduser().resolve()
+    roots = [root.expanduser().resolve() for root in _codex_session_history_roots()]
+    if not any(_path_is_within(path, root) for root in roots):
+        raise HTTPException(status_code=400, detail="Codex thread path is outside allowed history directories")
+    if path.suffix != ".jsonl" or not path.name.startswith("rollout-") or thread_id not in path.name:
+        raise HTTPException(status_code=400, detail="Codex thread path does not match the requested thread")
+    if path.exists() and not path.is_file():
+        raise HTTPException(status_code=400, detail="Codex thread target is not a file")
+    return path
+
+
+async def _delete_codex_cli_session_via_app_server(
+    codex_path: str,
+    thread_id: str,
+    *,
+    env: dict | None = None,
+    timeout_s: float = 12.0,
+) -> dict[str, Any]:
+    proc: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_build_tool_command(codex_path, ["app-server"]),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or _build_env(),
+        )
+        if proc.stderr is not None:
+            stderr_task = asyncio.create_task(proc.stderr.read())
+        await _codex_app_server_initialize(proc, timeout_s=timeout_s)
+        await _codex_app_server_send(
+            proc,
+            {"id": 2, "method": "thread/read", "params": {"threadId": thread_id, "includeTurns": False}},
+        )
+        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
+        thread = result.get("thread") if isinstance(result.get("thread"), dict) else result
+        if not isinstance(thread, dict):
+            raise HTTPException(status_code=404, detail="Codex thread not found")
+        source = _codex_source_label(thread.get("source"), thread.get("threadSource"))
+        if source != "cli":
+            raise HTTPException(status_code=400, detail="Only Codex CLI history can be deleted")
+        path_value = _first_string(thread.get("path"), result.get("path"))
+        rollout_path = _validate_codex_rollout_path(path_value, thread_id)
+        await _codex_app_server_send(
+            proc,
+            {"id": 3, "method": "thread/archive", "params": {"threadId": thread_id}},
+        )
+        await _codex_app_server_response(proc, 3, timeout_s=timeout_s)
+        deleted_file = False
+        if rollout_path.exists():
+            rollout_path.unlink()
+            deleted_file = True
+        _write_codex_deleted_thread_tombstone(
+            {"thread_id": thread_id, "source": source, "path": str(rollout_path)}
+        )
+        return {
+            "thread_id": thread_id,
+            "source": source,
+            "archived": True,
+            "deleted_file": deleted_file,
+            "path": str(rollout_path),
+        }
+    finally:
+        if proc is not None and proc.returncode is None:
+            await _terminate_process_tree(proc)
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -3511,7 +3973,7 @@ async def codex_conversation_goal_clear(session_key: str, payload: CodexConversa
     try:
         instructions = build_codex_developer_instructions()
         proc = await asyncio.create_subprocess_exec(
-            *_build_tool_command(codex_path, ["app-server"]),
+            *_build_codex_app_server_command(codex_path, bypass_hook_trust=True),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -3665,12 +4127,20 @@ async def codex_sessions(
         }
 
     try:
-        return await _list_codex_cli_sessions_via_app_server(
+        result = await _list_codex_cli_sessions_via_app_server(
             codex_path,
             env=env,
             limit=limit,
             cursor=cursor,
         )
+        deleted_thread_ids = _read_codex_deleted_thread_ids()
+        if deleted_thread_ids:
+            result["sessions"] = [
+                session
+                for session in result.get("sessions", [])
+                if str(session.get("id") or "") not in deleted_thread_ids
+            ]
+        return result
     except TimeoutError:
         return {
             "installed": True,
@@ -3694,6 +4164,8 @@ async def codex_sessions(
 @router.get("/codex/sessions/{thread_id}/messages")
 async def codex_session_messages(thread_id: str):
     """Read a Codex CLI thread transcript summary through app-server JSON-RPC."""
+    if thread_id in _read_codex_deleted_thread_ids():
+        raise HTTPException(status_code=404, detail="Codex session has been deleted")
     env = _build_env()
     codex_path = _find_codex(env=env)
     if not codex_path:
@@ -3730,6 +4202,26 @@ async def codex_session_messages(thread_id: str):
             "message": "",
             "error": str(exc),
         }
+
+
+@router.delete("/codex/sessions/{thread_id}")
+async def codex_session_delete(thread_id: str):
+    """Archive and physically remove one local Codex CLI rollout file."""
+    session_key = f"codex:{thread_id}"
+    if session_key in _codex_active_turns:
+        raise HTTPException(status_code=409, detail="Codex session is active")
+    env = _build_env()
+    codex_path = _find_codex(env=env)
+    if not codex_path:
+        raise HTTPException(status_code=404, detail="codex executable not found")
+    try:
+        return await _delete_codex_cli_session_via_app_server(codex_path, thread_id, env=env)
+    except HTTPException:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=500, detail="codex app-server timed out") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/install-status")

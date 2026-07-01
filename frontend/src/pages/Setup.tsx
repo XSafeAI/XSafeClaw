@@ -430,67 +430,6 @@ export default function Setup() {
     }
   };
 
-  // Nanobot install (SSE flow only; config is created later in /nanobot_configure)
-  const handleInstallNanobot = async () => {
-    setInstallingPlatform('nanobot');
-    setStage('installing_nanobot');
-    setLogs([]);
-    addLog(t.setup.nanobotInitStart, 'info');
-
-    try {
-      const resp = await fetch('/api/system/nanobot/install', { method: 'POST' });
-      if (!resp.ok || !resp.body) {
-        addLog(`HTTP ${resp.status} ${resp.statusText}`, 'error');
-        addLog(t.setup.nanobotInstallFailedHint, 'info');
-        setStage('install_failed');
-        return;
-      }
-      const reader = resp.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      let success = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split('\n\n');
-        buf = parts.pop() ?? '';
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith('data:')) continue;
-          try {
-            const d = JSON.parse(line.slice(5).trim());
-            if (d.type === 'output' && d.text) addLog(d.text);
-            else if (d.type === 'done') {
-              success = d.success;
-              if (success) addLog(t.setup.nanobotInitSuccess, 'success');
-              else addLog(`uv exited with code ${d.exit_code}`, 'error');
-            } else if (d.type === 'error') {
-              addLog(d.message, 'error');
-              success = false;
-            }
-          } catch {}
-        }
-      }
-
-      if (success) {
-        addLog(t.setup.nanobotCliInstallComplete || t.setup.nanobotInitSuccess, 'success');
-        setNanobotInfo(prev => ({ ...prev, installed: true, configured: false }));
-        setTimeout(() => navigate('/nanobot_configure', { replace: true }), 1200);
-      } else {
-        // Show manual install hint
-        addLog(t.setup.nanobotInstallFailedHint, 'info');
-        setStage('install_failed');
-      }
-    } catch (err: any) {
-      addLog(String(err), 'error');
-      setStage('install_failed');
-    } finally {
-      setInstallingPlatform(null);
-    }
-  };
-
   const handleInstallHermes = async () => {
     setInstallingPlatform('hermes');
     setStage('installing_hermes');
@@ -667,6 +606,14 @@ export default function Setup() {
               )}
 
               <SetupCard
+                platform="codex"
+                info={codexInfo}
+                installing={installingPlatform === 'codex'}
+                onInstall={handleInstallCodex}
+                onConfigure={() => navigate('/codex_configure', { replace: true })}
+                t={t}
+              />
+              <SetupCard
                 platform="openclaw"
                 info={openclawInfo}
                 installing={installingPlatform === 'openclaw'}
@@ -675,27 +622,11 @@ export default function Setup() {
                 t={t}
               />
               <SetupCard
-                platform="nanobot"
-                info={nanobotInfo}
-                installing={installingPlatform === 'nanobot'}
-                onInstall={handleInstallNanobot}
-                onConfigure={() => navigate('/nanobot_configure', { replace: true })}
-                t={t}
-              />
-              <SetupCard
                 platform="hermes"
                 info={hermesInfo}
                 installing={installingPlatform === 'hermes'}
                 onInstall={handleInstallHermes}
                 onConfigure={() => navigate('/hermes_configure', { replace: true })}
-                t={t}
-              />
-              <SetupCard
-                platform="codex"
-                info={codexInfo}
-                installing={installingPlatform === 'codex'}
-                onInstall={handleInstallCodex}
-                onConfigure={() => navigate('/codex_configure', { replace: true })}
                 t={t}
               />
 

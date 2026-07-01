@@ -46,7 +46,6 @@ import {
   budgetAPI,
   chatAPI,
   guardAPI,
-  sessionsAPI,
   systemAPI,
   type BudgetPeriodUnit,
   type DirectoryBrowseEntry,
@@ -56,6 +55,7 @@ import {
   type RuntimeBudgetStatus,
   type RuntimeInstance,
   type StartSessionResponse,
+  type LocalRuntimeSessionRecord,
   type RuntimeSessionRecord,
   type CodexSessionRecord,
   type CodexModelCatalogItem,
@@ -785,6 +785,33 @@ export function runtimeSessionRecordToRuntimeGuardSession(
     agent,
     platform,
     instanceId: firstText(record.instance_id),
+    workspacePath: firstText(record.cwd) || undefined,
+    title,
+    createdAt,
+    lastActivityAt,
+    status: 'ready',
+    autoTitlePending: false,
+  };
+}
+
+export function localRuntimeSessionRecordToRuntimeGuardSession(
+  record: LocalRuntimeSessionRecord,
+): RuntimeGuardSession | null {
+  const sessionKey = firstText(record.session_key, record.source_session_id);
+  const sourceSessionId = firstText(record.source_session_id);
+  if (!sessionKey || !sourceSessionId) return null;
+  const platform = record.platform;
+  const agent = platformToAgent(platform);
+  const createdAt = firstText(record.created_at, record.updated_at) || new Date().toISOString();
+  const lastActivityAt = firstText(record.updated_at, record.created_at, createdAt);
+  const title = firstText(record.title, sourceSessionId) || `${agent} Session`;
+
+  return {
+    sessionKey,
+    historySessionId: sourceSessionId,
+    agent,
+    platform,
+    instanceId: firstText(record.instance_id) || `${platform}-default`,
     workspacePath: firstText(record.cwd) || undefined,
     title,
     createdAt,
@@ -2131,19 +2158,17 @@ export function SessionHistoryViewAllModal({
                       {sessionStatusDisplay(status, copy)}
                     </span>
                   </button>
-                  {!session.codexHistory ? (
-                    <button
-                      className="rg-session-modal-delete"
-                      onClick={() => {
-                        const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: displayTitle }));
-                        if (confirmed) onDeleteSession(session);
-                      }}
-                      title={rgText(copy.sessionHistory.deleteTitle, { title: displayTitle })}
-                      type="button"
-                    >
-                      <Trash2 />
-                    </button>
-                  ) : null}
+                  <button
+                    className="rg-session-modal-delete"
+                    onClick={() => {
+                      const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: displayTitle }));
+                      if (confirmed) onDeleteSession(session);
+                    }}
+                    title={rgText(copy.sessionHistory.deleteTitle, { title: displayTitle })}
+                    type="button"
+                  >
+                    <Trash2 />
+                  </button>
                 </article>
               );
             })
@@ -2880,7 +2905,11 @@ export default function RuntimeGuardConsole() {
     () => mergeSessionHistorySessions(sessionHistoryItems, sessions),
     [sessionHistoryItems, sessions],
   );
-  const sidebarSessionHistoryItems = visibleSessionHistoryItems;
+  const installedSessionHistoryItems = useMemo(
+    () => visibleSessionHistoryItems.filter(session => installedAgents[session.agent] === true),
+    [installedAgents, visibleSessionHistoryItems],
+  );
+  const sidebarSessionHistoryItems = installedSessionHistoryItems;
   const activeDraft = activeSession ? (draftBySessionKey[activeSession.sessionKey] ?? '') : '';
   const activeSending = activeSession ? (sendingMap[activeSession.sessionKey] ?? false) : false;
   const codexComposerCopy = copy.codexComposer;
@@ -2973,18 +3002,24 @@ export default function RuntimeGuardConsole() {
   const fetchSessionHistory = useCallback(async (showLoading = false): Promise<RuntimeGuardSession[] | null> => {
     if (showLoading) setSessionHistoryLoading(true);
     try {
-      const [runtimeResult, codexResult] = await Promise.allSettled([
-        sessionsAPI.listRuntime({ page: 1, page_size: 100 }),
+      const [openclawResult, hermesResult, codexResult] = await Promise.allSettled([
+        systemAPI.listRuntimeSessions({ platform: 'openclaw', limit: 100 }),
+        systemAPI.listRuntimeSessions({ platform: 'hermes', limit: 100 }),
         systemAPI.listCodexSessions({ limit: 100 }),
       ]);
-      if (runtimeResult.status === 'rejected' && codexResult.status === 'rejected') {
+      if (
+        openclawResult.status === 'rejected'
+        && hermesResult.status === 'rejected'
+        && codexResult.status === 'rejected'
+      ) {
         return null;
       }
-      const runtimeSessions = runtimeResult.status === 'fulfilled'
-        ? (runtimeResult.value.data.sessions ?? [])
-          .map(runtimeSessionRecordToRuntimeGuardSession)
-          .filter((session): session is RuntimeGuardSession => session !== null)
-        : [];
+      const runtimeSessions = [
+        ...(openclawResult.status === 'fulfilled' ? (openclawResult.value.data.sessions ?? []) : []),
+        ...(hermesResult.status === 'fulfilled' ? (hermesResult.value.data.sessions ?? []) : []),
+      ]
+        .map(localRuntimeSessionRecordToRuntimeGuardSession)
+        .filter((session): session is RuntimeGuardSession => session !== null);
       const codexSessions = codexResult.status === 'fulfilled'
         ? (codexResult.value.data.sessions ?? [])
           .map(codexSessionRecordToRuntimeGuardSession)
@@ -3197,12 +3232,7 @@ export default function RuntimeGuardConsole() {
   const agents: AgentDisplay[] = useMemo(
     () => sidebarAgentDefinitions.map(agent => {
       const installed = installedAgents[agent.name];
-      const probeUnknown = installed === null || installProbeFailed;
-      const inferredInstalled = agent.runtimeBacked
-        ? probeUnknown
-          ? availableInstances.some(instance => instance.platform === agent.platform) || installed !== false
-          : Boolean(installed)
-        : installed === true;
+      const inferredInstalled = installed === true;
       return {
         name: agent.name,
         className: agent.className,
@@ -3211,7 +3241,7 @@ export default function RuntimeGuardConsole() {
         status: runtimeGuardAgentStatus(agent.name, inferredInstalled, sessions, messageMap, sendingMap),
       };
     }),
-    [availableInstances, installProbeFailed, installedAgents, messageMap, sendingMap, sessions],
+    [installedAgents, messageMap, sendingMap, sessions],
   );
   const budgetStatus = runtimeBudgetStatuses[selectedBudgetPlatform] ?? defaultRuntimeBudgetStatus(selectedBudgetPlatform);
   const activeBudgetStatus = runtimeBudgetStatuses[activeBudgetPlatform] ?? defaultRuntimeBudgetStatus(activeBudgetPlatform);
@@ -3728,8 +3758,6 @@ export default function RuntimeGuardConsole() {
   }, [codexModel, codexPermissionMode, showToast]);
 
   const deleteHistorySession = async (session: RuntimeGuardSession) => {
-    if (session.codexHistory) return;
-
     const removeLocalSession = () => {
       setSessionHistoryItems(current => current.filter(item => (
         item.sessionKey !== session.sessionKey
@@ -3744,7 +3772,15 @@ export default function RuntimeGuardConsole() {
     }
 
     try {
-      await chatAPI.deleteSession(session.historySessionId);
+      if (session.platform === 'codex') {
+        await systemAPI.deleteCodexSession(session.historySessionId);
+      } else if (session.platform === 'openclaw' || session.platform === 'hermes') {
+        await systemAPI.deleteRuntimeSession(session.platform, session.historySessionId, {
+          instance_id: session.instanceId,
+        });
+      } else {
+        await chatAPI.deleteSession(session.historySessionId);
+      }
       removeLocalSession();
       void fetchSessionHistory(false);
     } catch (error: unknown) {
@@ -4852,7 +4888,7 @@ export default function RuntimeGuardConsole() {
       )}
       {activeRuntimeGuardModal === 'sessions' && (
         <SessionHistoryViewAllModal
-          sessions={visibleSessionHistoryItems}
+          sessions={installedSessionHistoryItems}
           loading={sessionHistoryLoading}
           activeSessionId={activeSessionId}
           messageMap={messageMap}

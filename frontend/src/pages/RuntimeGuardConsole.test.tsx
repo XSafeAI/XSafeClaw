@@ -25,6 +25,7 @@ import RuntimeGuardConsole, {
   mergeSessionHistorySessions,
   promoteRuntimeGuardSession,
   codexSessionRecordToRuntimeGuardSession,
+  localRuntimeSessionRecordToRuntimeGuardSession,
   runtimeGuardAgentStatus,
   runtimeGuardSidebarLayoutMetrics,
   runtimeGuardStartSessionPayload,
@@ -271,6 +272,14 @@ function mockRuntimeGuardApis() {
     },
   } as any);
   vi.spyOn(sessionsAPI, 'listRuntime').mockResolvedValue({ data: { sessions: [] } } as any);
+  vi.spyOn(systemAPI, 'listRuntimeSessions').mockImplementation(async (params: any) => ({
+    data: {
+      platform: params.platform,
+      instance_id: params.platform === 'hermes' ? 'hermes-default' : 'openclaw-default',
+      sessions: [],
+      total: 0,
+    },
+  } as any));
   vi.spyOn(systemAPI, 'listCodexSessions').mockResolvedValue({
     data: {
       installed: true,
@@ -289,6 +298,25 @@ function mockRuntimeGuardApis() {
       messages: [],
       message: '',
       error: null,
+    },
+  } as any);
+  vi.spyOn(systemAPI, 'deleteRuntimeSession').mockResolvedValue({
+    data: {
+      platform: 'openclaw',
+      instance_id: 'openclaw-default',
+      source_session_id: 'source-openclaw',
+      session_key: 'workspace',
+      deleted_file: true,
+      updated_index: true,
+    },
+  } as any);
+  vi.spyOn(systemAPI, 'deleteCodexSession').mockResolvedValue({
+    data: {
+      thread_id: 'thread-abcdef123456',
+      source: 'cli',
+      archived: true,
+      deleted_file: true,
+      path: 'C:/Users/heng/.codex/sessions/rollout-thread-abcdef123456.jsonl',
     },
   } as any);
   const startCodexConversationSpy = vi.spyOn(systemAPI, 'startCodexConversation').mockResolvedValue({
@@ -813,8 +841,65 @@ describe('NewTaskModal', () => {
     expect(within(rightTools).getByText('Risk Test')).toBeTruthy();
   });
 
+  it('keeps runtime agent rows grey while install detection is pending', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockReturnValueOnce(new Promise(() => {}) as any);
+    vi.mocked(systemAPI.instances).mockResolvedValueOnce({
+      data: {
+        instances: [
+          runtimeInstance(),
+          runtimeInstance({ instance_id: 'runtime-hermes', platform: 'hermes', display_name: 'Hermes' }),
+        ],
+        total: 2,
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    const openClawRow = (await screen.findByText('OpenClaw')).closest('.rg-agent-row') as HTMLElement;
+    const hermesRow = (await screen.findByText('Hermes')).closest('.rg-agent-row') as HTMLElement;
+
+    expect(openClawRow).toHaveClass('is-uninstalled');
+    expect(hermesRow).toHaveClass('is-uninstalled');
+    expect(within(openClawRow).getByText('Not installed')).toBeTruthy();
+    expect(within(hermesRow).getByText('Not installed')).toBeTruthy();
+  });
+
+  it('keeps runtime agent rows grey when install detection fails', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockRejectedValueOnce(new Error('install status failed'));
+    vi.mocked(systemAPI.instances).mockResolvedValueOnce({
+      data: {
+        instances: [
+          runtimeInstance(),
+          runtimeInstance({ instance_id: 'runtime-hermes', platform: 'hermes', display_name: 'Hermes' }),
+        ],
+        total: 2,
+      },
+    } as any);
+    renderRuntimeGuardConsole();
+
+    const openClawRow = (await screen.findByText('OpenClaw')).closest('.rg-agent-row') as HTMLElement;
+    const hermesRow = (await screen.findByText('Hermes')).closest('.rg-agent-row') as HTMLElement;
+
+    await waitFor(() => {
+      expect(openClawRow).toHaveClass('is-uninstalled');
+      expect(hermesRow).toHaveClass('is-uninstalled');
+    });
+    expect(within(openClawRow).getByText('Not installed')).toBeTruthy();
+    expect(within(hermesRow).getByText('Not installed')).toBeTruthy();
+  });
+
   it('shows only the icon and session title in sidebar history rows', async () => {
     mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: true,
+        nanobot_installed: false,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
     window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
       {
         sessionKey: 'codex:thread-login',
@@ -851,6 +936,89 @@ describe('NewTaskModal', () => {
     expect(rows[1].querySelector('.rg-agent-badge')).toBeTruthy();
     expect(rows[1].textContent).toContain('sess-local');
     expect(rows[1].textContent).not.toContain('Hermes:');
+  });
+
+  it('hides session history for agents that are not installed', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: false,
+        hermes_installed: false,
+        nanobot_installed: false,
+        codex_installed: false,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
+      {
+        sessionKey: 'codex:cached',
+        agent: 'Codex',
+        platform: 'codex',
+        instanceId: 'codex-cli',
+        title: 'Cached Codex shell',
+        createdAt: '2026-06-15T14:30:00.000Z',
+        status: 'ready',
+      },
+      {
+        sessionKey: 'hermes:cached',
+        agent: 'Hermes',
+        platform: 'hermes',
+        instanceId: 'runtime-hermes',
+        title: 'Cached Hermes shell',
+        createdAt: '2026-06-15T08:18:00.000Z',
+        status: 'ready',
+      },
+    ]));
+    vi.mocked(systemAPI.listRuntimeSessions).mockResolvedValue({
+      data: {
+        platform: 'openclaw',
+        instance_id: 'openclaw-default',
+        sessions: [],
+        total: 0,
+      },
+    } as any);
+    vi.mocked(systemAPI.listCodexSessions).mockResolvedValueOnce({
+      data: {
+        installed: true,
+        status: 'ready',
+        sessions: [
+          {
+            id: 'thread-codex-history',
+            session_id: 'thread-codex-history',
+            title: 'Codex real history',
+            preview: 'Codex real history',
+            cwd: 'E:/work/codex-demo',
+            created_at: '2026-06-15T12:00:00Z',
+            updated_at: '2026-06-15T13:00:00Z',
+            status: 'idle',
+            source: 'cli',
+            path: 'C:/Users/heng/.codex/sessions/thread.jsonl',
+            cli_version: '0.139.0',
+          },
+        ],
+        next_cursor: null,
+        message: '',
+        error: null,
+      },
+    } as any);
+
+    const { container } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(systemAPI.installStatus).toHaveBeenCalled();
+      expect(systemAPI.listRuntimeSessions).toHaveBeenCalledWith({ platform: 'openclaw', limit: 100 });
+      expect(systemAPI.listRuntimeSessions).toHaveBeenCalledWith({ platform: 'hermes', limit: 100 });
+      expect(systemAPI.listCodexSessions).toHaveBeenCalledWith({ limit: 100 });
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll('.rg-left-history-row')).toHaveLength(0);
+    });
+
+    fireEvent.click(container.querySelector('.rg-left-history-title button') as HTMLElement);
+    const dialog = screen.getByRole('dialog', { name: 'Session history' });
+    expect(within(dialog).queryByText('Cached Codex shell')).toBeNull();
+    expect(within(dialog).queryByText('Cached Hermes shell')).toBeNull();
+    expect(within(dialog).queryByText('Codex real history')).toBeNull();
   });
 
   it('switches the budget card to Codex CLI remaining usage when Codex is selected', async () => {
@@ -1773,6 +1941,15 @@ describe('NewTaskModal', () => {
 
   it('opens Codex CLI history and renders the real transcript in the middle panel', async () => {
     const { getHistorySpy, getCodexSessionMessagesSpy, resumeCodexConversationSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
     vi.mocked(systemAPI.listCodexSessions).mockResolvedValue({
       data: {
         installed: true,
@@ -1849,7 +2026,7 @@ describe('NewTaskModal', () => {
     const codexHistoryRow = within(dialog).getByText('Codex CLI history').closest('.rg-session-modal-row') as HTMLElement;
     expect(codexHistoryRow.querySelector('.rg-session-modal-title em')?.textContent).toBe('E:/work/codex-demo');
     expect(codexHistoryRow.querySelector('.rg-session-modal-title em')?.textContent).not.toBe('Codex CLI');
-    expect(screen.queryByTitle('Delete Codex CLI history')).toBeNull();
+    expect(screen.getByTitle('Delete Codex CLI history')).toBeTruthy();
 
     fireEvent.click(within(dialog).getByText('Codex CLI history').closest('button') as HTMLElement);
     await waitFor(() => {
@@ -1872,6 +2049,15 @@ describe('NewTaskModal', () => {
 
   it('reloads Codex CLI history when an older frontend Codex shell already cached the same session key', async () => {
     const { getHistorySpy, getCodexSessionMessagesSpy } = mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
     window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
       {
         sessionKey: 'codex:thread-abcdef123456',
@@ -1952,32 +2138,28 @@ describe('NewTaskModal', () => {
 
   it('keeps runtime history visible when Codex CLI history fails to load', async () => {
     mockRuntimeGuardApis();
-    vi.mocked(sessionsAPI.listRuntime).mockResolvedValue({
+    vi.mocked(systemAPI.listRuntimeSessions).mockImplementation(async (params: any) => ({
       data: {
-        sessions: [
-          {
-            session_id: 'db-session-openclaw',
-            platform: 'openclaw',
-            instance_id: 'runtime-openclaw',
-            source_session_id: 'source-openclaw',
-            display_session_id: 'OpenClaw real history',
-            session_key: 'openclaw::runtime-openclaw::source-openclaw',
-            first_seen_at: '2026-06-15T10:00:00.000Z',
-            last_activity_at: '2026-06-15T11:00:00.000Z',
-            cwd: 'E:/work/openclaw-demo',
-            current_model_provider: null,
-            current_model_name: null,
-            total_runs: 1,
-            total_tokens: 10,
-            created_at: '2026-06-15T10:00:00.000Z',
-            updated_at: '2026-06-15T11:00:00.000Z',
-          },
-        ],
-        total: 1,
-        page: 1,
-        page_size: 100,
+        platform: params.platform,
+        instance_id: params.platform === 'openclaw' ? 'openclaw-default' : 'hermes-default',
+        sessions: params.platform === 'openclaw'
+          ? [
+            {
+              platform: 'openclaw',
+              instance_id: 'openclaw-default',
+              source_session_id: 'source-openclaw',
+              session_key: 'workspace-openclaw',
+              title: 'OpenClaw real history',
+              cwd: 'E:/work/openclaw-demo',
+              created_at: '2026-06-15T10:00:00.000Z',
+              updated_at: '2026-06-15T11:00:00.000Z',
+              path_available: true,
+            },
+          ]
+          : [],
+        total: params.platform === 'openclaw' ? 1 : 0,
       },
-    } as any);
+    } as any));
     vi.mocked(systemAPI.listCodexSessions).mockRejectedValue(new Error('codex app-server failed'));
 
     const { container } = renderRuntimeGuardConsole();
@@ -2388,6 +2570,28 @@ describe('SessionHistoryViewAllModal', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].title).toBe('Frontend title');
     expect(merged[0].historySessionId).toBe('db-session-1');
+
+    const localMapped = localRuntimeSessionRecordToRuntimeGuardSession({
+      platform: 'openclaw',
+      instance_id: 'openclaw-default',
+      source_session_id: 'source-openclaw-1',
+      session_key: 'workspace-openclaw',
+      title: 'Local OpenClaw history',
+      cwd: 'E:/work/local-openclaw',
+      created_at: '2026-06-05T04:00:00.000Z',
+      updated_at: '2026-06-05T05:00:00.000Z',
+      path_available: true,
+    });
+
+    expect(localMapped).toMatchObject({
+      sessionKey: 'workspace-openclaw',
+      historySessionId: 'source-openclaw-1',
+      agent: 'OpenClaw',
+      platform: 'openclaw',
+      instanceId: 'openclaw-default',
+      title: 'Local OpenClaw history',
+      workspacePath: 'E:/work/local-openclaw',
+    });
   });
 
   it('maps Codex CLI thread summaries as readonly frontend sessions', () => {
@@ -2470,7 +2674,7 @@ describe('SessionHistoryViewAllModal', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('hides delete controls for readonly Codex CLI history records', () => {
+  it('shows delete controls for Codex CLI history records', () => {
     const codexHistorySession = {
       ...sessions[2],
       sessionKey: 'codex:thread-abcdef123456',
@@ -2491,7 +2695,7 @@ describe('SessionHistoryViewAllModal', () => {
     );
 
     expect(screen.getByText('Restore Codex transcript')).toBeTruthy();
-    expect(screen.queryByTitle('Delete Restore Codex transcript')).toBeNull();
+    expect(screen.getByTitle('Delete Restore Codex transcript')).toBeTruthy();
   });
 
   it('confirms before deleting a session record', () => {

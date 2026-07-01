@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -252,6 +253,91 @@ def test_codex_runtime_status_falls_back_when_doctor_fails(monkeypatch, tmp_path
     assert data["install_context"] is None
     assert data["error"] is None
     assert data["warnings"] == ["doctor failed"]
+
+
+def test_codex_runtime_status_parses_doctor_json_even_when_doctor_exits_nonzero(monkeypatch, tmp_path):
+    client, entry_path = _client_with_codex(monkeypatch, tmp_path)
+    executable_path = str(tmp_path / "vendor" / "codex.exe")
+    doctor_payload = {
+        "codexVersion": "0.139.0",
+        "overallStatus": "fail",
+        "checks": {
+            "installation": {
+                "status": "ok",
+                "details": {
+                    "current executable": executable_path,
+                    "install context": "npm",
+                },
+            },
+            "auth.credentials": {"status": "ok"},
+            "terminal.env": {
+                "status": "fail",
+                "summary": "TERM=dumb - colors and cursor control are disabled",
+            },
+        },
+    }
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        command = list(args)
+        if command[-1] == "--version":
+            return FakeProcess(args, returncode=0, stdout=b"codex-cli 0.139.0\n")
+        if command[-3:] == ["doctor", "--json", "--summary"]:
+            return FakeProcess(args, returncode=1, stdout=json.dumps(doctor_payload).encode("utf-8"))
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = client.get("/api/system/codex/runtime")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["installed"] is True
+    assert data["configured"] is True
+    assert data["status"] == "installed"
+    assert data["version"] == "0.139.0"
+    assert data["path"] == executable_path
+    assert data["entry_path"] == entry_path
+    assert data["install_context"] == "npm"
+    assert data["error"] is None
+    assert data["warnings"] == ["terminal.env: TERM=dumb - colors and cursor control are disabled"]
+
+
+def test_run_tool_capture_timeout_terminates_process_tree(monkeypatch):
+    killed_pids: list[int] = []
+
+    class SlowProcess:
+        pid = 4242
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.sleep(60)
+            return b"", b""
+
+        def kill(self):
+            self.returncode = -9
+
+        async def wait(self):
+            self.returncode = self.returncode if self.returncode is not None else -9
+            return self.returncode
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return SlowProcess()
+
+    async def fake_terminate_process_tree(proc):
+        killed_pids.append(proc.pid)
+        proc.returncode = -9
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(system_routes, "_terminate_process_tree", fake_terminate_process_tree, raising=False)
+
+    code, output, error = asyncio.run(
+        system_routes._run_tool_capture_async(["codex.cmd", "doctor"], timeout_s=0.001)
+    )
+
+    assert code is None
+    assert output == ""
+    assert error == "codex.cmd timed out"
+    assert killed_pids == [4242]
 
 
 def test_codex_runtime_refresh_invalidates_probe_cache(monkeypatch, tmp_path):

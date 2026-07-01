@@ -544,6 +544,42 @@ export interface RuntimeSessionListResponse {
   page_size: number;
 }
 
+export interface LocalRuntimeSessionRecord {
+  platform: 'openclaw' | 'hermes';
+  instance_id: string;
+  source_session_id: string;
+  session_key: string;
+  title: string;
+  cwd: string | null;
+  created_at: string;
+  updated_at: string;
+  path_available: boolean;
+}
+
+export interface LocalRuntimeSessionListResponse {
+  platform: 'openclaw' | 'hermes';
+  instance_id: string;
+  sessions: LocalRuntimeSessionRecord[];
+  total: number;
+}
+
+export interface LocalRuntimeSessionDeleteResponse {
+  platform: 'openclaw' | 'hermes';
+  instance_id: string;
+  source_session_id: string;
+  session_key: string | null;
+  deleted_file: boolean;
+  updated_index: boolean;
+}
+
+export interface CodexSessionDeleteResponse {
+  thread_id: string;
+  source: string;
+  archived: boolean;
+  deleted_file: boolean;
+  path: string | null;
+}
+
 // Sessions API
 export const sessionsAPI = {
   list: (params?: { page?: number; page_size?: number }) =>
@@ -985,7 +1021,7 @@ export const systemAPI = {
   getCodexRuntimeStatus: (refresh?: boolean) =>
     api.get<CodexRuntimeStatusResponse>(
       '/system/codex/runtime',
-      { timeout: 15000, params: refresh ? { refresh: true } : undefined },
+      { timeout: 35000, params: refresh ? { refresh: true } : undefined },
     ),
 
   /** Read Codex CLI ChatGPT rolling rate limits through app-server. */
@@ -1007,6 +1043,25 @@ export const systemAPI = {
   /** List local Codex CLI session summaries through app-server. */
   listCodexSessions: (params?: { limit?: number; cursor?: string }) =>
     api.get<CodexSessionListResponse>('/system/codex/sessions', { timeout: 15000, params }),
+
+  /** List local OpenClaw/Hermes sessions directly from runtime history files. */
+  listRuntimeSessions: (params: { platform: 'openclaw' | 'hermes'; instance_id?: string; limit?: number }) =>
+    api.get<LocalRuntimeSessionListResponse>('/system/runtime-sessions', { timeout: 15000, params }),
+
+  /** Delete one local OpenClaw/Hermes runtime history file. */
+  deleteRuntimeSession: (
+    platform: 'openclaw' | 'hermes',
+    sourceSessionId: string,
+    params?: { instance_id?: string },
+  ) =>
+    api.delete<LocalRuntimeSessionDeleteResponse>(
+      `/system/runtime-sessions/${encodeURIComponent(platform)}/${encodeURIComponent(sourceSessionId)}`,
+      { timeout: 15000, params },
+    ),
+
+  /** Archive and delete one local Codex CLI history rollout. */
+  deleteCodexSession: (threadId: string) =>
+    api.delete<CodexSessionDeleteResponse>(`/system/codex/sessions/${encodeURIComponent(threadId)}`, { timeout: 15000 }),
 
   /** Read a Codex CLI thread transcript summary through app-server. */
   getCodexSessionMessages: (threadId: string) =>

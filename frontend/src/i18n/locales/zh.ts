@@ -520,7 +520,7 @@ export const zh: Translations = {
     retryDetect: '重新检测',
     // Selecting platform
     selectTitle: '选择运行时平台',
-    selectDesc: 'OpenClaw、Hermes、Nanobot 和 Codex 都是支持的运行时，选择其中一个安装即可使用。',
+    selectDesc: 'Codex CLI、OpenClaw 和 Hermes 都是支持的运行时，选择其中一个安装即可使用。',
     chooseTitle: '选择智能体框架',
     openclawName: 'OpenClaw',
     openclawDesc: '基于 Node.js 的 CLI 智能体运行时。提供完整的工具集、飞书集成、搜索和技能系统。',

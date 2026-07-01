@@ -526,7 +526,7 @@ export const en = {
     retryDetect: 'Retry Detection',
     // Selecting platform
     selectTitle: 'Select Runtime Platform',
-    selectDesc: 'OpenClaw, Hermes, Nanobot, and Codex are supported. Install one to get started.',
+    selectDesc: 'Codex CLI, OpenClaw, and Hermes are supported. Install one to get started.',
     chooseTitle: 'Choose Agent Framework',
     openclawName: 'OpenClaw',
     openclawDesc: 'Node.js-based CLI agent runtime. Provides full tool suite, Feishu integration, search, and skills system.',

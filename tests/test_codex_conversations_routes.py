@@ -645,6 +645,57 @@ class FakeInstructionBundle:
     byte_length = 59
 
 
+def _expected_conversation_app_server_command(codex_path: str) -> list[str]:
+    return [codex_path, "--dangerously-bypass-hook-trust", "app-server"]
+
+
+def test_codex_hook_validation_allows_untrusted_or_modified_hooks_only_with_bypass():
+    command = system_routes._codex_guard_hook_command("codex:thread-existing")
+    base_hook = {
+        "eventName": "PreToolUse",
+        "command": command,
+        "source": "sessionFlags",
+        "enabled": True,
+    }
+
+    assert system_routes._codex_hook_is_loaded(
+        {**base_hook, "trustStatus": "untrusted"},
+        session_key="codex:thread-existing",
+        expected_command=command,
+        bypass_hook_trust=True,
+    )
+    assert system_routes._codex_hook_is_loaded(
+        {**base_hook, "trustStatus": "modified"},
+        session_key="codex:thread-existing",
+        expected_command=command,
+        bypass_hook_trust=True,
+    )
+    assert not system_routes._codex_hook_is_loaded(
+        {**base_hook, "trustStatus": "untrusted"},
+        session_key="codex:thread-existing",
+        expected_command=command,
+        bypass_hook_trust=False,
+    )
+    assert not system_routes._codex_hook_is_loaded(
+        {**base_hook, "trustStatus": "trusted", "command": f"{command} --extra"},
+        session_key="codex:thread-existing",
+        expected_command=command,
+        bypass_hook_trust=True,
+    )
+    assert not system_routes._codex_hook_is_loaded(
+        {**base_hook, "trustStatus": "trusted", "source": "project"},
+        session_key="codex:thread-existing",
+        expected_command=command,
+        bypass_hook_trust=True,
+    )
+    assert not system_routes._codex_hook_is_loaded(
+        {**base_hook, "trustStatus": "trusted", "enabled": False},
+        session_key="codex:thread-existing",
+        expected_command=command,
+        bypass_hook_trust=True,
+    )
+
+
 def _client_with_fake_conversation(monkeypatch, tmp_path):
     codex_path = str(tmp_path / "codex.cmd")
     sent_messages: list[dict] = []
@@ -652,7 +703,7 @@ def _client_with_fake_conversation(monkeypatch, tmp_path):
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeConversationProcess(sent_messages)
 
@@ -740,7 +791,7 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeTurnProcess(sent_messages)
 
@@ -807,7 +858,7 @@ def test_codex_turn_stream_starts_thread_for_pending_first_message(monkeypatch, 
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeTurnProcess(sent_messages)
 
@@ -960,7 +1011,7 @@ def test_codex_turn_stream_maps_request_user_input_and_resolved_notification(mon
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeQuestionTurnProcess(sent_messages)
 
@@ -995,7 +1046,7 @@ def test_codex_plan_mode_uses_native_collaboration_mode_and_maps_plan_events(mon
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakePlanTurnProcess(sent_messages)
 
@@ -1044,7 +1095,7 @@ def test_codex_plan_mode_returns_error_when_plan_collaboration_mode_is_missing(m
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeNoPlanTurnProcess(sent_messages)
 
@@ -1071,7 +1122,7 @@ def test_codex_goal_mode_sets_goal_before_starting_turn_and_maps_goal_events(mon
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == [codex_path, "app-server"]
+        assert list(args) == _expected_conversation_app_server_command(codex_path)
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeGoalTurnProcess(sent_messages)
 
