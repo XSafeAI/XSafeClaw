@@ -926,11 +926,22 @@ function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
         const isFrontendCodex = platform === 'codex' && agent === 'Codex';
         const isRuntimeSession = isRuntimePlatform(platform) && ['OpenClaw', 'Hermes', 'Nanobot'].includes(agent);
         if (!sessionKey || (!isRuntimeSession && !isFrontendCodex)) return null;
+        const historySessionId = typeof item?.historySessionId === 'string' ? item.historySessionId : undefined;
+        const codexHistory = isFrontendCodex && Boolean(item?.codexHistory);
+        if (
+          isFrontendCodex
+          && sessionKey.startsWith('codex:')
+          && !sessionKey.startsWith('codex:pending:')
+          && !historySessionId
+          && !codexHistory
+        ) {
+          return null;
+        }
         const sessionAgent = (isFrontendCodex ? 'Codex' : agent) as AgentName;
         const sessionPlatform = (isFrontendCodex ? 'codex' : platform) as RuntimeGuardSessionPlatform;
         return {
           sessionKey,
-          historySessionId: typeof item?.historySessionId === 'string' ? item.historySessionId : undefined,
+          historySessionId,
           agent: sessionAgent,
           platform: sessionPlatform,
           instanceId: typeof item?.instanceId === 'string' ? item.instanceId : '',
@@ -942,7 +953,7 @@ function loadRuntimeGuardSessions(): RuntimeGuardSession[] {
           status: item?.status === 'error' ? 'error' : 'ready',
           autoTitlePending: Boolean(item?.autoTitlePending),
           frontendOnly: isFrontendCodex || Boolean(item?.frontendOnly),
-          codexHistory: isFrontendCodex && Boolean(item?.codexHistory),
+          codexHistory,
         };
       })
       .filter((item): item is RuntimeGuardSession => item !== null);
@@ -3532,7 +3543,7 @@ export default function RuntimeGuardConsole() {
     const now = new Date().toISOString();
     const sameAgentCount = sessions.filter(session => session.agent === 'Codex').length + 1;
     const fallbackLabel = sameAgentCount === 1 ? 'Codex' : `Codex ${sameAgentCount}`;
-    const seedSessionKey = typeof seed?.session_key === 'string' && seed.session_key.startsWith('codex:')
+    const seedSessionKey = typeof seed?.session_key === 'string' && seed.session_key.startsWith('codex:pending:')
       ? seed.session_key
       : '';
     const session: RuntimeGuardSession = {

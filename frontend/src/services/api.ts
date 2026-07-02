@@ -1021,7 +1021,7 @@ export const systemAPI = {
   getCodexRuntimeStatus: (refresh?: boolean) =>
     api.get<CodexRuntimeStatusResponse>(
       '/system/codex/runtime',
-      { timeout: 35000, params: refresh ? { refresh: true } : undefined },
+      { timeout: refresh ? 60000 : 35000, params: refresh ? { refresh: true } : undefined },
     ),
 
   /** Read Codex CLI ChatGPT rolling rate limits through app-server. */

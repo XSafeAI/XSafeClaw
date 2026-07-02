@@ -255,6 +255,32 @@ def test_codex_runtime_status_falls_back_when_doctor_fails(monkeypatch, tmp_path
     assert data["warnings"] == ["doctor failed"]
 
 
+def test_codex_runtime_status_treats_doctor_timeout_as_diagnostic_warning(monkeypatch, tmp_path):
+    client, entry_path = _client_with_codex(monkeypatch, tmp_path)
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        command = list(args)
+        if command[-1] == "--version":
+            return FakeProcess(args, returncode=0, stdout=b"codex-cli 0.139.0\n")
+        if command[-3:] == ["doctor", "--json", "--summary"]:
+            return FakeProcess(args, returncode=None, stderr=b"codex.cmd timed out")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = client.get("/api/system/codex/runtime")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["installed"] is True
+    assert data["configured"] is False
+    assert data["status"] == "installed"
+    assert data["version"] == "0.139.0"
+    assert data["path"] == entry_path
+    assert data["error"] is None
+    assert data["warnings"] == ["Codex diagnostics timed out; Codex CLI itself is available."]
+
+
 def test_codex_runtime_status_parses_doctor_json_even_when_doctor_exits_nonzero(monkeypatch, tmp_path):
     client, entry_path = _client_with_codex(monkeypatch, tmp_path)
     executable_path = str(tmp_path / "vendor" / "codex.exe")

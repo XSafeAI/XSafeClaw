@@ -1283,6 +1283,13 @@ def _codex_runtime_response(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _codex_doctor_warning(message: str | None) -> str:
+    text = (message or "").strip()
+    if "timed out" in text.lower():
+        return "Codex diagnostics timed out; Codex CLI itself is available."
+    return text
+
+
 def _invalidate_codex_probe_cache() -> None:
     global _codex_probe_cache
     _codex_probe_cache = None
@@ -1553,9 +1560,13 @@ async def _probe_codex_install_async(
 
     warnings = []
     if doctor_error:
-        warnings.append(doctor_error)
+        warning = _codex_doctor_warning(doctor_error)
+        if warning:
+            warnings.append(warning)
     elif doctor_output:
-        warnings.append(doctor_output.splitlines()[0])
+        warning = _codex_doctor_warning(doctor_output.splitlines()[0])
+        if warning:
+            warnings.append(warning)
     else:
         warnings.append(f"codex doctor exited with code {doctor_code}")
     result = {
@@ -1584,7 +1595,7 @@ async def codex_runtime_status(refresh: bool = False):
         codex_path,
         env=env,
         version_timeout_s=10.0 if refresh else 5.0,
-        doctor_timeout_s=25.0 if refresh else 5.0,
+        doctor_timeout_s=45.0 if refresh else 5.0,
     )
     return _codex_runtime_response(status)
 

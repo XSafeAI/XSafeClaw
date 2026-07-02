@@ -903,9 +903,11 @@ describe('NewTaskModal', () => {
     window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
       {
         sessionKey: 'codex:thread-login',
+        historySessionId: 'thread-login',
         agent: 'Codex',
         platform: 'codex',
         instanceId: 'codex-cli',
+        codexHistory: true,
         title: '我现在的登录情况',
         createdAt: '2026-06-15T14:30:00.000Z',
         lastActivityAt: '2026-06-15T14:30:00.000Z',
@@ -1273,6 +1275,133 @@ describe('NewTaskModal', () => {
       expect(savedSessions[0].frontendOnly).toBeFalsy();
       expect(savedSessions[0].sessionKey).toBe('codex:thread-started');
     });
+
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: {"type":"final","text":"Second turn"}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'continue Codex' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledTimes(2);
+    });
+    const [, secondCodexRequest] = sendMessageStreamSpy.mock.calls[1];
+    expect(sendMessageStreamSpy.mock.calls[1][0]).toBe('/api/system/codex/conversations/codex%3Athread-started/turns/stream');
+    expect(JSON.parse((secondCodexRequest as RequestInit).body as string)).toEqual(expect.objectContaining({
+      message: 'continue Codex',
+      thread_id: 'thread-started',
+      cwd: 'E:/configured-codex-workspace',
+    }));
+  });
+
+  it('ignores stale non-pending Codex smart-route seeds and creates a pending session', async () => {
+    const { smartStartSessionSpy, sendMessageStreamSpy, startCodexConversationSpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/configured-codex-workspace',
+      permissionMode: 'workspace_write',
+      defaultModel: 'GPT-5.5',
+      defaultReasoning: 'xhigh',
+      defaultSpeed: 'standard',
+    }));
+    smartStartSessionSpy.mockResolvedValueOnce({
+      data: {
+        session_key: 'codex:empty-thread-without-rollout',
+        selected_agent: 'Codex',
+        platform: 'codex',
+        instance_id: 'codex-cli',
+        instance: {
+          instance_id: 'codex-cli',
+          platform: 'codex',
+          display_name: 'Codex CLI',
+        },
+        smart: true,
+      },
+    } as any);
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        `data: ${JSON.stringify({
+          type: 'codex_session_started',
+          thread_id: 'thread-started',
+          session_key: 'codex:thread-started',
+          cwd: 'E:/configured-codex-workspace',
+        })}\n\ndata: {"type":"final","text":"Created"}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+    const { container } = renderRuntimeGuardConsole();
+
+    fireEvent.click(screen.getByRole('button', { name: /New Task/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'New task request' }), {
+      target: { value: 'Create a Codex task' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await screen.findByText('Configure Codex session');
+    fireEvent.click(screen.getByRole('button', { name: 'Create session' }));
+
+    await waitFor(() => {
+      const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+      expect(savedSessions[0].sessionKey).toMatch(/^codex:pending:/);
+      expect(savedSessions[0].sessionKey).not.toBe('codex:empty-thread-without-rollout');
+    });
+
+    const composer = container.querySelector('.rg-codex-composer') as HTMLElement;
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'start now' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => {
+      expect(sendMessageStreamSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^\/api\/system\/codex\/conversations\/codex%3Apending%3A.+\/turns\/stream$/),
+        expect.any(Object),
+      );
+    });
+    const requestBody = JSON.parse((sendMessageStreamSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(requestBody.thread_id).toBeNull();
+    expect(startCodexConversationSpy).not.toHaveBeenCalled();
+  });
+
+  it('filters stale non-history Codex thread sessions from localStorage on startup', async () => {
+    mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
+      {
+        sessionKey: 'codex:old-empty-thread',
+        agent: 'Codex',
+        platform: 'codex',
+        instanceId: 'codex-cli',
+        displayName: 'Codex CLI',
+        title: 'Old empty Codex thread',
+        createdAt: '2026-06-01T00:00:00.000Z',
+        lastActivityAt: '2026-06-01T00:00:00.000Z',
+        frontendOnly: true,
+      },
+      {
+        sessionKey: 'codex:pending:kept',
+        agent: 'Codex',
+        platform: 'codex',
+        instanceId: 'codex-cli',
+        displayName: 'Codex CLI',
+        title: 'Pending Codex',
+        createdAt: '2026-06-02T00:00:00.000Z',
+        lastActivityAt: '2026-06-02T00:00:00.000Z',
+        frontendOnly: true,
+      },
+    ]));
+
+    renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      const savedSessions = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') ?? '[]');
+      expect(savedSessions.some((session: any) => session.sessionKey === 'codex:old-empty-thread')).toBe(false);
+      expect(savedSessions.some((session: any) => session.sessionKey === 'codex:pending:kept')).toBe(true);
+    });
+    expect(screen.queryByText('Old empty Codex thread')).toBeNull();
   });
 
   it('rereads Codex configure localStorage for every new pending Codex session', async () => {
@@ -1903,10 +2032,10 @@ describe('NewTaskModal', () => {
     expect(composer.querySelector('.rg-codex-model-menu')).toBeNull();
   });
 
-  it('restores a frontend-only Codex session without loading backend history', async () => {
+  it('restores a pending frontend-only Codex session without loading backend history', async () => {
     const { getHistorySpy } = mockRuntimeGuardApis();
     window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([{
-      sessionKey: 'codex::frontend::saved-session',
+      sessionKey: 'codex:pending:saved-session',
       agent: 'Codex',
       platform: 'codex',
       instanceId: 'codex-frontend',
@@ -2117,8 +2246,9 @@ describe('NewTaskModal', () => {
     const { container } = renderRuntimeGuardConsole();
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Stale frontend shell' })).toBeTruthy();
+      expect(systemAPI.listCodexSessions).toHaveBeenCalledWith({ limit: 100 });
     });
+    expect(screen.queryByRole('heading', { name: 'Stale frontend shell' })).toBeNull();
     expect(getCodexSessionMessagesSpy).not.toHaveBeenCalled();
 
     fireEvent.click(container.querySelector('.rg-left-history-title button') as HTMLElement);
