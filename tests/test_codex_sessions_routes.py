@@ -34,12 +34,14 @@ class FakeAppServerStdin:
         thread_list_error: str | None = None,
         thread_read_error: str | None = None,
         thread_read_result: dict | None = None,
+        thread_lists_by_source: dict[str, list[dict]] | None = None,
     ):
         self._queue = queue
         self._sent_messages = sent_messages
         self._thread_list_error = thread_list_error
         self._thread_read_error = thread_read_error
         self._thread_read_result = thread_read_result
+        self._thread_lists_by_source = thread_lists_by_source or {}
 
     def write(self, payload: bytes) -> None:
         message = json.loads(payload.decode("utf-8"))
@@ -54,27 +56,32 @@ class FakeAppServerStdin:
                     + b"\n"
                 )
                 return
+            source_kinds = (((message.get("params") or {}).get("sourceKinds")) or [])
+            source_kind = source_kinds[0] if source_kinds else "cli"
+            threads = self._thread_lists_by_source.get(source_kind)
+            if threads is None:
+                threads = [
+                    {
+                        "id": "thread-123456789",
+                        "sessionId": "session-abc",
+                        "name": "Investigate Codex history",
+                        "preview": "Opened a repo and checked tests",
+                        "cwd": "E:/work/project",
+                        "createdAt": 1781524800,
+                        "updatedAt": 1781528400,
+                        "status": {"type": "idle"},
+                        "source": {"kind": "cli"},
+                        "path": "C:/Users/heng/.codex/sessions/2026/06/15/thread.jsonl",
+                        "cliVersion": "0.139.0",
+                        "turns": [{"role": "user", "text": "must not leak"}],
+                    }
+                ] if source_kind == "cli" else []
             self._queue.put_nowait(
                 json.dumps({
                     "id": message["id"],
                     "result": {
-                        "threads": [
-                            {
-                                "id": "thread-123456789",
-                                "sessionId": "session-abc",
-                                "name": "Investigate Codex history",
-                                "preview": "Opened a repo and checked tests",
-                                "cwd": "E:/work/project",
-                                "createdAt": 1781524800,
-                                "updatedAt": 1781528400,
-                                "status": {"type": "idle"},
-                                "source": {"kind": "cli"},
-                                "path": "C:/Users/heng/.codex/sessions/2026/06/15/thread.jsonl",
-                                "cliVersion": "0.139.0",
-                                "turns": [{"role": "user", "text": "must not leak"}],
-                            }
-                        ],
-                        "nextCursor": "cursor-2",
+                        "threads": threads,
+                        "nextCursor": "cursor-2" if source_kind == "cli" else None,
                     },
                 }).encode("utf-8")
                 + b"\n"
@@ -190,6 +197,7 @@ class FakeAppServerProcess:
         thread_list_error: str | None = None,
         thread_read_error: str | None = None,
         thread_read_result: dict | None = None,
+        thread_lists_by_source: dict[str, list[dict]] | None = None,
     ):
         self.returncode = None
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -199,6 +207,7 @@ class FakeAppServerProcess:
             thread_list_error=thread_list_error,
             thread_read_error=thread_read_error,
             thread_read_result=thread_read_result,
+            thread_lists_by_source=thread_lists_by_source,
         )
         self.stdout = FakeAppServerStdout(self._queue)
         self.stderr = FakeAppServerStderr()
@@ -249,6 +258,9 @@ def test_codex_sessions_route_lists_cli_thread_summaries(monkeypatch, tmp_path):
             "updated_at": "2026-06-15T13:00:00Z",
             "status": "idle",
             "source": "cli",
+            "originator": None,
+            "history_kind": "cli",
+            "deletable": True,
             "path": "C:/Users/heng/.codex/sessions/2026/06/15/thread.jsonl",
             "cli_version": "0.139.0",
         }
@@ -256,20 +268,78 @@ def test_codex_sessions_route_lists_cli_thread_summaries(monkeypatch, tmp_path):
     assert "turns" not in data["sessions"][0]
 
     thread_list_messages = [message for message in sent_messages if message.get("method") == "thread/list"]
-    assert thread_list_messages == [
-        {
-            "id": 2,
-            "method": "thread/list",
-            "params": {
-                "sourceKinds": ["cli"],
-                "archived": False,
-                "limit": 50,
-                "cursor": "abc",
-                "sortKey": "updated_at",
-                "sortDirection": "desc",
+    assert [message["params"]["sourceKinds"] for message in thread_list_messages] == [["cli"], ["vscode"]]
+    assert thread_list_messages[0]["params"] == {
+        "sourceKinds": ["cli"],
+        "archived": False,
+        "limit": 50,
+        "cursor": "abc",
+        "sortKey": "updated_at",
+        "sortDirection": "desc",
+    }
+
+
+def test_codex_sessions_route_includes_only_xsafeclaw_vscode_history(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sessions_root = tmp_path / ".codex" / "sessions"
+    xsafeclaw_rollout = sessions_root / "2026" / "06" / "15" / "rollout-thread-xsafeclaw-123.jsonl"
+    other_rollout = sessions_root / "2026" / "06" / "15" / "rollout-thread-vscode-other-123.jsonl"
+    xsafeclaw_rollout.parent.mkdir(parents=True)
+    xsafeclaw_rollout.write_text(
+        json.dumps({"type": "session_meta", "payload": {"originator": "XSafeClaw", "source": "vscode"}}) + "\n",
+        encoding="utf-8",
+    )
+    other_rollout.write_text(
+        json.dumps({"type": "session_meta", "payload": {"originator": "Codex App", "source": "vscode"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "_codex_session_history_roots", lambda: [sessions_root])
+    sent_messages: list[dict] = []
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeAppServerProcess(
+            sent_messages,
+            thread_lists_by_source={
+                "cli": [],
+                "vscode": [
+                    {
+                        "id": "thread-xsafeclaw-123",
+                        "sessionId": "session-xsafeclaw",
+                        "name": "",
+                        "preview": "Create matrix transpose helper",
+                        "cwd": "C:/Users/heng/Desktop/test",
+                        "createdAt": 1781524800,
+                        "updatedAt": 1781528400,
+                        "status": {"type": "idle"},
+                        "source": {"kind": "vscode"},
+                        "path": str(xsafeclaw_rollout),
+                    },
+                    {
+                        "id": "thread-vscode-other-123",
+                        "sessionId": "session-other",
+                        "preview": "Do not show this IDE thread",
+                        "createdAt": 1781524800,
+                        "updatedAt": 1781528500,
+                        "status": {"type": "idle"},
+                        "source": {"kind": "vscode"},
+                        "path": str(other_rollout),
+                    },
+                ],
             },
-        }
-    ]
+        )
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = TestClient(app).get("/api/system/codex/sessions")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [session["id"] for session in data["sessions"]] == ["thread-xsafeclaw-123"]
+    assert data["sessions"][0]["source"] == "vscode"
+    assert data["sessions"][0]["originator"] == "XSafeClaw"
+    assert data["sessions"][0]["history_kind"] == "xsafeclaw"
+    assert data["sessions"][0]["deletable"] is True
 
 
 def test_codex_sessions_route_reports_missing_cli(monkeypatch):
@@ -508,16 +578,62 @@ def test_codex_session_delete_archives_cli_thread_and_removes_rollout(monkeypatc
         {
             "thread_id": "thread-delete-123",
             "source": "cli",
+            "originator": None,
+            "history_kind": "cli",
             "path": str(rollout_path),
         }
     ]
 
 
-def test_codex_session_delete_rejects_non_cli_thread(monkeypatch, tmp_path):
+def test_codex_session_delete_allows_xsafeclaw_vscode_thread(monkeypatch, tmp_path):
+    codex_path = str(tmp_path / "codex.cmd")
+    sessions_root = tmp_path / ".codex" / "sessions"
+    rollout_path = sessions_root / "rollout-thread-vscode-123.jsonl"
+    rollout_path.parent.mkdir(parents=True)
+    rollout_path.write_text(
+        json.dumps({"type": "session_meta", "payload": {"originator": "XSafeClaw", "source": "vscode"}}) + "\n",
+        encoding="utf-8",
+    )
+    sent_messages: list[dict] = []
+    tombstones: list[dict] = []
+    monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
+    monkeypatch.setattr(system_routes, "_codex_session_history_roots", lambda: [sessions_root])
+    monkeypatch.setattr(system_routes, "_write_codex_deleted_thread_tombstone", lambda payload: tombstones.append(payload))
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeAppServerProcess(
+            sent_messages,
+            thread_read_result={
+                "thread": {
+                    "id": "thread-vscode-123",
+                    "source": {"kind": "vscode"},
+                    "path": str(rollout_path),
+                }
+            },
+        )
+
+    monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    response = TestClient(app).delete("/api/system/codex/sessions/thread-vscode-123")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == "vscode"
+    assert data["originator"] == "XSafeClaw"
+    assert data["history_kind"] == "xsafeclaw"
+    assert data["deleted_file"] is True
+    assert not rollout_path.exists()
+    assert tombstones[0]["history_kind"] == "xsafeclaw"
+
+
+def test_codex_session_delete_rejects_non_xsafeclaw_vscode_thread(monkeypatch, tmp_path):
     codex_path = str(tmp_path / "codex.cmd")
     rollout_path = tmp_path / ".codex" / "sessions" / "rollout-thread-vscode-123.jsonl"
     rollout_path.parent.mkdir(parents=True)
-    rollout_path.write_text("{}\n", encoding="utf-8")
+    rollout_path.write_text(
+        json.dumps({"type": "session_meta", "payload": {"originator": "Codex App", "source": "vscode"}}) + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(system_routes, "_find_codex", lambda **_: codex_path)
     monkeypatch.setattr(system_routes, "_codex_session_history_roots", lambda: [rollout_path.parent])
 
@@ -538,5 +654,5 @@ def test_codex_session_delete_rejects_non_cli_thread(monkeypatch, tmp_path):
     response = TestClient(app).delete("/api/system/codex/sessions/thread-vscode-123")
 
     assert response.status_code == 400
-    assert "CLI" in response.json()["detail"]
+    assert "XSafeClaw" in response.json()["detail"]
     assert rollout_path.exists()

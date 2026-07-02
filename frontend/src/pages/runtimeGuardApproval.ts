@@ -174,8 +174,36 @@ export function buildActiveTimelineRows(
   const rows: TimelineRow[] = [];
   const approvals = sortMiddleApprovalCards(activeApprovalCards);
   let approvalIndex = 0;
+  const messages = activeMessages.some(message => (
+    Number.isFinite(message.codex_event_order)
+    || Number.isFinite(message.codex_started_at_ms)
+    || Number.isFinite(message.codex_completed_at_ms)
+  ))
+    ? [...activeMessages].sort((left, right) => {
+        const leftOrder = Number.isFinite(left.codex_event_order) ? Number(left.codex_event_order) : Number.NaN;
+        const rightOrder = Number.isFinite(right.codex_event_order) ? Number(right.codex_event_order) : Number.NaN;
+        if (Number.isFinite(leftOrder) && Number.isFinite(rightOrder) && leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        const leftMs = Number.isFinite(left.codex_started_at_ms)
+          ? Number(left.codex_started_at_ms)
+          : Number.isFinite(left.codex_completed_at_ms)
+            ? Number(left.codex_completed_at_ms)
+            : messageTimestampMs(left);
+        const rightMs = Number.isFinite(right.codex_started_at_ms)
+          ? Number(right.codex_started_at_ms)
+          : Number.isFinite(right.codex_completed_at_ms)
+            ? Number(right.codex_completed_at_ms)
+            : messageTimestampMs(right);
+        if (leftMs !== rightMs) return leftMs - rightMs;
+        if (Number.isFinite(leftOrder) && Number.isFinite(rightOrder) && leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return activeMessages.indexOf(left) - activeMessages.indexOf(right);
+      })
+    : activeMessages;
 
-  for (const message of activeMessages) {
+  for (const message of messages) {
     const messageMs = messageTimestampMs(message);
     while (
       approvalIndex < approvals.length

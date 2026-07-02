@@ -35,6 +35,9 @@ export interface ChatMessage {
   codex_thread_id?: string;
   codex_turn_id?: string;
   codex_item_id?: string;
+  codex_event_order?: number;
+  codex_started_at_ms?: number;
+  codex_completed_at_ms?: number;
   codex_questions?: CodexUserInputQuestion[];
   codex_response_status?: 'pending' | 'submitting' | 'submitted' | 'resolved' | 'error';
   codex_answer_values?: Record<string, string[]>;

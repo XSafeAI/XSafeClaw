@@ -143,6 +143,35 @@ describe('runtime guard middle approval sync', () => {
     ]);
   });
 
+  it('sorts Codex realtime messages by item event order without changing other timelines', () => {
+    const rows = buildActiveTimelineRows(
+      [
+        message('tool-1', 1710000010, {
+          role: 'tool_call',
+          codex_event_order: 2,
+          codex_started_at_ms: 1710000001000,
+        }),
+        message('assistant-1', 1710000005, {
+          role: 'assistant',
+          codex_event_order: 1,
+          codex_started_at_ms: 1710000015000,
+        }),
+        message('assistant-2', 1710000015, {
+          role: 'assistant',
+          codex_event_order: 3,
+          codex_started_at_ms: 1710000015000,
+        }),
+      ],
+      [],
+    );
+
+    expect(rowKeys(rows)).toEqual([
+      'message:assistant-1',
+      'message:tool-1',
+      'message:assistant-2',
+    ]);
+  });
+
   it('does not anchor approvals before a pending assistant message', () => {
     const cardsBySession = upsertMiddleApprovalCards(
       {},

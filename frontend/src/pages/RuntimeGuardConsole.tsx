@@ -134,6 +134,9 @@ export type RuntimeGuardSession = {
   autoTitlePending?: boolean;
   frontendOnly?: boolean;
   codexHistory?: boolean;
+  codexHistoryKind?: string | null;
+  codexOriginator?: string | null;
+  codexDeletable?: boolean;
   codexModel?: CodexModelOption;
   codexReasoningLevel?: CodexReasoningLevel;
   codexSpeed?: CodexSpeedOption;
@@ -845,6 +848,9 @@ export function codexSessionRecordToRuntimeGuardSession(
     autoTitlePending: false,
     frontendOnly: true,
     codexHistory: true,
+    codexHistoryKind: record.history_kind ?? null,
+    codexOriginator: record.originator ?? null,
+    codexDeletable: record.deletable ?? true,
   };
 }
 
@@ -1267,6 +1273,39 @@ export function titleFromUserMessage(input: string, fallback = ''): string {
   return safeTitle.length > 48 ? `${safeTitle.slice(0, 48).trimEnd()}...` : safeTitle;
 }
 
+function compactCodexPromptTitle(input: string): string {
+  return titleFromUserMessage(input, input) || input.replace(/\s+/g, ' ').trim().slice(0, 48);
+}
+
+function isGeneratedCodexTitle(title: string | undefined): boolean {
+  return /^Codex(?:\s+\d+)?$/i.test((title || '').trim());
+}
+
+function sseNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function codexTimestampFromChunk(chunk: {
+  codex_started_at_ms?: unknown;
+  codex_completed_at_ms?: unknown;
+}): Date | undefined {
+  const timestamp = sseNumber(chunk.codex_started_at_ms) ?? sseNumber(chunk.codex_completed_at_ms);
+  return timestamp !== undefined ? new Date(timestamp) : undefined;
+}
+
+function codexMetadataFromChunk(chunk: {
+  codex_event_order?: unknown;
+  codex_started_at_ms?: unknown;
+  codex_completed_at_ms?: unknown;
+}): Pick<ChatMessage, 'codex_event_order' | 'codex_started_at_ms' | 'codex_completed_at_ms'> {
+  return {
+    codex_event_order: sseNumber(chunk.codex_event_order),
+    codex_started_at_ms: sseNumber(chunk.codex_started_at_ms),
+    codex_completed_at_ms: sseNumber(chunk.codex_completed_at_ms),
+  };
+}
+
 function runtimeGuardSessionBaseTitle(session: Pick<RuntimeGuardSession, 'agent' | 'title'>): string {
   const agent = session.agent;
   const title = titleFromUserMessage(session.title, agent) || agent;
@@ -1411,6 +1450,17 @@ function upsertApprovalItem(
 function responseStatus(error: unknown): number | null {
   const response = (error as { response?: { status?: unknown } } | null)?.response;
   return typeof response?.status === 'number' ? response.status : null;
+}
+
+function responseDetail(error: unknown, fallback: string): string {
+  const data = (error as { response?: { data?: unknown } } | null)?.response?.data;
+  if (typeof data === 'string' && data.trim()) return data.trim();
+  if (data && typeof data === 'object') {
+    const detail = (data as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.trim()) return detail.trim();
+  }
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && message.trim() ? message.trim() : fallback;
 }
 
 function formatBlockedTime(timestamp: number): string {
@@ -3784,6 +3834,9 @@ export default function RuntimeGuardConsole() {
 
     try {
       if (session.platform === 'codex') {
+        if (session.codexDeletable === false) {
+          throw new Error('This Codex history source is not managed by XSafeClaw and cannot be deleted here.');
+        }
         await systemAPI.deleteCodexSession(session.historySessionId);
       } else if (session.platform === 'openclaw' || session.platform === 'hermes') {
         await systemAPI.deleteRuntimeSession(session.platform, session.historySessionId, {
@@ -3800,7 +3853,7 @@ export default function RuntimeGuardConsole() {
         void fetchSessionHistory(false);
         return;
       }
-      showToast('Failed to delete session history.');
+      showToast(responseDetail(error, 'Failed to delete session history.'));
     }
   };
 
@@ -4010,6 +4063,7 @@ export default function RuntimeGuardConsole() {
       const effectiveCodexGoalMode = options.codexGoalMode ?? codexGoalMode;
       const activity = new Date();
       const activityIso = activity.toISOString();
+      const provisionalCodexTitle = isGeneratedCodexTitle(session.title) ? compactCodexPromptTitle(text) : '';
       const userMsg: ChatMessage = {
         id: uuidv4(),
         role: 'user',
@@ -4023,10 +4077,22 @@ export default function RuntimeGuardConsole() {
       chatStreamStore.setSending(originalKey, true);
       setDraftBySessionKey(current => ({ ...current, [originalKey]: '' }));
       setSessions(current => current.map(session => (
-        session.sessionKey === originalKey ? { ...session, lastActivityAt: activityIso } : session
+        session.sessionKey === originalKey
+          ? {
+              ...session,
+              title: provisionalCodexTitle || session.title,
+              lastActivityAt: activityIso,
+            }
+          : session
       )));
       setSessionHistoryItems(current => sortSessionsNewestFirst(current.map(session => (
-        session.sessionKey === originalKey ? { ...session, lastActivityAt: activityIso } : session
+        session.sessionKey === originalKey
+          ? {
+              ...session,
+              title: provisionalCodexTitle || session.title,
+              lastActivityAt: activityIso,
+            }
+          : session
       ))));
       setMessageMap(prev => ({ ...prev, [originalKey]: [...(prev[originalKey] ?? []), userMsg] }));
 
@@ -4098,6 +4164,12 @@ export default function RuntimeGuardConsole() {
                 thread_id?: string;
                 session_key?: string;
                 cwd?: string | null;
+                title?: string | null;
+                preview?: string | null;
+                source?: string | null;
+                originator?: string | null;
+                history_kind?: string | null;
+                deletable?: boolean;
                 turn_id?: string;
                 item_id?: string;
                 questions?: ChatMessage['codex_questions'];
@@ -4107,6 +4179,9 @@ export default function RuntimeGuardConsole() {
                 goal?: ChatMessage['codex_goal'];
                 phase?: string;
                 summary?: string;
+                codex_event_order?: number;
+                codex_started_at_ms?: number;
+                codex_completed_at_ms?: number;
               };
 
               const appendStreamMessage = (message: ChatMessage) => {
@@ -4143,6 +4218,11 @@ export default function RuntimeGuardConsole() {
                 }
                 if (nextKey) {
                   const previousKey = activeKey;
+                  const nextTitle = typeof chunk.title === 'string' && chunk.title.trim() && !isGeneratedCodexTitle(chunk.title)
+                    ? chunk.title.trim()
+                    : typeof chunk.preview === 'string' && chunk.preview.trim()
+                      ? compactCodexPromptTitle(chunk.preview)
+                      : provisionalCodexTitle;
                   if (nextKey !== previousKey) {
                     renameSessionKey(previousKey, nextKey);
                     chatStreamStore.setSending(previousKey, false);
@@ -4158,6 +4238,10 @@ export default function RuntimeGuardConsole() {
                           historySessionId: nextThreadId || item.historySessionId,
                           frontendOnly: false,
                           codexHistory: false,
+                          codexHistoryKind: chunk.history_kind ?? item.codexHistoryKind ?? 'xsafeclaw',
+                          codexOriginator: chunk.originator ?? item.codexOriginator ?? 'XSafeClaw',
+                          codexDeletable: chunk.deletable ?? item.codexDeletable ?? true,
+                          title: nextTitle || item.title,
                           workspacePath: chunk.cwd || item.workspacePath,
                         }
                       : item
@@ -4169,6 +4253,10 @@ export default function RuntimeGuardConsole() {
                           historySessionId: nextThreadId || item.historySessionId,
                           frontendOnly: false,
                           codexHistory: false,
+                          codexHistoryKind: chunk.history_kind ?? item.codexHistoryKind ?? 'xsafeclaw',
+                          codexOriginator: chunk.originator ?? item.codexOriginator ?? 'XSafeClaw',
+                          codexDeletable: chunk.deletable ?? item.codexDeletable ?? true,
+                          title: nextTitle || item.title,
                           workspacePath: chunk.cwd || item.workspacePath,
                         }
                       : item
@@ -4180,17 +4268,49 @@ export default function RuntimeGuardConsole() {
                     return next;
                   });
                 }
+              } else if (chunk.type === 'codex_thread_title') {
+                const nextTitle = typeof chunk.title === 'string' ? chunk.title.trim() : '';
+                if (nextTitle) {
+                  const applyTitle = (item: RuntimeGuardSession) => {
+                    const matchesSession = item.sessionKey === activeKey
+                      || (chunk.thread_id && item.historySessionId === chunk.thread_id)
+                      || (chunk.thread_id && item.sessionKey === `codex:${chunk.thread_id}`);
+                    return matchesSession ? { ...item, title: nextTitle, autoTitlePending: false } : item;
+                  };
+                  setSessions(current => current.map(applyTitle));
+                  setSessionHistoryItems(current => sortSessionsNewestFirst(current.map(applyTitle)));
+                }
+              } else if (chunk.type === 'codex_assistant_start' && chunk.item_id) {
+                const assistantId = `assistant-${chunk.item_id}`;
+                const metadata = codexMetadataFromChunk(chunk);
+                upsertStreamMessage(assistantId, existing => ({
+                  id: assistantId,
+                  role: 'assistant',
+                  content: existing?.content || '',
+                  timestamp: existing?.timestamp ?? codexTimestampFromChunk(chunk) ?? new Date(),
+                  pending: true,
+                  codex_thread_id: chunk.thread_id || existing?.codex_thread_id,
+                  codex_turn_id: chunk.turn_id || existing?.codex_turn_id,
+                  codex_item_id: chunk.item_id || existing?.codex_item_id,
+                  codex_event_order: existing?.codex_event_order ?? metadata.codex_event_order,
+                  codex_started_at_ms: existing?.codex_started_at_ms ?? metadata.codex_started_at_ms,
+                  codex_completed_at_ms: existing?.codex_completed_at_ms ?? metadata.codex_completed_at_ms,
+                }));
               } else if (chunk.type === 'delta' && typeof chunk.text === 'string') {
                 const assistantId = chunk.item_id ? `assistant-${chunk.item_id}` : fallbackAssistantId;
+                const metadata = codexMetadataFromChunk(chunk);
                 upsertStreamMessage(assistantId, existing => ({
                   id: assistantId,
                   role: 'assistant',
                   content: `${existing?.content || ''}${chunk.text}`,
-                  timestamp: existing?.timestamp ?? new Date(),
+                  timestamp: existing?.timestamp ?? codexTimestampFromChunk(chunk) ?? new Date(),
                   pending: false,
                   codex_thread_id: chunk.thread_id || existing?.codex_thread_id,
                   codex_turn_id: chunk.turn_id || existing?.codex_turn_id,
                   codex_item_id: chunk.item_id || existing?.codex_item_id,
+                  codex_event_order: existing?.codex_event_order ?? metadata.codex_event_order,
+                  codex_started_at_ms: existing?.codex_started_at_ms ?? metadata.codex_started_at_ms,
+                  codex_completed_at_ms: existing?.codex_completed_at_ms ?? metadata.codex_completed_at_ms,
                 }));
               } else if (chunk.type === 'final') {
                 if (chunk.text || !sawCodexTimelineContent) {
@@ -4204,12 +4324,13 @@ export default function RuntimeGuardConsole() {
                 }
               } else if (chunk.type === 'tool_start') {
                 const toolMessageId = `tool-${chunk.tool_id || uuidv4()}`;
+                const metadata = codexMetadataFromChunk(chunk);
                 upsertStreamMessage(toolMessageId, existing => ({
                   ...existing,
                   id: toolMessageId,
                   role: 'tool_call',
                   content: '',
-                  timestamp: existing?.timestamp ?? new Date(),
+                  timestamp: existing?.timestamp ?? codexTimestampFromChunk(chunk) ?? new Date(),
                   tool_id: chunk.tool_id,
                   tool_name: chunk.tool_name,
                   args: chunk.args,
@@ -4218,15 +4339,19 @@ export default function RuntimeGuardConsole() {
                   tool_action: chunk.tool_action,
                   timeline_kind: chunk.timeline_kind,
                   risk_level: chunk.risk_level,
+                  codex_event_order: existing?.codex_event_order ?? metadata.codex_event_order,
+                  codex_started_at_ms: existing?.codex_started_at_ms ?? metadata.codex_started_at_ms,
+                  codex_completed_at_ms: existing?.codex_completed_at_ms ?? metadata.codex_completed_at_ms,
                 }));
               } else if (chunk.type === 'tool_result') {
                 const toolMessageId = `tool-${chunk.tool_id || uuidv4()}`;
+                const metadata = codexMetadataFromChunk(chunk);
                 upsertStreamMessage(toolMessageId, existing => ({
                   ...existing,
                   id: toolMessageId,
                   role: 'tool_call',
                   content: '',
-                  timestamp: existing?.timestamp ?? new Date(),
+                  timestamp: existing?.timestamp ?? codexTimestampFromChunk(chunk) ?? new Date(),
                   tool_id: chunk.tool_id || existing?.tool_id,
                   tool_name: chunk.tool_name || existing?.tool_name,
                   args: existing?.args ?? chunk.args,
@@ -4237,15 +4362,19 @@ export default function RuntimeGuardConsole() {
                   tool_action: chunk.tool_action || existing?.tool_action,
                   timeline_kind: chunk.timeline_kind || existing?.timeline_kind,
                   risk_level: chunk.risk_level || existing?.risk_level,
+                  codex_event_order: existing?.codex_event_order ?? metadata.codex_event_order,
+                  codex_started_at_ms: existing?.codex_started_at_ms ?? metadata.codex_started_at_ms,
+                  codex_completed_at_ms: metadata.codex_completed_at_ms ?? existing?.codex_completed_at_ms,
                 }));
               } else if (chunk.type === 'codex_user_input_request') {
                 sawCodexNativeUserInputRequest = true;
                 const requestId = String(chunk.request_id || uuidv4());
+                const metadata = codexMetadataFromChunk(chunk);
                 appendStreamMessage({
                   id: `codex-question-${requestId}`,
                   role: 'codex_question',
                   content: '',
-                  timestamp: new Date(),
+                  timestamp: codexTimestampFromChunk(chunk) ?? new Date(),
                   codex_request_id: requestId,
                   codex_question_kind: 'native_request',
                   codex_thread_id: chunk.thread_id,
@@ -4253,12 +4382,14 @@ export default function RuntimeGuardConsole() {
                   codex_item_id: chunk.item_id,
                   codex_questions: chunk.questions ?? [],
                   codex_response_status: 'pending',
+                  ...metadata,
                 });
               } else if (chunk.type === 'codex_plan_update') {
                 sawCodexPlanUpdate = true;
                 latestCodexPlanTurnId = chunk.turn_id || latestCodexPlanTurnId;
                 latestCodexPlanItemId = chunk.item_id || latestCodexPlanItemId;
                 const planId = `codex-plan-${chunk.turn_id || chunk.item_id || pendingId}`;
+                const metadata = codexMetadataFromChunk(chunk);
                 upsertStreamMessage(planId, existing => {
                   const existingText = existing?.codex_plan_text || existing?.content || '';
                   const nextText = typeof chunk.delta === 'string' && chunk.delta
@@ -4270,10 +4401,13 @@ export default function RuntimeGuardConsole() {
                     id: planId,
                     role: 'codex_plan',
                     content: nextText,
-                    timestamp: existing?.timestamp ?? new Date(),
+                    timestamp: existing?.timestamp ?? codexTimestampFromChunk(chunk) ?? new Date(),
                     codex_thread_id: chunk.thread_id || existing?.codex_thread_id,
                     codex_turn_id: chunk.turn_id || existing?.codex_turn_id,
                     codex_item_id: chunk.item_id || existing?.codex_item_id,
+                    codex_event_order: existing?.codex_event_order ?? metadata.codex_event_order,
+                    codex_started_at_ms: existing?.codex_started_at_ms ?? metadata.codex_started_at_ms,
+                    codex_completed_at_ms: existing?.codex_completed_at_ms ?? metadata.codex_completed_at_ms,
                     codex_plan_explanation: chunk.explanation ?? existing?.codex_plan_explanation ?? null,
                     codex_plan_steps: Array.isArray(chunk.steps) && chunk.steps.length > 0
                       ? chunk.steps
@@ -4322,22 +4456,26 @@ export default function RuntimeGuardConsole() {
                   }));
                 }
               } else if (chunk.type === 'status' && chunk.text) {
+                const metadata = codexMetadataFromChunk(chunk);
                 appendStreamMessage({
                   id: `trace-${uuidv4()}`,
                   role: 'trace',
                   content: chunk.text,
-                  timestamp: new Date(),
+                  timestamp: codexTimestampFromChunk(chunk) ?? new Date(),
                   trace_type: chunk.phase || 'status',
                   trace_phase: chunk.phase || 'codex',
                   trace_summary: chunk.summary,
+                  ...metadata,
                 });
               } else if (chunk.type === 'error') {
+                const metadata = codexMetadataFromChunk(chunk);
                 appendStreamMessage({
                   id: `error-${uuidv4()}`,
                   role: 'error' as const,
                   content: chunk.text || 'Codex error',
-                  timestamp: new Date(),
+                  timestamp: codexTimestampFromChunk(chunk) ?? new Date(),
                   pending: false,
+                  ...metadata,
                 });
               }
             } catch {

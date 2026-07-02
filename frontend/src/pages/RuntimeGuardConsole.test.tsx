@@ -1265,8 +1265,13 @@ describe('NewTaskModal', () => {
           type: 'codex_session_started',
           thread_id: 'thread-started',
           session_key: 'codex:thread-started',
+          title: 'hello Codex',
+          preview: 'hello Codex',
+          source: 'vscode',
+          originator: 'XSafeClaw',
+          history_kind: 'xsafeclaw',
           cwd: 'E:/configured-codex-workspace',
-        })}\n\ndata: {"type":"final","text":"Task created"}\n\ndata: [DONE]\n\n`,
+        })}\n\ndata: {"type":"codex_thread_title","thread_id":"thread-started","title":"Official Codex title"}\n\ndata: {"type":"final","text":"Task created"}\n\ndata: [DONE]\n\n`,
         { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
       )
     ) as any);
@@ -1299,7 +1304,7 @@ describe('NewTaskModal', () => {
       goal_mode: false,
       goal_objective: null,
     });
-    expect(screen.getByText('hello Codex')).toBeTruthy();
+    expect(screen.getAllByText('hello Codex').length).toBeGreaterThan(0);
     expect(await screen.findByText('Task created')).toBeTruthy();
     expect(screen.queryByText('This is a Codex frontend preview session. Backend data is not connected yet.')).toBeNull();
 
@@ -1311,7 +1316,9 @@ describe('NewTaskModal', () => {
         historySessionId: 'thread-started',
         instanceId: 'codex-cli',
         platform: 'codex',
-        title: 'Codex',
+        title: 'Official Codex title',
+        codexHistoryKind: 'xsafeclaw',
+        codexOriginator: 'XSafeClaw',
         workspacePath: 'E:/configured-codex-workspace',
       }));
       expect(savedSessions[0].frontendOnly).toBeFalsy();

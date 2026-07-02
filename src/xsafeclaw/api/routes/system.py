@@ -1782,12 +1782,78 @@ def _codex_source_label(value: Any, fallback: Any = None) -> str | None:
     return _codex_source_label(fallback) if fallback is not None else None
 
 
+_XSAFECLAW_CODEX_ORIGINATOR = "XSafeClaw"
+
+
+def _codex_thread_path_value(thread: dict[str, Any]) -> str | None:
+    return _first_string(thread.get("path"), thread.get("rolloutPath"), thread.get("rollout_path"))
+
+
+def _codex_rollout_path_if_safe(path_value: str | None, thread_id: str) -> Path | None:
+    if not path_value:
+        return None
+    try:
+        path = Path(path_value).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    roots = [root.expanduser().resolve() for root in _codex_session_history_roots()]
+    if not any(_path_is_within(path, root) for root in roots):
+        return None
+    if path.suffix != ".jsonl" or not path.name.startswith("rollout-") or thread_id not in path.name:
+        return None
+    if path.exists() and not path.is_file():
+        return None
+    return path
+
+
+def _codex_rollout_session_meta(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            first_line = handle.readline(1024 * 1024)
+    except OSError:
+        return {}
+    if not first_line.strip():
+        return {}
+    try:
+        payload = json.loads(first_line)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict) or payload.get("type") != "session_meta":
+        return {}
+    meta = payload.get("payload")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _codex_thread_originator(thread: dict[str, Any], *, thread_id: str, source: str | None) -> str | None:
+    direct = _first_string(thread.get("originator"))
+    if direct:
+        return direct
+    path = _codex_rollout_path_if_safe(_codex_thread_path_value(thread), thread_id)
+    if path is None:
+        return None
+    meta = _codex_rollout_session_meta(path)
+    return _first_string(meta.get("originator"))
+
+
+def _codex_history_kind(source: str | None, originator: str | None) -> str | None:
+    if source == "cli":
+        return "cli"
+    if source == "vscode" and originator == _XSAFECLAW_CODEX_ORIGINATOR:
+        return "xsafeclaw"
+    return None
+
+
 def _codex_thread_summary(thread: dict[str, Any]) -> dict[str, Any] | None:
     thread_id = _first_string(thread.get("id"), thread.get("threadId"))
     if not thread_id:
         return None
     created_at = _codex_timestamp_to_iso(thread.get("createdAt") or thread.get("created_at"))
     updated_at = _codex_timestamp_to_iso(thread.get("updatedAt") or thread.get("updated_at"))
+    source = _codex_source_label(thread.get("source"), thread.get("threadSource"))
+    originator = _codex_thread_originator(thread, thread_id=thread_id, source=source)
+    history_kind = _codex_history_kind(source, originator)
     return {
         "id": thread_id,
         "session_id": _first_string(thread.get("sessionId"), thread.get("session_id")),
@@ -1797,8 +1863,11 @@ def _codex_thread_summary(thread: dict[str, Any]) -> dict[str, Any] | None:
         "created_at": created_at,
         "updated_at": updated_at,
         "status": _codex_status_label(thread.get("status")),
-        "source": _codex_source_label(thread.get("source"), thread.get("threadSource")),
-        "path": _first_string(thread.get("path")),
+        "source": source,
+        "originator": originator,
+        "history_kind": history_kind,
+        "deletable": history_kind in {"cli", "xsafeclaw"},
+        "path": _codex_thread_path_value(thread),
         "cli_version": _first_string(thread.get("cliVersion"), thread.get("cli_version")),
     }
 
@@ -1897,13 +1966,23 @@ def _codex_conversation_response(
     thread_id = _first_string(thread.get("id"), thread.get("threadId"), result.get("threadId"), fallback_thread_id)
     if not thread_id:
         raise CodexAppServerError("codex app-server did not return a thread id")
+    source = _codex_source_label(thread.get("source"), thread.get("threadSource"))
+    originator = _codex_thread_originator(thread, thread_id=thread_id, source=source)
+    history_kind = _codex_history_kind(source, originator)
+    preview = _first_string(thread.get("preview"))
+    title = _first_string(thread.get("name"), thread.get("title"), preview) or "Codex"
     return {
         "installed": True,
         "status": "ready",
         "session_key": f"codex:{thread_id}",
         "thread_id": thread_id,
         "session_id": _first_string(thread.get("sessionId"), thread.get("session_id"), result.get("sessionId")),
-        "title": _first_string(thread.get("name"), thread.get("title"), thread.get("preview")) or "Codex",
+        "title": title,
+        "preview": preview,
+        "source": source,
+        "originator": originator,
+        "history_kind": history_kind or "xsafeclaw",
+        "deletable": True,
         "cwd": _first_string(thread.get("cwd"), result.get("cwd"), fallback_cwd),
         "instruction_hash": instruction_hash,
         "instruction_bytes": instruction_bytes,
@@ -2479,8 +2558,19 @@ def _codex_realtime_unknown_tool_chunk(item: dict[str, Any], *, completed: bool)
     }
 
 
+def _codex_realtime_agent_message_start_chunk(item: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "codex_assistant_start",
+        "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+        "item_id": _first_string(item.get("id"), params.get("itemId"), params.get("item_id")),
+    }
+
+
 def _codex_realtime_item_chunk(item: dict[str, Any], params: dict[str, Any], *, completed: bool) -> dict[str, Any] | None:
     item_type = _first_string(item.get("type")) or "tool"
+    if item_type == "agentMessage" and not completed:
+        return _codex_realtime_agent_message_start_chunk(item, params)
     if item_type in {"agentMessage", "userMessage"}:
         return None
     if item_type == "plan" and completed:
@@ -2494,28 +2584,71 @@ def _codex_realtime_item_chunk(item: dict[str, Any], params: dict[str, Any], *, 
     return _codex_realtime_unknown_tool_chunk(item, completed=completed)
 
 
-def _codex_notification_chunk(message: dict[str, Any]) -> dict[str, Any] | None:
+def _codex_with_event_metadata(
+    chunk: dict[str, Any] | None,
+    *,
+    params: dict[str, Any],
+    item: dict[str, Any] | None = None,
+    event_order: int | None = None,
+) -> dict[str, Any] | None:
+    if chunk is None:
+        return None
+    if event_order is not None:
+        chunk["codex_event_order"] = event_order
+    started_at = None
+    completed_at = None
+    if item is not None:
+        started_at = item.get("startedAtMs", item.get("started_at_ms"))
+        completed_at = item.get("completedAtMs", item.get("completed_at_ms"))
+    started_at = started_at if started_at is not None else params.get("startedAtMs", params.get("started_at_ms"))
+    completed_at = completed_at if completed_at is not None else params.get("completedAtMs", params.get("completed_at_ms"))
+    if started_at is not None:
+        chunk["codex_started_at_ms"] = started_at
+    if completed_at is not None:
+        chunk["codex_completed_at_ms"] = completed_at
+    return chunk
+
+
+def _codex_notification_chunk(message: dict[str, Any], *, event_order: int | None = None) -> dict[str, Any] | None:
     method = _first_string(message.get("method"))
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     if method == "item/tool/requestUserInput":
-        return _codex_user_input_request_chunk(message, params)
+        return _codex_with_event_metadata(_codex_user_input_request_chunk(message, params), params=params, event_order=event_order)
     if method == "turn/plan/updated":
-        return _codex_plan_update_chunk(params)
+        return _codex_with_event_metadata(_codex_plan_update_chunk(params), params=params, event_order=event_order)
     if method == "item/plan/delta":
-        return _codex_plan_delta_chunk(params)
+        return _codex_with_event_metadata(_codex_plan_delta_chunk(params), params=params, event_order=event_order)
+    if method == "thread/name/updated":
+        return _codex_with_event_metadata(
+            {
+                "type": "codex_thread_title",
+                "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+                "title": _first_string(params.get("name"), params.get("threadName"), params.get("title")),
+            },
+            params=params,
+            event_order=event_order,
+        )
     if method == "thread/goal/updated":
         goal = _codex_goal_payload(params.get("goal"))
-        return {
-            "type": "codex_goal_update",
-            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
-            "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
-            "goal": goal,
-        }
+        return _codex_with_event_metadata(
+            {
+                "type": "codex_goal_update",
+                "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+                "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+                "goal": goal,
+            },
+            params=params,
+            event_order=event_order,
+        )
     if method == "thread/goal/cleared":
-        return {
-            "type": "codex_goal_cleared",
-            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
-        }
+        return _codex_with_event_metadata(
+            {
+                "type": "codex_goal_cleared",
+                "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+            },
+            params=params,
+            event_order=event_order,
+        )
     if method == "serverRequest/resolved":
         request_id = (
             _first_string(params.get("requestId"), params.get("request_id"), params.get("id"))
@@ -2523,31 +2656,57 @@ def _codex_notification_chunk(message: dict[str, Any]) -> dict[str, Any] | None:
             or _codex_request_id_text(params.get("request_id"))
             or _codex_request_id_text(params.get("id"))
         )
-        return {
-            "type": "codex_request_resolved",
-            "request_id": request_id,
-            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
-        }
+        return _codex_with_event_metadata(
+            {
+                "type": "codex_request_resolved",
+                "request_id": request_id,
+                "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+            },
+            params=params,
+            event_order=event_order,
+        )
     if method == "item/agentMessage/delta":
-        return {
-            "type": "delta",
-            "text": _first_string(params.get("delta")) or "",
-            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
-            "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
-            "item_id": _first_string(params.get("itemId"), params.get("item_id")),
-        }
+        return _codex_with_event_metadata(
+            {
+                "type": "delta",
+                "text": _first_string(params.get("delta")) or "",
+                "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+                "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+                "item_id": _first_string(params.get("itemId"), params.get("item_id")),
+            },
+            params=params,
+            event_order=event_order,
+        )
     if method == "item/started":
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
-        return _codex_realtime_item_chunk(item, params, completed=False)
+        return _codex_with_event_metadata(
+            _codex_realtime_item_chunk(item, params, completed=False),
+            params=params,
+            item=item,
+            event_order=event_order,
+        )
     if method == "item/completed":
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
-        return _codex_realtime_item_chunk(item, params, completed=True)
+        return _codex_with_event_metadata(
+            _codex_realtime_item_chunk(item, params, completed=True),
+            params=params,
+            item=item,
+            event_order=event_order,
+        )
     if method == "warning":
-        return {"type": "status", "text": _first_string(params.get("message"), params.get("warning")) or "Codex warning"}
+        return _codex_with_event_metadata(
+            {"type": "status", "text": _first_string(params.get("message"), params.get("warning")) or "Codex warning"},
+            params=params,
+            event_order=event_order,
+        )
     if method == "error":
-        return {"type": "error", "text": _first_string(params.get("message"), params.get("error")) or "Codex error"}
+        return _codex_with_event_metadata(
+            {"type": "error", "text": _first_string(params.get("message"), params.get("error")) or "Codex error"},
+            params=params,
+            event_order=event_order,
+        )
     if method == "turn/completed":
-        return {"type": "final", "text": ""}
+        return _codex_with_event_metadata({"type": "final", "text": ""}, params=params, event_order=event_order)
     return None
 
 
@@ -2583,6 +2742,7 @@ async def _codex_turn_stream_events(
     stderr_task: asyncio.Task[bytes] | None = None
     turn_id: str | None = None
     active_session_key = session_key
+    codex_event_order = 0
     hook_command = _codex_guard_hook_command(session_key)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -2629,9 +2789,17 @@ async def _codex_turn_stream_events(
                     "type": "codex_session_started",
                     "thread_id": thread_id,
                     "session_key": active_session_key,
+                    "title": conversation.get("title"),
+                    "preview": conversation.get("preview"),
+                    "source": conversation.get("source"),
+                    "originator": conversation.get("originator"),
+                    "history_kind": conversation.get("history_kind"),
+                    "deletable": conversation.get("deletable"),
                     "cwd": conversation.get("cwd"),
+                    "codex_event_order": codex_event_order,
                 }
             )
+            codex_event_order += 1
 
         next_request_id = 3
         await _codex_verify_session_hooks(
@@ -2747,7 +2915,7 @@ async def _codex_turn_stream_events(
                 if approval_chunk:
                     yield _codex_sse(approval_chunk)
                 continue
-            chunk = _codex_notification_chunk(message)
+            chunk = _codex_notification_chunk(message, event_order=codex_event_order)
             if active and method == "item/tool/requestUserInput":
                 request_id = _codex_request_id_text(message.get("id"))
                 if request_id:
@@ -2768,6 +2936,7 @@ async def _codex_turn_stream_events(
                     active.setdefault("pending_requests", {}).pop(request_id, None)
             if chunk:
                 yield _codex_sse(chunk)
+                codex_event_order += 1
             if method == "turn/completed":
                 break
         yield "data: [DONE]\n\n"
@@ -3489,7 +3658,7 @@ async def _read_codex_models_via_debug_models(
     return _codex_model_catalog_response(models, source="debug_models")
 
 
-async def _list_codex_cli_sessions_via_app_server(
+async def _list_codex_local_sessions_via_app_server(
     codex_path: str,
     *,
     env: dict | None = None,
@@ -3527,26 +3696,36 @@ async def _list_codex_cli_sessions_via_app_server(
         await _codex_app_server_response(proc, 1, timeout_s=timeout_s)
         await _codex_app_server_send(proc, {"method": "initialized"})
 
-        params = {
-            "sourceKinds": ["cli"],
-            "archived": False,
-            "limit": limit,
-            "cursor": cursor,
-            "sortKey": "updated_at",
-            "sortDirection": "desc",
-        }
-        await _codex_app_server_send(proc, {"id": 2, "method": "thread/list", "params": params})
-        result = await _codex_app_server_response(proc, 2, timeout_s=timeout_s)
-        sessions = [
-            summary
-            for summary in (_codex_thread_summary(item) for item in _codex_thread_list_items(result))
-            if summary is not None
-        ]
+        sessions: list[dict[str, Any]] = []
+        next_cursor: str | None = None
+        request_id = 2
+        for source_kind in ("cli", "vscode"):
+            params = {
+                "sourceKinds": [source_kind],
+                "archived": False,
+                "limit": limit,
+                "cursor": cursor,
+                "sortKey": "updated_at",
+                "sortDirection": "desc",
+            }
+            await _codex_app_server_send(proc, {"id": request_id, "method": "thread/list", "params": params})
+            result = await _codex_app_server_response(proc, request_id, timeout_s=timeout_s)
+            request_id += 1
+            next_cursor = next_cursor or _first_string(result.get("nextCursor"), result.get("next_cursor"), result.get("cursor"))
+            for item in _codex_thread_list_items(result):
+                summary = _codex_thread_summary(item)
+                if summary is None:
+                    continue
+                if summary.get("history_kind") not in {"cli", "xsafeclaw"}:
+                    continue
+                sessions.append(summary)
+        sessions.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+        sessions = sessions[:limit]
         return {
             "installed": True,
             "status": "ready",
             "sessions": sessions,
-            "next_cursor": _first_string(result.get("nextCursor"), result.get("next_cursor"), result.get("cursor")),
+            "next_cursor": next_cursor,
             "message": "",
             "error": None,
         }
@@ -3978,10 +4157,17 @@ async def _delete_codex_cli_session_via_app_server(
         if not isinstance(thread, dict):
             raise HTTPException(status_code=404, detail="Codex thread not found")
         source = _codex_source_label(thread.get("source"), thread.get("threadSource"))
-        if source != "cli":
-            raise HTTPException(status_code=400, detail="Only Codex CLI history can be deleted")
-        path_value = _first_string(thread.get("path"), result.get("path"))
+        path_value = _first_string(_codex_thread_path_value(thread), result.get("path"))
         rollout_path = _validate_codex_rollout_path(path_value, thread_id)
+        meta = _codex_rollout_session_meta(rollout_path)
+        source = source or _first_string(meta.get("source"))
+        originator = _first_string(thread.get("originator"), meta.get("originator"))
+        history_kind = _codex_history_kind(source, originator)
+        if history_kind not in {"cli", "xsafeclaw"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Only Codex CLI history or XSafeClaw-created Codex history can be deleted",
+            )
         await _codex_app_server_send(
             proc,
             {"id": 3, "method": "thread/archive", "params": {"threadId": thread_id}},
@@ -3992,11 +4178,19 @@ async def _delete_codex_cli_session_via_app_server(
             rollout_path.unlink()
             deleted_file = True
         _write_codex_deleted_thread_tombstone(
-            {"thread_id": thread_id, "source": source, "path": str(rollout_path)}
+            {
+                "thread_id": thread_id,
+                "source": source,
+                "originator": originator,
+                "history_kind": history_kind,
+                "path": str(rollout_path),
+            }
         )
         return {
             "thread_id": thread_id,
             "source": source,
+            "originator": originator,
+            "history_kind": history_kind,
             "archived": True,
             "deleted_file": deleted_file,
             "path": str(rollout_path),
@@ -4288,7 +4482,7 @@ async def codex_sessions(
         }
 
     try:
-        result = await _list_codex_cli_sessions_via_app_server(
+        result = await _list_codex_local_sessions_via_app_server(
             codex_path,
             env=env,
             limit=limit,

@@ -211,6 +211,9 @@ export interface CodexSessionRecord {
   updated_at: string | null;
   status: string | null;
   source: string | null;
+  originator?: string | null;
+  history_kind?: 'cli' | 'xsafeclaw' | string | null;
+  deletable?: boolean;
   path: string | null;
   cli_version: string | null;
 }
@@ -575,6 +578,8 @@ export interface LocalRuntimeSessionDeleteResponse {
 export interface CodexSessionDeleteResponse {
   thread_id: string;
   source: string;
+  originator?: string | null;
+  history_kind?: 'cli' | 'xsafeclaw' | string | null;
   archived: boolean;
   deleted_file: boolean;
   path: string | null;
@@ -1059,7 +1064,7 @@ export const systemAPI = {
       { timeout: 15000, params },
     ),
 
-  /** Archive and delete one local Codex CLI history rollout. */
+  /** Archive and delete one local Codex history rollout managed by CLI or XSafeClaw. */
   deleteCodexSession: (threadId: string) =>
     api.delete<CodexSessionDeleteResponse>(`/system/codex/sessions/${encodeURIComponent(threadId)}`, { timeout: 15000 }),
 

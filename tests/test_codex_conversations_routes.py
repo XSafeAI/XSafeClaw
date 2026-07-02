@@ -812,6 +812,49 @@ def test_codex_realtime_reasoning_without_summary_is_not_unknown_tool():
     assert chunk is None
 
 
+def test_codex_realtime_title_and_agent_start_include_order_metadata():
+    title_chunk = system_routes._codex_notification_chunk(
+        {
+            "method": "thread/name/updated",
+            "params": {
+                "threadId": "thread-123",
+                "threadName": "Create matrix transpose script",
+            },
+        },
+        event_order=4,
+    )
+    assert title_chunk == {
+        "type": "codex_thread_title",
+        "thread_id": "thread-123",
+        "title": "Create matrix transpose script",
+        "codex_event_order": 4,
+    }
+
+    start_chunk = system_routes._codex_notification_chunk(
+        {
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-123",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "agentMessage",
+                    "id": "assistant-item-1",
+                    "startedAtMs": 1781524800123,
+                },
+            },
+        },
+        event_order=5,
+    )
+    assert start_chunk == {
+        "type": "codex_assistant_start",
+        "thread_id": "thread-123",
+        "turn_id": "turn-1",
+        "item_id": "assistant-item-1",
+        "codex_event_order": 5,
+        "codex_started_at_ms": 1781524800123,
+    }
+
+
 def _client_with_fake_conversation(monkeypatch, tmp_path):
     codex_path = str(tmp_path / "codex.cmd")
     sent_messages: list[dict] = []
@@ -933,7 +976,7 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
         body = "".join(response.iter_text())
 
     assert response.status_code == 200
-    assert 'data: {"type": "delta", "text": "Hello from Codex", "thread_id": "thread-existing", "turn_id": "turn-1", "item_id": "assistant-1"}' in body
+    assert 'data: {"type": "delta", "text": "Hello from Codex", "thread_id": "thread-existing", "turn_id": "turn-1", "item_id": "assistant-1", "codex_event_order": 0}' in body
     assert "data: [DONE]" in body
 
     resume_messages = [message for message in sent_messages if message.get("method") == "thread/resume"]
@@ -1003,7 +1046,8 @@ def test_codex_turn_stream_starts_thread_for_pending_first_message(monkeypatch, 
     assert '"thread_id": "thread-started"' in first_event
     assert '"session_key": "codex:thread-started"' in first_event
     assert '"cwd": "C:/Users/heng/Desktop/test"' in first_event
-    assert 'data: {"type": "delta", "text": "Hello from Codex", "thread_id": "thread-started", "turn_id": "turn-1", "item_id": "assistant-1"}' in body
+    assert '"history_kind": "xsafeclaw"' in first_event
+    assert 'data: {"type": "delta", "text": "Hello from Codex", "thread_id": "thread-started", "turn_id": "turn-1", "item_id": "assistant-1", "codex_event_order": 1}' in body
     assert "data: [DONE]" in body
 
     methods = [message.get("method") for message in sent_messages]
