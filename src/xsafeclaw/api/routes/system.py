@@ -2374,6 +2374,126 @@ def _codex_plan_item_chunk(item: dict[str, Any], params: dict[str, Any]) -> dict
     }
 
 
+def _codex_realtime_reasoning_chunk(item: dict[str, Any], params: dict[str, Any]) -> dict[str, Any] | None:
+    summary = "\n".join(_codex_text_parts(item.get("summary"))).strip()
+    if not summary:
+        return None
+    return {
+        "type": "status",
+        "text": summary,
+        "phase": "reasoning",
+        "summary": "Reasoning",
+        "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+        "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+        "item_id": _first_string(item.get("id"), params.get("itemId"), params.get("item_id")),
+    }
+
+
+def _codex_realtime_command_chunk(item: dict[str, Any], *, completed: bool) -> dict[str, Any]:
+    item_id = _first_string(item.get("id"), item.get("clientId")) or str(uuid.uuid4())
+    command = _first_string(item.get("command")) or ""
+    cwd = _first_string(item.get("cwd"))
+    base = {
+        "tool_id": item_id,
+        "tool_name": "Shell",
+        "tool_category": "shell",
+        "tool_action": "execute",
+        "timeline_kind": "shell_command",
+    }
+    if not completed:
+        return {
+            "type": "tool_start",
+            **base,
+            "args": {
+                "command": command,
+                "cwd": cwd,
+                "command_actions": item.get("commandActions"),
+            },
+        }
+
+    status = (_first_string(item.get("status")) or "").lower()
+    exit_code = item.get("exitCode")
+    return {
+        "type": "tool_result",
+        **base,
+        "result": {
+            "output": _first_string(item.get("aggregatedOutput"), item.get("output")) or "",
+            "exit_code": exit_code,
+            "duration_ms": item.get("durationMs"),
+        },
+        "is_error": bool(status in {"failed", "error"} or (isinstance(exit_code, int) and exit_code != 0)),
+    }
+
+
+def _codex_realtime_file_change_chunk(item: dict[str, Any], *, completed: bool) -> dict[str, Any]:
+    item_id = _first_string(item.get("id"), item.get("clientId")) or str(uuid.uuid4())
+    changes = [change for change in item.get("changes", []) if isinstance(change, dict)]
+    base = {
+        "tool_id": item_id,
+        "tool_name": "File Change",
+        "tool_category": "file_system",
+        "tool_action": _codex_file_change_action(changes),
+        "timeline_kind": "file_change",
+    }
+    if not completed:
+        return {
+            "type": "tool_start",
+            **base,
+            "args": {
+                "changes": changes,
+            },
+        }
+    return {
+        "type": "tool_result",
+        **base,
+        "result": {
+            "changes": changes,
+            "status": _first_string(item.get("status")) or "completed",
+        },
+        "is_error": False,
+    }
+
+
+def _codex_realtime_unknown_tool_chunk(item: dict[str, Any], *, completed: bool) -> dict[str, Any]:
+    item_id = _first_string(item.get("id"), item.get("clientId")) or str(uuid.uuid4())
+    item_type = _first_string(item.get("type")) or "tool"
+    tool_name = _first_string(item.get("name"), item.get("toolName"), item_type) or "Codex"
+    if not completed:
+        return {
+            "type": "tool_start",
+            "tool_id": item_id,
+            "tool_name": tool_name,
+            "args": {
+                "type": item_type,
+            },
+        }
+    return {
+        "type": "tool_result",
+        "tool_id": item_id,
+        "tool_name": tool_name,
+        "result": {
+            "type": item_type,
+            "status": _first_string(item.get("status")) or "completed",
+        },
+        "is_error": False,
+    }
+
+
+def _codex_realtime_item_chunk(item: dict[str, Any], params: dict[str, Any], *, completed: bool) -> dict[str, Any] | None:
+    item_type = _first_string(item.get("type")) or "tool"
+    if item_type in {"agentMessage", "userMessage"}:
+        return None
+    if item_type == "plan" and completed:
+        return _codex_plan_item_chunk(item, params)
+    if item_type == "reasoning":
+        return _codex_realtime_reasoning_chunk(item, params)
+    if item_type == "commandExecution":
+        return _codex_realtime_command_chunk(item, completed=completed)
+    if item_type == "fileChange":
+        return _codex_realtime_file_change_chunk(item, completed=completed)
+    return _codex_realtime_unknown_tool_chunk(item, completed=completed)
+
+
 def _codex_notification_chunk(message: dict[str, Any]) -> dict[str, Any] | None:
     method = _first_string(message.get("method"))
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
@@ -2409,38 +2529,19 @@ def _codex_notification_chunk(message: dict[str, Any]) -> dict[str, Any] | None:
             "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
         }
     if method == "item/agentMessage/delta":
-        return {"type": "delta", "text": _first_string(params.get("delta")) or ""}
+        return {
+            "type": "delta",
+            "text": _first_string(params.get("delta")) or "",
+            "thread_id": _first_string(params.get("threadId"), params.get("thread_id")),
+            "turn_id": _first_string(params.get("turnId"), params.get("turn_id")),
+            "item_id": _first_string(params.get("itemId"), params.get("item_id")),
+        }
     if method == "item/started":
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
-        item_id = _first_string(item.get("id"), params.get("itemId")) or str(uuid.uuid4())
-        item_type = _first_string(item.get("type")) or "tool"
-        if item_type in {"agentMessage", "userMessage"}:
-            return None
-        return {
-            "type": "tool_start",
-            "tool_id": item_id,
-            "tool_name": _first_string(item.get("name"), item.get("toolName"), item_type) or "Codex",
-            "args": item,
-            "tool_category": _first_string(item.get("type")),
-            "timeline_kind": _first_string(item.get("type")),
-        }
+        return _codex_realtime_item_chunk(item, params, completed=False)
     if method == "item/completed":
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
-        item_id = _first_string(item.get("id"), params.get("itemId"))
-        item_type = _first_string(item.get("type")) or "tool"
-        if item_type in {"agentMessage", "userMessage"}:
-            return None
-        if item_type == "plan":
-            return _codex_plan_item_chunk(item, params)
-        return {
-            "type": "tool_result",
-            "tool_id": item_id,
-            "tool_name": _first_string(item.get("name"), item.get("toolName"), item_type) or "Codex",
-            "result": item,
-            "is_error": False,
-            "tool_category": _first_string(item.get("type")),
-            "timeline_kind": _first_string(item.get("type")),
-        }
+        return _codex_realtime_item_chunk(item, params, completed=True)
     if method == "warning":
         return {"type": "status", "text": _first_string(params.get("message"), params.get("warning")) or "Codex warning"}
     if method == "error":

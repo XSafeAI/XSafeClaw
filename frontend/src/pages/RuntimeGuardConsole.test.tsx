@@ -1341,6 +1341,130 @@ describe('NewTaskModal', () => {
     }));
   });
 
+  it('keeps Codex realtime assistant items and tools in stream order with normalized tool colors', async () => {
+    const { sendMessageStreamSpy } = mockRuntimeGuardApis();
+    window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({
+      configVersion: 2,
+      workspaceDir: 'E:/configured-codex-workspace',
+      permissionMode: 'workspace_write',
+      defaultModel: 'GPT-5.5',
+      defaultReasoning: 'xhigh',
+      defaultSpeed: 'standard',
+    }));
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: false,
+        nanobot_installed: true,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    sendMessageStreamSpy.mockImplementationOnce(async () => (
+      new Response(
+        [
+          `data: ${JSON.stringify({
+            type: 'codex_session_started',
+            thread_id: 'thread-started',
+            session_key: 'codex:thread-started',
+            cwd: 'E:/configured-codex-workspace',
+          })}`,
+          `data: ${JSON.stringify({
+            type: 'delta',
+            item_id: 'assistant-first',
+            text: 'First explanation.',
+          })}`,
+          `data: ${JSON.stringify({
+            type: 'tool_start',
+            tool_id: 'call-shell',
+            tool_name: 'Shell',
+            args: { command: 'python -m pytest', cwd: 'E:/configured-codex-workspace' },
+            tool_category: 'shell',
+            tool_action: 'execute',
+            timeline_kind: 'shell_command',
+          })}`,
+          `data: ${JSON.stringify({
+            type: 'tool_result',
+            tool_id: 'call-shell',
+            tool_name: 'Shell',
+            result: { output: '1 passed', exit_code: 0, duration_ms: 42 },
+            is_error: false,
+            tool_category: 'shell',
+            tool_action: 'execute',
+            timeline_kind: 'shell_command',
+          })}`,
+          `data: ${JSON.stringify({
+            type: 'tool_start',
+            tool_id: 'call-file',
+            tool_name: 'File Change',
+            args: { changes: [{ kind: 'create', path: 'polynomial_derivative.py' }] },
+            tool_category: 'file_system',
+            tool_action: 'create',
+            timeline_kind: 'file_change',
+          })}`,
+          `data: ${JSON.stringify({
+            type: 'tool_result',
+            tool_id: 'call-file',
+            tool_name: 'File Change',
+            result: { changes: [{ kind: 'create', path: 'polynomial_derivative.py' }], status: 'completed' },
+            is_error: false,
+            tool_category: 'file_system',
+            tool_action: 'create',
+            timeline_kind: 'file_change',
+          })}`,
+          `data: ${JSON.stringify({
+            type: 'delta',
+            item_id: 'assistant-second',
+            text: 'Second explanation.',
+          })}`,
+          'data: [DONE]',
+          '',
+        ].join('\n\n'),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      )
+    ) as any);
+
+    const { container } = renderRuntimeGuardConsole();
+    const codexRow = (await screen.findByText('Codex')).closest('.rg-agent-row') as HTMLElement;
+    fireEvent.click(within(codexRow).getByRole('button', { name: /Open/ }));
+    const composer = await waitFor(() => {
+      const node = container.querySelector('.rg-codex-composer') as HTMLElement | null;
+      expect(node).toBeTruthy();
+      return node as HTMLElement;
+    });
+
+    fireEvent.change(within(composer).getByRole('textbox', { name: 'Ask Codex' }), {
+      target: { value: 'run codex task' },
+    });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('First explanation.')).toBeTruthy();
+    expect(await screen.findByText('Second explanation.')).toBeTruthy();
+    await waitFor(() => {
+      expect(container.querySelectorAll('.rg-stream-row[data-kind="tool_shell"]')).toHaveLength(1);
+      expect(container.querySelectorAll('.rg-stream-row[data-kind="tool_file_write"]')).toHaveLength(1);
+    });
+
+    const rows = Array.from(container.querySelectorAll('.rg-stream-row'));
+    const interestingRows = rows
+      .map(row => ({
+        kind: row.getAttribute('data-kind'),
+        text: row.textContent ?? '',
+      }))
+      .filter(row => (
+        row.text.includes('First explanation.')
+        || row.text.includes('Shell')
+        || row.text.includes('Edit')
+        || row.text.includes('Second explanation.')
+      ));
+    expect(interestingRows.map(row => row.kind)).toEqual([
+      'assistant_final',
+      'tool_shell',
+      'tool_file_write',
+      'assistant_final',
+    ]);
+  });
+
   it('ignores stale non-pending Codex smart-route seeds and creates a pending session', async () => {
     const { smartStartSessionSpy, sendMessageStreamSpy, startCodexConversationSpy } = mockRuntimeGuardApis();
     window.localStorage.setItem('xsafeclaw:codex_config', JSON.stringify({

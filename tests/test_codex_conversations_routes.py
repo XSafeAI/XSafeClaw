@@ -707,6 +707,111 @@ def test_codex_hook_validation_allows_untrusted_or_modified_hooks_only_with_bypa
     )
 
 
+def test_codex_realtime_command_execution_maps_to_shell_timeline():
+    chunk = system_routes._codex_notification_chunk({
+        "method": "item/started",
+        "params": {
+            "item": {
+                "type": "commandExecution",
+                "id": "call-shell-1",
+                "command": "python -m pytest",
+                "cwd": "E:/work/project",
+                "commandActions": [{"type": "run"}],
+            },
+        },
+    })
+
+    assert chunk == {
+        "type": "tool_start",
+        "tool_id": "call-shell-1",
+        "tool_name": "Shell",
+        "args": {
+            "command": "python -m pytest",
+            "cwd": "E:/work/project",
+            "command_actions": [{"type": "run"}],
+        },
+        "tool_category": "shell",
+        "tool_action": "execute",
+        "timeline_kind": "shell_command",
+    }
+
+    completed = system_routes._codex_notification_chunk({
+        "method": "item/completed",
+        "params": {
+            "item": {
+                "type": "commandExecution",
+                "id": "call-shell-1",
+                "command": "python -m pytest",
+                "cwd": "E:/work/project",
+                "aggregatedOutput": "1 passed",
+                "exitCode": 0,
+                "durationMs": 42,
+                "status": "completed",
+            },
+        },
+    })
+
+    assert completed == {
+        "type": "tool_result",
+        "tool_id": "call-shell-1",
+        "tool_name": "Shell",
+        "result": {
+            "output": "1 passed",
+            "exit_code": 0,
+            "duration_ms": 42,
+        },
+        "is_error": False,
+        "tool_category": "shell",
+        "tool_action": "execute",
+        "timeline_kind": "shell_command",
+    }
+
+
+def test_codex_realtime_file_change_maps_to_file_timeline():
+    changes = [{"kind": "create", "path": "E:/work/project/polynomial_derivative.py"}]
+
+    chunk = system_routes._codex_notification_chunk({
+        "method": "item/completed",
+        "params": {
+            "item": {
+                "type": "fileChange",
+                "id": "call-file-1",
+                "changes": changes,
+                "status": "completed",
+            },
+        },
+    })
+
+    assert chunk == {
+        "type": "tool_result",
+        "tool_id": "call-file-1",
+        "tool_name": "File Change",
+        "result": {
+            "changes": changes,
+            "status": "completed",
+        },
+        "is_error": False,
+        "tool_category": "file_system",
+        "tool_action": "create",
+        "timeline_kind": "file_change",
+    }
+
+
+def test_codex_realtime_reasoning_without_summary_is_not_unknown_tool():
+    chunk = system_routes._codex_notification_chunk({
+        "method": "item/started",
+        "params": {
+            "item": {
+                "type": "reasoning",
+                "id": "rs-empty",
+                "summary": [],
+            },
+        },
+    })
+
+    assert chunk is None
+
+
 def _client_with_fake_conversation(monkeypatch, tmp_path):
     codex_path = str(tmp_path / "codex.cmd")
     sent_messages: list[dict] = []
@@ -828,7 +933,7 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
         body = "".join(response.iter_text())
 
     assert response.status_code == 200
-    assert 'data: {"type": "delta", "text": "Hello from Codex"}' in body
+    assert 'data: {"type": "delta", "text": "Hello from Codex", "thread_id": "thread-existing", "turn_id": "turn-1", "item_id": "assistant-1"}' in body
     assert "data: [DONE]" in body
 
     resume_messages = [message for message in sent_messages if message.get("method") == "thread/resume"]
@@ -898,7 +1003,7 @@ def test_codex_turn_stream_starts_thread_for_pending_first_message(monkeypatch, 
     assert '"thread_id": "thread-started"' in first_event
     assert '"session_key": "codex:thread-started"' in first_event
     assert '"cwd": "C:/Users/heng/Desktop/test"' in first_event
-    assert 'data: {"type": "delta", "text": "Hello from Codex"}' in body
+    assert 'data: {"type": "delta", "text": "Hello from Codex", "thread_id": "thread-started", "turn_id": "turn-1", "item_id": "assistant-1"}' in body
     assert "data: [DONE]" in body
 
     methods = [message.get("method") for message in sent_messages]

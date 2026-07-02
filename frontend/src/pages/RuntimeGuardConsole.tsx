@@ -4017,13 +4017,7 @@ export default function RuntimeGuardConsole() {
         timestamp: activity,
       };
       const pendingId = uuidv4();
-      const assistantMsg: ChatMessage = {
-        id: pendingId,
-        role: 'assistant',
-        content: '',
-        timestamp: new Date(),
-        pending: true,
-      };
+      const fallbackAssistantId = `assistant-${pendingId}`;
 
       inFlightKeysRef.current.add(originalKey);
       chatStreamStore.setSending(originalKey, true);
@@ -4034,7 +4028,7 @@ export default function RuntimeGuardConsole() {
       setSessionHistoryItems(current => sortSessionsNewestFirst(current.map(session => (
         session.sessionKey === originalKey ? { ...session, lastActivityAt: activityIso } : session
       ))));
-      setMessageMap(prev => ({ ...prev, [originalKey]: [...(prev[originalKey] ?? []), userMsg, assistantMsg] }));
+      setMessageMap(prev => ({ ...prev, [originalKey]: [...(prev[originalKey] ?? []), userMsg] }));
 
       try {
         if (!activeThreadId && !session.sessionKey.startsWith('codex:pending:')) {
@@ -4067,6 +4061,7 @@ export default function RuntimeGuardConsole() {
         let streamDone = false;
         let sawCodexPlanUpdate = false;
         let sawCodexNativeUserInputRequest = false;
+        let sawCodexTimelineContent = false;
         let latestCodexPlanTurnId = '';
         let latestCodexPlanItemId = '';
 
@@ -4110,21 +4105,24 @@ export default function RuntimeGuardConsole() {
                 steps?: ChatMessage['codex_plan_steps'];
                 delta?: string;
                 goal?: ChatMessage['codex_goal'];
+                phase?: string;
+                summary?: string;
               };
 
-              const appendBeforeAssistant = (message: ChatMessage) => {
+              const appendStreamMessage = (message: ChatMessage) => {
+                sawCodexTimelineContent = true;
                 setMessageMap(prev => {
                   const messages = [...(prev[activeKey] ?? [])];
-                  const assistantIndex = messages.findIndex(item => item.id === pendingId);
-                  messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, message);
+                  messages.push(message);
                   return { ...prev, [activeKey]: messages };
                 });
               };
 
-              const upsertBeforeAssistant = (
+              const upsertStreamMessage = (
                 messageId: string,
                 buildMessage: (existing?: ChatMessage) => ChatMessage,
               ) => {
+                sawCodexTimelineContent = true;
                 setMessageMap(prev => {
                   const messages = [...(prev[activeKey] ?? [])];
                   const existingIndex = messages.findIndex(item => item.id === messageId);
@@ -4132,8 +4130,7 @@ export default function RuntimeGuardConsole() {
                     messages[existingIndex] = buildMessage(messages[existingIndex]);
                     return { ...prev, [activeKey]: messages };
                   }
-                  const assistantIndex = messages.findIndex(item => item.id === pendingId);
-                  messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, buildMessage());
+                  messages.push(buildMessage());
                   return { ...prev, [activeKey]: messages };
                 });
               };
@@ -4184,29 +4181,35 @@ export default function RuntimeGuardConsole() {
                   });
                 }
               } else if (chunk.type === 'delta' && typeof chunk.text === 'string') {
-                setMessageMap(prev => ({
-                  ...prev,
-                  [activeKey]: (prev[activeKey] ?? []).map(message => (
-                    message.id === pendingId
-                      ? { ...message, content: `${message.content || ''}${chunk.text}`, pending: false }
-                      : message
-                  )),
+                const assistantId = chunk.item_id ? `assistant-${chunk.item_id}` : fallbackAssistantId;
+                upsertStreamMessage(assistantId, existing => ({
+                  id: assistantId,
+                  role: 'assistant',
+                  content: `${existing?.content || ''}${chunk.text}`,
+                  timestamp: existing?.timestamp ?? new Date(),
+                  pending: false,
+                  codex_thread_id: chunk.thread_id || existing?.codex_thread_id,
+                  codex_turn_id: chunk.turn_id || existing?.codex_turn_id,
+                  codex_item_id: chunk.item_id || existing?.codex_item_id,
                 }));
               } else if (chunk.type === 'final') {
-                setMessageMap(prev => ({
-                  ...prev,
-                  [activeKey]: (prev[activeKey] ?? []).map(message => (
-                    message.id === pendingId
-                      ? { ...message, content: chunk.text || message.content || '[No response]', pending: false }
-                      : message
-                  )),
-                }));
+                if (chunk.text || !sawCodexTimelineContent) {
+                  upsertStreamMessage(fallbackAssistantId, existing => ({
+                    id: fallbackAssistantId,
+                    role: 'assistant',
+                    content: chunk.text || existing?.content || '[No response]',
+                    timestamp: existing?.timestamp ?? new Date(),
+                    pending: false,
+                  }));
+                }
               } else if (chunk.type === 'tool_start') {
-                appendBeforeAssistant({
-                  id: `tool-${chunk.tool_id || uuidv4()}`,
+                const toolMessageId = `tool-${chunk.tool_id || uuidv4()}`;
+                upsertStreamMessage(toolMessageId, existing => ({
+                  ...existing,
+                  id: toolMessageId,
                   role: 'tool_call',
                   content: '',
-                  timestamp: new Date(),
+                  timestamp: existing?.timestamp ?? new Date(),
                   tool_id: chunk.tool_id,
                   tool_name: chunk.tool_name,
                   args: chunk.args,
@@ -4215,29 +4218,30 @@ export default function RuntimeGuardConsole() {
                   tool_action: chunk.tool_action,
                   timeline_kind: chunk.timeline_kind,
                   risk_level: chunk.risk_level,
-                });
+                }));
               } else if (chunk.type === 'tool_result') {
-                setMessageMap(prev => ({
-                  ...prev,
-                  [activeKey]: (prev[activeKey] ?? []).map(message => (
-                    message.role === 'tool_call' && chunk.tool_id && message.tool_id === chunk.tool_id
-                      ? {
-                          ...message,
-                          result: chunk.result,
-                          is_error: chunk.is_error,
-                          result_pending: false,
-                          tool_category: chunk.tool_category || message.tool_category,
-                          tool_action: chunk.tool_action || message.tool_action,
-                          timeline_kind: chunk.timeline_kind || message.timeline_kind,
-                          risk_level: chunk.risk_level || message.risk_level,
-                        }
-                      : message
-                  )),
+                const toolMessageId = `tool-${chunk.tool_id || uuidv4()}`;
+                upsertStreamMessage(toolMessageId, existing => ({
+                  ...existing,
+                  id: toolMessageId,
+                  role: 'tool_call',
+                  content: '',
+                  timestamp: existing?.timestamp ?? new Date(),
+                  tool_id: chunk.tool_id || existing?.tool_id,
+                  tool_name: chunk.tool_name || existing?.tool_name,
+                  args: existing?.args ?? chunk.args,
+                  result: chunk.result,
+                  is_error: chunk.is_error,
+                  result_pending: false,
+                  tool_category: chunk.tool_category || existing?.tool_category,
+                  tool_action: chunk.tool_action || existing?.tool_action,
+                  timeline_kind: chunk.timeline_kind || existing?.timeline_kind,
+                  risk_level: chunk.risk_level || existing?.risk_level,
                 }));
               } else if (chunk.type === 'codex_user_input_request') {
                 sawCodexNativeUserInputRequest = true;
                 const requestId = String(chunk.request_id || uuidv4());
-                appendBeforeAssistant({
+                appendStreamMessage({
                   id: `codex-question-${requestId}`,
                   role: 'codex_question',
                   content: '',
@@ -4255,7 +4259,7 @@ export default function RuntimeGuardConsole() {
                 latestCodexPlanTurnId = chunk.turn_id || latestCodexPlanTurnId;
                 latestCodexPlanItemId = chunk.item_id || latestCodexPlanItemId;
                 const planId = `codex-plan-${chunk.turn_id || chunk.item_id || pendingId}`;
-                upsertBeforeAssistant(planId, existing => {
+                upsertStreamMessage(planId, existing => {
                   const existingText = existing?.codex_plan_text || existing?.content || '';
                   const nextText = typeof chunk.delta === 'string' && chunk.delta
                     ? `${existingText}${chunk.delta}`
@@ -4284,7 +4288,7 @@ export default function RuntimeGuardConsole() {
                 };
                 setCodexGoalBySessionKey(current => ({ ...current, [activeKey]: goal }));
                 const goalId = `codex-goal-${goal.thread_id || activeThreadId || pendingId}`;
-                upsertBeforeAssistant(goalId, existing => ({
+                upsertStreamMessage(goalId, existing => ({
                   id: goalId,
                   role: 'codex_goal',
                   content: goal.objective || existing?.content || '',
@@ -4318,23 +4322,23 @@ export default function RuntimeGuardConsole() {
                   }));
                 }
               } else if (chunk.type === 'status' && chunk.text) {
-                appendBeforeAssistant({
+                appendStreamMessage({
                   id: `trace-${uuidv4()}`,
                   role: 'trace',
                   content: chunk.text,
                   timestamp: new Date(),
-                  trace_type: 'status',
-                  trace_phase: 'codex',
+                  trace_type: chunk.phase || 'status',
+                  trace_phase: chunk.phase || 'codex',
+                  trace_summary: chunk.summary,
                 });
               } else if (chunk.type === 'error') {
-                setMessageMap(prev => ({
-                  ...prev,
-                  [activeKey]: (prev[activeKey] ?? []).map(message => (
-                    message.id === pendingId
-                      ? { ...message, role: 'error' as const, content: chunk.text || 'Codex error', pending: false }
-                      : message
-                  )),
-                }));
+                appendStreamMessage({
+                  id: `error-${uuidv4()}`,
+                  role: 'error' as const,
+                  content: chunk.text || 'Codex error',
+                  timestamp: new Date(),
+                  pending: false,
+                });
               }
             } catch {
               // Ignore malformed SSE data.
@@ -4360,29 +4364,22 @@ export default function RuntimeGuardConsole() {
           setMessageMap(prev => {
             const messages = [...(prev[activeKey] ?? [])];
             if (messages.some(message => message.id === confirmationId)) return prev;
-            const assistantIndex = messages.findIndex(message => message.id === pendingId);
-            messages.splice(assistantIndex >= 0 ? assistantIndex : messages.length, 0, confirmationMessage);
+            messages.push(confirmationMessage);
             return { ...prev, [activeKey]: messages };
           });
         }
-
-        setMessageMap(prev => ({
-          ...prev,
-          [activeKey]: (prev[activeKey] ?? []).map(message => (
-            message.id === pendingId && message.pending
-              ? { ...message, content: message.content || '[No response]', pending: false }
-              : message
-          )),
-        }));
       } catch (err: any) {
-        setMessageMap(prev => ({
-          ...prev,
-          [activeKey]: (prev[activeKey] ?? prev[originalKey] ?? []).map(message => (
-            message.id === pendingId
-              ? { ...message, role: 'error' as const, content: `[Error] ${err.message}`, pending: false }
-              : message
-          )),
-        }));
+        setMessageMap(prev => {
+          const messages = [...(prev[activeKey] ?? prev[originalKey] ?? [])];
+          messages.push({
+            id: `error-${uuidv4()}`,
+            role: 'error' as const,
+            content: `[Error] ${err.message}`,
+            timestamp: new Date(),
+            pending: false,
+          });
+          return { ...prev, [activeKey]: messages };
+        });
       } finally {
         chatStreamStore.setSending(originalKey, false);
         chatStreamStore.setSending(activeKey, false);
