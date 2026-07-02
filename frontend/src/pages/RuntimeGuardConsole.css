@@ -606,30 +606,69 @@
   background: #1f3340;
 }
 
+.rg-left-history-row-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 2px;
+  width: 134px;
+  min-height: 24px;
+  padding: 0 3px 0 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+}
+
 .rg-left-history-row {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 5px;
-  width: 134px;
-  min-height: 24px;
-  padding: 3px 5px;
-  border: 1px solid transparent;
-  border-radius: 5px;
+  min-width: 0;
+  min-height: 22px;
+  padding: 3px 0 3px 5px;
+  border: 0;
   background: transparent;
   color: #9eacb5;
   text-align: left;
 }
 
-.rg-left-history-row:hover {
+.rg-left-history-row-shell:hover {
   border-color: #1d2d39;
   background: #0e1821;
+}
+
+.rg-left-history-row-shell:hover .rg-left-history-row {
   color: #dce6ed;
 }
 
-.rg-left-history-row.is-active {
+.rg-left-history-row-shell.is-active {
   border-color: #173447;
   background: #0a1a24;
+}
+
+.rg-left-history-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #536570;
+  opacity: 0;
+}
+
+.rg-left-history-row-shell:hover .rg-left-history-delete,
+.rg-left-history-row-shell:focus-within .rg-left-history-delete,
+.rg-left-history-row-shell.is-active .rg-left-history-delete {
+  opacity: 1;
+}
+
+.rg-left-history-delete:hover {
+  background: rgba(244, 63, 94, 0.13);
+  color: #fb7185;
 }
 
 .rg-left-history-main {

@@ -940,6 +940,48 @@ describe('NewTaskModal', () => {
     expect(rows[1].textContent).not.toContain('Hermes:');
   });
 
+  it('deletes local Codex shell sessions from the sidebar history', async () => {
+    mockRuntimeGuardApis();
+    vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({
+      data: {
+        openclaw_installed: true,
+        hermes_installed: true,
+        nanobot_installed: false,
+        codex_installed: true,
+        xsafeclaw_version: '1.1.1',
+      },
+    } as any);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    window.localStorage.setItem('xsafeclaw:runtime-guard:sessions', JSON.stringify([
+      {
+        sessionKey: 'codex:pending:failed-local',
+        agent: 'Codex',
+        platform: 'codex',
+        instanceId: 'codex-cli',
+        frontendOnly: true,
+        title: 'Codex 4',
+        createdAt: '2026-06-15T15:12:00.000Z',
+        lastActivityAt: '2026-06-15T15:12:00.000Z',
+        status: 'error',
+      },
+    ]));
+
+    const { container } = renderRuntimeGuardConsole();
+
+    await screen.findByText('Codex 4');
+    const deleteButton = container.querySelector('.rg-left-history-delete') as HTMLButtonElement;
+    expect(deleteButton).toBeTruthy();
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Codex 4')).toBeNull();
+    });
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(systemAPI.deleteCodexSession).not.toHaveBeenCalled();
+    const stored = JSON.parse(window.localStorage.getItem('xsafeclaw:runtime-guard:sessions') || '[]');
+    expect(stored.some((session: any) => session.sessionKey === 'codex:pending:failed-local')).toBe(false);
+  });
+
   it('hides session history for agents that are not installed', async () => {
     mockRuntimeGuardApis();
     vi.mocked(systemAPI.installStatus).mockResolvedValueOnce({

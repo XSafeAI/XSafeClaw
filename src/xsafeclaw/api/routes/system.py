@@ -980,10 +980,17 @@ def _build_tool_command(executable_path: str, args: list[str]) -> list[str]:
     return [executable_path, *args]
 
 
-def _build_codex_app_server_command(codex_path: str, *, bypass_hook_trust: bool = False) -> list[str]:
+def _build_codex_app_server_command(
+    codex_path: str,
+    *,
+    bypass_hook_trust: bool = False,
+    hook_command: str | None = None,
+) -> list[str]:
     args = ["app-server"]
     if bypass_hook_trust:
         args.insert(0, "--dangerously-bypass-hook-trust")
+    if hook_command:
+        args.extend(_codex_guard_hook_cli_args(hook_command))
     return _build_tool_command(codex_path, args)
 
 
@@ -2017,6 +2024,35 @@ def _codex_guard_hook_config(session_key: str, command: str | None = None) -> di
     }
 
 
+def _codex_toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def _codex_guard_hook_cli_value(command: str) -> str:
+    handler_parts = [
+        'type = "command"',
+        f"command = {_codex_toml_string(command)}",
+        f"timeoutSec = {_CODEX_GUARD_HOOK_TIMEOUT_S}",
+        "async = false",
+        'statusMessage = "XSafeClaw Guard is reviewing this Codex tool call"',
+    ]
+    if os.name == "nt":
+        handler_parts.insert(2, f"commandWindows = {_codex_toml_string(command)}")
+    return '[{ matcher = "*", hooks = [{ ' + ", ".join(handler_parts) + " }] }]"
+
+
+def _codex_guard_hook_cli_args(command: str) -> list[str]:
+    hook_value = _codex_guard_hook_cli_value(command)
+    return [
+        "-c",
+        f"hooks.PreToolUse={hook_value}",
+        "-c",
+        f"hooks.PermissionRequest={hook_value}",
+        "--enable",
+        "hooks",
+    ]
+
+
 def _codex_hook_metadata_entries(result: dict[str, Any]) -> list[dict[str, Any]]:
     data = result.get("data")
     if not isinstance(data, list):
@@ -2031,6 +2067,17 @@ def _codex_hook_metadata_entries(result: dict[str, Any]) -> list[dict[str, Any]]
     return hooks
 
 
+def _codex_hook_event_name(value: Any) -> str:
+    raw = (_first_string(value) or "").strip()
+    event_names = {
+        "PreToolUse": "preToolUse",
+        "preToolUse": "preToolUse",
+        "PermissionRequest": "permissionRequest",
+        "permissionRequest": "permissionRequest",
+    }
+    return event_names.get(raw, raw)
+
+
 def _codex_hook_is_loaded(
     hook: dict[str, Any],
     *,
@@ -2039,7 +2086,7 @@ def _codex_hook_is_loaded(
     bypass_hook_trust: bool = False,
 ) -> bool:
     command = _first_string(hook.get("command")) or ""
-    event_name = _first_string(hook.get("eventName")) or ""
+    event_name = _codex_hook_event_name(hook.get("eventName"))
     source = _first_string(hook.get("source")) or ""
     trust = _first_string(hook.get("trustStatus")) or ""
     trusted_statuses = {"trusted", "managed"}
@@ -2050,7 +2097,7 @@ def _codex_hook_is_loaded(
     )
     return (
         command_matches
-        and event_name in {"PreToolUse", "PermissionRequest"}
+        and event_name in {"preToolUse", "permissionRequest"}
         and source == "sessionFlags"
         and bool(hook.get("enabled", True))
         and trust in trusted_statuses
@@ -2073,7 +2120,7 @@ async def _codex_verify_session_hooks(
     await _codex_app_server_send(proc, {"id": request_id, "method": "hooks/list", "params": params})
     result = await _codex_app_server_response(proc, request_id, timeout_s=timeout_s)
     loaded_events = {
-        _first_string(hook.get("eventName"))
+        _codex_hook_event_name(hook.get("eventName"))
         for hook in _codex_hook_metadata_entries(result)
         if _codex_hook_is_loaded(
             hook,
@@ -2082,7 +2129,7 @@ async def _codex_verify_session_hooks(
             bypass_hook_trust=bypass_hook_trust,
         )
     }
-    missing = {"PreToolUse", "PermissionRequest"} - loaded_events
+    missing = {"preToolUse", "permissionRequest"} - loaded_events
     if missing:
         raise CodexAppServerError(
             "Codex session hooks are unavailable; XSafeClaw will not start this Codex turn without hook protection"
@@ -2438,7 +2485,11 @@ async def _codex_turn_stream_events(
     hook_command = _codex_guard_hook_command(session_key)
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_build_codex_app_server_command(codex_path, bypass_hook_trust=True),
+            *_build_codex_app_server_command(
+                codex_path,
+                bypass_hook_trust=True,
+                hook_command=hook_command,
+            ),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -2452,7 +2503,6 @@ async def _codex_turn_stream_events(
         thread_id = _first_string(payload.thread_id)
         open_params: dict[str, Any] = {
             "developerInstructions": instructions.text,
-            "config": _codex_guard_hook_config(session_key, command=hook_command),
         }
         if payload.cwd:
             open_params["cwd"] = payload.cwd
@@ -2667,7 +2717,6 @@ async def _open_codex_conversation_via_app_server(
             if not thread_id:
                 raise CodexAppServerError("thread id is required to resume Codex conversation")
             params["threadId"] = thread_id
-            params["config"] = _codex_guard_hook_config(f"codex:{thread_id}")
         if cwd:
             params["cwd"] = cwd
         if model:

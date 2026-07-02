@@ -94,15 +94,22 @@ class FakeConversationProcess:
 
 
 class FakeTurnStdin(FakeConversationStdin):
+    def __init__(
+        self,
+        queue: asyncio.Queue[bytes],
+        sent_messages: list[dict],
+        *,
+        hook_command: str | None = None,
+    ):
+        super().__init__(queue, sent_messages)
+        self._hook_command = hook_command or system_routes._codex_guard_hook_command("codex:thread-existing")
+
     def _remember_hook_command(self, message: dict) -> None:
         config = message.get("params", {}).get("config")
         try:
             self._hook_command = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         except Exception:
-            self._hook_command = (
-                "python -m xsafeclaw.integrations.codex_guard_hook "
-                "--session-key codex:thread-existing"
-            )
+            pass
 
     def _enqueue_hooks_list(self, message: dict) -> None:
         command = getattr(
@@ -122,18 +129,18 @@ class FakeTurnStdin(FakeConversationStdin):
                                 "errors": [],
                                 "hooks": [
                                     {
-                                        "eventName": "PreToolUse",
+                                        "eventName": "preToolUse",
                                         "command": command,
                                         "source": "sessionFlags",
                                         "enabled": True,
-                                        "trustStatus": "trusted",
+                                        "trustStatus": "untrusted",
                                     },
                                     {
-                                        "eventName": "PermissionRequest",
+                                        "eventName": "permissionRequest",
                                         "command": command,
                                         "source": "sessionFlags",
                                         "enabled": True,
-                                        "trustStatus": "trusted",
+                                        "trustStatus": "untrusted",
                                     },
                                 ],
                             }
@@ -242,10 +249,10 @@ class FakeTurnStdin(FakeConversationStdin):
 
 
 class FakeTurnProcess(FakeConversationProcess):
-    def __init__(self, sent_messages: list[dict]):
+    def __init__(self, sent_messages: list[dict], *, hook_command: str | None = None):
         self.returncode = None
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
-        self.stdin = FakeTurnStdin(self._queue, sent_messages)
+        self.stdin = FakeTurnStdin(self._queue, sent_messages, hook_command=hook_command)
         self.stdout = FakeConversationStdout(self._queue)
         self.stderr = FakeConversationStderr()
 
@@ -645,14 +652,18 @@ class FakeInstructionBundle:
     byte_length = 59
 
 
-def _expected_conversation_app_server_command(codex_path: str) -> list[str]:
-    return [codex_path, "--dangerously-bypass-hook-trust", "app-server"]
+def _expected_conversation_app_server_command(codex_path: str, session_key: str | None = None) -> list[str]:
+    command = [codex_path, "--dangerously-bypass-hook-trust", "app-server"]
+    if session_key:
+        hook_command = system_routes._codex_guard_hook_command(session_key)
+        command.extend(system_routes._codex_guard_hook_cli_args(hook_command))
+    return command
 
 
 def test_codex_hook_validation_allows_untrusted_or_modified_hooks_only_with_bypass():
     command = system_routes._codex_guard_hook_command("codex:thread-existing")
     base_hook = {
-        "eventName": "PreToolUse",
+        "eventName": "preToolUse",
         "command": command,
         "source": "sessionFlags",
         "enabled": True,
@@ -791,9 +802,12 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == _expected_conversation_app_server_command(codex_path)
+        assert list(args) == _expected_conversation_app_server_command(codex_path, "codex:thread-existing")
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
-        return FakeTurnProcess(sent_messages)
+        return FakeTurnProcess(
+            sent_messages,
+            hook_command=system_routes._codex_guard_hook_command("codex:thread-existing"),
+        )
 
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     client = TestClient(app)
@@ -821,12 +835,7 @@ def test_codex_turn_stream_sends_ui_model_reasoning_speed_and_streams_delta(monk
     assert len(resume_messages) == 1
     assert resume_messages[0]["params"]["threadId"] == "thread-existing"
     assert resume_messages[0]["params"]["developerInstructions"] == FakeInstructionBundle.text
-    hook_config = resume_messages[0]["params"]["config"]
-    assert hook_config["hooks"]["PreToolUse"][0]["matcher"] == "*"
-    assert hook_config["hooks"]["PermissionRequest"][0]["matcher"] == "*"
-    hook_command = hook_config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert "xsafeclaw.integrations.codex_guard_hook" in hook_command
-    assert "--session-key codex:thread-existing" in hook_command
+    assert "config" not in resume_messages[0]["params"]
 
     hooks_list_messages = [message for message in sent_messages if message.get("method") == "hooks/list"]
     assert len(hooks_list_messages) == 1
@@ -858,9 +867,12 @@ def test_codex_turn_stream_starts_thread_for_pending_first_message(monkeypatch, 
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == _expected_conversation_app_server_command(codex_path)
+        assert list(args) == _expected_conversation_app_server_command(codex_path, "codex:pending:abc")
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
-        return FakeTurnProcess(sent_messages)
+        return FakeTurnProcess(
+            sent_messages,
+            hook_command=system_routes._codex_guard_hook_command("codex:pending:abc"),
+        )
 
     monkeypatch.setattr(system_routes.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     client = TestClient(app)
@@ -900,8 +912,7 @@ def test_codex_turn_stream_starts_thread_for_pending_first_message(monkeypatch, 
     assert start_params["developerInstructions"] == FakeInstructionBundle.text
     assert start_params["cwd"] == "C:/Users/heng/Desktop/test"
     assert start_params["model"] == "gpt-5.5"
-    hook_command = start_params["config"]["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert "--session-key codex:pending:abc" in hook_command
+    assert "config" not in start_params
 
     turn_messages = [message for message in sent_messages if message.get("method") == "turn/start"]
     assert len(turn_messages) == 1
@@ -1011,7 +1022,7 @@ def test_codex_turn_stream_maps_request_user_input_and_resolved_notification(mon
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == _expected_conversation_app_server_command(codex_path)
+        assert list(args) == _expected_conversation_app_server_command(codex_path, "codex:thread-existing")
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeQuestionTurnProcess(sent_messages)
 
@@ -1046,7 +1057,7 @@ def test_codex_plan_mode_uses_native_collaboration_mode_and_maps_plan_events(mon
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == _expected_conversation_app_server_command(codex_path)
+        assert list(args) == _expected_conversation_app_server_command(codex_path, "codex:thread-existing")
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakePlanTurnProcess(sent_messages)
 
@@ -1095,7 +1106,7 @@ def test_codex_plan_mode_returns_error_when_plan_collaboration_mode_is_missing(m
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == _expected_conversation_app_server_command(codex_path)
+        assert list(args) == _expected_conversation_app_server_command(codex_path, "codex:thread-existing")
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeNoPlanTurnProcess(sent_messages)
 
@@ -1122,7 +1133,7 @@ def test_codex_goal_mode_sets_goal_before_starting_turn_and_maps_goal_events(mon
     monkeypatch.setattr(system_routes, "build_codex_developer_instructions", lambda: FakeInstructionBundle())
 
     async def fake_create_subprocess_exec(*args, **kwargs):
-        assert list(args) == _expected_conversation_app_server_command(codex_path)
+        assert list(args) == _expected_conversation_app_server_command(codex_path, "codex:thread-existing")
         assert kwargs.get("stdin") == system_routes.asyncio.subprocess.PIPE
         return FakeGoalTurnProcess(sent_messages)
 

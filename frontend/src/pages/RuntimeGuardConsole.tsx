@@ -5038,18 +5038,35 @@ export default function RuntimeGuardConsole() {
                 const status = sessionHistoryStatus(session, activeSessionId);
                 const baseTitle = runtimeGuardSessionBaseTitle(session);
                 return (
-                  <button
-                    className={`rg-left-history-row ${status === 'Active' ? 'is-active' : ''}`}
+                  <div
+                    className={`rg-left-history-row-shell ${status === 'Active' ? 'is-active' : ''}`}
                     key={session.sessionKey}
-                    onClick={() => openHistorySession(session)}
-                    type="button"
                   >
-                    <AgentIconBadge agent={session.agent} size="compact" />
-                    <span className="rg-left-history-main">
-                      <span className="rg-left-history-session-title">{baseTitle}</span>
-                    </span>
-                    <span className="rg-left-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
-                  </button>
+                    <button
+                      className="rg-left-history-row"
+                      onClick={() => openHistorySession(session)}
+                      type="button"
+                    >
+                      <AgentIconBadge agent={session.agent} size="compact" />
+                      <span className="rg-left-history-main">
+                        <span className="rg-left-history-session-title">{baseTitle}</span>
+                      </span>
+                      <span className="rg-left-history-time">{formatSessionHistoryTime(session.createdAt)}</span>
+                    </button>
+                    <button
+                      aria-label={`Delete sidebar session ${baseTitle}`}
+                      className="rg-left-history-delete"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const confirmed = window.confirm(rgText(copy.sessionHistory.deleteConfirm, { title: baseTitle }));
+                        if (confirmed) void deleteHistorySession(session);
+                      }}
+                      title={`Delete sidebar session ${baseTitle}`}
+                      type="button"
+                    >
+                      <Trash2 size={10} strokeWidth={2.2} />
+                    </button>
+                  </div>
                 );
               })
             ) : (
