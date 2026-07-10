@@ -850,6 +850,8 @@ describe('NewTaskModal', () => {
     expect(within(rightTools).getByText('SAFETY TOOLS')).toBeTruthy();
     expect(within(rightTools).getByText('File Protection')).toBeTruthy();
     expect(within(rightTools).getByText('Risk Test')).toBeTruthy();
+    const blockedPanel = container.querySelector('.rg-recent-blocked') as HTMLElement;
+    expect(within(blockedPanel).getByText('Blocked actions')).toBeTruthy();
   });
 
   it('keeps runtime agent rows grey while install detection is pending', async () => {
@@ -3021,6 +3023,24 @@ describe('RuntimeGuardConsole i18n', () => {
       expect(screen.getByText('New Task')).toBeTruthy();
     });
   });
+
+  it('toggles the shared light and dark theme from the top utility bar', async () => {
+    mockRuntimeGuardApis();
+    const { container } = renderRuntimeGuardConsole();
+
+    const themeButton = screen.getByRole('button', { name: 'Switch to light mode' });
+    expect(screen.getByText('Light Mode')).toBeTruthy();
+
+    fireEvent.click(themeButton);
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem('xsafeclaw:theme')).toBe('light');
+      expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+      expect(container.querySelector('.runtime-guard-page.is-light-theme')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Switch to dark mode' })).toBeTruthy();
+      expect(screen.getByText('Dark Mode')).toBeTruthy();
+    });
+  });
 });
 
 describe('RuntimeGuardConsole sidebar layout', () => {
@@ -3035,11 +3055,46 @@ describe('RuntimeGuardConsole sidebar layout', () => {
     expect(container.querySelector('.rg-session-tabs')).toBeNull();
   });
 
-  it('aligns the budget card with the middle session panel and distributes sidebar gaps evenly', () => {
+  it('aligns the sidebar session history with the middle session panel', () => {
     const metrics = runtimeGuardSidebarLayoutMetrics();
 
-    expect(metrics.budgetBottom).toBe(metrics.middleSessionPanelBottom);
-    expect(Math.max(...metrics.visibleGaps) - Math.min(...metrics.visibleGaps)).toBeLessThanOrEqual(1);
+    expect(metrics.historyBottom).toBe(metrics.middleSessionPanelBottom);
+    expect(metrics.agentHistoryGap).toBeGreaterThan(0);
+  });
+
+  it('collapses the right sidebar into a rail and persists the state', async () => {
+    mockRuntimeGuardApis();
+    const { container, unmount } = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(container.querySelector('.rg-right-tools')).toBeTruthy();
+    });
+    const main = container.querySelector('.rg-main-fluid') as HTMLElement;
+    const initialMainWidth = parseFloat(main.style.width);
+
+    fireEvent.click(screen.getByTitle('Collapse sidebar'));
+
+    await waitFor(() => {
+      expect(container.querySelector('.rg-right-tools')).toBeNull();
+      expect(screen.getByTitle('Expand sidebar')).toBeTruthy();
+      expect(parseFloat(main.style.width)).toBeGreaterThan(initialMainWidth);
+    });
+    expect(window.localStorage.getItem('xsafeclaw:runtime-guard:right-panel-collapsed')).toBe('true');
+
+    unmount();
+    mockRuntimeGuardApis();
+    const secondRender = renderRuntimeGuardConsole();
+
+    await waitFor(() => {
+      expect(secondRender.container.querySelector('.rg-right-tools')).toBeNull();
+      expect(screen.getByTitle('Expand sidebar')).toBeTruthy();
+    });
+
+    fireEvent.click(secondRender.container.querySelector('.rg-right-collapse-rail') as HTMLElement);
+
+    await waitFor(() => {
+      expect(secondRender.container.querySelector('.rg-right-tools')).toBeTruthy();
+    });
   });
 });
 

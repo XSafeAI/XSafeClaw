@@ -4,18 +4,24 @@ import { Shield, Monitor, ChevronRight, MessageSquare, Sun, Moon, Languages, Act
 import { useI18n } from '../i18n';
 import { systemAPI } from '../services/api';
 import BudgetControlCard from './BudgetControlCard';
+import {
+  applyXSafeClawTheme,
+  getStoredXSafeClawTheme,
+  setXSafeClawTheme,
+  subscribeXSafeClawTheme,
+  type XSafeClawTheme,
+} from '../theme';
 
 function useTheme() {
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('xsafeclaw:theme') as 'dark' | 'light') ?? 'dark';
-  });
+  const [theme, setTheme] = useState<XSafeClawTheme>(() => getStoredXSafeClawTheme());
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('xsafeclaw:theme', theme);
+    applyXSafeClawTheme(theme);
   }, [theme]);
 
-  const toggle = () => setTheme(t => t === 'dark' ? 'light' : 'dark');
+  useEffect(() => subscribeXSafeClawTheme(setTheme), []);
+
+  const toggle = () => setXSafeClawTheme(theme === 'dark' ? 'light' : 'dark');
   return { theme, toggle };
 }
 

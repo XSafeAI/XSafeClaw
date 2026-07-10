@@ -19,6 +19,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleQuestionMark,
   ClipboardList,
@@ -29,10 +30,12 @@ import {
   Loader2,
   Lock,
   Network,
+  Moon,
   Plus,
   Route,
   Send,
   Shield,
+  Sun,
   Target,
   Terminal,
   Trash2,
@@ -67,6 +70,13 @@ import MarkdownMessage from '../components/MarkdownMessage';
 import { useRuntimeInstances } from '../hooks/useAPI';
 import { useI18n } from '../i18n';
 import { chatStreamStore, type ChatMessage } from '../stores/chatStreamStore';
+import {
+  applyXSafeClawTheme,
+  getStoredXSafeClawTheme,
+  setXSafeClawTheme,
+  subscribeXSafeClawTheme,
+  type XSafeClawTheme,
+} from '../theme';
 import {
   buildActiveTimelineRows,
   buildTimelineScrollKey,
@@ -103,6 +113,9 @@ import {
   type CodexReasoningLevel,
   type CodexSpeedOption,
 } from './codexModelCatalog';
+import openclawAgentIcon from '../assets/agent-icons/openclaw.png';
+import hermesAgentIcon from '../assets/agent-icons/hermes.png';
+import codexAgentIcon from '../assets/agent-icons/codex.png';
 import './RuntimeGuardConsole.css';
 
 export type AgentName = 'OpenClaw' | 'Hermes' | 'Nanobot' | 'Codex';
@@ -170,10 +183,12 @@ const BUILD_TIME_XSAFECLAW_VERSION = import.meta.env.VITE_XSAFECLAW_VERSION || n
 const RUNTIME_GUARD_DESIGN_HEIGHT = 570;
 const RUNTIME_GUARD_LEFT_WIDTH = 156;
 const RUNTIME_GUARD_RIGHT_WIDTH = 207;
+const RUNTIME_GUARD_RIGHT_COLLAPSE_RAIL_WIDTH = 24;
 const RUNTIME_GUARD_MIN_MAIN_WIDTH = 280;
 const RUNTIME_GUARD_TOP_GAP = 38;
 const RUNTIME_GUARD_MIN_DESIGN_WIDTH = RUNTIME_GUARD_LEFT_WIDTH + RUNTIME_GUARD_MIN_MAIN_WIDTH + RUNTIME_GUARD_RIGHT_WIDTH;
 const RUNTIME_GUARD_RIGHT_EDGE_GUARD = 2;
+const RUNTIME_GUARD_RIGHT_PANEL_COLLAPSED_KEY = 'xsafeclaw:runtime-guard:right-panel-collapsed';
 
 const agentDefinitions: Array<{
   name: RuntimeAgentName;
@@ -204,9 +219,7 @@ const RUNTIME_GUARD_SIDEBAR_LAYOUT = {
   agentRowGap: 36,
   agentRowHeight: 34,
   historyTop: 239,
-  historyHeight: 186,
-  budgetTop: 446,
-  budgetHeight: 92,
+  historyHeight: 299,
   taskPanelTopBase: 50,
   taskPanelHeightBase: 488,
 } as const;
@@ -219,12 +232,9 @@ export function runtimeGuardSidebarLayoutMetrics() {
   const historyVisibleBottom = RUNTIME_GUARD_SIDEBAR_LAYOUT.historyTop
     + RUNTIME_GUARD_SIDEBAR_LAYOUT.historyHeight;
   return {
-    budgetBottom: RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop + RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetHeight,
+    historyBottom: historyVisibleBottom,
     middleSessionPanelBottom: RUNTIME_GUARD_SIDEBAR_LAYOUT.taskPanelTopBase + RUNTIME_GUARD_SIDEBAR_LAYOUT.taskPanelHeightBase,
-    visibleGaps: [
-      RUNTIME_GUARD_SIDEBAR_LAYOUT.historyTop - agentsVisibleBottom,
-      RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop - historyVisibleBottom,
-    ],
+    agentHistoryGap: RUNTIME_GUARD_SIDEBAR_LAYOUT.historyTop - agentsVisibleBottom,
   };
 }
 
@@ -1421,6 +1431,13 @@ function agentIconComponent(agent: AgentName): LucideIcon {
   return Brain;
 }
 
+function agentImageIcon(agent: AgentName): string | null {
+  if (agent === 'OpenClaw') return openclawAgentIcon;
+  if (agent === 'Hermes') return hermesAgentIcon;
+  if (agent === 'Codex') return codexAgentIcon;
+  return null;
+}
+
 function agentClassName(agent: AgentName): string {
   if (agent === 'Codex') return 'agent-codex';
   return agentDefinitions.find(item => item.name === agent)?.className ?? 'agent-openclaw';
@@ -1434,12 +1451,17 @@ export function AgentIconBadge({
   size?: 'default' | 'compact';
 }) {
   const Icon = agentIconComponent(agent);
+  const imageIcon = agentImageIcon(agent);
   return (
     <span
       className={`rg-agent-badge rg-agent-badge-${size} ${agentClassName(agent)}`}
       data-agent={agent}
     >
-      <Icon />
+      {imageIcon ? (
+        <img className="rg-agent-badge-image" src={imageIcon} alt="" aria-hidden="true" />
+      ) : (
+        <Icon />
+      )}
     </span>
   );
 }
@@ -1485,21 +1507,6 @@ function responseDetail(error: unknown, fallback: string): string {
   }
   const message = (error as { message?: unknown } | null)?.message;
   return typeof message === 'string' && message.trim() ? message.trim() : fallback;
-}
-
-function formatBlockedTime(timestamp: number): string {
-  const timestampMs = Number(timestamp) * 1000;
-  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return '--:--';
-  return new Date(timestampMs).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-}
-
-function blockedDisplayText(item: RecentBlockedItem): string {
-  const preview = previewApprovalParams(item.params);
-  return preview ? `${item.toolName} ${preview}` : item.toolName;
 }
 
 function mapHistoryMessage(raw: any, platform?: RuntimePlatform): ChatMessage | null {
@@ -1837,6 +1844,20 @@ export function InlineApprovalCard({
 
 function blockedByline(item: RecentBlockedItem): string {
   return item.instanceId ? `${item.platform} / ${item.instanceId}` : item.platform;
+}
+
+function formatBlockedTime(timestamp: number): string {
+  const timestampMs = Number(timestamp) * 1000;
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return '--:--';
+  return new Date(timestampMs).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function blockedDisplayText(item: RecentBlockedItem): string {
+  return previewApprovalParams(item.params);
 }
 
 function blockedSourceLabel(source: RecentBlockedSource, copy: RuntimeGuardCopy): string {
@@ -2815,6 +2836,14 @@ export default function RuntimeGuardConsole() {
   const [runtimeBudgetStatuses, setRuntimeBudgetStatuses] = useState<RuntimeBudgetStatusMap>(() => defaultRuntimeBudgetStatusMap());
   const [selectedBudgetPlatform, setSelectedBudgetPlatform] = useState<RuntimeBudgetPlatform>('openclaw');
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(RUNTIME_GUARD_RIGHT_PANEL_COLLAPSED_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [theme, setTheme] = useState<XSafeClawTheme>(() => getStoredXSafeClawTheme());
   const [budgetAmountInput, setBudgetAmountInput] = useState('');
   const [budgetPeriodInput, setBudgetPeriodInput] = useState('');
   const [budgetPeriodUnit, setBudgetPeriodUnit] = useState<BudgetPeriodUnit>('hour');
@@ -3041,13 +3070,27 @@ export default function RuntimeGuardConsole() {
     ? activeSession.platform
     : agentToPlatform(selectedAgent);
   useEffect(() => {
+    applyXSafeClawTheme(theme);
+  }, [theme]);
+
+  useEffect(() => subscribeXSafeClawTheme(setTheme), []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RUNTIME_GUARD_RIGHT_PANEL_COLLAPSED_KEY, String(rightPanelCollapsed));
+    } catch {
+      // Ignore storage failures; the panel can still be toggled for this session.
+    }
+  }, [rightPanelCollapsed]);
+
+  useEffect(() => {
     const updateLayoutFit = () => {
       const availableWidth = Math.max(1, window.innerWidth - RUNTIME_GUARD_RIGHT_EDGE_GUARD);
       const heightScale = window.innerHeight / RUNTIME_GUARD_DESIGN_HEIGHT;
       const widthScale = availableWidth / RUNTIME_GUARD_MIN_DESIGN_WIDTH;
       const scale = Math.min(heightScale, widthScale);
       const leftWidth = RUNTIME_GUARD_LEFT_WIDTH * scale;
-      const rightWidth = RUNTIME_GUARD_RIGHT_WIDTH * scale;
+      const rightWidth = (rightPanelCollapsed ? RUNTIME_GUARD_RIGHT_COLLAPSE_RAIL_WIDTH : RUNTIME_GUARD_RIGHT_WIDTH) * scale;
       const mainWidth = Math.max(availableWidth - leftWidth - rightWidth, RUNTIME_GUARD_MIN_MAIN_WIDTH * scale);
 
       setLayoutFit({
@@ -3063,7 +3106,7 @@ export default function RuntimeGuardConsole() {
     updateLayoutFit();
     window.addEventListener('resize', updateLayoutFit);
     return () => window.removeEventListener('resize', updateLayoutFit);
-  }, []);
+  }, [rightPanelCollapsed]);
 
   useEffect(() => {
     saveRuntimeGuardSessions(sessions);
@@ -5051,9 +5094,62 @@ export default function RuntimeGuardConsole() {
     '--rg-top-gap-px': `${RUNTIME_GUARD_TOP_GAP * layoutFit.scale}px`,
   } as CSSProperties;
   const xsafeclawVersionLabel = formatVersionLabel(xsafeclawVersion);
+  const nextTheme = theme === 'dark' ? 'light' : 'dark';
+  const ThemeIcon = theme === 'dark' ? Sun : Moon;
+  const themeLabel = theme === 'dark' ? t.layout.lightMode : t.layout.darkMode;
+  const themeTitle = theme === 'dark' ? t.layout.switchToLight : t.layout.switchToDark;
+  const budgetCard = (
+    <div
+      className={`rg-budget rg-budget-panel ${showCodexQuotaBudget ? 'rg-budget-codex' : ''} ${!showCodexQuotaBudget && selectedBudgetOverLimit ? 'is-over-limit' : ''}`}
+    >
+      <div className="rg-budget-title">{copy.sidebar.budget}</div>
+      <div className="rg-budget-actions">
+        {showCodexQuotaBudget ? (
+          <button className="rg-budget-settings" onClick={() => { void refreshCodexRateLimits(); }} type="button">
+            {copy.sidebar.codexQuotaAction}
+          </button>
+        ) : (
+          <button className="rg-budget-settings" type="button" onClick={openBudgetModal}>{copy.sidebar.set}</button>
+        )}
+      </div>
+      {showCodexQuotaBudget ? (
+        <>
+          <div className="rg-codex-quota-rows">
+            <div className="rg-codex-quota-row is-centered-columns">
+              <strong className="rg-codex-quota-percent">{codexFiveHourRemainingPercent}</strong>
+              <span className="rg-codex-quota-window">{copy.sidebar.codexQuotaFiveHour}</span>
+              <span className="rg-codex-quota-refresh">{codexFiveHourResetText}</span>
+            </div>
+            <div className="rg-codex-quota-row is-centered-columns">
+              <strong className="rg-codex-quota-percent">{codexWeekRemainingPercent}</strong>
+              <span className="rg-codex-quota-window">{copy.sidebar.codexQuotaWeek}</span>
+              <span className="rg-codex-quota-refresh">{codexWeekResetText}</span>
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="rg-budget-amount-line">
+            <strong className="rg-budget-used">{budgetDisplayCostText}</strong>
+            {budgetConfigured && (
+              <>
+                <span className="rg-budget-slash">/</span>
+                <span className="rg-budget-limit">{budgetLimitText}</span>
+              </>
+            )}
+          </div>
+          <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
+          <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
+          <div className="rg-budget-reset">
+            {selectedBudgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: selectedBudgetAgentName }) : budgetResetText}
+          </div>
+        </>
+      )}
+    </div>
+  );
 
   return (
-    <div className="runtime-guard-page" style={runtimeGuardPageStyle}>
+    <div className={`runtime-guard-page ${theme === 'light' ? 'is-light-theme' : ''}`} style={runtimeGuardPageStyle}>
       {placeholder && <div className="rg-toast">{placeholder}</div>}
       <div className="rg-runtime-top-shelf" style={topShelfStyle} aria-hidden="true" />
       <div className="rg-top-utilities" aria-label={copy.sidebar.topUtilitiesAria}>
@@ -5068,6 +5164,16 @@ export default function RuntimeGuardConsole() {
         <button className="rg-top-utility rg-top-town" onClick={() => navigate('/agent-town')} type="button">
           <Bot />
           <span>{copy.sidebar.agentTown}</span>
+        </button>
+        <button
+          aria-label={themeTitle}
+          className="rg-top-utility rg-top-theme"
+          onClick={() => setXSafeClawTheme(nextTheme)}
+          title={themeTitle}
+          type="button"
+        >
+          <ThemeIcon />
+          <span>{themeLabel}</span>
         </button>
         <button className="rg-top-utility rg-top-user" type="button" aria-disabled="true">
           <span>Free</span>
@@ -5358,51 +5464,6 @@ export default function RuntimeGuardConsole() {
             )}
           </div>
         </section>
-
-        <div
-          className={`rg-budget ${showCodexQuotaBudget ? 'rg-budget-codex' : ''} ${!showCodexQuotaBudget && selectedBudgetOverLimit ? 'is-over-limit' : ''}`}
-          style={{ top: RUNTIME_GUARD_SIDEBAR_LAYOUT.budgetTop }}
-        >
-          {showCodexQuotaBudget ? (
-            <>
-              <div className="rg-budget-title">{copy.sidebar.budget}</div>
-              <button className="rg-budget-settings" onClick={() => { void refreshCodexRateLimits(); }} type="button">
-                {copy.sidebar.codexQuotaAction}
-              </button>
-              <div className="rg-codex-quota-rows">
-                <div className="rg-codex-quota-row is-centered-columns">
-                  <strong className="rg-codex-quota-percent">{codexFiveHourRemainingPercent}</strong>
-                  <span className="rg-codex-quota-window">{copy.sidebar.codexQuotaFiveHour}</span>
-                  <span className="rg-codex-quota-refresh">{codexFiveHourResetText}</span>
-                </div>
-                <div className="rg-codex-quota-row is-centered-columns">
-                  <strong className="rg-codex-quota-percent">{codexWeekRemainingPercent}</strong>
-                  <span className="rg-codex-quota-window">{copy.sidebar.codexQuotaWeek}</span>
-                  <span className="rg-codex-quota-refresh">{codexWeekResetText}</span>
-                </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="rg-budget-title">{copy.sidebar.budget}</div>
-              <button className="rg-budget-settings" type="button" onClick={openBudgetModal}>{copy.sidebar.set}</button>
-              <div className="rg-budget-amount-line">
-                <strong className="rg-budget-used">{budgetDisplayCostText}</strong>
-                {budgetConfigured && (
-                  <>
-                    <span className="rg-budget-slash">/</span>
-                    <span className="rg-budget-limit">{budgetLimitText}</span>
-                  </>
-                )}
-              </div>
-              <div className="rg-budget-bar"><span style={{ width: `${budgetBarPercent}%` }} /></div>
-              <div className="rg-budget-percent">{budgetConfigured ? `${Math.round(budgetPercent)}%` : ''}</div>
-              <div className="rg-budget-reset">
-                {selectedBudgetOverLimit ? rgText(copy.sidebar.budgetReached, { agent: selectedBudgetAgentName }) : budgetResetText}
-              </div>
-            </>
-          )}
-        </div>
 
       </aside>
       </div>
@@ -5757,25 +5818,51 @@ export default function RuntimeGuardConsole() {
 
       </main>
       </div>
-      <div className="rg-right-scale" style={rightScaleStyle}>
-        <section className="rg-right-tools">
-          <div className="rg-card-head rg-right-tools-head">
-            <span>{copy.sidebar.safetyTools}</span>
-          </div>
-          <div className="rg-right-tools-list">
-            <button className="rg-right-tool-row rg-safety-row-asset" onClick={() => navigate('/assets')} type="button">
-              <Shield />
-              <span>{copy.sidebar.assetShield}</span>
+      <div className={`rg-right-scale ${rightPanelCollapsed ? 'is-collapsed' : ''}`} style={rightScaleStyle}>
+        {rightPanelCollapsed ? (
+          <button
+              aria-label={copy.sidebar.rightPanelExpand}
+              className="rg-right-collapse-rail"
+              onClick={() => setRightPanelCollapsed(false)}
+              title={copy.sidebar.rightPanelExpand}
+              type="button"
+            >
+            <span className="rg-right-rail-toggle">
+              <span>{copy.sidebar.rightPanelExpand}</span>
+              <ChevronLeft />
+            </span>
+          </button>
+        ) : (
+          <>
+            <button
+              aria-label={copy.sidebar.rightPanelCollapse}
+              className="rg-right-panel-toggle"
+              onClick={() => setRightPanelCollapsed(true)}
+              title={copy.sidebar.rightPanelCollapse}
+              type="button"
+            >
+              <span>{copy.sidebar.rightPanelCollapse}</span>
               <ChevronRight />
             </button>
-            <button className="rg-right-tool-row rg-safety-row-risk" onClick={() => navigate('/risk-test')} type="button">
-              <AlertTriangle />
-              <span>{copy.sidebar.riskTest}</span>
-              <ChevronRight />
-            </button>
-          </div>
-        </section>
-        <aside className="rg-right-panel">
+            {budgetCard}
+            <section className="rg-right-tools">
+              <div className="rg-card-head rg-right-tools-head">
+                <span>{copy.sidebar.safetyTools}</span>
+              </div>
+              <div className="rg-right-tools-list">
+                <button className="rg-right-tool-row rg-safety-row-asset" onClick={() => navigate('/assets')} type="button">
+                  <Shield />
+                  <span>{copy.sidebar.assetShield}</span>
+                  <ChevronRight />
+                </button>
+                <button className="rg-right-tool-row rg-safety-row-risk" onClick={() => navigate('/risk-test')} type="button">
+                  <AlertTriangle />
+                  <span>{copy.sidebar.riskTest}</span>
+                  <ChevronRight />
+                </button>
+              </div>
+            </section>
+            <aside className="rg-right-panel">
           <section className="rg-approval-center">
             <div className="rg-card-head rg-approval-head">
               <span>{copy.approvals.panelTitle}</span>
@@ -5831,14 +5918,18 @@ export default function RuntimeGuardConsole() {
 
           <section className="rg-recent-blocked">
             <div className="rg-card-head rg-recent-head">
-              <span>{copy.blockedActions.title.toUpperCase()}</span>
+              <span>{copy.blockedActions.title}</span>
               <button type="button" onClick={() => setActiveRuntimeGuardModal('blocked')}>{copy.blockedActions.manage}</button>
             </div>
             {recentBlockedItems.length > 0 ? (
               recentBlockedItems.map((item, index) => (
-                <div className="rg-block-row" key={item.id} style={{ top: 28 + index * 16 }}>
+                <div
+                  className="rg-block-row"
+                  key={item.id}
+                  style={{ top: 28 + index * 16 }}
+                >
                   <span>{formatBlockedTime(item.timestamp)}</span>
-                  <strong>{copy.blockedActions.blocked}</strong>
+                  <strong>{blockedSourceLabel(item.source, copy)}</strong>
                   <span>{blockedDisplayText(item)}</span>
                 </div>
               ))
@@ -5848,7 +5939,9 @@ export default function RuntimeGuardConsole() {
               </div>
             )}
           </section>
-        </aside>
+            </aside>
+          </>
+        )}
       </div>
     </div>
   );
