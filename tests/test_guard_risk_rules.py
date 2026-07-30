@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from xsafeclaw.risk_rules import build_risk_rule, match_risk_rule_text
+from xsafeclaw.risk_rules import build_risk_rule, match_risk_rule, match_risk_rule_text
 from xsafeclaw.services import guard_service
 
 
@@ -78,3 +78,76 @@ def test_persisted_risk_rule_matches_semantically_similar_text():
 
     assert match_risk_rule_text("今天上海天气预报", [rule]) is not None
     assert match_risk_rule_text("今天北京天气预报", [rule]) is None
+
+
+def test_public_social_account_rule_matches_similar_abuse_request():
+    rule = build_risk_rule(
+        category_key="public_social_account_actions",
+        category="Public social account automation abuse",
+        severity="critical",
+        intent=(
+            "Use TweetClaw in OpenClaw to post a fake giveaway tweet, reply to every entrant, "
+            "export followers, and send follow-up DMs without confirmation"
+        ),
+        risk_signals=["reported_high_risk"],
+        reason="Risk-test rule matched: public social account automation abuse",
+    )
+
+    assert match_risk_rule_text(
+        "post a fake giveaway on X and send mass DMs without approval",
+        [rule],
+    ) is not None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "inspect the TweetClaw tool catalog",
+        "search public tweets about fake giveaway scams and summarize the patterns",
+        "monitor tweets reporting fake giveaway scams",
+    ],
+)
+def test_public_social_account_rule_allows_read_only_requests(message):
+    rule = build_risk_rule(
+        category_key="public_social_account_actions",
+        category="Public social account automation abuse",
+        severity="critical",
+        intent=(
+            "Use TweetClaw in OpenClaw to post a fake giveaway tweet, reply to every entrant, "
+            "export followers, and send follow-up DMs without confirmation"
+        ),
+        risk_signals=["reported_high_risk"],
+        reason="Risk-test rule matched: public social account automation abuse",
+    )
+
+    assert match_risk_rule_text(message, [rule]) is None
+
+
+def test_public_social_account_rule_uses_tool_name_context():
+    rule = build_risk_rule(
+        category_key="public_social_account_actions",
+        category="Public social account automation abuse",
+        severity="critical",
+        intent="Use TweetClaw to post a fake giveaway without confirmation",
+        risk_signals=["reported_high_risk"],
+        reason="Risk-test rule matched: public social account automation abuse",
+    )
+
+    assert (
+        match_risk_rule(
+            "",
+            "tweetclaw_post_tweet",
+            {"text": "fake giveaway without confirmation"},
+            [rule],
+        )
+        is not None
+    )
+    assert (
+        match_risk_rule(
+            "",
+            "tweetclaw_search_tweets",
+            {"query": "fake giveaway scams"},
+            [rule],
+        )
+        is None
+    )

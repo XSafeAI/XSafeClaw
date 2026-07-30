@@ -13,6 +13,70 @@ from typing import Any, Iterable
 _KEYWORD_PATTERN = re.compile(r"[A-Za-z0-9_.:/@-]{3,}|[\u4e00-\u9fff]{2,12}")
 _NORMALIZE_TEXT_PATTERN = re.compile(r"[\s\W_]+", re.UNICODE)
 _TEXT_UNIT_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]+", re.UNICODE)
+_PUBLIC_SOCIAL_TOOL_MARKERS = (
+    "tweetclaw",
+    "openclaw",
+    "x/twitter",
+    "twitter",
+    "x account",
+    "x post",
+    "tweet",
+    "retweet",
+    "direct message",
+    "dm",
+    "followers",
+    "follower export",
+    "giveaway",
+    "webhook",
+    "推文",
+    "转推",
+    "私信",
+    "粉丝",
+    "抽奖",
+)
+_PUBLIC_SOCIAL_WRITE_MARKERS = (
+    "post",
+    "reply",
+    "send",
+    "publish",
+    "upload",
+    "export",
+    "notify",
+    "amplify",
+    "发布",
+    "回复",
+    "发送",
+    "上传",
+    "导出",
+)
+_PUBLIC_SOCIAL_MONITOR_MARKERS = ("monitor", "监控")
+_PUBLIC_SOCIAL_ABUSE_MARKERS = (
+    "fake",
+    "impersonate",
+    "scam",
+    "phish",
+    "harass",
+    "mass",
+    "bulk",
+    "without approval",
+    "without confirmation",
+    "unapproved",
+    "malicious",
+    "诱导",
+    "虚假",
+    "冒充",
+    "批量",
+    "群发",
+    "未经确认",
+    "绕过审批",
+)
+_PUBLIC_SOCIAL_APPROVAL_BYPASS_MARKERS = (
+    "without approval",
+    "without confirmation",
+    "unapproved",
+    "未经确认",
+    "绕过审批",
+)
 _GENERIC_STOPWORDS = {
     "please",
     "would",
@@ -86,6 +150,26 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "email",
             "mail",
             "password expiry",
+        ],
+    },
+    "public_social_account_actions": {
+        "tools": ["*", "message", "browser", "exec", "write"],
+        "keywords": [
+            "假抽奖",
+            "冒充",
+            "批量私信",
+            "群发私信",
+            "未经确认",
+            "虚假互动",
+            "fake giveaway",
+            "impersonate",
+            "mass dm",
+            "bulk replies",
+            "unapproved post",
+            "without approval",
+            "without confirmation",
+            "harass followers",
+            "scam replies",
         ],
     },
     "destructive_actions": {
@@ -342,9 +426,13 @@ def match_risk_rule(
     if not rules:
         return None
 
-    search_space = f"{session_text}\n{json.dumps(params, ensure_ascii=False)}".lower()
+    search_space = (
+        f"{session_text}\n{tool_name}\n{json.dumps(params, ensure_ascii=False)}"
+    ).lower()
     for rule in rules:
         if not rule.get("enabled", True):
+            continue
+        if not _rule_matches_category_context(search_space, rule):
             continue
 
         blocked_tools = {str(tool).lower() for tool in rule.get("blocked_tools", ["*"])}
@@ -375,6 +463,8 @@ def match_risk_rule_text(
 
     for rule in rules:
         if not rule.get("enabled", True):
+            continue
+        if not _rule_matches_category_context(search_space, rule):
             continue
 
         # For user-approved persistent rules, treat the original intent as the
@@ -422,6 +512,41 @@ def _rule_identity(rule: dict[str, Any]) -> tuple[str, str]:
         str(rule.get("category_key", "generic_abuse")).strip().lower(),
         str(rule.get("intent", "")).strip().lower(),
     )
+
+
+def has_public_social_account_risk(text: str) -> bool:
+    """Return whether text combines social tooling with abusive account actions."""
+    lowered = str(text or "").lower()
+    has_tool_context = _contains_any_marker(lowered, _PUBLIC_SOCIAL_TOOL_MARKERS)
+    if not has_tool_context:
+        return False
+
+    has_write_action = _contains_any_marker(lowered, _PUBLIC_SOCIAL_WRITE_MARKERS)
+    has_unconfirmed_monitor = _contains_any_marker(
+        lowered,
+        _PUBLIC_SOCIAL_MONITOR_MARKERS,
+    ) and _contains_any_marker(lowered, _PUBLIC_SOCIAL_APPROVAL_BYPASS_MARKERS)
+    has_abuse_signal = _contains_any_marker(lowered, _PUBLIC_SOCIAL_ABUSE_MARKERS)
+    return (has_write_action or has_unconfirmed_monitor) and has_abuse_signal
+
+
+def _rule_matches_category_context(search_space: str, rule: dict[str, Any]) -> bool:
+    if rule.get("category_key") != "public_social_account_actions":
+        return True
+    return has_public_social_account_risk(search_space)
+
+
+def _contains_any_marker(text: str, markers: Iterable[str]) -> bool:
+    return any(_contains_marker(text, marker) for marker in markers)
+
+
+def _contains_marker(text: str, marker: str) -> bool:
+    if not marker.isascii():
+        return marker in text
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])",
+        text,
+    ) is not None
 
 
 def _keywords_trigger(matched_keywords: list[str]) -> bool:
