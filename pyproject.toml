@@ -44,6 +44,7 @@ dependencies = [
     "pynvml>=13.0.1",
     "cryptography>=46.0.5",
     "websockets>=16.0",
+    "llm-prices>=1.2.0",
 ]
 
 [project.scripts]

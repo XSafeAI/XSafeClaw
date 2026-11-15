@@ -1,14 +1,19 @@
 """Built-in model pricing catalog.
 
-Prices are in USD per 1 million tokens, sourced from each provider's
-public API pricing pages (as of May 2026).  The catalog is used as a
-fallback when ``~/.openclaw/openclaw.json`` does not contain cost data
+Prices are in USD per 1 million tokens.  OpenAI, Anthropic, Google and
+the other providers covered by the ``llm-prices`` package come from its
+dated, source-cited table (re-read from each provider's pricing page), so
+new models and price changes arrive with a dependency bump instead of an
+edit here.  ``_BUILTIN_PRICES`` keeps the rows ``llm-prices`` does not
+list (older snapshots, Qwen, Meta Llama hosts, ...) and takes precedence
+where both define the same id.  The catalog is used as a fallback when
+``~/.openclaw/openclaw.json`` does not contain cost data
 — which is always the case for Hermes and Nanobot runtimes.
 
-To add a new model, append an entry to ``_BUILTIN_PRICES``.  The
-``aliases`` list lets fuzzy matching work when the model_id stored in
-the DB doesn't exactly match the canonical name (e.g. "gpt-4o" vs
-"gpt-4o-2024-08-06").
+To add a model ``llm-prices`` does not know, append an entry to
+``_BUILTIN_PRICES``.  The ``aliases`` list lets fuzzy matching work when
+the model_id stored in the DB doesn't exactly match the canonical name
+(e.g. "gpt-4o" vs "gpt-4o-2024-08-06").
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+import llm_prices
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,55 +38,13 @@ class ModelPrice:
 
 # All prices: USD per 1M tokens
 _BUILTIN_PRICES: list[ModelPrice] = [
-    # ── OpenAI ────────────────────────────────────────────────────────
-    ModelPrice("openai", "gpt-4.1", 2.0, 8.0,
-              aliases=("gpt-4.1-2025-04-14",)),
-    ModelPrice("openai", "gpt-4.1-mini", 0.4, 1.6,
-              aliases=("gpt-4.1-mini-2025-04-14",)),
-    ModelPrice("openai", "gpt-4.1-nano", 0.1, 0.4,
-              aliases=("gpt-4.1-nano-2025-04-14",)),
-    ModelPrice("openai", "gpt-4o", 2.5, 10.0,
-              aliases=("gpt-4o-2024-08-06", "gpt-4o-2024-11-20")),
-    ModelPrice("openai", "gpt-4o-mini", 0.15, 0.6,
-              aliases=("gpt-4o-mini-2024-07-18",)),
-    ModelPrice("openai", "gpt-4-turbo", 10.0, 30.0,
-              aliases=("gpt-4-turbo-2024-04-09",)),
+    # ── OpenAI / Anthropic / Google ───────────────────────────────────
+    # Current models come from llm-prices (see ``_LLM_PRICES_ROWS``).
+    # These are older ids it does not list.
     ModelPrice("openai", "gpt-4", 30.0, 60.0),
-    ModelPrice("openai", "gpt-3.5-turbo", 0.5, 1.5,
-              aliases=("gpt-3.5-turbo-0125",)),
-    ModelPrice("openai", "o3", 2.0, 8.0,
-              aliases=("o3-2025-04-16",)),
-    ModelPrice("openai", "o3-mini", 1.1, 4.4,
-              aliases=("o3-mini-2025-01-31",)),
-    ModelPrice("openai", "o4-mini", 1.1, 4.4,
-              aliases=("o4-mini-2025-04-16",)),
-    ModelPrice("openai", "o1", 15.0, 60.0,
-              aliases=("o1-2024-12-17",)),
     ModelPrice("openai", "o1-mini", 3.0, 12.0,
               aliases=("o1-mini-2024-09-12",)),
     ModelPrice("openai", "o1-preview", 15.0, 60.0),
-
-    # ── Anthropic ─────────────────────────────────────────────────────
-    ModelPrice("anthropic", "claude-opus-4-7", 15.0, 75.0,
-              cache_read=1.5, cache_write=18.75,
-              aliases=("claude-opus-4.7",)),
-    ModelPrice("anthropic", "claude-opus-4-6", 15.0, 75.0,
-              cache_read=1.5, cache_write=18.75,
-              aliases=("claude-opus-4.6",)),
-    ModelPrice("anthropic", "claude-opus-4-5-20250220", 15.0, 75.0,
-              cache_read=1.5, cache_write=18.75,
-              aliases=("claude-opus-4.5", "claude-4-5-opus",
-                       "claude-opus-4-5")),
-    ModelPrice("anthropic", "claude-sonnet-4-6", 3.0, 15.0,
-              cache_read=0.3, cache_write=3.75,
-              aliases=("claude-sonnet-4.6",)),
-    ModelPrice("anthropic", "claude-sonnet-4-5-20250514", 3.0, 15.0,
-              cache_read=0.3, cache_write=3.75,
-              aliases=("claude-sonnet-4.5", "claude-4-5-sonnet",
-                       "claude-sonnet-4-5")),
-    ModelPrice("anthropic", "claude-sonnet-4-20250514", 3.0, 15.0,
-              cache_read=0.3, cache_write=3.75,
-              aliases=("claude-sonnet-4", "claude-4-sonnet")),
     ModelPrice("anthropic", "claude-3-7-sonnet-20250219", 3.0, 15.0,
               cache_read=0.3, cache_write=3.75,
               aliases=("claude-3.7-sonnet", "claude-3-7-sonnet")),
@@ -87,22 +52,11 @@ _BUILTIN_PRICES: list[ModelPrice] = [
               cache_read=0.3, cache_write=3.75,
               aliases=("claude-3.5-sonnet", "claude-3-5-sonnet",
                        "claude-3-5-sonnet-v2", "claude-3-5-sonnet-20240620")),
-    ModelPrice("anthropic", "claude-3-5-haiku-20241022", 0.8, 4.0,
-              cache_read=0.08, cache_write=1.0,
-              aliases=("claude-3.5-haiku", "claude-3-5-haiku")),
     ModelPrice("anthropic", "claude-3-haiku-20240307", 0.25, 1.25,
               aliases=("claude-3-haiku",)),
     ModelPrice("anthropic", "claude-3-opus-20240229", 15.0, 75.0,
               cache_read=1.5, cache_write=18.75,
               aliases=("claude-3-opus",)),
-
-    # ── Google Gemini ─────────────────────────────────────────────────
-    ModelPrice("google", "gemini-2.5-pro", 1.25, 10.0,
-              aliases=("gemini-2.5-pro-preview-05-06",
-                       "gemini-2.5-pro-preview-03-25")),
-    ModelPrice("google", "gemini-2.5-flash", 0.15, 0.6,
-              aliases=("gemini-2.5-flash-preview-05-20",
-                       "gemini-2.5-flash-preview-04-17")),
     ModelPrice("google", "gemini-2.0-flash", 0.1, 0.4,
               aliases=("gemini-2.0-flash-001",)),
     ModelPrice("google", "gemini-2.0-flash-lite", 0.075, 0.3),
@@ -193,13 +147,44 @@ _BUILTIN_PRICES: list[ModelPrice] = [
               aliases=("command-r-08-2024",)),
 ]
 
+# Older ids this catalog accepted for models that llm-prices now prices.
+_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
+    "claude-opus-4-5": ("claude-4-5-opus", "claude-opus-4-5-20250220"),
+    "claude-sonnet-4-5-20250929": ("claude-4-5-sonnet", "claude-sonnet-4-5-20250514"),
+    "claude-sonnet-4-20250514": ("claude-4-sonnet",),
+    "gemini-2.5-pro": ("gemini-2.5-pro-preview-05-06", "gemini-2.5-pro-preview-03-25"),
+    "gemini-2.5-flash": ("gemini-2.5-flash-preview-05-20", "gemini-2.5-flash-preview-04-17"),
+}
+
+
+def _from_llm_prices(p: llm_prices.Price) -> ModelPrice:
+    cache_write = p.cache_write.get("5m")
+    if cache_write is None:
+        cache_write = min(p.cache_write.values(), default=0.0)
+    return ModelPrice(
+        p.provider,
+        p.model,
+        p.input or 0.0,
+        p.output or 0.0,
+        cache_read=p.cache_read or 0.0,
+        cache_write=cache_write,
+        aliases=(*p.aliases, *_LEGACY_ALIASES.get(p.model, ())),
+    )
+
+
+_LLM_PRICES_ROWS: list[ModelPrice] = [
+    _from_llm_prices(p) for p in llm_prices.all_prices() if p.input is not None
+]
+
 # ── Lookup index (built once at import time) ──────────────────────────
 
 _NORM_RE = re.compile(r"[^a-z0-9./:-]")
 
 
 def _norm(value: str) -> str:
-    return _NORM_RE.sub("", value.strip().lower())
+    key = _NORM_RE.sub("", value.strip().lower())
+    # Claude ids write versions with dashes ("claude-opus-4-7"); accept "4.7" too.
+    return key.replace(".", "-") if "claude" in key else key
 
 
 _BY_EXACT: dict[str, ModelPrice] = {}
@@ -214,6 +199,28 @@ for _mp in _BUILTIN_PRICES:
         bare = key.split("/")[-1] if "/" in key else key
         if bare:
             _BY_BARE.setdefault(bare, []).append(_mp)
+
+# llm-prices rows never shadow a local entry.
+for _mp in _LLM_PRICES_ROWS:
+    for name in (_mp.model, *_mp.aliases):
+        key = _norm(name)
+        if not key or key in _BY_EXACT:
+            continue
+        _BY_EXACT[key] = _mp
+        bare = key.split("/")[-1] if "/" in key else key
+        _BY_BARE.setdefault(bare, []).append(_mp)
+
+# Longest key first, so "gpt-4o-..." prefers "gpt-4o" over "gpt-4".
+_PREFIX_KEYS = sorted(_BY_EXACT, key=len, reverse=True)
+
+
+def _llm_prices_lookup(provider: str | None, model_id: str) -> ModelPrice | None:
+    for candidate in dict.fromkeys((model_id.strip(), _norm(model_id))):
+        hit = llm_prices.lookup_provider(provider, candidate) if provider else None
+        hit = hit or llm_prices.lookup(candidate)
+        if hit is not None and hit.input is not None:
+            return _from_llm_prices(hit)
+    return None
 
 
 def lookup_price(
@@ -230,7 +237,9 @@ def lookup_price(
       2. Exact ``model`` key (ignoring provider)
       3. ``provider/bare_model`` where ``bare_model`` strips the ``org/`` prefix
       4. Bare model name only
-      5. Prefix match (model_id starts with a known key)
+      5. llm-prices id resolution (dated snapshots, ``-latest``, Bedrock,
+         Vertex and OpenRouter ids)
+      6. Prefix match (model_id starts with a known key, longest first)
     """
     if not model_id:
         return None
@@ -263,10 +272,15 @@ def lookup_price(
     if candidates:
         return _to_cost_dict(candidates[0])
 
-    # 5. prefix match (e.g. "gpt-4o-2024-11-20" matches "gpt-4o")
-    for known_key, mp in _BY_EXACT.items():
+    # 5. llm-prices (e.g. "claude-sonnet-4-6-20260101" matches "claude-sonnet-4-6")
+    hit = _llm_prices_lookup(provider, model_id)
+    if hit:
+        return _to_cost_dict(hit)
+
+    # 6. prefix match (e.g. "gpt-4o-mini-tts" matches "gpt-4o-mini")
+    for known_key in _PREFIX_KEYS:
         if model_key.startswith(known_key) and len(known_key) > 3:
-            return _to_cost_dict(mp)
+            return _to_cost_dict(_BY_EXACT[known_key])
 
     return None
 
@@ -289,20 +303,28 @@ def get_builtin_catalog() -> dict[str, Any]:
     by_provider_model: dict[tuple[str, str], dict[str, float]] = {}
     by_model: dict[str, list[dict[str, float]]] = {}
 
-    for mp in _BUILTIN_PRICES:
-        cost = _to_cost_dict(mp)
-        pkey = _norm(mp.provider)
-        mkey = _norm(mp.model)
-        by_provider_model[(pkey, mkey)] = cost
-        by_model.setdefault(mkey, []).append(cost)
+    local_models: set[str] = set()
 
-        for alias in mp.aliases:
-            akey = _norm(alias)
-            by_provider_model[(pkey, akey)] = cost
-            by_model.setdefault(akey, []).append(cost)
-            if "/" in akey:
-                _, bare = akey.split("/", 1)
-                by_provider_model[(pkey, bare)] = cost
-                by_model.setdefault(bare, []).append(cost)
+    def add(pkey: str, mkey: str, cost: dict[str, float], local: bool) -> None:
+        # Local rows win; llm-prices rows only fill ids the local table lacks.
+        if local or (pkey, mkey) not in by_provider_model:
+            by_provider_model[(pkey, mkey)] = cost
+        if local:
+            local_models.add(mkey)
+        if local or mkey not in local_models:
+            by_model.setdefault(mkey, []).append(cost)
+
+    for local, rows in ((True, _BUILTIN_PRICES), (False, _LLM_PRICES_ROWS)):
+        for mp in rows:
+            cost = _to_cost_dict(mp)
+            pkey = _norm(mp.provider)
+            add(pkey, _norm(mp.model), cost, local)
+
+            for alias in mp.aliases:
+                akey = _norm(alias)
+                add(pkey, akey, cost, local)
+                if "/" in akey:
+                    _, bare = akey.split("/", 1)
+                    add(pkey, bare, cost, local)
 
     return {"by_provider_model": by_provider_model, "by_model": by_model}
